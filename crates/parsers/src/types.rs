@@ -26,8 +26,16 @@ pub struct Extracted {
 
 /// Trait implemented by every file parser.
 pub trait Parser: Send + Sync {
+    /// Returns true if this parser handles the given path.
+    /// Default: delegates to `accepts_mime`. Override for extension-based detection.
+    fn accepts_path(&self, path: &std::path::Path) -> bool {
+        let mime = mime_guess::from_path(path)
+            .first_or_octet_stream()
+            .to_string();
+        self.accepts_mime(&mime)
+    }
     /// Returns true if this parser handles the given MIME type.
-    fn accepts(&self, mime: &str) -> bool;
+    fn accepts_mime(&self, mime: &str) -> bool;
     /// Parse the file at `path` and return extracted chunks.
     fn parse(&self, path: &std::path::Path) -> anyhow::Result<Extracted>;
 }

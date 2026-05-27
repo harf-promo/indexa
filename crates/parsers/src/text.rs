@@ -58,7 +58,7 @@ impl TextParser {
 }
 
 impl Parser for TextParser {
-    fn accepts(&self, mime: &str) -> bool {
+    fn accepts_mime(&self, mime: &str) -> bool {
         mime.starts_with("text/plain")
     }
 
@@ -101,7 +101,7 @@ impl MarkdownParser {
 }
 
 impl Parser for MarkdownParser {
-    fn accepts(&self, mime: &str) -> bool {
+    fn accepts_mime(&self, mime: &str) -> bool {
         mime == "text/markdown" || mime == "text/x-markdown"
     }
 

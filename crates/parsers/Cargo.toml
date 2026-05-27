@@ -15,6 +15,14 @@ tracing = { workspace = true }
 pulldown-cmark = "0.12"
 # Mime type detection
 mime_guess = "2"
+# Code parsing via tree-sitter
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
 
 [dev-dependencies]
 tempfile = "3"
