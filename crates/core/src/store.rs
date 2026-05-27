@@ -226,6 +226,9 @@ impl Store {
         const RRF_K: f64 = 60.0;
 
         // ── FTS5 keyword retrieval ────────────────────────────────────────────
+        // Sanitize: wrap in quotes so FTS5 treats the whole query as a phrase,
+        // avoiding syntax errors from punctuation in natural-language questions.
+        let fts_query = fts5_quote(query_text);
         let fts_candidates = {
             let mut stmt = self.conn.prepare(
                 "SELECT CAST(chunk_id AS INTEGER), entry_path, bm25(chunks_fts) AS score
@@ -234,7 +237,7 @@ impl Store {
                  ORDER BY score
                  LIMIT 100",
             )?;
-            let rows = stmt.query_map(params![query_text], |r| {
+            let rows = stmt.query_map(params![fts_query], |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -323,6 +326,14 @@ impl Store {
         scored.truncate(limit);
         Ok(scored.into_iter().map(|(id, path, _)| (id, path)).collect())
     }
+}
+
+/// Wrap a user query in FTS5 double-quote syntax so arbitrary natural-language
+/// text (with punctuation, `?`, parentheses, etc.) is treated as a phrase search
+/// rather than triggering FTS5 query-syntax errors.
+fn fts5_quote(s: &str) -> String {
+    // Escape any embedded double-quotes by doubling them.
+    format!("\"{}\"", s.replace('"', "\"\""))
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
