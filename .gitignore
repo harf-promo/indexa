@@ -1,0 +1,17 @@
+# Rust
+/target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Indexa runtime data (never commit the user's index)
+.indexa/
+
+# Build artifacts
+*.pdb
+dist/

@@ -1,0 +1,13 @@
+[package]
+name = "indexa-web"
+description = "Local web UI server for Indexa (axum + embedded frontend)."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

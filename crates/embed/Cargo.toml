@@ -1,0 +1,16 @@
+[package]
+name = "indexa-embed"
+description = "Embedding adapter trait and implementations (Ollama, OpenAI, Anthropic, llama.cpp)."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+async-trait = "0.1"

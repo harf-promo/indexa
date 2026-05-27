@@ -1,0 +1,13 @@
+[package]
+name = "indexa-parsers"
+description = "File type parsers for Indexa (text, PDF, image, code, audio/video)."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

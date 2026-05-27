@@ -1,0 +1,15 @@
+[package]
+name = "indexa-core"
+description = "File walker, filesystem watcher, SQLite store, and graph model for Indexa."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

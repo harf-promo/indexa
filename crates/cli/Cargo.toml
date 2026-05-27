@@ -1,0 +1,20 @@
+[package]
+name = "indexa-cli"
+description = "CLI command definitions for Indexa."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+indexa-core = { path = "../core" }
+indexa-parsers = { path = "../parsers" }
+indexa-embed = { path = "../embed" }
+indexa-llm = { path = "../llm" }
+indexa-query = { path = "../query" }
