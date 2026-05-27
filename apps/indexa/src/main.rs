@@ -6,6 +6,7 @@ use indexa_core::{
     config::{self, Config},
     store::{ChunkRecord, Store},
     walker::{walk, WalkConfig},
+    watcher::{self, ChangeKind, WatcherConfig},
 };
 use indexa_embed::{Embedder as _, OllamaEmbedder};
 use indexa_llm::OllamaLlm;
@@ -40,10 +41,7 @@ async fn main() -> Result<()> {
             embed_model,
             llm_model,
         } => cmd_ask(question, embed_model, llm_model, &cfg).await,
-        Commands::Watch => {
-            println!("Watcher not yet implemented — coming soon.");
-            Ok(())
-        }
+        Commands::Watch { paths } => cmd_watch(paths, &cfg).await,
         Commands::Serve { port } => {
             println!("Web UI not yet implemented — coming soon.");
             println!("Will serve on http://localhost:{port}");
@@ -227,6 +225,111 @@ async fn cmd_ask(
             println!("  [{}] {}", i + 1, loc);
         }
     }
+
+    Ok(())
+}
+
+async fn cmd_watch(paths: Vec<String>, cfg: &Config) -> Result<()> {
+    let roots = resolve_roots(paths, false)?;
+    let db_path = index_db_path()?;
+
+    let embed_model = &cfg.embedding.model;
+    let base_url = &cfg.embedding.base_url;
+    let dim = cfg.embedding.dim;
+
+    println!(
+        "Watching {} path(s) for changes. Press Ctrl-C to stop.",
+        roots.len()
+    );
+    for r in &roots {
+        println!("  {}", r.display());
+    }
+    println!();
+
+    let session = watcher::watch(&roots, &WatcherConfig::default())?;
+
+    // Spawn a blocking thread to consume events from the sync channel.
+    let embed_model = embed_model.clone();
+    let base_url = base_url.clone();
+    let db_path_clone = db_path.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let embedder = indexa_embed::OllamaEmbedder::new(&base_url, &embed_model, dim);
+        let rt = tokio::runtime::Handle::current();
+
+        watcher::run_watch_loop(session, |event| {
+            let path = &event.path;
+
+            // Skip directories and hidden files.
+            if path.is_dir() {
+                return;
+            }
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with('.'))
+                .unwrap_or(false)
+            {
+                return;
+            }
+
+            match event.kind {
+                ChangeKind::Remove => {
+                    // Remove chunks for deleted file.
+                    if let Ok(mut store) = Store::open(&db_path_clone) {
+                        let path_str = path.to_string_lossy().into_owned();
+                        if let Err(e) = store.delete_chunks_for(&path_str) {
+                            tracing::warn!("failed to delete chunks for {path_str}: {e}");
+                        } else {
+                            println!("  removed: {path_str}");
+                        }
+                    }
+                }
+                ChangeKind::Upsert => {
+                    // Re-parse and re-embed.
+                    let extracted = match indexa_parsers::registry::parse(path) {
+                        Ok(e) => e,
+                        Err(_) => return,
+                    };
+                    if extracted.chunks.is_empty() {
+                        return;
+                    }
+
+                    let chunk_records: Vec<ChunkRecord> = rt.block_on(async {
+                        let mut records = Vec::with_capacity(extracted.chunks.len());
+                        for chunk in &extracted.chunks {
+                            let embedding = indexa_embed::Embedder::embed(&embedder, &chunk.text)
+                                .await
+                                .ok();
+                            records.push(ChunkRecord {
+                                entry_path: path.to_string_lossy().into_owned(),
+                                seq: chunk.seq,
+                                heading: chunk.heading.clone(),
+                                text: chunk.text.clone(),
+                                language: chunk.language.clone(),
+                                embedding,
+                                embed_model: Some(embed_model.clone()),
+                            });
+                        }
+                        records
+                    });
+
+                    if let Ok(mut store) = Store::open(&db_path_clone) {
+                        if let Err(e) = store.upsert_chunks(&chunk_records) {
+                            tracing::warn!("failed to upsert chunks for {}: {e}", path.display());
+                        } else {
+                            println!(
+                                "  re-indexed: {} ({} chunks)",
+                                path.display(),
+                                chunk_records.len()
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    })
+    .await?;
 
     Ok(())
 }

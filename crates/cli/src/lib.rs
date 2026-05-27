@@ -57,8 +57,12 @@ pub enum Commands {
         llm_model: Option<String>,
     },
 
-    /// Start the background watcher daemon (keeps the index current).
-    Watch,
+    /// Watch one or more paths for changes and re-index them automatically.
+    Watch {
+        /// Paths to watch. Omit to watch the home directory.
+        #[arg(num_args = 0..)]
+        paths: Vec<String>,
+    },
 
     /// Start the local web UI at http://localhost:<port>.
     Serve {

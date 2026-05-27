@@ -186,6 +186,21 @@ impl Store {
         Ok(n as u64)
     }
 
+    /// Delete all chunks (and their FTS5 entries) for a given file path.
+    /// Called when a watched file is deleted.
+    pub fn delete_chunks_for(&mut self, entry_path: &str) -> Result<()> {
+        // Remove from FTS5 first (trigger-less, manual delete).
+        self.conn.execute(
+            "DELETE FROM chunks_fts WHERE entry_path = ?1",
+            rusqlite::params![entry_path],
+        )?;
+        self.conn.execute(
+            "DELETE FROM chunks WHERE entry_path = ?1",
+            rusqlite::params![entry_path],
+        )?;
+        Ok(())
+    }
+
     /// Count of indexed chunks.
     pub fn chunk_count(&self) -> Result<u64> {
         let n: i64 = self
