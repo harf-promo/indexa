@@ -23,6 +23,14 @@ tree-sitter-javascript = "0.25"
 tree-sitter-typescript = "0.23"
 tree-sitter-go = "0.25"
 tree-sitter-java = "0.23"
+# Image EXIF
+kamadak-exif = "0.5"
+# Office formats
+calamine = { version = "0.26", features = ["dates"] }
+# docx extraction (zip-based)
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Media metadata (audio/video via ffprobe subprocess — no extra dep needed)
+serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"
