@@ -17,6 +17,7 @@ jwalk = { workspace = true }
 ignore = { workspace = true }
 rusqlite = { workspace = true }
 directories = { workspace = true }
+bytemuck = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"

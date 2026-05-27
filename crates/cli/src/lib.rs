@@ -28,10 +28,29 @@ pub enum Commands {
     /// Print a summary map of what Indexa found and how regions were classified.
     Map,
 
+    /// Deep-scan a path: parse, embed, and index file contents.
+    Deep {
+        /// Path to deep-scan. Omit to deep-scan the entire existing index.
+        #[arg(num_args = 0..)]
+        paths: Vec<String>,
+
+        /// Ollama embedding model to use.
+        #[arg(long, default_value = "nomic-embed-text")]
+        embed_model: String,
+    },
+
     /// Ask a question about your indexed files.
     Ask {
         /// Natural-language question.
         question: String,
+
+        /// Ollama embedding model (must match what was used during indexing).
+        #[arg(long, default_value = "nomic-embed-text")]
+        embed_model: String,
+
+        /// Ollama generation model.
+        #[arg(long, default_value = "qwen2.5:14b")]
+        llm_model: String,
     },
 
     /// Start the background watcher daemon (keeps the index current).

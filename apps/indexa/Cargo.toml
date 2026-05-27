@@ -21,3 +21,7 @@ directories = { workspace = true }
 shellexpand = "3"
 indexa-cli = { path = "../../crates/cli" }
 indexa-core = { path = "../../crates/core" }
+indexa-parsers = { path = "../../crates/parsers" }
+indexa-embed = { path = "../../crates/embed" }
+indexa-llm = { path = "../../crates/llm" }
+indexa-query = { path = "../../crates/query" }

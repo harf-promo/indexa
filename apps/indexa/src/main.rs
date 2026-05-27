@@ -3,9 +3,12 @@ use clap::Parser;
 use directories::BaseDirs;
 use indexa_cli::{Cli, Commands};
 use indexa_core::{
-    store::Store,
+    store::{ChunkRecord, Store},
     walker::{walk, WalkConfig},
 };
+use indexa_embed::{Embedder as _, OllamaEmbedder};
+use indexa_llm::OllamaLlm;
+use indexa_query::{ask, QaConfig};
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -21,18 +24,19 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Scan { paths, all } => cmd_scan(paths, all).await,
+        Commands::Deep { paths, embed_model } => cmd_deep(paths, embed_model).await,
         Commands::Map => cmd_map().await,
-        Commands::Ask { question } => {
-            println!("Question: {question}");
-            println!("(query engine not yet implemented — coming in v0.1)");
-            Ok(())
-        }
+        Commands::Ask {
+            question,
+            embed_model,
+            llm_model,
+        } => cmd_ask(question, embed_model, llm_model).await,
         Commands::Watch => {
-            println!("Watcher not yet implemented — coming in v0.1");
+            println!("Watcher not yet implemented — coming soon.");
             Ok(())
         }
         Commands::Serve { port } => {
-            println!("Web UI not yet implemented — coming in v0.1");
+            println!("Web UI not yet implemented — coming soon.");
             println!("Will serve on http://localhost:{port}");
             Ok(())
         }
@@ -54,6 +58,69 @@ async fn cmd_scan(paths: Vec<String>, all: bool) -> Result<()> {
 
     println!("\nIndex saved to {}", db_path.display());
     println!("Run `indexa map` to see a summary.");
+    println!("Run `indexa deep <path>` to parse and embed file contents.");
+    Ok(())
+}
+
+async fn cmd_deep(paths: Vec<String>, embed_model: String) -> Result<()> {
+    let roots = resolve_roots(paths, false)?;
+    let db_path = index_db_path()?;
+    if !db_path.exists() {
+        println!("No index found. Run `indexa scan <path>` first.");
+        return Ok(());
+    }
+
+    let mut store = Store::open(&db_path)?;
+    let embedder = OllamaEmbedder::new("http://localhost:11434", &embed_model, 768);
+
+    for root in &roots {
+        println!(
+            "Deep-scanning {} with embed model '{}'",
+            root.display(),
+            embed_model
+        );
+        let entries = walk(root, &WalkConfig::default())?;
+        let files: Vec<_> = entries
+            .iter()
+            .filter(|e| e.kind == indexa_core::walker::EntryKind::File)
+            .collect();
+
+        println!("  parsing {} files...", files.len());
+        let mut total_chunks = 0usize;
+
+        for entry in files {
+            let extracted = match indexa_parsers::registry::parse(&entry.path) {
+                Ok(e) => e,
+                Err(_) => continue, // skip unparseable files silently
+            };
+
+            if extracted.chunks.is_empty() {
+                continue;
+            }
+
+            let mut chunk_records = Vec::with_capacity(extracted.chunks.len());
+
+            for chunk in &extracted.chunks {
+                let embedding = embedder.embed(&chunk.text).await.ok();
+                chunk_records.push(ChunkRecord {
+                    entry_path: entry.path.to_string_lossy().into_owned(),
+                    seq: chunk.seq,
+                    heading: chunk.heading.clone(),
+                    text: chunk.text.clone(),
+                    language: chunk.language.clone(),
+                    embedding,
+                    embed_model: Some(embed_model.clone()),
+                });
+            }
+
+            store.upsert_chunks(&chunk_records)?;
+            total_chunks += chunk_records.len();
+        }
+
+        println!("  embedded {total_chunks} chunks.");
+    }
+
+    println!("\nDeep index done. Run `indexa ask \"<question>\"` to query.");
     Ok(())
 }
 
@@ -66,9 +133,10 @@ async fn cmd_map() -> Result<()> {
 
     let store = Store::open(&db_path)?;
     let total = store.entry_count()?;
+    let chunks = store.chunk_count()?;
     let summary = store.region_summary()?;
 
-    println!("Indexa map — {} entries total\n", total);
+    println!("Indexa map — {total} entries, {chunks} deep-scanned chunks\n");
     println!("{:<20} {:>10} {:>14}", "Category", "Files", "Size");
     println!("{}", "-".repeat(46));
     for r in summary {
@@ -82,9 +150,46 @@ async fn cmd_map() -> Result<()> {
     Ok(())
 }
 
+async fn cmd_ask(question: String, embed_model: String, llm_model: String) -> Result<()> {
+    let db_path = index_db_path()?;
+    if !db_path.exists() {
+        println!("No index found. Run `indexa scan <path>` first.");
+        return Ok(());
+    }
+
+    let store = Store::open(&db_path)?;
+    let chunk_count = store.chunk_count()?;
+    if chunk_count == 0 {
+        println!("No deep-scanned content found. Run `indexa deep <path>` first.");
+        return Ok(());
+    }
+
+    let embedder = OllamaEmbedder::new("http://localhost:11434", &embed_model, 768);
+    let llm = OllamaLlm::new("http://localhost:11434", &llm_model);
+
+    println!("Searching {chunk_count} indexed chunks...\n");
+
+    let answer = ask(&store, &embedder, &llm, &question, &QaConfig::default()).await?;
+
+    println!("Answer:\n{}\n", answer.answer);
+
+    if !answer.sources.is_empty() {
+        println!("Sources:");
+        for (i, src) in answer.sources.iter().enumerate() {
+            let loc = if src.heading.is_empty() {
+                src.path.clone()
+            } else {
+                format!("{} — {}", src.path, src.heading)
+            };
+            println!("  [{}] {}", i + 1, loc);
+        }
+    }
+
+    Ok(())
+}
+
 fn resolve_roots(paths: Vec<String>, all: bool) -> Result<Vec<PathBuf>> {
     if all {
-        // On macOS/Linux start from /, on Windows from each drive root.
         #[cfg(windows)]
         return Ok(vec![PathBuf::from("C:\\")]);
         #[cfg(not(windows))]

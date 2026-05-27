@@ -1,9 +1,4 @@
 //! Hybrid search (FTS5 + vector) and RAG-based Q&A pipeline.
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn placeholder() {
-        assert_eq!(2 + 2, 4);
-    }
-}
+pub mod qa;
+pub use qa::{ask, Answer, QaConfig, SourceCitation};

@@ -1,11 +1,7 @@
 //! File type parsers: text, Markdown, source code (tree-sitter), PDF, images, audio/video.
 
 pub mod registry;
+pub mod text;
+pub mod types;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn placeholder() {
-        assert_eq!(2 + 2, 4);
-    }
-}
+pub use types::{Chunk, Extracted, Parser};
