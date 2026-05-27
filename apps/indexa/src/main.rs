@@ -42,11 +42,7 @@ async fn main() -> Result<()> {
             llm_model,
         } => cmd_ask(question, embed_model, llm_model, &cfg).await,
         Commands::Watch { paths } => cmd_watch(paths, &cfg).await,
-        Commands::Serve { port } => {
-            println!("Web UI not yet implemented — coming soon.");
-            println!("Will serve on http://localhost:{port}");
-            Ok(())
-        }
+        Commands::Serve { port } => cmd_serve(port, &cfg).await,
     }
 }
 
@@ -332,6 +328,29 @@ async fn cmd_watch(paths: Vec<String>, cfg: &Config) -> Result<()> {
     .await?;
 
     Ok(())
+}
+
+async fn cmd_serve(port: u16, cfg: &Config) -> Result<()> {
+    let db_path = index_db_path()?;
+    if !db_path.exists() {
+        println!("No index found. Run `indexa scan <path>` first.");
+        return Ok(());
+    }
+
+    let store = indexa_core::store::Store::open(&db_path)?;
+
+    let embed_model = &cfg.embedding.model;
+    let base_url = &cfg.embedding.base_url;
+    let dim = cfg.embedding.dim;
+    let llm_model = &cfg.describer.model;
+    let llm_base_url = &cfg.describer.base_url;
+
+    let embedder: std::sync::Arc<dyn indexa_embed::Embedder + Send + Sync + 'static> =
+        std::sync::Arc::new(OllamaEmbedder::new(base_url, embed_model, dim));
+    let llm: std::sync::Arc<dyn indexa_llm::Generator + Send + Sync + 'static> =
+        std::sync::Arc::new(OllamaLlm::new(llm_base_url, llm_model));
+
+    indexa_web::serve(port, store, embedder, llm, cfg.clone()).await
 }
 
 fn resolve_roots(paths: Vec<String>, all: bool) -> Result<Vec<PathBuf>> {

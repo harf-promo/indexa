@@ -11,3 +11,11 @@ repository.workspace = true
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { version = "0.7", features = ["json"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+indexa-core = { path = "../core" }
+indexa-embed = { path = "../embed" }
+indexa-llm = { path = "../llm" }
+indexa-query = { path = "../query" }

@@ -25,3 +25,4 @@ indexa-parsers = { path = "../../crates/parsers" }
 indexa-embed = { path = "../../crates/embed" }
 indexa-llm = { path = "../../crates/llm" }
 indexa-query = { path = "../../crates/query" }
+indexa-web = { path = "../../crates/web" }

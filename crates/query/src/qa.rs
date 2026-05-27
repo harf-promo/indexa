@@ -36,6 +36,9 @@ impl Default for QaConfig {
 
 /// Run the full RAG Q&A pipeline:
 ///   embed(query) → hybrid_search → pack context → LLM → cited answer.
+///
+/// The store query is synchronous and completes before any async calls,
+/// so this function never holds `&Store` across an `.await` point.
 pub async fn ask(
     store: &Store,
     embedder: &dyn Embedder,
@@ -46,18 +49,25 @@ pub async fn ask(
     // 1. Embed the question.
     let query_vec = embedder.embed(question).await?;
 
-    // 2. Hybrid retrieval.
+    // 2. Hybrid retrieval (sync — no await while holding &store).
     let hits = store.hybrid_search(question, Some(&query_vec), cfg.top_k)?;
 
-    // 3. Pack context — top-k chunks, budget-limited.
+    // 3–5. Synthesize (no store access from here on).
+    synthesize_from_hits(hits, llm, question, cfg).await
+}
+
+/// Synthesise an answer from pre-retrieved hits (no store access).
+/// Use this when the caller already has hits and wants to avoid holding
+/// a non-Sync store lock across async boundaries.
+pub async fn synthesize_from_hits(
+    hits: Vec<SearchHit>,
+    llm: &dyn Generator,
+    question: &str,
+    cfg: &QaConfig,
+) -> Result<Answer> {
     let (context, sources) = pack_context(&hits, cfg.context_budget);
-
-    // 4. Build prompt.
     let prompt = build_prompt(question, &context);
-
-    // 5. LLM synthesis.
     let answer_text = llm.generate(&prompt).await?;
-
     Ok(Answer {
         question: question.to_owned(),
         answer: answer_text.trim().to_owned(),
