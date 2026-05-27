@@ -3,6 +3,7 @@ use clap::Parser;
 use directories::BaseDirs;
 use indexa_cli::{Cli, Commands};
 use indexa_core::{
+    config::{self, Config},
     store::{ChunkRecord, Store},
     walker::{walk, WalkConfig},
 };
@@ -22,15 +23,23 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Load config — CLI --config flag overrides the default path.
+    let cfg = if let Some(path) = &cli.config {
+        let expanded = shellexpand::tilde(path).into_owned();
+        config::load(std::path::Path::new(&expanded))?
+    } else {
+        config::load_default()?
+    };
+
     match cli.command {
         Commands::Scan { paths, all } => cmd_scan(paths, all).await,
-        Commands::Deep { paths, embed_model } => cmd_deep(paths, embed_model).await,
+        Commands::Deep { paths, embed_model } => cmd_deep(paths, embed_model, &cfg).await,
         Commands::Map => cmd_map().await,
         Commands::Ask {
             question,
             embed_model,
             llm_model,
-        } => cmd_ask(question, embed_model, llm_model).await,
+        } => cmd_ask(question, embed_model, llm_model, &cfg).await,
         Commands::Watch => {
             println!("Watcher not yet implemented — coming soon.");
             Ok(())
@@ -62,7 +71,11 @@ async fn cmd_scan(paths: Vec<String>, all: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_deep(paths: Vec<String>, embed_model: String) -> Result<()> {
+async fn cmd_deep(
+    paths: Vec<String>,
+    embed_model_flag: Option<String>,
+    cfg: &Config,
+) -> Result<()> {
     let roots = resolve_roots(paths, false)?;
     let db_path = index_db_path()?;
     if !db_path.exists() {
@@ -70,8 +83,16 @@ async fn cmd_deep(paths: Vec<String>, embed_model: String) -> Result<()> {
         return Ok(());
     }
 
+    // CLI flag wins; fall back to config.
+    let embed_model = embed_model_flag
+        .as_deref()
+        .unwrap_or(&cfg.embedding.model)
+        .to_owned();
+    let base_url = &cfg.embedding.base_url;
+    let dim = cfg.embedding.dim;
+
     let mut store = Store::open(&db_path)?;
-    let embedder = OllamaEmbedder::new("http://localhost:11434", &embed_model, 768);
+    let embedder = OllamaEmbedder::new(base_url, &embed_model, dim);
 
     for root in &roots {
         println!(
@@ -91,7 +112,7 @@ async fn cmd_deep(paths: Vec<String>, embed_model: String) -> Result<()> {
         for entry in files {
             let extracted = match indexa_parsers::registry::parse(&entry.path) {
                 Ok(e) => e,
-                Err(_) => continue, // skip unparseable files silently
+                Err(_) => continue,
             };
 
             if extracted.chunks.is_empty() {
@@ -150,7 +171,12 @@ async fn cmd_map() -> Result<()> {
     Ok(())
 }
 
-async fn cmd_ask(question: String, embed_model: String, llm_model: String) -> Result<()> {
+async fn cmd_ask(
+    question: String,
+    embed_model_flag: Option<String>,
+    llm_model_flag: Option<String>,
+    cfg: &Config,
+) -> Result<()> {
     let db_path = index_db_path()?;
     if !db_path.exists() {
         println!("No index found. Run `indexa scan <path>` first.");
@@ -164,12 +190,29 @@ async fn cmd_ask(question: String, embed_model: String, llm_model: String) -> Re
         return Ok(());
     }
 
-    let embedder = OllamaEmbedder::new("http://localhost:11434", &embed_model, 768);
-    let llm = OllamaLlm::new("http://localhost:11434", &llm_model);
+    let embed_model = embed_model_flag
+        .as_deref()
+        .unwrap_or(&cfg.embedding.model)
+        .to_owned();
+    let llm_model = llm_model_flag
+        .as_deref()
+        .unwrap_or(&cfg.describer.model)
+        .to_owned();
+    let embed_base_url = &cfg.embedding.base_url;
+    let llm_base_url = &cfg.describer.base_url;
+    let dim = cfg.embedding.dim;
+
+    let embedder = OllamaEmbedder::new(embed_base_url, &embed_model, dim);
+    let llm = OllamaLlm::new(llm_base_url, &llm_model);
 
     println!("Searching {chunk_count} indexed chunks...\n");
 
-    let answer = ask(&store, &embedder, &llm, &question, &QaConfig::default()).await?;
+    let qa_cfg = QaConfig {
+        top_k: cfg.retrieval.top_k,
+        ..QaConfig::default()
+    };
+
+    let answer = ask(&store, &embedder, &llm, &question, &qa_cfg).await?;
 
     println!("Answer:\n{}\n", answer.answer);
 

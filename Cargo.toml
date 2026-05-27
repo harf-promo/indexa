@@ -55,3 +55,6 @@ async-trait = "0.1"
 
 # Shell helpers
 shellexpand = "3"
+
+# Config file parsing
+toml = "0.8"

@@ -8,6 +8,10 @@ use clap::{Parser, Subcommand};
     long_about = None,
 )]
 pub struct Cli {
+    /// Path to config file (default: platform config dir / config.toml).
+    #[arg(long, global = true)]
+    pub config: Option<String>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -34,9 +38,9 @@ pub enum Commands {
         #[arg(num_args = 0..)]
         paths: Vec<String>,
 
-        /// Ollama embedding model to use.
-        #[arg(long, default_value = "nomic-embed-text")]
-        embed_model: String,
+        /// Embedding model to use (overrides config).
+        #[arg(long)]
+        embed_model: Option<String>,
     },
 
     /// Ask a question about your indexed files.
@@ -44,13 +48,13 @@ pub enum Commands {
         /// Natural-language question.
         question: String,
 
-        /// Ollama embedding model (must match what was used during indexing).
-        #[arg(long, default_value = "nomic-embed-text")]
-        embed_model: String,
+        /// Embedding model (must match what was used during indexing; overrides config).
+        #[arg(long)]
+        embed_model: Option<String>,
 
-        /// Ollama generation model.
-        #[arg(long, default_value = "qwen2.5:14b")]
-        llm_model: String,
+        /// Generation model for answer synthesis (overrides config).
+        #[arg(long)]
+        llm_model: Option<String>,
     },
 
     /// Start the background watcher daemon (keeps the index current).
@@ -95,5 +99,47 @@ mod tests {
     #[test]
     fn cli_help_doesnt_panic() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn cli_ask_without_model_flags() {
+        let cli = Cli::try_parse_from(["indexa", "ask", "where are my tax docs?"]).unwrap();
+        match cli.command {
+            Commands::Ask {
+                question,
+                embed_model,
+                llm_model,
+            } => {
+                assert_eq!(question, "where are my tax docs?");
+                assert!(embed_model.is_none());
+                assert!(llm_model.is_none());
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_ask_with_model_flags() {
+        let cli = Cli::try_parse_from([
+            "indexa",
+            "ask",
+            "query",
+            "--embed-model",
+            "nomic-embed-text:v1.5",
+            "--llm-model",
+            "llama3.2:8b",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Ask {
+                embed_model,
+                llm_model,
+                ..
+            } => {
+                assert_eq!(embed_model.as_deref(), Some("nomic-embed-text:v1.5"));
+                assert_eq!(llm_model.as_deref(), Some("llama3.2:8b"));
+            }
+            _ => panic!("wrong command"),
+        }
     }
 }
