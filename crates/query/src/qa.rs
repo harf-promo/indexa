@@ -1,7 +1,7 @@
 use anyhow::Result;
 use indexa_core::store::{SearchHit, Store};
 use indexa_embed::Embedder;
-use indexa_llm::OllamaLlm;
+use indexa_llm::Generator;
 
 /// Result of a Q&A query.
 #[derive(Debug)]
@@ -39,7 +39,7 @@ impl Default for QaConfig {
 pub async fn ask(
     store: &Store,
     embedder: &dyn Embedder,
-    llm: &OllamaLlm,
+    llm: &dyn Generator,
     question: &str,
     cfg: &QaConfig,
 ) -> Result<Answer> {

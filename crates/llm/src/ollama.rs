@@ -1,3 +1,4 @@
+use crate::{Describer, Generator};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -5,9 +6,9 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_MODEL: &str = "qwen2.5:14b";
 
 pub struct OllamaLlm {
-    base_url: String,
-    model: String,
-    client: reqwest::Client,
+    pub(crate) base_url: String,
+    pub(crate) model: String,
+    pub(crate) client: reqwest::Client,
 }
 
 impl OllamaLlm {
@@ -22,23 +23,25 @@ impl OllamaLlm {
     pub fn default_local() -> Self {
         Self::new("http://localhost:11434", DEFAULT_MODEL)
     }
+}
 
-    /// Generate a completion for `prompt`. Returns the full response text.
-    pub async fn generate(&self, prompt: &str) -> Result<String> {
+#[derive(Serialize)]
+struct Req<'a> {
+    model: &'a str,
+    prompt: &'a str,
+    stream: bool,
+}
+
+#[derive(Deserialize)]
+struct Resp {
+    response: String,
+}
+
+#[async_trait::async_trait]
+impl Generator for OllamaLlm {
+    /// Send a prompt to Ollama's `/api/generate` and return the response text.
+    async fn generate(&self, prompt: &str) -> Result<String> {
         let url = format!("{}/api/generate", self.base_url);
-
-        #[derive(Serialize)]
-        struct Req<'a> {
-            model: &'a str,
-            prompt: &'a str,
-            stream: bool,
-        }
-
-        #[derive(Deserialize)]
-        struct Resp {
-            response: String,
-        }
-
         let body = Req {
             model: &self.model,
             prompt,
@@ -68,7 +71,7 @@ impl OllamaLlm {
 }
 
 #[async_trait::async_trait]
-impl crate::Describer for OllamaLlm {
+impl Describer for OllamaLlm {
     async fn describe(&self, path: &str, content_sample: &[u8]) -> Result<String> {
         let sample = std::str::from_utf8(content_sample)
             .unwrap_or("[binary]")
@@ -78,6 +81,6 @@ impl crate::Describer for OllamaLlm {
         let prompt = format!(
             "Briefly describe what this file is about in 1-2 sentences.\nFile: {path}\nContent:\n{sample}"
         );
-        self.generate(&prompt).await
+        Generator::generate(self, &prompt).await
     }
 }
