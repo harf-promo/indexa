@@ -1,59 +1,87 @@
 # Indexa
 
-**The open index for your whole computer.**
+**The first tool to give your computer a memory.**
+
+*Indexa reads every file and folder you point it at, understands what they are, and lets you ask your computer questions in your own words — all locally, with your own AI model.*
 
 > Status: **pre-alpha** — foundations being built. Watch this repo or join [Discussions](../../discussions) to follow along.
 
-Indexa walks every file and folder on your device, builds a rich semantic understanding of each one using a language model of your choice, and lets you search and ask questions in plain language — completely locally, with no data leaving your machine unless you configure a cloud model yourself.
+---
 
-```
-indexa scan ~/Documents
-indexa ask "where are my tax documents from last year?"
-indexa serve   # opens http://localhost:7620 — folder graph + chat UI
-```
+## Why this is new
+
+**No file search tool actually understands your files.**
+Spotlight, Everything, and Recoll match keywords. They tell you a file *exists*, not what it *means*. Indexa reads your files the way a colleague would — it knows that `Q3_review_final_v2.docx` is a performance review for someone named Jordan, and that the folder called `random` is actually your photography archive from 2019.
+
+**No AI tool indexes your whole machine.**
+Chat-with-docs apps (AnythingLLM, PrivateGPT, and others) only know the folders you explicitly drop into them. Indexa builds a living memory of everything you own — documents, code, images, audio, video — and keeps it current as your files change.
+
+**No private whole-disk tool is open.**
+Apple Spotlight and Windows Recall do surface-level indexing behind proprietary code on locked-down platforms. Indexa is fully open source, runs on macOS, Linux, and Windows, and never sends your data anywhere unless you explicitly point it at a cloud model.
 
 ---
 
-## Why Indexa?
+## Scope it your way
 
-| | Spotlight / Windows Recall | AnythingLLM / PrivateGPT | Recoll / DocFetcher | **Indexa** |
-|---|---|---|---|---|
-| Indexes whole disk | ✅ | ❌ (folder you point at) | ✅ | ✅ |
-| Open source | ❌ | ✅ | ✅ | ✅ |
-| BYO LLM | ❌ | ✅ | ❌ | ✅ |
-| Hierarchical folder graph | ❌ | ❌ | ❌ | ✅ |
-| Cross-platform | ❌ | ✅ | ✅ | ✅ |
+You don't have to index your whole computer on day one. Start with what matters.
+
+```bash
+# Index one folder
+indexa scan ~/Documents
+
+# Index several folders
+indexa scan ~/Projects ~/Notes ~/Desktop
+
+# Index the whole computer (uses a fast two-phase scan — see below)
+indexa scan --all
+```
+
+Then ask questions in plain language:
+
+```bash
+indexa ask "where are my tax documents from last year?"
+indexa ask "which of my code projects use Postgres?"
+indexa ask "do I have any photos from the Morocco trip?"
+```
+
+Or open the local web UI for a visual map and chat:
+
+```bash
+indexa serve   # opens http://localhost:7620
+```
 
 ---
 
 ## How it works
 
-Indexa understands files from the bottom up:
+Indexa understands your files in two phases so you get value immediately, not after hours of processing.
 
-1. **Parse** — extract text, metadata, EXIF, code structure, PDF content, audio/video metadata.
-2. **Describe** — ask a language model to summarize each file in one or two sentences.
-3. **Embed** — store a vector representation for semantic search.
-4. **Compose** — roll up understanding from files → folders → device, so you can ask about any level.
-5. **Watch** — a background daemon tracks changes and keeps the index current.
+**Phase 1 — Surface scan (seconds to minutes)**
+Indexa walks your directory tree and builds a *map* of your computer: which regions are code projects, which are photo libraries, which are app data, which are build artifacts to skip. This phase makes zero AI calls and produces a visual treemap you can explore right away.
 
-Everything is stored in a single SQLite database at `~/.indexa/index.db`. Nothing else touches your filesystem.
+**Phase 2 — Deep scan (background, per region)**
+For each region worth understanding, Indexa reads file content, extracts structure (code symbols, PDF text, image metadata), generates a description using your AI model of choice, and stores a vector embedding for semantic search. You can trigger this on-demand for a specific folder or let the background daemon work through your disk in priority order.
+
+The result is a single index file at `~/.indexa/index.db` — one file, zero external services, easy to back up, easy to delete.
 
 ---
 
-## Supported LLM adapters (v0.1)
+## Supported AI adapters
 
-Bring your own model. Configure in `~/.indexa/config.toml`:
+Bring your own model. No model is bundled — Indexa works with whatever you already have running. Configure in `~/.indexa/config.toml`:
 
-- **Ollama** (local, recommended — fully offline)
-- **llama.cpp** HTTP server
-- **OpenAI** (gpt-4o, text-embedding-3-small, …)
-- **Anthropic** (claude-3-5-haiku, claude-opus-4, …)
+| Adapter | How it runs |
+|---|---|
+| **Ollama** | Local, fully offline (recommended) |
+| **llama.cpp** | Local via HTTP server |
+| **OpenAI** | Cloud — data leaves your device |
+| **Anthropic** | Cloud — data leaves your device |
 
 ---
 
 ## Installation
 
-Pre-built binaries for macOS (arm64, x86\_64), Linux (x86\_64, arm64), and Windows (x86\_64) are available on the [Releases](../../releases) page once v0.1 ships.
+Pre-built binaries for macOS (arm64, x86\_64), Linux (x86\_64, arm64), and Windows (x86\_64) will be available on the [Releases](../../releases) page when v0.1 ships.
 
 Build from source (requires Rust ≥ 1.82):
 
@@ -66,17 +94,18 @@ cargo build --release
 
 ---
 
-## Roadmap
+## What's coming
 
-| Version | Focus |
-|---|---|
-| **v0.1** | Scan, watch, ask, serve. Four LLM adapters. Cross-platform binaries. |
-| v0.2 | Software fingerprinting — detect installed apps and project types by file patterns. |
-| v0.3 | Insights — duplicate clusters, stale projects, anomaly hints. |
-| v0.4 | Mobile read-only view. |
-| v0.5 | Plugin SDK for custom parsers, adapters, and insights. |
+Indexa is being built in the open. Here is what comes after the initial release, in rough order — no dates, ships when it's ready:
 
-See [ROADMAP.md](ROADMAP.md) for detail.
+- **Software fingerprinting** — detect installed apps, frameworks, and project types by file patterns
+- **Smart classification** — automatically suggest "this looks like a work directory / personal archive / media library"; you confirm or correct
+- **Importance weighting** — tell Indexa which parts of your disk matter most; it adjusts search ranking accordingly
+- **Insights** — duplicate file clusters, stale projects, weekly change reports
+- **Mobile** — read-only companion app to browse your index from a phone
+- **Plugin SDK** — extend Indexa with custom parsers, AI adapters, and insight modules
+
+See [ROADMAP.md](ROADMAP.md) for detail. Vote on ideas and suggest new ones in [Discussions](../../discussions/categories/ideas).
 
 ---
 
@@ -85,10 +114,10 @@ See [ROADMAP.md](ROADMAP.md) for detail.
 Indexa is an early-stage project actively looking for contributors. All skill levels welcome.
 
 - Read [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup and PR process.
-- Browse [Issues](../../issues) — items labeled [`good first issue`](../../issues?q=label%3A%22good+first+issue%22) are explicitly scoped for new contributors.
+- Browse [`good first issue`](../../issues?q=label%3A%22good+first+issue%22) labels for scoped, newcomer-friendly work.
 - Join the conversation in [Discussions](../../discussions).
 
-Contributors sign off their commits using the [Developer Certificate of Origin](https://developercertificate.org/) (`git commit -s`). No CLA required.
+Contributors sign off with the [Developer Certificate of Origin](https://developercertificate.org/) (`git commit -s`). No CLA.
 
 ---
 

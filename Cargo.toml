@@ -38,3 +38,20 @@ clap = { version = "4", features = ["derive"] }
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Filesystem
+jwalk = "0.8"
+ignore = "0.4"
+notify = "6"
+
+# Storage
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Platform paths
+directories = "5"
+
+# Async traits
+async-trait = "0.1"
+
+# Shell helpers
+shellexpand = "3"

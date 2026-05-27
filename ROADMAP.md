@@ -1,50 +1,87 @@
 # Roadmap
 
-This roadmap is directional — dates are targets, not promises. All milestones have a corresponding [GitHub Milestone](../../milestones).
+Milestones ship when they're ready — no dates. Order is directional. Each milestone has a corresponding [GitHub Milestone](../../milestones) with `good first issue` labels seeded before work begins.
 
-## v0.1 — Index + Ask (target: ~3 months from project start)
-
-The first publicly usable release. Everything needed to scan a disk and ask questions about it.
-
-- `indexa scan <path>` — walk, parse, embed, store
-- `indexa ask "<question>"` — hybrid semantic + full-text search with LLM-synthesized answer
-- `indexa watch` / `indexa daemon` — incremental index updates via filesystem events
-- `indexa serve` — local web UI (folder tree, file detail, chat, search)
-- File parsers: plain text, Markdown, source code (tree-sitter), PDF, images (EXIF), audio/video metadata (ffprobe)
-- LLM adapters: Ollama, llama.cpp HTTP, OpenAI, Anthropic
-- Cross-platform binaries: macOS (arm64 + x86_64), Linux (x86_64 + arm64), Windows (x86_64)
-
-## v0.2 — Fingerprints (target: ~5 months)
-
-Detect software, frameworks, and project types by file-pattern signatures.
-
-- Community-curated pattern library (e.g. "Next.js project", "Lightroom catalog", "Xcode workspace")
-- `indexa fingerprint` command — list detected software on the machine
-- Contributor guide for adding new fingerprint definitions
-
-## v0.3 — Insights (target: ~7 months)
-
-Analytical reports over the index.
-
-- Duplicate file cluster detection
-- Stale project detection ("last touched > 1 year ago")
-- Weekly diff report ("what changed this week")
-- Informational anomaly hints (large new binaries, unsigned executables) — advisory only, not antivirus
-
-## v0.4 — Mobile read-only (target: ~10 months)
-
-Browse a desktop index from a phone.
-
-- iOS and Android companion app (read-only)
-- Local network sync of the index database
-
-## v0.5 — Plugin SDK (target: ~12 months)
-
-Open the platform to third-party extensions.
-
-- Stable plugin API for custom parsers, LLM adapters, and insight modules
-- Plugin registry / discovery
+Vote on upcoming features and suggest new ones in [Discussions → Ideas](../../discussions/categories/ideas).
 
 ---
 
-Items beyond v0.5 are tracked in [Discussions → Ideas](../../discussions/categories/ideas). Vote on what matters to you.
+## v0.1 — Index + Ask
+
+The first publicly usable release. Scan any folder or your whole disk, ask questions in plain language, watch changes in real time.
+
+- **Two-phase scan**: surface scan (fast, zero AI calls, builds a disk map) → deep scan (parses content, generates descriptions, computes embeddings)
+- **Flexible scope**: `indexa scan <path>` for a folder, `indexa scan --all` for the whole computer
+- `indexa ask "<question>"` — hybrid semantic + full-text search with LLM-synthesized answer
+- `indexa watch` / `indexa daemon` — background daemon keeps the index current via filesystem events
+- `indexa serve` — local web UI: folder map, file detail view, chat, search
+- `indexa map` — CLI summary of what Indexa found and how regions were classified
+- File parsers: plain text, Markdown, source code (tree-sitter), PDF, images (EXIF), audio/video metadata (ffprobe)
+- AI adapters: Ollama, llama.cpp HTTP, OpenAI, Anthropic
+- Cross-platform binaries: macOS (arm64 + x86\_64), Linux (x86\_64 + arm64), Windows (x86\_64)
+
+---
+
+## v0.2 — Fingerprints
+
+Detect installed software and project types by file-pattern signatures — without reading file content.
+
+- Community-curated pattern library: Rails app, Next.js project, Xcode workspace, Lightroom catalog, Premiere project, Final Cut library, Docker Compose stack, and more
+- `indexa fingerprint` — list detected software and project types on the machine
+- Contributor guide for adding fingerprint definitions (JSON pattern format)
+
+---
+
+## v0.3 — Smart classification
+
+Indexa suggests how to categorize regions of your disk. You confirm, correct, or ignore.
+
+- Automatic "work / personal / archive / media / code / system" tagging at the folder level, inferred from file contents and well-known path patterns
+- Suggestions surfaced in the web UI and via `indexa classify`
+- Saved classifications feed into v0.4 importance weighting
+
+---
+
+## v0.4 — Importance weighting
+
+Tell Indexa which parts of your disk matter most. It adjusts everything accordingly.
+
+- User-controlled weights per file, folder, or category ("this project is active", "ignore this old archive")
+- Weights affect search result ranking and Q&A answer quality
+- Auto-suggested weights based on file access recency and frequency (opt-in)
+- Exportable weight profiles — share a "new job setup" or "creative work" profile with others
+
+---
+
+## v0.5 — Insights
+
+Analytical reports over your indexed disk.
+
+- Duplicate file cluster detection (exact and near-duplicate)
+- Stale project detection ("last touched more than a year ago")
+- Weekly diff report — "what changed on your disk this week"
+- Informational anomaly hints: large new binaries, unsigned executables, unusual permission changes — advisory only, never antivirus
+
+---
+
+## v0.6 — Mobile read-only
+
+Browse your desktop index from a phone.
+
+- iOS and Android companion apps (read-only)
+- Local-network sync of the index database — no cloud required
+- Search and ask questions from your phone against your desktop index
+
+---
+
+## v0.7 — Plugin SDK
+
+Open the platform to third-party extensions.
+
+- Stable plugin API for custom parsers, AI adapters, and insight modules
+- Plugin manifest format and discovery
+- First-party plugin: browser history indexer (opt-in)
+
+---
+
+Beyond v0.7, ideas live in [Discussions](../../discussions/categories/ideas).

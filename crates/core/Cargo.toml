@@ -13,3 +13,10 @@ serde = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+jwalk = { workspace = true }
+ignore = { workspace = true }
+rusqlite = { workspace = true }
+directories = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
