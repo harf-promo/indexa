@@ -197,6 +197,44 @@ struct AskSource {
     snippet: String,
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Build a `{"error": msg}` JSON response with the given status.
+fn err_json(status: StatusCode, msg: impl Into<String>) -> Response {
+    (status, Json(serde_json::json!({ "error": msg.into() }))).into_response()
+}
+
+/// Extract `path` from a `PathQuery`, or return a 400 error response.
+/// Accepts an empty string as a valid (present) value — the strictness here
+/// mirrors the original handlers' behavior.
+#[allow(clippy::result_large_err)] // Response is the natural err type for axum handlers
+fn require_path(params: PathQuery) -> Result<String, Response> {
+    params
+        .path
+        .ok_or_else(|| err_json(StatusCode::BAD_REQUEST, "path required"))
+}
+
+/// Filename component of a path, falling back to the full path if none.
+fn file_name_of(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_owned())
+}
+
+impl From<indexa_core::store::TreeNode> for TreeNodeResponse {
+    fn from(n: indexa_core::store::TreeNode) -> Self {
+        Self {
+            path: n.path,
+            name: n.name,
+            kind: n.kind,
+            child_count: n.child_count,
+            byte_size: n.byte_size,
+            summary_state: n.summary_state,
+        }
+    }
+}
+
 // ── Route handlers ────────────────────────────────────────────────────────────
 
 async fn api_tree(
@@ -206,31 +244,13 @@ async fn api_tree(
     let path = params.path.as_deref().unwrap_or("");
     let store = state.store.lock().await;
     let nodes = store.tree_level(path).unwrap_or_default();
-    Json(
-        nodes
-            .into_iter()
-            .map(|n| TreeNodeResponse {
-                path: n.path,
-                name: n.name,
-                kind: n.kind,
-                child_count: n.child_count,
-                byte_size: n.byte_size,
-                summary_state: n.summary_state,
-            })
-            .collect(),
-    )
+    Json(nodes.into_iter().map(TreeNodeResponse::from).collect())
 }
 
 async fn api_summary(State(state): State<AppState>, Query(params): Query<PathQuery>) -> Response {
-    let path = match params.path {
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error":"path required"})),
-            )
-                .into_response()
-        }
-        Some(p) => p,
+    let path = match require_path(params) {
+        Ok(p) => p,
+        Err(resp) => return resp,
     };
 
     let store = state.store.lock().await;
@@ -239,47 +259,29 @@ async fn api_summary(State(state): State<AppState>, Query(params): Query<PathQue
         Ok(None) => {
             return Json(serde_json::json!({"error":"no summary","pending":true})).into_response()
         }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error":e.to_string()})),
-            )
-                .into_response()
-        }
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     let children = store.children_summaries(&path).unwrap_or_default();
     let crumbs = store.ancestor_summaries(&path).unwrap_or_default();
 
     let child_responses: Vec<SummaryChildResponse> = children
-        .iter()
-        .map(|c| {
-            let name = std::path::Path::new(&c.path)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| c.path.clone());
-            SummaryChildResponse {
-                path: c.path.clone(),
-                name,
-                kind: c.kind.clone(),
-                summary: c.summary.clone(),
-                summary_state: Some("done".into()),
-            }
+        .into_iter()
+        .map(|c| SummaryChildResponse {
+            name: file_name_of(&c.path),
+            path: c.path,
+            kind: c.kind,
+            summary: c.summary,
+            summary_state: Some("done".into()),
         })
         .collect();
 
     let crumb_responses: Vec<BreadcrumbResponse> = crumbs
-        .iter()
-        .map(|c| {
-            let name = std::path::Path::new(&c.path)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| c.path.clone());
-            BreadcrumbResponse {
-                path: c.path.clone(),
-                name,
-                summary: c.summary.clone(),
-            }
+        .into_iter()
+        .map(|c| BreadcrumbResponse {
+            name: file_name_of(&c.path),
+            path: c.path,
+            summary: c.summary,
         })
         .collect();
 
@@ -299,15 +301,9 @@ async fn api_summarize_enqueue(
     State(state): State<AppState>,
     Query(params): Query<PathQuery>,
 ) -> Response {
-    let path = match params.path {
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error":"path required"})),
-            )
-                .into_response()
-        }
-        Some(p) => p,
+    let path = match require_path(params) {
+        Ok(p) => p,
+        Err(resp) => return resp,
     };
     let depth = path.chars().filter(|&c| c == '/' || c == '\\').count() as i64;
     let kind = if std::path::Path::new(&path).is_dir() {
@@ -318,77 +314,55 @@ async fn api_summarize_enqueue(
     let mut store = state.store.lock().await;
     match store.enqueue_summary_items(&[(path.clone(), kind.into(), depth)]) {
         Ok(()) => Json(serde_json::json!({"queued":true,"path":path})).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error":e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
 async fn api_models_installed(State(state): State<AppState>) -> Response {
     let base = &state.config.describer.base_url;
     let url = format!("{base}/api/tags");
-    let client = reqwest::Client::new();
-    match client.get(&url).send().await {
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
-        Ok(resp) => {
-            let body: serde_json::Value = match resp.json().await {
-                Ok(v) => v,
-                Err(e) => {
-                    return (
-                        StatusCode::BAD_GATEWAY,
-                        Json(serde_json::json!({"error": e.to_string()})),
-                    )
-                        .into_response()
-                }
-            };
-            let models: Vec<ModelInfo> = body["models"]
-                .as_array()
-                .unwrap_or(&vec![])
-                .iter()
-                .map(|m| ModelInfo {
-                    name: m["name"].as_str().unwrap_or("").to_owned(),
-                    size: m["size"].as_u64().unwrap_or(0),
-                })
-                .collect();
-            Json(models).into_response()
-        }
-    }
+    let resp = match reqwest::Client::new().get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => return err_json(StatusCode::BAD_GATEWAY, e.to_string()),
+    };
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => return err_json(StatusCode::BAD_GATEWAY, e.to_string()),
+    };
+    let models: Vec<ModelInfo> = body["models"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .map(|m| ModelInfo {
+            name: m["name"].as_str().unwrap_or("").to_owned(),
+            size: m["size"].as_u64().unwrap_or(0),
+        })
+        .collect();
+    Json(models).into_response()
 }
 
 async fn api_models_pull(State(state): State<AppState>, Json(body): Json<PullRequest>) -> Response {
     let base = &state.config.describer.base_url;
     let url = format!("{base}/api/pull");
-    let client = reqwest::Client::new();
-    match client
+    let resp = match reqwest::Client::new()
         .post(&url)
         .json(&serde_json::json!({"name": body.name, "stream": true}))
         .send()
         .await
     {
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
-        Ok(resp) => {
-            // Proxy the NDJSON stream straight through to the client.
-            let stream = resp
-                .bytes_stream()
-                .map(|r| r.map_err(std::io::Error::other));
-            Response::builder()
-                .status(200)
-                .header("Content-Type", "application/x-ndjson")
-                .body(Body::from_stream(stream))
-                .unwrap()
-                .into_response()
-        }
-    }
+        Ok(r) => r,
+        Err(e) => return err_json(StatusCode::BAD_GATEWAY, e.to_string()),
+    };
+    // Proxy the NDJSON stream straight through to the client.
+    let stream = resp
+        .bytes_stream()
+        .map(|r| r.map_err(std::io::Error::other));
+    Response::builder()
+        .status(200)
+        .header("Content-Type", "application/x-ndjson")
+        .body(Body::from_stream(stream))
+        .unwrap()
+        .into_response()
 }
 
 async fn api_keys_get(State(state): State<AppState>) -> Json<KeysStatus> {
@@ -403,11 +377,10 @@ async fn api_keys_get(State(state): State<AppState>) -> Json<KeysStatus> {
 async fn api_keys_set(State(state): State<AppState>, Json(body): Json<KeyRequest>) -> Response {
     // Gate: require env flag to allow writing secrets via the web UI.
     if std::env::var("INDEXA_WEB_ALLOW_KEY_EDIT").as_deref() != Ok("1") {
-        return (
+        return err_json(
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error":"Set INDEXA_WEB_ALLOW_KEY_EDIT=1 to enable API key editing via the web UI."})),
-        )
-            .into_response();
+            "Set INDEXA_WEB_ALLOW_KEY_EDIT=1 to enable API key editing via the web UI.",
+        );
     }
 
     let cfg_path = config::default_config_path();
@@ -422,13 +395,7 @@ async fn api_keys_set(State(state): State<AppState>, Json(body): Json<KeyRequest
         "openai" => cfg.api_keys.openai = key_val,
         "anthropic" => cfg.api_keys.anthropic = key_val,
         "google" => cfg.api_keys.google = key_val,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error":"unknown provider"})),
-            )
-                .into_response()
-        }
+        _ => return err_json(StatusCode::BAD_REQUEST, "unknown provider"),
     }
 
     // Never log key material — log only the provider name.
@@ -439,11 +406,7 @@ async fn api_keys_set(State(state): State<AppState>, Json(body): Json<KeyRequest
             tracing::info!("API key updated for provider={provider}");
             Json(serde_json::json!({"saved": true, "restart_required": true})).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -453,12 +416,9 @@ async fn api_roots(State(state): State<AppState>) -> Json<Vec<RootResponse>> {
     Json(
         paths
             .into_iter()
-            .map(|p| {
-                let name = std::path::Path::new(&p)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| p.clone());
-                RootResponse { path: p, name }
+            .map(|p| RootResponse {
+                name: file_name_of(&p),
+                path: p,
             })
             .collect(),
     )
@@ -475,42 +435,21 @@ async fn api_search(
     let limit = params.limit.unwrap_or(50).min(200);
     let store = state.store.lock().await;
     let nodes = store.search_paths(&q, limit).unwrap_or_default();
-    Json(
-        nodes
-            .into_iter()
-            .map(|n| TreeNodeResponse {
-                path: n.path,
-                name: n.name,
-                kind: n.kind,
-                child_count: n.child_count,
-                byte_size: n.byte_size,
-                summary_state: n.summary_state,
-            })
-            .collect(),
-    )
+    Json(nodes.into_iter().map(TreeNodeResponse::from).collect())
 }
 
 async fn api_fs_ls(Query(params): Query<PathQuery>) -> Response {
     let raw = match params.path.as_deref() {
         Some(p) if !p.is_empty() => p.to_owned(),
-        _ => {
-            let home = directories::BaseDirs::new()
-                .map(|b| b.home_dir().to_string_lossy().into_owned())
-                .unwrap_or_else(|| "/".to_owned());
-            home
-        }
+        _ => directories::BaseDirs::new()
+            .map(|b| b.home_dir().to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/".to_owned()),
     };
 
     // Security: reject path traversal and non-absolute paths.
     let canon = match std::fs::canonicalize(&raw) {
         Ok(p) => p,
-        Err(_) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "path not found" })),
-            )
-                .into_response();
-        }
+        Err(_) => return err_json(StatusCode::NOT_FOUND, "path not found"),
     };
 
     let home_canon = directories::BaseDirs::new()
@@ -520,11 +459,7 @@ async fn api_fs_ls(Query(params): Query<PathQuery>) -> Response {
 
     // Clamp to HOME to prevent exposing system dirs.
     if !canon.starts_with(&home_canon) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "error": "path outside home directory" })),
-        )
-            .into_response();
+        return err_json(StatusCode::FORBIDDEN, "path outside home directory");
     }
 
     let mut entries: Vec<FsEntry> = Vec::new();
@@ -539,30 +474,23 @@ async fn api_fs_ls(Query(params): Query<PathQuery>) -> Response {
         }
     }
 
-    match std::fs::read_dir(&canon) {
-        Ok(rd) => {
-            let mut dirs: Vec<FsEntry> = rd
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_type().map(|t| t.is_dir()).unwrap_or(false)
-                        && !e.file_name().to_string_lossy().starts_with('.')
-                })
-                .map(|e| FsEntry {
-                    name: e.file_name().to_string_lossy().into_owned(),
-                    path: e.path().to_string_lossy().into_owned(),
-                })
-                .collect();
-            dirs.sort_by(|a, b| a.name.cmp(&b.name));
-            entries.extend(dirs);
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
-    }
+    let rd = match std::fs::read_dir(&canon) {
+        Ok(rd) => rd,
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let mut dirs: Vec<FsEntry> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                && !e.file_name().to_string_lossy().starts_with('.')
+        })
+        .map(|e| FsEntry {
+            name: e.file_name().to_string_lossy().into_owned(),
+            path: e.path().to_string_lossy().into_owned(),
+        })
+        .collect();
+    dirs.sort_by(|a, b| a.name.cmp(&b.name));
+    entries.extend(dirs);
 
     Json(entries).into_response()
 }
@@ -596,24 +524,14 @@ async fn api_queue_retry(
     State(state): State<AppState>,
     Query(params): Query<PathQuery>,
 ) -> Response {
-    let path = match params.path.as_deref() {
-        Some(p) => p.to_owned(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "path required" })),
-            )
-                .into_response();
-        }
+    let path = match require_path(params) {
+        Ok(p) => p,
+        Err(resp) => return resp,
     };
     let mut store = state.store.lock().await;
     match store.mark_queue_state(&path, "pending", None) {
         Ok(_) => Json(serde_json::json!({ "queued": true })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -632,11 +550,7 @@ async fn api_config_passes(
     Json(body): Json<PassesRequest>,
 ) -> Response {
     if std::env::var("INDEXA_WEB_ALLOW_KEY_EDIT").as_deref() != Ok("1") {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "error": "INDEXA_WEB_ALLOW_KEY_EDIT not set" })),
-        )
-            .into_response();
+        return err_json(StatusCode::FORBIDDEN, "INDEXA_WEB_ALLOW_KEY_EDIT not set");
     }
 
     let cap = state.config.describer.passes_cap;
@@ -650,11 +564,7 @@ async fn api_config_passes(
 
     match config::save(&cfg, &cfg_path) {
         Ok(_) => Json(serde_json::json!({ "saved": true })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -697,13 +607,7 @@ async fn api_ask(State(state): State<AppState>, Json(body): Json<AskRequest>) ->
     // Step 1: embed query (async, no store lock needed).
     let query_vec = match state.embedder.embed(&body.question).await {
         Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     // Step 2: sync store query (hold lock only for the synchronous call, no await).
@@ -718,13 +622,7 @@ async fn api_ask(State(state): State<AppState>, Json(body): Json<AskRequest>) ->
             state.config.retrieval.rrf_k as f32,
         ) {
             Ok(h) => h,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e.to_string() })),
-                )
-                    .into_response();
-            }
+            Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         }
     }; // MutexGuard dropped here — no store reference held across awaits
 
@@ -743,11 +641,7 @@ async fn api_ask(State(state): State<AppState>, Json(body): Json<AskRequest>) ->
                 .collect(),
         })
         .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -773,13 +667,19 @@ struct JobListEntry {
     started_at: i64,
 }
 
+/// Register a new job in the shared registry and return its handle + id.
+async fn register_job(jobs: &Jobs, kind: &str, path: String) -> (Uuid, Arc<JobHandle>) {
+    let handle = Arc::new(JobHandle::new(kind, path));
+    let id = handle.id;
+    jobs.write().await.insert(id, handle.clone());
+    (id, handle)
+}
+
 async fn api_job_scan(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
 ) -> impl IntoResponse {
-    let handle = Arc::new(JobHandle::new("scan", q.path.clone()));
-    let id = handle.id;
-    s.jobs.write().await.insert(id, handle.clone());
+    let (id, handle) = register_job(&s.jobs, "scan", q.path.clone()).await;
     let state = s.clone();
     tokio::spawn(async move { run_scan_phase(&state, &q.path, &handle).await });
     Json(JobStartResponse { job_id: id })
@@ -789,15 +689,12 @@ async fn api_job_deep(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
 ) -> impl IntoResponse {
-    let handle = Arc::new(JobHandle::new("deep", q.path.clone()));
-    let id = handle.id;
-    s.jobs.write().await.insert(id, handle.clone());
+    let (id, handle) = register_job(&s.jobs, "deep", q.path.clone()).await;
     let state = s.clone();
     let path = q.path.clone();
     tokio::spawn(async move {
         // Walk first then deep-index
-        let path_buf = std::path::PathBuf::from(&path);
-        let pb = path_buf.clone();
+        let pb = std::path::PathBuf::from(&path);
         let entries = tokio::task::spawn_blocking(move || walk(&pb, &WalkConfig::default()))
             .await
             .unwrap_or_else(|e| Err(anyhow::anyhow!(e)))
@@ -811,9 +708,7 @@ async fn api_job_summarize(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
 ) -> impl IntoResponse {
-    let handle = Arc::new(JobHandle::new("summarize", q.path.clone()));
-    let id = handle.id;
-    s.jobs.write().await.insert(id, handle.clone());
+    let (id, handle) = register_job(&s.jobs, "summarize", q.path.clone()).await;
     let state = s.clone();
     tokio::spawn(async move { run_summarize_phase(&state, &q.path, q.passes, &handle).await });
     Json(JobStartResponse { job_id: id })
@@ -823,9 +718,7 @@ async fn api_job_index(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
 ) -> impl IntoResponse {
-    let handle = Arc::new(JobHandle::new("index", q.path.clone()));
-    let id = handle.id;
-    s.jobs.write().await.insert(id, handle.clone());
+    let (id, handle) = register_job(&s.jobs, "index", q.path.clone()).await;
     let state = s.clone();
     tokio::spawn(async move { run_index_job(state, q.path, handle).await });
     Json(JobStartResponse { job_id: id })
@@ -847,33 +740,25 @@ async fn api_jobs_list(State(s): State<AppState>) -> impl IntoResponse {
 }
 
 async fn api_jobs_events(Path(id): Path<Uuid>, State(s): State<AppState>) -> impl IntoResponse {
-    let handle = {
-        let jobs = s.jobs.read().await;
-        match jobs.get(&id) {
-            Some(h) => h.clone(),
-            None => {
-                return (StatusCode::NOT_FOUND, "job not found").into_response();
-            }
-        }
+    let handle = match s.jobs.read().await.get(&id) {
+        Some(h) => h.clone(),
+        None => return (StatusCode::NOT_FOUND, "job not found").into_response(),
     };
 
     let history = handle.history.lock().unwrap().clone();
     let rx = handle.tx.subscribe();
 
-    let replay = futures_util::stream::iter(history).map(|ev| {
+    fn to_sse(ev: JobEvent) -> Result<Event, Infallible> {
         let data = serde_json::to_string(&ev).unwrap_or_default();
-        Ok::<_, Infallible>(Event::default().data(data))
-    });
+        Ok(Event::default().data(data))
+    }
 
+    let replay = futures_util::stream::iter(history).map(to_sse);
     let live = BroadcastStream::new(rx)
         .filter_map(|r| async move { r.ok() })
-        .map(|ev| {
-            let data = serde_json::to_string(&ev).unwrap_or_default();
-            Ok::<_, Infallible>(Event::default().data(data))
-        });
+        .map(to_sse);
 
-    let stream = replay.chain(live);
-    Sse::new(stream)
+    Sse::new(replay.chain(live))
         .keep_alive(KeepAlive::new())
         .into_response()
 }
@@ -885,6 +770,27 @@ async fn api_job_delete(Path(id): Path<Uuid>, State(s): State<AppState>) -> impl
     }
     jobs.remove(&id);
     StatusCode::NO_CONTENT
+}
+
+// ── Entry management ──────────────────────────────────────────────────────────
+
+async fn api_delete_entry(
+    Query(q): Query<PathQuery>,
+    State(s): State<AppState>,
+) -> impl IntoResponse {
+    let path = match require_path(q) {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let mut store = s.store.lock().await;
+    match store.delete_subtree(&path) {
+        Ok(removed) => Json(serde_json::json!({ "removed": removed })).into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn api_version() -> impl IntoResponse {
+    Json(serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }))
 }
 
 // ── Job runner ────────────────────────────────────────────────────────────────
@@ -899,19 +805,28 @@ fn finalize_failed(handle: &Arc<JobHandle>, error: &str) {
     *handle.status.lock().unwrap() = JobStatus::Failed;
 }
 
+/// Walk a path in a blocking thread; on failure, push the error to the job and return None.
+async fn walk_for_job(
+    path: &str,
+    handle: &Arc<JobHandle>,
+) -> Option<Vec<indexa_core::walker::Entry>> {
+    let pb = std::path::PathBuf::from(path);
+    let walked = tokio::task::spawn_blocking(move || walk(&pb, &WalkConfig::default()))
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!(e)));
+    match walked {
+        Ok(e) => Some(e),
+        Err(e) => {
+            finalize_failed(handle, &e.to_string());
+            None
+        }
+    }
+}
+
 async fn run_index_job(state: AppState, path: String, handle: Arc<JobHandle>) {
     // Phase 1: scan
-    let path_buf = std::path::PathBuf::from(&path);
-    let pb = path_buf.clone();
-    let entries = match tokio::task::spawn_blocking(move || walk(&pb, &WalkConfig::default()))
-        .await
-        .unwrap_or_else(|e| Err(anyhow::anyhow!(e)))
-    {
-        Ok(e) => e,
-        Err(e) => {
-            finalize_failed(&handle, &e.to_string());
-            return;
-        }
+    let Some(entries) = walk_for_job(&path, &handle).await else {
+        return;
     };
 
     if !run_scan_phase_with_entries(&state, &path, &entries, &handle).await {
@@ -929,16 +844,8 @@ async fn run_index_job(state: AppState, path: String, handle: Arc<JobHandle>) {
 
 /// Returns true on success.
 async fn run_scan_phase(state: &AppState, path: &str, handle: &Arc<JobHandle>) -> bool {
-    let pb = std::path::PathBuf::from(path);
-    let entries = match tokio::task::spawn_blocking(move || walk(&pb, &WalkConfig::default()))
-        .await
-        .unwrap_or_else(|e| Err(anyhow::anyhow!(e)))
-    {
-        Ok(e) => e,
-        Err(e) => {
-            finalize_failed(handle, &e.to_string());
-            return false;
-        }
+    let Some(entries) = walk_for_job(path, handle).await else {
+        return false;
     };
     run_scan_phase_with_entries(state, path, &entries, handle).await
 }
@@ -1213,6 +1120,8 @@ pub async fn serve(
         .route("/api/jobs/index", post(api_job_index))
         .route("/api/jobs/:id/events", get(api_jobs_events))
         .route("/api/jobs/:id", delete(api_job_delete))
+        .route("/api/entry", delete(api_delete_entry))
+        .route("/api/version", get(api_version))
         .with_state(state)
         .layer(
             tower_http::cors::CorsLayer::new()
@@ -1276,7 +1185,13 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
   .tree-badge.pending { color: var(--orange); animation: pulse 2s ease-in-out infinite; }
   .tree-badge.failed { color: var(--red); }
   .tree-children { padding-left: 16px; }
+  .tree-row-actions { display: none; gap: 1px; margin-left: auto; flex-shrink: 0; }
+  .tree-node-row:hover .tree-row-actions { display: flex; }
+  .tree-row-actions button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 1px 4px; border-radius: 3px; line-height: 1.4; }
+  .tree-row-actions button:hover { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .tree-row-actions button[data-act="remove"]:hover { background: rgba(248,81,73,0.15); color: var(--red); }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .version-chip { font-size: 10px; color: var(--muted); opacity: 0.7; }
   .tree-search { padding: 6px 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; display: flex; gap: 4px; }
   .tree-search input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 5px; color: var(--text); font-family: inherit; font-size: 12px; padding: 4px 8px; outline: none; }
   .tree-search input:focus { border-color: var(--accent); }
@@ -1400,6 +1315,7 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
 <body>
 <header>
   <h1>&#x2B21; Indexa</h1>
+  <span class="version-chip" id="app-version"></span>
   <span class="stats" id="stats">Loading&#x2026;</span>
   <div class="tabs">
     <button class="tab" id="tab-tree" onclick="switchTab('tree')">Tree</button>
@@ -1414,6 +1330,7 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
     <div class="tree-header">
       <span>Folder tree</span>
       <span class="queue-badge" id="queue-badge" style="display:none"></span>
+      <button class="add-root-btn" onclick="reindexAll()" title="Re-index all roots" style="font-size:10px;padding:0 5px;margin-right:2px">&#x21BB;</button>
       <button class="add-root-btn" onclick="openAddRoot()" title="Add root folder">+</button>
     </div>
     <div class="tree-search">
@@ -1604,8 +1521,36 @@ function buildTreeNode(node) {
   const row = document.createElement('div');
   row.className = 'tree-node-row' + (node.path === selectedPath ? ' selected' : '');
   row.innerHTML = toggle + '<span class="tree-icon">' + icon + '</span>' +
-    '<span class="tree-label" title="' + escapeHtml(node.name) + '">' + escapeHtml(node.name) + '</span>' +
-    badge;
+    '<span class="tree-label" title="' + escapeAttr(node.path) + '">' + escapeHtml(node.name) + '</span>' +
+    badge +
+    '<span class="tree-row-actions">' +
+    '<button data-act="scan" title="Re-scan">&#x21BB;</button>' +
+    '<button data-act="deep" title="Deep index">&#x26A1;</button>' +
+    '<button data-act="summarize" title="Summarize">&#x1F4DD;</button>' +
+    '<button data-act="remove" title="Remove from index">&#x1F5D1;</button>' +
+    '</span>';
+
+  row.querySelectorAll('.tree-row-actions button').forEach(function(btn) {
+    btn.addEventListener('click', async function(e) {
+      e.stopPropagation();
+      const act = btn.dataset.act;
+      if (act === 'remove') {
+        const label = node.path.split('/').pop() || node.path;
+        if (!confirm('Remove ‹' + label + '› from the index?\nFiles on disk are not deleted.')) return;
+        try {
+          await fetch('/api/entry?path=' + encodeURIComponent(node.path), { method: 'DELETE' });
+          initTree();
+          loadStats();
+        } catch(err) { alert('Remove failed: ' + err.message); }
+      } else {
+        try {
+          const r = await fetch('/api/jobs/' + act + '?path=' + encodeURIComponent(node.path), { method: 'POST' });
+          const d = await r.json();
+          subscribeJob(d.job_id, node.path);
+        } catch(err) { alert('Failed to start job: ' + err.message); }
+      }
+    });
+  });
 
   const childContainer = document.createElement('div');
   childContainer.className = 'tree-children';
@@ -2188,8 +2133,34 @@ function escapeHtml(s) {
 }
 function escapeAttr(s) { return escapeHtml(s); }
 
+/* ── Version ── */
+async function loadVersion() {
+  try {
+    const r = await fetch('/api/version');
+    const d = await r.json();
+    const el = document.getElementById('app-version');
+    if (el && d.version) el.textContent = 'v' + d.version;
+  } catch(_) {}
+}
+
+/* ── Re-index all ── */
+async function reindexAll() {
+  try {
+    const r = await fetch('/api/roots');
+    const roots = await r.json();
+    if (!roots.length) { alert('No indexed roots yet.'); return; }
+    if (!confirm('Re-index ' + roots.length + ' root(s) with deep scan?')) return;
+    for (const root of roots) {
+      const rj = await fetch('/api/jobs/deep?path=' + encodeURIComponent(root.path), { method: 'POST' });
+      const d = await rj.json();
+      subscribeJob(d.job_id, root.path);
+    }
+  } catch(e) { alert('Failed: ' + e.message); }
+}
+
 /* ── Init ── */
 loadStats();
+loadVersion();
 initTree();
 switchTab('chat');
 reconnectInFlightJobs();

@@ -61,9 +61,8 @@ pub async fn summarize_file(
         tracing::info!("summarize {path} pass {}/{passes}", i + 1);
         summary_text = Some(next);
     }
-    let summary_text = match summary_text {
-        Some(s) => s,
-        None => return Ok(false),
+    let Some(summary_text) = summary_text else {
+        return Ok(false);
     };
 
     let embedding = embedder.embed(&summary_text).await.ok();
@@ -138,9 +137,8 @@ pub async fn summarize_directory(
         tracing::info!("summarize {dir_path} pass {}/{passes}", i + 1);
         summary_text = Some(next);
     }
-    let summary_text = match summary_text {
-        Some(s) => s,
-        None => return Ok(false),
+    let Some(summary_text) = summary_text else {
+        return Ok(false);
     };
 
     let embedding = embedder.embed(&summary_text).await.ok();
@@ -273,36 +271,24 @@ pub async fn summarize_subtree_sync(
     let mut done = 0usize;
     let mut errors = 0usize;
     let mut first_error: Option<String> = None;
-    loop {
-        let item = store.next_queue_item()?;
-        match item {
-            None => break,
-            Some(item) => {
-                let r = process_queue_item_with_passes(
-                    store,
-                    describer,
-                    embedder,
-                    &item,
-                    cfg,
-                    passes_override,
-                )
+    while let Some(item) = store.next_queue_item()? {
+        let r =
+            process_queue_item_with_passes(store, describer, embedder, &item, cfg, passes_override)
                 .await;
-                match r {
-                    Ok(()) => done += 1,
-                    Err(e) => {
-                        errors += 1;
-                        if first_error.is_none() {
-                            first_error = Some(e.to_string());
-                        }
-                    }
-                }
-                if (done + errors).is_multiple_of(10) {
-                    println!(
-                        "  {}/{enqueued} processed ({errors} errors)...",
-                        done + errors
-                    );
+        match r {
+            Ok(()) => done += 1,
+            Err(e) => {
+                errors += 1;
+                if first_error.is_none() {
+                    first_error = Some(e.to_string());
                 }
             }
+        }
+        if (done + errors).is_multiple_of(10) {
+            println!(
+                "  {}/{enqueued} processed ({errors} errors)...",
+                done + errors
+            );
         }
     }
 

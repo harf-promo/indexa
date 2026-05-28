@@ -5,6 +5,21 @@ All notable changes to Indexa will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-05-28
+
+### Added
+
+- **Per-row tree actions** — hovering any folder row in the sidebar reveals four action buttons: ↻ Re-scan, ⚡ Deep index, 📝 Summarize, 🗑 Remove from index. Each wires into the existing SSE job infrastructure (`/api/jobs/{scan,deep,summarize}`) so progress is visible in the live jobs panel without opening a terminal.
+- **Version chip** — the header now shows the running version (e.g. `v0.3.1`) fetched from `GET /api/version` on page load.
+- **Re-index all button** — a ↻ button in the tree-pane header fires `POST /api/jobs/deep` for every indexed root in sequence, with a confirm prompt.
+- **Full-path tooltip** — hovering a tree-row label shows the absolute path via the native `title` attribute.
+- **`GET /api/version`** — returns `{ "version": "0.3.1" }`.
+- **`DELETE /api/entry?path=`** — removes a path and all its children from the index (wraps `Store::delete_subtree`; returns `{ "removed": N }`). Files on disk are not deleted.
+
+### Changed
+
+- **Code simplification** — 138 lines removed from `crates/web/src/lib.rs` and `crates/query/src/summarize.rs`: error-response boilerplate consolidated into a helper, repeated `register_job` / `walk_for_job` patterns folded, `TreeNode → TreeNodeResponse` mapping extracted to `From` impl, `while let` loops and `let-else` throughout. All HTTP routes, SSE event shapes, and embedded UI unchanged.
+
 ## [0.3.0] — 2026-05-28
 
 ### Fixed
