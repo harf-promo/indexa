@@ -226,7 +226,7 @@ pub async fn process_queue_item_with_passes(
     match result {
         Ok(_) => store.mark_queue_state(&item.path, "done", None)?,
         Err(e) => {
-            let msg = e.to_string();
+            let msg = format!("{e:#}");
             tracing::warn!("summarize failed for {}: {msg}", item.path);
             store.mark_queue_state(&item.path, "failed", Some(&msg))?;
         }

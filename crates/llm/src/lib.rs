@@ -19,6 +19,19 @@ pub use openai_compat::OpenAICompatLlm;
 #[async_trait::async_trait]
 pub trait Generator: Send + Sync {
     async fn generate(&self, prompt: &str) -> anyhow::Result<String>;
+
+    /// Streaming variant — calls `on_fragment` with each token/chunk as it arrives.
+    /// Returns the complete concatenated response.
+    /// The default impl buffers the full response and calls `on_fragment` once.
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        on_fragment: &mut (dyn FnMut(String) + Send),
+    ) -> anyhow::Result<String> {
+        let full = self.generate(prompt).await?;
+        on_fragment(full.clone());
+        Ok(full)
+    }
 }
 
 /// A child entry fed into a directory roll-up summary prompt.

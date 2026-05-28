@@ -38,14 +38,34 @@ pub enum JobEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         eta_secs: Option<f64>,
     },
-    Note {
-        msg: String,
-    },
     Done {
         summary: String,
     },
     Failed {
         error: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stage: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        item_path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        chain: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+    },
+    /// A non-fatal issue that did not stop the job (e.g. one file failed to parse).
+    Warning {
+        stage: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        item_path: Option<String>,
+        message: String,
+    },
+    /// A fragment of LLM output streamed in real time.
+    /// NOT stored in job history — broadcast-only to avoid unbounded memory growth.
+    LlmFragment {
+        item_path: String,
+        model: String,
+        stage: String,
+        fragment: String,
     },
 }
 
@@ -61,7 +81,7 @@ pub struct JobHandle {
 
 impl JobHandle {
     pub fn new(kind: impl Into<String>, path: impl Into<String>) -> Self {
-        let (tx, _) = broadcast::channel(64);
+        let (tx, _) = broadcast::channel(128);
         Self {
             id: Uuid::new_v4(),
             kind: kind.into(),
@@ -83,5 +103,11 @@ pub type Jobs = Arc<RwLock<HashMap<Uuid, Arc<JobHandle>>>>;
 /// Push an event into a job's history and broadcast it to subscribers.
 pub fn push(handle: &Arc<JobHandle>, event: JobEvent) {
     handle.history.lock().unwrap().push(event.clone());
+    let _ = handle.tx.send(event);
+}
+
+/// Broadcast an event to live subscribers WITHOUT storing it in history.
+/// Use for high-volume streaming events (e.g. LlmFragment) to avoid memory bloat.
+pub fn broadcast_only(handle: &Arc<JobHandle>, event: JobEvent) {
     let _ = handle.tx.send(event);
 }
