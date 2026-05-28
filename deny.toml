@@ -19,12 +19,17 @@ allow = [
 exceptions = []
 
 [advisories]
+# All three advisories below are transitive through hyperpolyglot 0.1.7, which
+# ships clap v2.x and serde_yaml 0.8.x. hyperpolyglot has no newer release that
+# moves to maintained successors. Risk is confined to our offline, read-only
+# language-detection path (no network, no user input reaching these crates).
 ignore = [
-    # yaml-rust 0.4.5 is unmaintained (RUSTSEC-2024-0320). It's a transitive
-    # dep via hyperpolyglot → serde_yaml 0.8; no safe upgrade exists on the
-    # hyperpolyglot 0.1.x line. Risk: none — we only use hyperpolyglot for
-    # read-only language detection; yaml-rust is not on any network path.
-    { id = "RUSTSEC-2024-0320", reason = "transitive via hyperpolyglot/serde_yaml 0.8; no upstream fix; read-only language detection only" },
+    # yaml-rust 0.4.5 → hyperpolyglot → serde_yaml 0.8; unmaintained, no upgrade
+    { id = "RUSTSEC-2024-0320", reason = "transitive via hyperpolyglot/serde_yaml 0.8; no upstream fix; read-only use" },
+    # ansi_term 0.12.1 → hyperpolyglot → clap v2; unmaintained, no upgrade
+    { id = "RUSTSEC-2021-0139", reason = "transitive via hyperpolyglot/clap v2; no upstream fix; terminal formatting only" },
+    # atty 0.2.14 → hyperpolyglot → clap v2; unmaintained, no upgrade
+    { id = "RUSTSEC-2024-0375", reason = "transitive via hyperpolyglot/clap v2; no upstream fix; isatty check only" },
 ]
 
 [bans]
