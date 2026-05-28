@@ -23,13 +23,18 @@ pub trait Embedder: Send + Sync {
 }
 
 /// Build an `Embedder` from config values.
-/// Returns an error if credentials are missing (e.g. OPENAI_API_KEY not set).
+///
+/// `openai_key` / `google_key` are used as fallbacks when the corresponding
+/// environment variables (`OPENAI_API_KEY`, `GOOGLE_API_KEY`) are not set.
+/// Pass `None` to require the env var.
 pub fn from_config(
     provider: &str,
     model: &str,
     dim: usize,
     base_url: &str,
-) -> anyhow::Result<Box<dyn Embedder>> {
+    openai_key: Option<&str>,
+    google_key: Option<&str>,
+) -> anyhow::Result<Box<dyn Embedder + Send + Sync>> {
     let base = if base_url.is_empty() {
         None
     } else {
@@ -41,13 +46,17 @@ pub fn from_config(
             model,
             dim,
         ))),
-        "openai" => Ok(Box::new(OpenAIEmbedder::from_env(model, dim)?)),
+        "openai" => Ok(Box::new(OpenAIEmbedder::from_env_or_config(
+            model, dim, openai_key,
+        )?)),
         "llamacpp" => Ok(Box::new(OpenAIEmbedder::local_llamacpp(
             OpenAIEmbedder::resolve_base_url(base),
             model,
             dim,
         ))),
-        "google" => Ok(Box::new(GoogleEmbedder::from_env(model, dim)?)),
+        "google" => Ok(Box::new(GoogleEmbedder::from_env_or_config(
+            model, dim, google_key,
+        )?)),
         other => anyhow::bail!("unknown embedding provider: {other}"),
     }
 }

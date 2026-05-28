@@ -8,7 +8,7 @@ use indexa_core::{
     walker::{walk, WalkConfig},
     watcher::{self, ChangeKind, WatcherConfig},
 };
-use indexa_embed::{Embedder as _, OllamaEmbedder};
+use indexa_embed::OllamaEmbedder;
 use indexa_llm::OllamaLlm;
 use indexa_query::{
     ask, build_tree, enqueue_subtree, render_json, render_markdown, render_xml,
@@ -127,7 +127,6 @@ async fn cmd_deep(
         .as_deref()
         .unwrap_or(&cfg.embedding.model)
         .to_owned();
-    let base_url = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
     let dim = cfg.embedding.dim;
 
     if dry_run {
@@ -166,7 +165,14 @@ async fn cmd_deep(
     }
 
     let mut store = Store::open(&db_path)?;
-    let embedder = OllamaEmbedder::new(&base_url, &embed_model, dim);
+    let embedder = indexa_embed::from_config(
+        &cfg.embedding.provider,
+        &embed_model,
+        dim,
+        &cfg.embedding.base_url,
+        cfg.api_keys.openai.as_deref(),
+        cfg.api_keys.google.as_deref(),
+    )?;
 
     for root in &roots {
         println!(
@@ -288,12 +294,23 @@ async fn cmd_ask(
         .as_deref()
         .unwrap_or(&cfg.describer.model)
         .to_owned();
-    let embed_base_url = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
-    let llm_base_url = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
     let dim = cfg.embedding.dim;
 
-    let embedder = OllamaEmbedder::new(&embed_base_url, &embed_model, dim);
-    let llm = OllamaLlm::new(&llm_base_url, &llm_model);
+    let embedder = indexa_embed::from_config(
+        &cfg.embedding.provider,
+        &embed_model,
+        dim,
+        &cfg.embedding.base_url,
+        cfg.api_keys.openai.as_deref(),
+        cfg.api_keys.google.as_deref(),
+    )?;
+    let llm = indexa_llm::from_config(
+        &cfg.describer.provider,
+        &llm_model,
+        &cfg.describer.base_url,
+        cfg.api_keys.openai.as_deref(),
+        cfg.api_keys.anthropic.as_deref(),
+    )?;
 
     let mode = if sparse_only {
         HybridMode::Sparse
@@ -317,7 +334,7 @@ async fn cmd_ask(
         ..QaConfig::default()
     };
 
-    let answer = ask(&store, &embedder, &llm, &question, &qa_cfg).await?;
+    let answer = ask(&store, embedder.as_ref(), llm.as_ref(), &question, &qa_cfg).await?;
 
     println!("Answer:\n{}\n", answer.answer);
 
@@ -348,8 +365,16 @@ async fn cmd_watch(
         .as_deref()
         .unwrap_or(&cfg.embedding.model)
         .to_owned();
-    let base_url = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
     let dim = cfg.embedding.dim;
+
+    let embedder = indexa_embed::from_config(
+        &cfg.embedding.provider,
+        &embed_model,
+        dim,
+        &cfg.embedding.base_url,
+        cfg.api_keys.openai.as_deref(),
+        cfg.api_keys.google.as_deref(),
+    )?;
 
     println!(
         "Watching {} path(s) for changes. Press Ctrl-C to stop.",
@@ -364,7 +389,6 @@ async fn cmd_watch(
 
     let db_path_clone = db_path.clone();
     tokio::task::spawn_blocking(move || {
-        let embedder = indexa_embed::OllamaEmbedder::new(&base_url, &embed_model, dim);
         let rt = tokio::runtime::Handle::current();
 
         watcher::run_watch_loop(session, |event| {
@@ -404,9 +428,7 @@ async fn cmd_watch(
                     let chunk_records: Vec<ChunkRecord> = rt.block_on(async {
                         let mut records = Vec::with_capacity(extracted.chunks.len());
                         for chunk in &extracted.chunks {
-                            let embedding = indexa_embed::Embedder::embed(&embedder, &chunk.text)
-                                .await
-                                .ok();
+                            let embedding = embedder.embed(&chunk.text).await.ok();
                             records.push(ChunkRecord {
                                 entry_path: path.to_string_lossy().into_owned(),
                                 seq: chunk.seq,
@@ -462,14 +484,25 @@ async fn cmd_serve(
         .as_deref()
         .unwrap_or(&cfg.describer.model)
         .to_owned();
-    let base_url = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
-    let llm_base_url = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
     let dim = cfg.embedding.dim;
 
     let embedder: std::sync::Arc<dyn indexa_embed::Embedder + Send + Sync + 'static> =
-        std::sync::Arc::new(OllamaEmbedder::new(&base_url, &embed_model, dim));
+        Arc::from(indexa_embed::from_config(
+            &cfg.embedding.provider,
+            &embed_model,
+            dim,
+            &cfg.embedding.base_url,
+            cfg.api_keys.openai.as_deref(),
+            cfg.api_keys.google.as_deref(),
+        )?);
     let llm: std::sync::Arc<dyn indexa_llm::Generator + Send + Sync + 'static> =
-        std::sync::Arc::new(OllamaLlm::new(&llm_base_url, &llm_model));
+        Arc::from(indexa_llm::from_config(
+            &cfg.describer.provider,
+            &llm_model,
+            &cfg.describer.base_url,
+            cfg.api_keys.openai.as_deref(),
+            cfg.api_keys.anthropic.as_deref(),
+        )?);
 
     indexa_web::serve(port, store, embedder, llm, cfg.clone()).await
 }

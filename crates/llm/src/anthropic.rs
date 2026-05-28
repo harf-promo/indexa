@@ -30,8 +30,16 @@ impl AnthropicLlm {
     }
 
     /// Create using `ANTHROPIC_API_KEY` from the environment.
+    /// Falls back to `config_key` when the env var is absent (e.g. key saved via web Settings).
     pub fn from_env(model: impl Into<String>) -> Result<Self> {
+        Self::from_env_or_config(model, None)
+    }
+
+    /// Like `from_env` but also accepts a config-file fallback key.
+    pub fn from_env_or_config(model: impl Into<String>, config_key: Option<&str>) -> Result<Self> {
         let api_key = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .or_else(|| config_key.map(|s| s.to_string()))
             .context("ANTHROPIC_API_KEY not set — required for Anthropic LLM")?;
         Ok(Self::new(model, api_key))
     }
