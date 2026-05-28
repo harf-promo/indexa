@@ -1,4 +1,4 @@
-use crate::surface::{classify, DeepScanPolicy, PathHint};
+use crate::surface::{classify, classify_file_by_extension, DeepScanPolicy, PathHint};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -56,7 +56,13 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
             }
         }
 
-        let hint = classify(&path);
+        let hint = classify(&path).or_else(|| {
+            if meta.is_file() {
+                classify_file_by_extension(&path)
+            } else {
+                None
+            }
+        });
 
         // Don't descend into skipped dirs — we still record the dir itself.
         if meta.is_dir() {

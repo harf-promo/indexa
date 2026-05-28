@@ -98,6 +98,29 @@ pub enum Commands {
         concurrency: usize,
     },
 
+    /// Export the hierarchical summary tree as XML, Markdown, or JSON for use as AI context.
+    #[command(after_help = "Examples:
+  indexa export ~/code/myrepo --format xml > .context.xml
+  indexa export ~/code/myrepo --format md
+  indexa export ~/code/myrepo --format json --depth 3 --output context.json")]
+    Export {
+        /// Path(s) to export. Omit to export the entire index.
+        #[arg(num_args = 0..)]
+        paths: Vec<String>,
+
+        /// Output format: xml (default), md, json.
+        #[arg(long, default_value = "xml")]
+        format: String,
+
+        /// Maximum tree depth (0 = root summary only).
+        #[arg(long)]
+        depth: Option<usize>,
+
+        /// Write output to FILE instead of stdout.
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+
     /// Ask a question about your indexed files.
     #[command(after_help = "Examples:
   indexa ask \"where are my tax documents?\"

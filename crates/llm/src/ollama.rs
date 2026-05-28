@@ -3,10 +3,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Default generation model — users override via config.toml `[describer] model = "..."`.
-/// gemma2:9b (Google, Apache-2.0) — strong on summarization/RAG, ~5GB download.
-pub const DEFAULT_MODEL: &str = "gemma2:9b";
+/// gemma3:12b (Google, Apache-2.0) — strong on summarization/RAG, ~8GB download.
+pub const DEFAULT_MODEL: &str = "gemma3:12b";
 /// Smaller model used for per-file descriptions by default.
-pub const DEFAULT_FILE_MODEL: &str = "gemma2:2b";
+pub const DEFAULT_FILE_MODEL: &str = "gemma3:4b";
 
 const DEFAULT_BASE: &str = "http://localhost:11434";
 

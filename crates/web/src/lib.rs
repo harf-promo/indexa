@@ -8,13 +8,18 @@
 
 use anyhow::Result;
 use axum::{
+    body::Body,
     extract::{Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use indexa_core::{config::Config, store::Store};
+use futures_util::StreamExt;
+use indexa_core::{
+    config::{self, Config},
+    store::Store,
+};
 use indexa_embed::Embedder;
 use indexa_llm::Generator;
 use indexa_query::{synthesize_from_hits, QaConfig};
@@ -83,6 +88,30 @@ struct SummaryResponse {
     generated_at: i64,
     children: Vec<SummaryChildResponse>,
     crumbs: Vec<BreadcrumbResponse>,
+}
+
+#[derive(Serialize)]
+struct ModelInfo {
+    name: String,
+    size: u64,
+}
+
+#[derive(Deserialize)]
+struct PullRequest {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct KeyRequest {
+    provider: String,
+    key: String,
+}
+
+#[derive(Serialize)]
+struct KeysStatus {
+    openai_set: bool,
+    anthropic_set: bool,
+    google_set: bool,
 }
 
 #[derive(Deserialize)]
@@ -237,6 +266,127 @@ async fn api_summarize_enqueue(
     }
 }
 
+async fn api_models_installed(State(state): State<AppState>) -> Response {
+    let base = &state.config.describer.base_url;
+    let url = format!("{base}/api/tags");
+    let client = reqwest::Client::new();
+    match client.get(&url).send().await {
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+        Ok(resp) => {
+            let body: serde_json::Value = match resp.json().await {
+                Ok(v) => v,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({"error": e.to_string()})),
+                    )
+                        .into_response()
+                }
+            };
+            let models: Vec<ModelInfo> = body["models"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .map(|m| ModelInfo {
+                    name: m["name"].as_str().unwrap_or("").to_owned(),
+                    size: m["size"].as_u64().unwrap_or(0),
+                })
+                .collect();
+            Json(models).into_response()
+        }
+    }
+}
+
+async fn api_models_pull(State(state): State<AppState>, Json(body): Json<PullRequest>) -> Response {
+    let base = &state.config.describer.base_url;
+    let url = format!("{base}/api/pull");
+    let client = reqwest::Client::new();
+    match client
+        .post(&url)
+        .json(&serde_json::json!({"name": body.name, "stream": true}))
+        .send()
+        .await
+    {
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+        Ok(resp) => {
+            // Proxy the NDJSON stream straight through to the client.
+            let stream = resp
+                .bytes_stream()
+                .map(|r| r.map_err(std::io::Error::other));
+            Response::builder()
+                .status(200)
+                .header("Content-Type", "application/x-ndjson")
+                .body(Body::from_stream(stream))
+                .unwrap()
+                .into_response()
+        }
+    }
+}
+
+async fn api_keys_get(State(state): State<AppState>) -> Json<KeysStatus> {
+    let keys = &state.config.api_keys;
+    Json(KeysStatus {
+        openai_set: keys.openai.as_deref().is_some_and(|k| !k.is_empty()),
+        anthropic_set: keys.anthropic.as_deref().is_some_and(|k| !k.is_empty()),
+        google_set: keys.google.as_deref().is_some_and(|k| !k.is_empty()),
+    })
+}
+
+async fn api_keys_set(State(state): State<AppState>, Json(body): Json<KeyRequest>) -> Response {
+    // Gate: require env flag to allow writing secrets via the web UI.
+    if std::env::var("INDEXA_WEB_ALLOW_KEY_EDIT").as_deref() != Ok("1") {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error":"Set INDEXA_WEB_ALLOW_KEY_EDIT=1 to enable API key editing via the web UI."})),
+        )
+            .into_response();
+    }
+
+    let cfg_path = config::default_config_path();
+    let mut cfg = config::load(&cfg_path).unwrap_or_default();
+
+    let key_val = if body.key.is_empty() {
+        None
+    } else {
+        Some(body.key.clone())
+    };
+    match body.provider.as_str() {
+        "openai" => cfg.api_keys.openai = key_val,
+        "anthropic" => cfg.api_keys.anthropic = key_val,
+        "google" => cfg.api_keys.google = key_val,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error":"unknown provider"})),
+            )
+                .into_response()
+        }
+    }
+
+    // Never log key material — log only the provider name.
+    let provider = &body.provider;
+    let _ = state.config.as_ref(); // keep state referenced
+    match config::save(&cfg, &cfg_path) {
+        Ok(()) => {
+            tracing::info!("API key updated for provider={provider}");
+            Json(serde_json::json!({"saved": true, "restart_required": true})).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 async fn serve_ui() -> Response {
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -361,6 +511,9 @@ pub async fn serve(
         .route("/api/tree", get(api_tree))
         .route("/api/summary", get(api_summary))
         .route("/api/summarize", post(api_summarize_enqueue))
+        .route("/api/models/installed", get(api_models_installed))
+        .route("/api/models/pull", post(api_models_pull))
+        .route("/api/keys", get(api_keys_get).post(api_keys_set))
         .with_state(state)
         .layer(
             tower_http::cors::CorsLayer::new()
@@ -473,6 +626,34 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
   .input-bar button:hover { opacity: 0.85; }
   .input-bar button:disabled { opacity: 0.4; cursor: default; }
   ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* ── Settings view ── */
+  .settings-view { flex: 1; overflow-y: auto; padding: 24px; display: none; }
+  .settings-view.visible { display: block; }
+  .settings-section { margin-bottom: 28px; }
+  .settings-section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 14px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  .model-list { display: flex; flex-direction: column; gap: 6px; }
+  .model-row { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; display: flex; align-items: center; gap: 10px; font-size: 12px; }
+  .model-name { flex: 1; color: var(--text); }
+  .model-size { color: var(--muted); font-size: 11px; }
+  .pull-row { display: flex; gap: 8px; margin-top: 10px; }
+  .pull-row input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 7px 10px; font-family: inherit; font-size: 12px; outline: none; }
+  .pull-row input:focus { border-color: var(--accent); }
+  .pull-row button { background: var(--accent); color: #0d1117; border: none; border-radius: 6px; padding: 7px 14px; font-family: inherit; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+  .pull-row button:disabled { opacity: 0.4; cursor: default; }
+  .pull-progress { margin-top: 8px; font-size: 11px; color: var(--muted); white-space: pre-wrap; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; max-height: 120px; overflow-y: auto; display: none; }
+  .key-rows { display: flex; flex-direction: column; gap: 10px; }
+  .key-row { display: flex; align-items: center; gap: 10px; }
+  .key-label { width: 100px; font-size: 12px; color: var(--muted); flex-shrink: 0; }
+  .key-input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 7px 10px; font-family: inherit; font-size: 12px; outline: none; }
+  .key-input:focus { border-color: var(--accent); }
+  .key-input:disabled { opacity: 0.4; }
+  .key-row .btn-sm { background: none; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); padding: 5px 10px; font-family: inherit; font-size: 11px; cursor: pointer; white-space: nowrap; }
+  .key-row .btn-sm:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .key-row .btn-sm:disabled { opacity: 0.4; cursor: default; }
+  .key-set-badge { font-size: 10px; color: var(--green); flex-shrink: 0; }
+  .key-gate-notice { font-size: 11px; color: var(--orange); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
+  .settings-note { font-size: 11px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
 </style>
 </head>
 <body>
@@ -482,6 +663,7 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
   <div class="tabs">
     <button class="tab" id="tab-tree" onclick="switchTab('tree')">Tree</button>
     <button class="tab active" id="tab-chat" onclick="switchTab('chat')">Ask</button>
+    <button class="tab" id="tab-settings" onclick="switchTab('settings')">Settings</button>
   </div>
 </header>
 <div class="layout">
@@ -493,9 +675,59 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
     </div>
     <div class="tree-list" id="tree-list"></div>
   </div>
-  <!-- Right panel switches between summary view and chat view -->
+  <!-- Right panel switches between summary view, chat view, and settings view -->
   <div class="right-panel">
     <div class="summary-view" id="summary-view"></div>
+    <div class="settings-view" id="settings-view">
+      <div class="settings-section">
+        <h2>Local Models (Ollama)</h2>
+        <div id="models-list" class="model-list"><div style="color:var(--muted);font-size:12px">Loading…</div></div>
+        <div class="pull-row">
+          <input type="text" id="pull-input" placeholder="Model name (e.g. gemma3:4b, nomic-embed-text)" autocomplete="off" list="model-suggestions">
+          <datalist id="model-suggestions">
+            <option value="gemma3:4b">
+            <option value="gemma3:12b">
+            <option value="gemma3:27b">
+            <option value="nomic-embed-text">
+            <option value="qwen2.5-coder:7b">
+            <option value="mistral:7b">
+          </datalist>
+          <button id="pull-btn" onclick="pullModel()">Pull</button>
+        </div>
+        <div id="pull-progress" class="pull-progress"></div>
+        <p class="settings-note">Models are stored by Ollama. After pulling, update <code>[describer] model</code> in <code>~/.indexa/config.toml</code> to use the new model.</p>
+      </div>
+      <div class="settings-section">
+        <h2>Cloud Provider API Keys</h2>
+        <div id="key-gate-notice" class="key-gate-notice" style="display:none">
+          API key editing is disabled. To enable: <code>INDEXA_WEB_ALLOW_KEY_EDIT=1 indexa serve</code>
+        </div>
+        <div class="key-rows">
+          <div class="key-row">
+            <span class="key-label">OpenAI</span>
+            <input type="password" class="key-input" id="key-openai" placeholder="sk-…" autocomplete="off">
+            <span class="key-set-badge" id="badge-openai"></span>
+            <button class="btn-sm" onclick="saveKey('openai')">Save</button>
+            <button class="btn-sm" onclick="clearKey('openai')">Clear</button>
+          </div>
+          <div class="key-row">
+            <span class="key-label">Anthropic</span>
+            <input type="password" class="key-input" id="key-anthropic" placeholder="sk-ant-…" autocomplete="off">
+            <span class="key-set-badge" id="badge-anthropic"></span>
+            <button class="btn-sm" onclick="saveKey('anthropic')">Save</button>
+            <button class="btn-sm" onclick="clearKey('anthropic')">Clear</button>
+          </div>
+          <div class="key-row">
+            <span class="key-label">Google</span>
+            <input type="password" class="key-input" id="key-google" placeholder="AIza…" autocomplete="off">
+            <span class="key-set-badge" id="badge-google"></span>
+            <button class="btn-sm" onclick="saveKey('google')">Save</button>
+            <button class="btn-sm" onclick="clearKey('google')">Clear</button>
+          </div>
+        </div>
+        <p class="settings-note">Keys are saved to <code>~/.indexa/config.toml</code> (0600 permissions). Restart <code>indexa serve</code> after saving to apply.</p>
+      </div>
+    </div>
     <div class="chat-view" id="chat-view">
       <div class="chat-area" id="chat">
         <div class="welcome">
@@ -523,8 +755,11 @@ function switchTab(tab) {
   currentTab = tab;
   document.getElementById('tab-tree').classList.toggle('active', tab === 'tree');
   document.getElementById('tab-chat').classList.toggle('active', tab === 'chat');
+  document.getElementById('tab-settings').classList.toggle('active', tab === 'settings');
   document.getElementById('summary-view').classList.toggle('visible', tab === 'tree' && selectedPath !== null);
   document.getElementById('chat-view').style.display = tab === 'chat' ? 'flex' : 'none';
+  document.getElementById('settings-view').classList.toggle('visible', tab === 'settings');
+  if (tab === 'settings') loadSettings();
 }
 
 /* ── Stats ── */
@@ -770,6 +1005,118 @@ document.addEventListener('keydown', function(e) {
     qInput.select();
   }
 });
+
+/* ── Settings ── */
+let settingsLoaded = false;
+async function loadSettings() {
+  if (settingsLoaded) return;
+  settingsLoaded = true;
+  loadModels();
+  loadKeys();
+}
+
+async function loadModels() {
+  const list = document.getElementById('models-list');
+  try {
+    const r = await fetch('/api/models/installed');
+    const models = await r.json();
+    if (models.error) throw new Error(models.error);
+    if (!models.length) {
+      list.innerHTML = '<div style="color:var(--muted);font-size:12px">No models installed. Pull one below.</div>';
+      return;
+    }
+    list.innerHTML = models.map(function(m) {
+      const mb = m.size > 0 ? (m.size / 1024 / 1024).toFixed(0) + ' MB' : '';
+      return '<div class="model-row"><span class="model-name">' + escapeHtml(m.name) + '</span>' +
+        '<span class="model-size">' + mb + '</span></div>';
+    }).join('');
+  } catch(e) {
+    list.innerHTML = '<div style="color:var(--red);font-size:12px">Ollama not reachable: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+async function pullModel() {
+  const input = document.getElementById('pull-input');
+  const name = input.value.trim();
+  if (!name) return;
+  const btn = document.getElementById('pull-btn');
+  const prog = document.getElementById('pull-progress');
+  btn.disabled = true;
+  prog.style.display = 'block';
+  prog.textContent = 'Starting pull for ' + name + '…\n';
+  try {
+    const r = await fetch('/api/models/pull', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: name})
+    });
+    if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed'); }
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      const lines = dec.decode(value, {stream: true}).split('\n').filter(Boolean);
+      lines.forEach(function(line) {
+        try {
+          const d = JSON.parse(line);
+          if (d.status) prog.textContent += d.status + (d.completed ? ' ' + d.completed : '') + '\n';
+          prog.scrollTop = prog.scrollHeight;
+        } catch(_) {}
+      });
+    }
+    prog.textContent += '✓ Done.\n';
+    input.value = '';
+    settingsLoaded = false; // force reload on next settings open
+    setTimeout(loadModels, 500);
+  } catch(e) {
+    prog.textContent += '✗ Error: ' + e.message + '\n';
+  }
+  btn.disabled = false;
+}
+
+async function loadKeys() {
+  try {
+    const r = await fetch('/api/keys');
+    if (r.status === 403) {
+      document.getElementById('key-gate-notice').style.display = 'block';
+      ['openai','anthropic','google'].forEach(function(p) {
+        document.getElementById('key-' + p).disabled = true;
+        document.querySelector('.key-row:has(#key-' + p + ') .btn-sm').disabled = true;
+      });
+      return;
+    }
+    const d = await r.json();
+    document.getElementById('badge-openai').textContent = d.openai_set ? '✓ set' : '';
+    document.getElementById('badge-anthropic').textContent = d.anthropic_set ? '✓ set' : '';
+    document.getElementById('badge-google').textContent = d.google_set ? '✓ set' : '';
+  } catch(_) {}
+}
+
+async function saveKey(provider) {
+  const val = document.getElementById('key-' + provider).value.trim();
+  if (!val) return clearKey(provider);
+  const r = await fetch('/api/keys', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({provider: provider, key: val})
+  });
+  const d = await r.json();
+  if (d.error) { alert(d.error); return; }
+  document.getElementById('key-' + provider).value = '';
+  loadKeys();
+}
+
+async function clearKey(provider) {
+  const r = await fetch('/api/keys', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({provider: provider, key: ''})
+  });
+  const d = await r.json();
+  if (d.error) { alert(d.error); return; }
+  loadKeys();
+}
 
 /* ── Utilities ── */
 function escapeHtml(s) {

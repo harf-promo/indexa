@@ -22,7 +22,21 @@ The first publicly usable release. Scan any folder or your whole disk, ask quest
 
 ---
 
-## v0.2 — Fingerprints
+## v0.2 — Hierarchical summarization *(shipped)*
+
+Every file and folder gets a summary. Bottom-up roll-up gives the entire disk a semantic shape that fits in 3.5 GB instead of 600 GB.
+
+- `indexa summarize <path>` — generate summaries for a subtree
+- `indexa describe <path>` — print a node's summary + ancestor chain
+- `indexa worker` — background queue daemon for low-priority summarization
+- `indexa export --format xml|md|json` — export the summary tree as AI-ready context (XML primary, per Anthropic's prompt-engineering docs)
+- Web UI: two-pane folder-tree + summary view; Settings tab for local model management and API keys
+- Three storage modes: `augment` (keep chunks + summaries), `compress` (drop chunks), `summaries-only` (~3.5 GB / 1 TB)
+- Models: `gemma3:4b` for files, `gemma3:12b` for directories — all offline via Ollama (Google/Apache-2.0)
+
+---
+
+## v0.2.x — Fingerprints *(next)*
 
 Detect installed software and project types by file-pattern signatures — without reading file content.
 

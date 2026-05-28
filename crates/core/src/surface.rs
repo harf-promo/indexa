@@ -1,3 +1,4 @@
+use mime_guess::MimeGuess;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,6 +293,112 @@ static HINTS: &[(Predicate, PathHint)] = &[
     ),
 ];
 
+/// Extension/filename-based classification for individual files.
+/// Runs after `classify()` returns `None` so directory rules still win.
+pub fn classify_file_by_extension(path: &Path) -> Option<PathHint> {
+    // Well-known filenames with no extension.
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        let cat = match name {
+            "Makefile" | "GNUmakefile" | "Rakefile" | "Gemfile" | "Dockerfile"
+            | "Containerfile" | "Justfile" | "justfile" | "Vagrantfile" => Some("code"),
+            "LICENSE" | "LICENCE" | "NOTICE" | "COPYING" | "AUTHORS" | "CONTRIBUTORS"
+            | "README" | "CHANGELOG" | "CHANGES" | "INSTALL" | "TODO" | "FIXME" => {
+                Some("documents")
+            }
+            ".env" | ".gitignore" | ".gitattributes" | ".gitmodules" | ".dockerignore"
+            | ".editorconfig" | ".npmrc" | ".yarnrc" | ".nvmrc" | ".node-version"
+            | ".python-version" | ".ruby-version" | ".tool-versions" => Some("config"),
+            // .env.* variants (e.g. .env.local, .env.production)
+            n if n.starts_with(".env.") => Some("config"),
+            "Cargo.lock" | "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock" | "go.sum"
+            | "poetry.lock" | "Pipfile.lock" | "Gemfile.lock" | "composer.lock" | "mix.lock"
+            | "flake.lock" => Some("lockfile"),
+            _ => None,
+        };
+        if let Some(c) = cat {
+            return Some(PathHint {
+                label: "file",
+                category: c,
+                deep_scan: DeepScanPolicy::Index,
+            });
+        }
+    }
+
+    // Extension-based explicit overrides (before MIME fallback).
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        let cat = match ext.to_lowercase().as_str() {
+            // Config files
+            "toml" | "yaml" | "yml" | "ini" | "conf" | "cfg" | "env" | "properties" | "plist"
+            | "hcl" | "tf" | "tfvars" => Some("config"),
+            // Dot-config patterns (e.g. .env.production)
+            "env.local" | "env.production" | "env.development" | "env.test" => Some("config"),
+            // Lockfiles
+            "lock" | "sum" => Some("lockfile"),
+            // Data files
+            "db" | "sqlite" | "sqlite3" | "duckdb" | "parquet" | "arrow" | "lance" | "mdb"
+            | "accdb" => Some("data"),
+            // Archive/compressed
+            "zip" | "tar" | "gz" | "bz2" | "xz" | "zst" | "7z" | "rar" | "br" | "lz4" | "lzma"
+            | "cab" | "iso" | "dmg" | "pkg" => Some("archive"),
+            // Fonts
+            "ttf" | "otf" | "woff" | "woff2" | "eot" | "pfb" | "pfm" | "afm" => Some("font"),
+            // Notebooks
+            "ipynb" => Some("code"),
+            // Scripts (broad)
+            "sh" | "bash" | "zsh" | "fish" | "ksh" | "csh" | "tcsh" | "ps1" | "psm1" | "psd1"
+            | "bat" | "cmd" | "vbs" => Some("code"),
+            _ => None,
+        };
+        if let Some(c) = cat {
+            return Some(PathHint {
+                label: "file",
+                category: c,
+                deep_scan: DeepScanPolicy::Index,
+            });
+        }
+    }
+
+    // MIME-based fallback.
+    let mime = MimeGuess::from_path(path).first()?;
+    let category = match (mime.type_().as_str(), mime.subtype().as_str()) {
+        ("image", _) | ("audio", _) | ("video", _) => "media",
+        ("font", _) => "font",
+        ("text", _) => "code",
+        ("application", "pdf")
+        | ("application", "msword")
+        | ("application", "epub+zip")
+        | ("application", "vnd.oasis.opendocument.text")
+        | ("application", "vnd.oasis.opendocument.spreadsheet")
+        | ("application", "vnd.oasis.opendocument.presentation") => "documents",
+        ("application", sub)
+            if sub.starts_with("vnd.openxmlformats-officedocument")
+                || sub.starts_with("vnd.ms-") =>
+        {
+            "documents"
+        }
+        ("application", "zip")
+        | ("application", "x-tar")
+        | ("application", "gzip")
+        | ("application", "x-bzip")
+        | ("application", "x-bzip2")
+        | ("application", "x-7z-compressed")
+        | ("application", "x-rar-compressed")
+        | ("application", "x-xz")
+        | ("application", "zstd") => "archive",
+        ("application", "json")
+        | ("application", "toml")
+        | ("application", "xml")
+        | ("application", "x-yaml") => "code",
+        ("application", "x-sqlite3") | ("application", "vnd.sqlite3") => "data",
+        _ => return None,
+    };
+    Some(PathHint {
+        label: "file",
+        category,
+        deep_scan: DeepScanPolicy::Index,
+    })
+}
+
 // ── Predicate helpers ─────────────────────────────────────────────────────────
 
 fn ends_with(path: &Path, segment: &str) -> bool {
@@ -390,5 +497,106 @@ mod tests {
             let hint = classify(&p).unwrap();
             assert_eq!(hint.deep_scan, DeepScanPolicy::Skip, "failed for {path}");
         }
+    }
+
+    #[test]
+    fn pdf_outside_documents_classified_as_documents() {
+        let p = PathBuf::from("/home/user/projects/report.pdf");
+        let hint = classify_file_by_extension(&p).unwrap();
+        assert_eq!(hint.category, "documents");
+    }
+
+    #[test]
+    fn env_file_classified_as_config() {
+        for name in [
+            ".env",
+            ".env.local",
+            "app.toml",
+            "settings.yaml",
+            "config.yml",
+            "server.ini",
+        ] {
+            let p = PathBuf::from(format!("/home/user/project/{name}"));
+            let hint = classify_file_by_extension(&p).unwrap();
+            assert_eq!(hint.category, "config", "failed for {name}");
+        }
+    }
+
+    #[test]
+    fn lockfile_classified() {
+        for name in [
+            "Cargo.lock",
+            "package-lock.json",
+            "yarn.lock",
+            "go.sum",
+            "poetry.lock",
+        ] {
+            let p = PathBuf::from(format!("/home/user/project/{name}"));
+            let hint = classify_file_by_extension(&p).unwrap();
+            assert_eq!(hint.category, "lockfile", "failed for {name}");
+        }
+    }
+
+    #[test]
+    fn media_files_classified() {
+        for name in [
+            "photo.jpg",
+            "video.mp4",
+            "song.mp3",
+            "image.heic",
+            "clip.mov",
+        ] {
+            let p = PathBuf::from(format!("/home/user/files/{name}"));
+            let hint = classify_file_by_extension(&p).unwrap();
+            assert_eq!(hint.category, "media", "failed for {name}");
+        }
+    }
+
+    #[test]
+    fn archive_files_classified() {
+        for name in ["backup.zip", "release.tar.gz", "archive.7z"] {
+            let p = PathBuf::from(format!("/home/user/files/{name}"));
+            let hint = classify_file_by_extension(&p).unwrap();
+            assert_eq!(hint.category, "archive", "failed for {name}");
+        }
+    }
+
+    #[test]
+    fn font_files_classified() {
+        for name in ["font.ttf", "font.otf", "font.woff2"] {
+            let p = PathBuf::from(format!("/home/user/fonts/{name}"));
+            let hint = classify_file_by_extension(&p).unwrap();
+            assert_eq!(hint.category, "font", "failed for {name}");
+        }
+    }
+
+    #[test]
+    fn data_files_classified() {
+        for name in ["db.sqlite", "data.parquet", "app.db"] {
+            let p = PathBuf::from(format!("/home/user/data/{name}"));
+            let hint = classify_file_by_extension(&p).unwrap();
+            assert_eq!(hint.category, "data", "failed for {name}");
+        }
+    }
+
+    #[test]
+    fn well_known_filenames_classified() {
+        let p = PathBuf::from("/home/user/project/Makefile");
+        assert_eq!(classify_file_by_extension(&p).unwrap().category, "code");
+        let p = PathBuf::from("/home/user/project/Dockerfile");
+        assert_eq!(classify_file_by_extension(&p).unwrap().category, "code");
+        let p = PathBuf::from("/home/user/project/LICENSE");
+        assert_eq!(
+            classify_file_by_extension(&p).unwrap().category,
+            "documents"
+        );
+        let p = PathBuf::from("/home/user/project/.gitignore");
+        assert_eq!(classify_file_by_extension(&p).unwrap().category, "config");
+    }
+
+    #[test]
+    fn unknown_extension_returns_none() {
+        let p = PathBuf::from("/home/user/mystery.xyzabc123");
+        assert!(classify_file_by_extension(&p).is_none());
     }
 }
