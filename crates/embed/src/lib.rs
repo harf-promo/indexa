@@ -4,10 +4,13 @@
 //! - `ollama`   — Ollama local server (`/api/embeddings`), default nomic-embed-text
 //! - `openai`   — OpenAI `/v1/embeddings` API (requires `OPENAI_API_KEY`)
 //! - `llamacpp` — llama.cpp HTTP server (OpenAI-compatible `/v1/embeddings`)
+//! - `google`   — Google Gemini `/v1beta/models/:embedContent` (requires `GOOGLE_API_KEY`)
 
+pub mod google;
 pub mod ollama;
 pub mod openai;
 
+pub use google::GoogleEmbedder;
 pub use ollama::OllamaEmbedder;
 pub use openai::OpenAIEmbedder;
 
@@ -40,6 +43,7 @@ pub fn from_config(
             model,
             dim,
         ))),
+        "google" => Ok(Box::new(GoogleEmbedder::from_env(model, dim)?)),
         other => anyhow::bail!("unknown embedding provider: {other}"),
     }
 }

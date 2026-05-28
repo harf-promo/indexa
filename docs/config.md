@@ -24,25 +24,27 @@ Controls how file content is converted to semantic vectors.
 
 ```toml
 [embedding]
-provider = "ollama"              # ollama | openai | llamacpp
+provider = "ollama"              # ollama | openai | google | llamacpp
 model    = "nomic-embed-text"    # model name (provider-specific)
 dim      = 768                   # must match the model's output dimension
-base_url = "http://localhost:11434"  # provider API base URL
+base_url = "http://localhost:11434"  # provider API base URL (optional — env var also works)
 ```
 
 ### Providers
 
 | Provider | Notes |
 |---|---|
-| `ollama` | Default. Local server, no API key. Run: `ollama pull nomic-embed-text` |
-| `openai` | Requires `OPENAI_API_KEY` env var. Recommended model: `text-embedding-3-small` (1536 dim) |
-| `llamacpp` | llama.cpp HTTP server in OpenAI-compatible mode. Set `base_url` to your server. |
+| `ollama` | Default. Local server, no API key. URL override: `OLLAMA_HOST` env var. |
+| `openai` | Requires `OPENAI_API_KEY`. URL override: `OPENAI_BASE_URL` env var. |
+| `google` | Google Gemini. Requires `GOOGLE_API_KEY`. URL override: `GOOGLE_BASE_URL` env var. |
+| `llamacpp` | llama.cpp in OpenAI-compatible mode. Set `base_url` or `OPENAI_BASE_URL`. |
 
 ### Recommended embedding models
 
 | Model | Provider | Dim | Notes |
 |---|---|---|---|
 | `nomic-embed-text` | Ollama | 768 | Default. Apache-2.0, strong MTEB scores, local |
+| `text-embedding-004` | Google | 768 | State-of-the-art, requires `GOOGLE_API_KEY` |
 | `text-embedding-3-small` | OpenAI | 1536 | Good quality, ~$0.02/1M tokens |
 | `text-embedding-3-large` | OpenAI | 3072 | Best quality, ~$0.13/1M tokens |
 
@@ -100,7 +102,7 @@ Controls the LLM used to generate answers in `indexa ask` and the web UI.
 ```toml
 [describer]
 provider              = "ollama"
-model                 = "qwen2.5:14b"
+model                 = "gemma2:9b"   # default: Google gemma2:9b (Apache-2.0)
 base_url              = "http://localhost:11434"
 contextual_retrieval  = false   # Anthropic-style per-chunk prefix at index time
 ```
@@ -109,10 +111,10 @@ contextual_retrieval  = false   # Anthropic-style per-chunk prefix at index time
 
 | Provider | Notes |
 |---|---|
-| `ollama` | Default. Any chat model available in Ollama. |
-| `openai` | Requires `OPENAI_API_KEY`. Recommended: `gpt-4o-mini`. |
-| `anthropic` | Requires `ANTHROPIC_API_KEY`. Recommended: `claude-sonnet-4-6`. |
-| `llamacpp` | llama.cpp in OpenAI-compat mode. Set `base_url`. |
+| `ollama` | Default. Any chat model in Ollama. URL override: `OLLAMA_HOST` env var. |
+| `openai` | Requires `OPENAI_API_KEY`. URL override: `OPENAI_BASE_URL`. Recommended: `gpt-4o-mini`. |
+| `anthropic` | Requires `ANTHROPIC_API_KEY`. Recommended: `claude-haiku-4-5-20251001`. |
+| `llamacpp` | llama.cpp in OpenAI-compat mode. Set `base_url` or `OPENAI_BASE_URL`. |
 
 ---
 
@@ -184,7 +186,7 @@ rerank = false
 
 [describer]
 provider = "ollama"
-model    = "qwen2.5:14b"
+model    = "gemma2:9b"
 
 [[region]]
 path = "~/Documents/Voice Memos"

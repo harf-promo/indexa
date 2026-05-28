@@ -72,10 +72,13 @@ Bring your own model. No model is bundled — Indexa works with whatever you alr
 
 | Adapter | How it runs |
 |---|---|
-| **Ollama** | Local, fully offline (recommended) |
-| **llama.cpp** | Local via HTTP server |
-| **OpenAI** | Cloud — data leaves your device |
-| **Anthropic** | Cloud — data leaves your device |
+| **Ollama** | Local, fully offline. Override server with `OLLAMA_HOST` env var. |
+| **Google Gemini** | Cloud embeddings (`GOOGLE_API_KEY`). `text-embedding-004` matches local quality. |
+| **llama.cpp** | Local via HTTP server. |
+| **OpenAI** | Cloud — data leaves your device. `OPENAI_API_KEY` required. |
+| **Anthropic** | Cloud — data leaves your device. `ANTHROPIC_API_KEY` required. |
+
+Default models: `nomic-embed-text` (embedding, Ollama) · `gemma2:9b` (answers, Ollama, Google/Apache-2.0).
 
 ---
 

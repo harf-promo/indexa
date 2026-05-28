@@ -171,3 +171,5 @@ Changes to defaults are recorded here with rationale.
 | 2025-05 | Vector storage: SQLite f32 blobs | Zero ops, single file, adequate for <300K vectors |
 | 2025-05 | Fusion: RRF k=60 | Parameter-free, matches industry defaults, robust |
 | 2025-05 | No re-ranker by default | Latency cost > recall benefit at top_k=8 |
+| 2026-05-28 | Default describer: `gemma2:9b` (was `qwen2.5:14b`) | Google, Apache-2.0; user preference for non-Chinese-company defaults |
+| 2026-05-28 | Added `google` embedding provider | Google `text-embedding-004` matches nomic-embed-text dim (768), state-of-the-art quality |

@@ -141,7 +141,7 @@ impl Default for DescriberConfig {
     fn default() -> Self {
         Self {
             provider: "ollama".into(),
-            model: "qwen2.5:14b".into(),
+            model: "gemma2:9b".into(),
             base_url: "http://localhost:11434".into(),
             contextual_retrieval: false,
         }
@@ -297,7 +297,7 @@ top_k = 20
         assert_eq!(cfg.retrieval.top_k, 20);
         // Fields not specified fall back to struct defaults.
         assert_eq!(cfg.retrieval.rrf_k, 60);
-        assert_eq!(cfg.describer.model, "qwen2.5:14b");
+        assert_eq!(cfg.describer.model, "gemma2:9b");
     }
 
     #[test]

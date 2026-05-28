@@ -20,13 +20,14 @@ cargo build --release
 cp target/release/indexa /usr/local/bin/indexa
 ```
 
-## Pull the embedding model
+## Pull the models
 
 ```bash
-ollama pull nomic-embed-text
+ollama pull nomic-embed-text   # embedding model (~270MB, Apache-2.0)
+ollama pull gemma2:9b          # answer model (~5GB, Google, Apache-2.0)
 ```
 
-This pulls a ~270MB model that runs locally. It never sends data anywhere.
+Both run entirely locally — your data never leaves your machine.
 
 ## Index a folder
 
@@ -106,5 +107,23 @@ The surface scan finishes in under a minute even on large disks. Deep scanning e
 ## Next steps
 
 - [Configuration Reference](config.md) — all options documented
+- [Architecture](architecture.md) — crate map and data flows
 - [Indexing Methodology](methodology.md) — how the search pipeline works
 - [Contributing](../CONTRIBUTING.md) — run tests, submit a PR
+
+## Customizing the AI endpoint
+
+Indexa respects environment variables so you don't need to edit config files:
+
+```bash
+# Point at a remote Ollama server
+export OLLAMA_HOST=http://my-server:11434
+
+# Use OpenAI instead
+export OPENAI_API_KEY=sk-...
+# then set provider = "openai" in config.toml
+
+# Use Google Gemini for embeddings
+export GOOGLE_API_KEY=AIza...
+# then set provider = "google" in config.toml
+```
