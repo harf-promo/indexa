@@ -52,7 +52,10 @@ pub async fn summarize_file(
             break;
         }
         if next == summary_text.as_deref().unwrap_or("") {
-            tracing::debug!("summarize {path} pass {}/{passes}: no change, stopping early", i + 1);
+            tracing::debug!(
+                "summarize {path} pass {}/{passes}: no change, stopping early",
+                i + 1
+            );
             break;
         }
         tracing::info!("summarize {path} pass {}/{passes}", i + 1);
@@ -126,7 +129,10 @@ pub async fn summarize_directory(
             break;
         }
         if next == summary_text.as_deref().unwrap_or("") {
-            tracing::debug!("summarize {dir_path} pass {}/{passes}: no change, stopping early", i + 1);
+            tracing::debug!(
+                "summarize {dir_path} pass {}/{passes}: no change, stopping early",
+                i + 1
+            );
             break;
         }
         tracing::info!("summarize {dir_path} pass {}/{passes}", i + 1);
@@ -197,7 +203,15 @@ pub async fn process_queue_item_with_passes(
     };
 
     let result = if item.kind == "file" {
-        summarize_file(store, describer, embedder, &item.path, &cfg.file_model, passes).await
+        summarize_file(
+            store,
+            describer,
+            embedder,
+            &item.path,
+            &cfg.file_model,
+            passes,
+        )
+        .await
     } else {
         summarize_directory(
             store,
@@ -283,7 +297,10 @@ pub async fn summarize_subtree_sync(
                     }
                 }
                 if (done + errors).is_multiple_of(10) {
-                    println!("  {}/{enqueued} processed ({errors} errors)...", done + errors);
+                    println!(
+                        "  {}/{enqueued} processed ({errors} errors)...",
+                        done + errors
+                    );
                 }
             }
         }

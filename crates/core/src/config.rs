@@ -266,8 +266,13 @@ pub struct RegionConfig {
 
 /// Returns the canonical path to `~/.indexa/config.toml`
 /// (or the platform-equivalent via `directories`).
+/// Canonical bundle-ID used for config and data directories.
+const APP_QUALIFIER: &str = "dev";
+const APP_ORG: &str = "indexa";
+const APP_NAME: &str = "Indexa";
+
 pub fn default_config_path() -> PathBuf {
-    if let Some(dirs) = ProjectDirs::from("dev", "indexa", "indexa") {
+    if let Some(dirs) = ProjectDirs::from(APP_QUALIFIER, APP_ORG, APP_NAME) {
         dirs.config_dir().join("config.toml")
     } else {
         // Fallback: XDG-style ~/.indexa/
@@ -276,6 +281,11 @@ pub fn default_config_path() -> PathBuf {
             .unwrap_or_else(|_| PathBuf::from("."));
         home.join(".indexa").join("config.toml")
     }
+}
+
+/// Canonical data directory for the index database.
+pub fn default_data_dir() -> Option<PathBuf> {
+    ProjectDirs::from(APP_QUALIFIER, APP_ORG, APP_NAME).map(|d| d.data_local_dir().to_path_buf())
 }
 
 /// Load config from `path`, returning `Config::default()` if the file is absent.
