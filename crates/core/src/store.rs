@@ -125,6 +125,23 @@ impl Store {
         Ok(())
     }
 
+    /// Returns true if the file at `path` already has chunks whose `indexed_at`
+    /// timestamp is >= the file's recorded `modified_s` (mtime).  When true,
+    /// `cmd_deep` can skip re-parsing and re-embedding the file.
+    pub fn chunks_are_current(&self, path: &str) -> Result<bool> {
+        let current: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0
+             FROM chunks c
+             JOIN entries e ON c.entry_path = e.path
+             WHERE e.path = ?1
+               AND e.modified_s IS NOT NULL
+               AND c.indexed_at >= e.modified_s",
+            params![path],
+            |r| r.get(0),
+        )?;
+        Ok(current)
+    }
+
     // ── Surface-scan writes ───────────────────────────────────────────────────
 
     /// Insert or replace a batch of walker entries.
@@ -259,6 +276,47 @@ impl Store {
         Ok(n)
     }
 
+    /// Reconcile entries under `root_prefix` against the live set returned by a fresh walk.
+    /// Deletes rows (plus their chunks and summaries) for paths no longer on disk.
+    /// Returns the number of entry rows removed.
+    pub fn reconcile_entries(
+        &mut self,
+        root_prefix: &str,
+        live_paths: &std::collections::HashSet<String>,
+    ) -> Result<usize> {
+        let pattern = like_prefix(root_prefix);
+        let indexed_paths: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT path FROM entries WHERE path LIKE ?1 ESCAPE '\\'")?;
+            let rows = stmt.query_map(params![pattern], |r| r.get(0))?;
+            rows.collect::<Result<Vec<String>, _>>()?
+        };
+
+        let ghosts: Vec<String> = indexed_paths
+            .into_iter()
+            .filter(|p| !live_paths.contains(p))
+            .collect();
+
+        if ghosts.is_empty() {
+            return Ok(0);
+        }
+
+        let tx = self.conn.transaction()?;
+        let mut removed = 0usize;
+        for path in &ghosts {
+            tx.execute(
+                "DELETE FROM chunks_fts WHERE entry_path = ?1",
+                params![path],
+            )?;
+            tx.execute("DELETE FROM chunks WHERE entry_path = ?1", params![path])?;
+            tx.execute("DELETE FROM summaries WHERE path = ?1", params![path])?;
+            removed += tx.execute("DELETE FROM entries WHERE path = ?1", params![path])?;
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
     /// Remove all entries whose path starts with `prefix` (e.g. a whole directory subtree).
     /// Returns the number of `entries` rows deleted.
     pub fn delete_subtree(&mut self, prefix: &str) -> Result<usize> {
@@ -304,6 +362,30 @@ impl Store {
             .conn
             .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
         Ok(n as u64)
+    }
+
+    /// Top-N file extensions (or bare names) in the index that have no category assigned.
+    /// Returns (extension_or_name, count) pairs sorted by count descending.
+    pub fn unknown_extensions(&self, limit: usize) -> Result<Vec<(String, u64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+               CASE
+                 WHEN instr(path, '.') > 0
+                      AND instr(replace(path, rtrim(path, replace(path, '/', '')), ''), '.') > 0
+                 THEN lower(substr(path, length(path) - length(path) + instr(path, '.')))
+                 ELSE '(no extension)'
+               END AS ext,
+               COUNT(*) AS n
+             FROM entries
+             WHERE (hint_cat IS NULL OR hint_cat = 'unknown') AND kind = 'file'
+             GROUP BY ext
+             ORDER BY n DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Summary of top-level regions: (category, entry_count, total_size_bytes).

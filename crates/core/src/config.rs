@@ -182,6 +182,12 @@ pub struct DescriberConfig {
     pub queue_concurrency: usize,
     /// Max child summaries fed into a single directory roll-up prompt.
     pub max_children_per_summary: usize,
+    /// Refinement passes when no prior summary exists (first-time build).
+    pub passes_first: u32,
+    /// Refinement passes when a summary row already exists (refresh).
+    pub passes_refresh: u32,
+    /// Hard ceiling on `--passes` flag; values above this are clamped.
+    pub passes_cap: u32,
 }
 
 impl Default for DescriberConfig {
@@ -196,6 +202,9 @@ impl Default for DescriberConfig {
             mode: SummaryMode::Augment,
             queue_concurrency: 2,
             max_children_per_summary: 30,
+            passes_first: 2,
+            passes_refresh: 1,
+            passes_cap: 3,
         }
     }
 }
@@ -257,8 +266,13 @@ pub struct RegionConfig {
 
 /// Returns the canonical path to `~/.indexa/config.toml`
 /// (or the platform-equivalent via `directories`).
+/// Canonical bundle-ID used for config and data directories.
+const APP_QUALIFIER: &str = "dev";
+const APP_ORG: &str = "indexa";
+const APP_NAME: &str = "Indexa";
+
 pub fn default_config_path() -> PathBuf {
-    if let Some(dirs) = ProjectDirs::from("dev", "indexa", "indexa") {
+    if let Some(dirs) = ProjectDirs::from(APP_QUALIFIER, APP_ORG, APP_NAME) {
         dirs.config_dir().join("config.toml")
     } else {
         // Fallback: XDG-style ~/.indexa/
@@ -267,6 +281,11 @@ pub fn default_config_path() -> PathBuf {
             .unwrap_or_else(|_| PathBuf::from("."));
         home.join(".indexa").join("config.toml")
     }
+}
+
+/// Canonical data directory for the index database.
+pub fn default_data_dir() -> Option<PathBuf> {
+    ProjectDirs::from(APP_QUALIFIER, APP_ORG, APP_NAME).map(|d| d.data_local_dir().to_path_buf())
 }
 
 /// Load config from `path`, returning `Config::default()` if the file is absent.

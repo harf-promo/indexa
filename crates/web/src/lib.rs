@@ -727,6 +727,22 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
         </div>
         <p class="settings-note">Keys are saved to <code>~/.indexa/config.toml</code> (0600 permissions). Restart <code>indexa serve</code> after saving to apply.</p>
       </div>
+      <div class="settings-section">
+        <h2>Refinement Passes</h2>
+        <div class="key-rows">
+          <div class="key-row">
+            <span class="key-label">First-time build</span>
+            <input type="number" class="key-input" id="passes-first" min="1" max="3" value="2" style="width:60px">
+            <span class="key-set-badge" style="color:var(--muted);font-size:11px">default 2</span>
+          </div>
+          <div class="key-row">
+            <span class="key-label">Refresh run</span>
+            <input type="number" class="key-input" id="passes-refresh" min="1" max="3" value="1" style="width:60px">
+            <span class="key-set-badge" style="color:var(--muted);font-size:11px">default 1</span>
+          </div>
+        </div>
+        <p class="settings-note">More passes = higher context quality at the cost of LLM calls. Set in <code>[describer] passes-first</code> / <code>passes-refresh</code> in config.toml. Cap is 3 (Self-Refine research: quality degrades above 3 passes).</p>
+      </div>
     </div>
     <div class="chat-view" id="chat-view">
       <div class="chat-area" id="chat">

@@ -56,7 +56,8 @@ pub enum Commands {
     #[command(after_help = "Examples:
   indexa deep ~/Documents
   indexa deep ~/Projects --embed-model nomic-embed-text:v1.5
-  indexa deep --dry-run ~/Documents")]
+  indexa deep --dry-run ~/Documents
+  indexa deep ~/Documents --passes 2")]
     Deep {
         /// Path to deep-scan. Omit to deep-scan the entire existing index.
         #[arg(num_args = 0..)]
@@ -73,12 +74,17 @@ pub enum Commands {
         /// Summary storage mode: augment (default), compress, summaries-only.
         #[arg(long, default_value = "augment")]
         mode: String,
+
+        /// Refinement passes per summary. Default: 2 for new context, 1 for refresh.
+        #[arg(long)]
+        passes: Option<u32>,
     },
 
     /// Generate hierarchical context summaries for indexed files and directories.
     #[command(after_help = "Examples:
   indexa summarize ~/Documents
-  indexa summarize ~/Documents --mode compress")]
+  indexa summarize ~/Documents --mode compress
+  indexa summarize ~/Documents --passes 2")]
     Summarize {
         /// Path to summarize. Omit to summarize the entire existing index.
         #[arg(num_args = 0..)]
@@ -87,6 +93,11 @@ pub enum Commands {
         /// Summary mode: augment (default), compress, summaries-only.
         #[arg(long, default_value = "augment")]
         mode: String,
+
+        /// Refinement passes per summary. Default: 2 for new context, 1 for refresh.
+        /// Capped at the config `passes-cap` (default 3).
+        #[arg(long)]
+        passes: Option<u32>,
     },
 
     /// Print the summary and breadcrumb chain for a specific path.
@@ -199,8 +210,13 @@ pub enum Commands {
 
     /// Show context store statistics.
     #[command(after_help = "Examples:
-  indexa status")]
-    Status,
+  indexa status
+  indexa status --unknown")]
+    Status {
+        /// Print the top-20 file extensions that could not be classified.
+        #[arg(long)]
+        unknown: bool,
+    },
 
     /// Remove one or more paths from the context store.
     #[command(after_help = "Examples:

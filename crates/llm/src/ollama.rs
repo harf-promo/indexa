@@ -106,19 +106,39 @@ impl Generator for OllamaLlm {
 
 #[async_trait::async_trait]
 impl Describer for OllamaLlm {
-    async fn describe(&self, path: &str, content_sample: &[u8]) -> Result<String> {
+    async fn describe(
+        &self,
+        path: &str,
+        content_sample: &[u8],
+        previous_summary: Option<&str>,
+    ) -> Result<String> {
         let sample = std::str::from_utf8(content_sample)
             .unwrap_or("[binary]")
             .chars()
             .take(800)
             .collect::<String>();
-        let prompt = format!(
-            "Briefly describe what this file is about in 1-2 sentences.\nFile: {path}\nContent:\n{sample}"
-        );
+        let prompt = match previous_summary {
+            None => format!(
+                "Briefly describe what this file is about in 1-2 sentences.\nFile: {path}\nContent:\n{sample}"
+            ),
+            Some(prev) => format!(
+                "We have provided an existing summary up to a certain point:\n{prev}\n\n\
+                 We have the opportunity to refine the existing summary (only if needed) \
+                 with some more context below.\n\
+                 File: {path}\nContent:\n{sample}\n\n\
+                 Given the new context, refine the original summary. \
+                 If the context isn't useful, return the original summary."
+            ),
+        };
         Generator::generate(self, &prompt).await
     }
 
-    async fn summarize_dir(&self, dir_path: &str, children: &[ChildSummary]) -> Result<String> {
+    async fn summarize_dir(
+        &self,
+        dir_path: &str,
+        children: &[ChildSummary],
+        previous_summary: Option<&str>,
+    ) -> Result<String> {
         let n_files = children.iter().filter(|c| c.kind == "file").count();
         let n_dirs = children.iter().filter(|c| c.kind == "dir").count();
 
@@ -132,7 +152,7 @@ impl Describer for OllamaLlm {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let prompt = format!(
+        let base_desc = format!(
             "You are describing a folder so a future search can understand its purpose.\n\
              Folder: {dir_path}\n\
              Direct children ({n_files} files, {n_dirs} subfolders):\n\
@@ -141,6 +161,16 @@ impl Describer for OllamaLlm {
              (2) the kinds of work or content inside, (3) anything notable. \
              Do not list filenames. Speak about themes."
         );
+        let prompt = match previous_summary {
+            None => base_desc,
+            Some(prev) => format!(
+                "We have provided an existing summary up to a certain point:\n{prev}\n\n\
+                 We have the opportunity to refine the existing summary (only if needed) \
+                 with some more context below.\n{base_desc}\n\n\
+                 Given the new context, refine the original summary. \
+                 If the context isn't useful, return the original summary."
+            ),
+        };
 
         // Use the dedicated dir model if configured
         let model = self.effective_dir_model().to_owned();

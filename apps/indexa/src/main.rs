@@ -42,9 +42,14 @@ async fn main() -> Result<()> {
             embed_model,
             dry_run,
             mode,
-        } => cmd_deep(paths, embed_model, dry_run, mode, &cfg).await,
+            passes,
+        } => cmd_deep(paths, embed_model, dry_run, mode, passes, &cfg).await,
         Commands::Map { depth } => cmd_map(depth).await,
-        Commands::Summarize { paths, mode } => cmd_summarize(paths, mode, &cfg).await,
+        Commands::Summarize {
+            paths,
+            mode,
+            passes,
+        } => cmd_summarize(paths, mode, passes, &cfg).await,
         Commands::Describe { path } => cmd_describe(path).await,
         Commands::Worker { concurrency } => cmd_worker(concurrency, &cfg).await,
         Commands::Export {
@@ -80,7 +85,7 @@ async fn main() -> Result<()> {
             embed_model,
             llm_model,
         } => cmd_serve(port, embed_model, llm_model, &cfg).await,
-        Commands::Status => cmd_status(&cfg).await,
+        Commands::Status { unknown } => cmd_status(unknown, &cfg).await,
         Commands::Rm { paths, recursive } => cmd_rm(paths, recursive).await,
     }
 }
@@ -93,9 +98,22 @@ async fn cmd_scan(paths: Vec<String>, all: bool) -> Result<()> {
     for root in &roots {
         println!("Scanning {}", root.display());
         let entries = walk(root, &WalkConfig::default())?;
-        let count = entries.len();
+        let live_paths: std::collections::HashSet<String> = entries
+            .iter()
+            .map(|e| e.path.to_string_lossy().into_owned())
+            .collect();
+
         store.upsert_entries(&entries)?;
-        println!("  indexed {count} entries");
+
+        // Ghost-row cleanup: remove entries that were in the index but no longer on disk.
+        let root_str = root.to_string_lossy().into_owned();
+        let removed = store.reconcile_entries(&root_str, &live_paths)?;
+        let count = live_paths.len();
+        if removed > 0 {
+            println!("  {count} entries, removed {removed} ghost rows");
+        } else {
+            println!("  {count} entries");
+        }
     }
 
     println!("\nIndex saved to {}", db_path.display());
@@ -109,6 +127,7 @@ async fn cmd_deep(
     embed_model_flag: Option<String>,
     dry_run: bool,
     mode: String,
+    _passes: Option<u32>,
     cfg: &Config,
 ) -> Result<()> {
     let summary_mode = match mode.as_str() {
@@ -188,8 +207,18 @@ async fn cmd_deep(
 
         println!("  parsing {} files...", files.len());
         let mut total_chunks = 0usize;
+        let mut skipped = 0usize;
 
         for entry in &files {
+            let path_str = entry.path.to_string_lossy().into_owned();
+
+            // Skip-if-unchanged: re-embedding is expensive; skip files whose chunks
+            // are already indexed at or after the file's last modification time.
+            if store.chunks_are_current(&path_str).unwrap_or(false) {
+                skipped += 1;
+                continue;
+            }
+
             let extracted = match indexa_parsers::registry::parse(&entry.path) {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -202,7 +231,7 @@ async fn cmd_deep(
             for chunk in &extracted.chunks {
                 let embedding = embedder.embed(&chunk.text).await.ok();
                 chunk_records.push(ChunkRecord {
-                    entry_path: entry.path.to_string_lossy().into_owned(),
+                    entry_path: path_str.clone(),
                     seq: chunk.seq,
                     heading: chunk.heading.clone(),
                     text: chunk.text.clone(),
@@ -216,7 +245,10 @@ async fn cmd_deep(
             total_chunks += chunk_records.len();
         }
 
-        println!("  embedded {total_chunks} chunks.");
+        if skipped > 0 {
+            println!("  skipped {skipped}/{} files (unchanged)", files.len());
+        }
+        println!("  embedded {total_chunks} new chunks.");
     }
 
     // Enqueue summarization for non-Augment modes or always to populate the queue
@@ -507,7 +539,7 @@ async fn cmd_serve(
     indexa_web::serve(port, store, embedder, llm, cfg.clone()).await
 }
 
-async fn cmd_status(cfg: &Config) -> Result<()> {
+async fn cmd_status(show_unknown: bool, cfg: &Config) -> Result<()> {
     let db_path = index_db_path()?;
     if !db_path.exists() {
         println!("No index found. Run `indexa scan <path>` first.");
@@ -572,6 +604,20 @@ async fn cmd_status(cfg: &Config) -> Result<()> {
         cfg.describer.dir_model
     );
 
+    if show_unknown {
+        println!();
+        println!("Top unclassified file extensions:");
+        match store.unknown_extensions(20) {
+            Ok(rows) if rows.is_empty() => println!("  (none — all files classified)"),
+            Ok(rows) => {
+                for (ext, n) in rows {
+                    println!("  {:>5}  {ext}", n);
+                }
+            }
+            Err(e) => println!("  (error: {e})"),
+        }
+    }
+
     Ok(())
 }
 
@@ -606,7 +652,12 @@ async fn cmd_rm(paths: Vec<String>, recursive: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_summarize(paths: Vec<String>, mode: String, cfg: &Config) -> Result<()> {
+async fn cmd_summarize(
+    paths: Vec<String>,
+    mode: String,
+    passes: Option<u32>,
+    cfg: &Config,
+) -> Result<()> {
     let roots = resolve_roots(paths, false)?;
     let db_path = index_db_path()?;
     if !db_path.exists() {
@@ -634,8 +685,15 @@ async fn cmd_summarize(paths: Vec<String>, mode: String, cfg: &Config) -> Result
 
     for root in &roots {
         println!("Summarizing {} …", root.display());
-        let done =
-            summarize_subtree_sync(&mut store, &describer, &embedder, root, &summary_cfg).await?;
+        let done = summarize_subtree_sync(
+            &mut store,
+            &describer,
+            &embedder,
+            root,
+            &summary_cfg,
+            passes,
+        )
+        .await?;
         println!("  {done} summaries written.");
     }
 
@@ -841,9 +899,38 @@ fn resolve_roots(paths: Vec<String>, all: bool) -> Result<Vec<PathBuf>> {
 }
 
 fn index_db_path() -> Result<PathBuf> {
-    let base =
-        BaseDirs::new().ok_or_else(|| anyhow::anyhow!("cannot determine config directory"))?;
-    Ok(base.data_local_dir().join("indexa").join("index.db"))
+    let data_dir = config::default_data_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot determine data directory"))?;
+    migrate_legacy_data_dir(&data_dir);
+    Ok(data_dir.join("index.db"))
+}
+
+/// One-time migration: if the old `indexa/` data dir exists but the new canonical
+/// `dev.indexa.Indexa/` dir does not, rename it so existing indexes aren't lost.
+fn migrate_legacy_data_dir(new_dir: &std::path::Path) {
+    if new_dir.exists() {
+        return;
+    }
+    // The old path was `<data_local>/indexa/` (bare name, no qualifier).
+    // Derive it by stripping the last component of `new_dir` and appending "indexa".
+    if let Some(parent) = new_dir.parent() {
+        let old_dir = parent.join("indexa");
+        if old_dir.exists() {
+            if let Err(e) = std::fs::rename(&old_dir, new_dir) {
+                tracing::warn!(
+                    "could not migrate data dir {} → {}: {e}",
+                    old_dir.display(),
+                    new_dir.display()
+                );
+            } else {
+                tracing::info!(
+                    "migrated data dir {} → {}",
+                    old_dir.display(),
+                    new_dir.display()
+                );
+            }
+        }
+    }
 }
 
 fn format_size(bytes: u64) -> String {
