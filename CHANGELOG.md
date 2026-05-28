@@ -5,6 +5,18 @@ All notable changes to Indexa will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-05-28
+
+### Changed
+
+- **Jobs panel moved to top of sidebar** — the live SSE progress panel now sits directly below the tree-pane header (above the search box and tree list) so it's always visible above the fold, even with deep trees. Added `max-height: 35vh; overflow-y: auto` to prevent it from pushing the tree off-screen during a burst of jobs.
+- **Sound notifications** — a short Web Audio API tone plays when a job finishes (`done` = ascending two-note ping, `failed` = descending tone). No audio files bundled — generated in-browser. A 🔔/🔕 toggle in the header switches sound on/off; preference saved in `localStorage.indexa_sound_muted`. **On by default.**
+- **Inline toast notifications** — all eight `alert()` modal dialogs replaced with a `toast(msg, level)` helper. Toasts appear at top-center of the page, auto-dismiss after 4 s, and have a × close button for sticky errors. Levels: `info`, `warn`, `error`.
+- **Failed job rows auto-clear** — failed job rows now self-remove after 30 s (same as successful jobs' 5 s), keeping the jobs panel from accumulating stale errors.
+- **Code simplification** — ~50 more lines removed:
+  - `crates/core/src/store.rs`: extracted `embedding_to_blob`, `blob_to_embedding`, `row_to_summary`, `row_to_tree_node`, `delete_chunks_under_prefix`, `delete_path_artifacts_exact` helpers.
+  - `apps/indexa/src/main.rs`: extracted `require_index_db()`, `build_embedder()`, `build_llm()` helpers; collapsed 9 identical early-return blocks.
+
 ## [0.3.1] — 2026-05-28
 
 ### Added

@@ -1269,7 +1269,7 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
   ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
   /* ── Jobs panel ── */
-  .jobs-panel { border-top: 1px solid var(--border); flex-shrink: 0; font-size: 11px; }
+  .jobs-panel { border-bottom: 1px solid var(--border); flex-shrink: 0; font-size: 11px; max-height: 35vh; overflow-y: auto; }
   .jobs-panel-header { padding: 5px 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; font-size: 10px; }
   .job-row { padding: 4px 14px; display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--border); }
   .job-row:last-child { border-bottom: none; }
@@ -1310,12 +1310,21 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
   .key-set-badge { font-size: 10px; color: var(--green); flex-shrink: 0; }
   .key-gate-notice { font-size: 11px; color: var(--orange); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
   .settings-note { font-size: 11px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
+  /* ── Toast notifications ── */
+  #toast { position: fixed; top: 52px; left: 50%; transform: translateX(-50%); z-index: 200; display: flex; flex-direction: column; gap: 6px; align-items: center; pointer-events: none; }
+  .toast-msg { background: var(--surface); border: 1px solid var(--border); border-radius: 7px; padding: 8px 14px; font-size: 12px; color: var(--text); box-shadow: 0 4px 16px rgba(0,0,0,0.4); display: flex; align-items: center; gap: 8px; pointer-events: auto; max-width: 420px; }
+  .toast-msg.warn { border-color: var(--orange); color: var(--orange); }
+  .toast-msg.error { border-color: var(--red); color: var(--red); }
+  .toast-msg.info { border-color: var(--accent); }
+  .toast-close { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; padding: 0 0 0 4px; line-height: 1; flex-shrink: 0; }
 </style>
 </head>
 <body>
+<div id="toast"></div>
 <header>
   <h1>&#x2B21; Indexa</h1>
   <span class="version-chip" id="app-version"></span>
+  <button id="sound-toggle" onclick="toggleSound()" title="Toggle sound notifications" style="background:none;border:none;cursor:pointer;font-size:14px;padding:0 2px;line-height:1;opacity:0.7" aria-label="Toggle sound">&#x1F514;</button>
   <span class="stats" id="stats">Loading&#x2026;</span>
   <div class="tabs">
     <button class="tab" id="tab-tree" onclick="switchTab('tree')">Tree</button>
@@ -1333,15 +1342,15 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
       <button class="add-root-btn" onclick="reindexAll()" title="Re-index all roots" style="font-size:10px;padding:0 5px;margin-right:2px">&#x21BB;</button>
       <button class="add-root-btn" onclick="openAddRoot()" title="Add root folder">+</button>
     </div>
+    <div class="jobs-panel" id="jobs-panel" style="display:none">
+      <div class="jobs-panel-header">Jobs</div>
+      <div id="jobs-list"></div>
+    </div>
     <div class="tree-search">
       <input type="text" id="search-input" placeholder="Search files&#x2026;" autocomplete="off" oninput="onSearchInput(this.value)">
       <button id="search-clear" onclick="clearSearchInput()" style="display:none" title="Clear">&#x2715;</button>
     </div>
     <div class="tree-list" id="tree-list"></div>
-    <div class="jobs-panel" id="jobs-panel" style="display:none">
-      <div class="jobs-panel-header">Jobs</div>
-      <div id="jobs-list"></div>
-    </div>
   </div>
   <!-- Right panel switches between summary view, chat view, and settings view -->
   <div class="right-panel">
@@ -1541,13 +1550,13 @@ function buildTreeNode(node) {
           await fetch('/api/entry?path=' + encodeURIComponent(node.path), { method: 'DELETE' });
           initTree();
           loadStats();
-        } catch(err) { alert('Remove failed: ' + err.message); }
+        } catch(err) { toast('Remove failed: ' + err.message, 'error'); }
       } else {
         try {
           const r = await fetch('/api/jobs/' + act + '?path=' + encodeURIComponent(node.path), { method: 'POST' });
           const d = await r.json();
           subscribeJob(d.job_id, node.path);
-        } catch(err) { alert('Failed to start job: ' + err.message); }
+        } catch(err) { toast('Failed to start job: ' + err.message, 'error'); }
       }
     });
   });
@@ -1696,14 +1705,14 @@ async function browseFsTo(path) {
 }
 async function startIndexRoot() {
   const path = document.getElementById('add-root-path').value.trim();
-  if (!path) { alert('Enter a path first.'); return; }
+  if (!path) { toast('Enter a path first.', 'warn'); return; }
   try {
     const r = await fetch('/api/jobs/index?path=' + encodeURIComponent(path), { method: 'POST' });
     const d = await r.json();
     closeAddRoot();
     subscribeJob(d.job_id, path);
   } catch(e) {
-    alert('Failed to start indexing: ' + e.message);
+    toast('Failed to start indexing: ' + e.message, 'error');
   }
 }
 
@@ -1749,6 +1758,7 @@ function subscribeJob(jobId, path) {
       } else if (ev.type === 'done') {
         noteEl.className = 'job-note done';
         noteEl.textContent = '✓ ' + ev.summary;
+        playPing('ok');
         es.close();
         setTimeout(function() {
           row.remove();
@@ -1762,7 +1772,15 @@ function subscribeJob(jobId, path) {
       } else if (ev.type === 'failed') {
         noteEl.className = 'job-note failed';
         noteEl.textContent = '✗ ' + ev.error.slice(0, 40);
+        playPing('err');
         es.close();
+        setTimeout(function() {
+          row.remove();
+          delete activeJobs[jobId];
+          if (!document.getElementById('jobs-list').children.length) {
+            document.getElementById('jobs-panel').style.display = 'none';
+          }
+        }, 30000);
       }
     } catch(_) {}
   };
@@ -2111,7 +2129,7 @@ async function saveKey(provider) {
     body: JSON.stringify({provider: provider, key: val})
   });
   const d = await r.json();
-  if (d.error) { alert(d.error); return; }
+  if (d.error) { toast(d.error, 'error'); return; }
   document.getElementById('key-' + provider).value = '';
   loadKeys();
 }
@@ -2123,15 +2141,61 @@ async function clearKey(provider) {
     body: JSON.stringify({provider: provider, key: ''})
   });
   const d = await r.json();
-  if (d.error) { alert(d.error); return; }
+  if (d.error) { toast(d.error, 'error'); return; }
   loadKeys();
 }
 
 /* ── Utilities ── */
+function toast(msg, level) {
+  level = level || 'info';
+  const container = document.getElementById('toast');
+  const el = document.createElement('div');
+  el.className = 'toast-msg ' + level;
+  el.innerHTML = escapeHtml(msg) + '<button class="toast-close" onclick="this.parentElement.remove()" title="Dismiss">&#x2715;</button>';
+  container.appendChild(el);
+  setTimeout(function() { if (el.parentElement) el.remove(); }, 4000);
+}
 function escapeHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 function escapeAttr(s) { return escapeHtml(s); }
+
+/* ── Sound ── */
+let _audioCtx = null;
+function playPing(kind) {
+  if (localStorage.getItem('indexa_sound_muted') === '1') return;
+  try {
+    _audioCtx = _audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = _audioCtx;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'sine';
+    if (kind === 'ok') {
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 0.12);
+    } else {
+      osc.frequency.setValueAtTime(280, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(140, ctx.currentTime + 0.20);
+    }
+    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.28);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.28);
+  } catch(_) {}
+}
+function toggleSound() {
+  const muted = localStorage.getItem('indexa_sound_muted') === '1';
+  localStorage.setItem('indexa_sound_muted', muted ? '0' : '1');
+  document.getElementById('sound-toggle').innerHTML = muted ? '&#x1F514;' : '&#x1F515;';
+}
+(function initSoundToggle() {
+  if (localStorage.getItem('indexa_sound_muted') === '1') {
+    const btn = document.getElementById('sound-toggle');
+    if (btn) btn.innerHTML = '&#x1F515;';
+  }
+})();
 
 /* ── Version ── */
 async function loadVersion() {
@@ -2148,14 +2212,14 @@ async function reindexAll() {
   try {
     const r = await fetch('/api/roots');
     const roots = await r.json();
-    if (!roots.length) { alert('No indexed roots yet.'); return; }
+    if (!roots.length) { toast('No indexed roots yet.', 'warn'); return; }
     if (!confirm('Re-index ' + roots.length + ' root(s) with deep scan?')) return;
     for (const root of roots) {
       const rj = await fetch('/api/jobs/deep?path=' + encodeURIComponent(root.path), { method: 'POST' });
       const d = await rj.json();
       subscribeJob(d.job_id, root.path);
     }
-  } catch(e) { alert('Failed: ' + e.message); }
+  } catch(e) { toast('Failed: ' + e.message, 'error'); }
 }
 
 /* ── Init ── */
