@@ -56,7 +56,7 @@ indexa serve
 # → Open http://localhost:7620 in your browser
 ```
 
-The web UI has a chat interface, search bar, and disk map sidebar.
+The web UI has a chat interface, search bar, and context tree sidebar.
 
 ## Keep the index current
 
@@ -93,14 +93,14 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 
 ---
 
-## Index your whole computer
+## Build context for your whole disk
 
 ```bash
-indexa scan --all   # surface scan everything
-indexa deep /       # deep scan (takes a while — start with a folder instead)
+indexa scan --all   # surface context map for everything
+indexa deep /       # deep context — takes a while, start with a folder instead
 ```
 
-The surface scan finishes in under a minute even on large disks. Deep scanning everything is slow — start with the folders that matter most, like `~/Documents` and `~/Projects`.
+The surface scan finishes in under a minute even on large disks. Building deep context for everything is slow — start with the folders that matter most, like `~/Documents` and `~/Projects`.
 
 ---
 

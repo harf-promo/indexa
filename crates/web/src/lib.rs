@@ -538,7 +538,7 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Indexa</title>
+<title>Indexa — Local Context Engine</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -731,14 +731,14 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
     <div class="chat-view" id="chat-view">
       <div class="chat-area" id="chat">
         <div class="welcome">
-          <h2>Ask your computer anything</h2>
-          <p>Indexa has read and indexed your files. Ask in plain English &mdash; like<br>
-          <code>&ldquo;where are my tax documents?&rdquo;</code> or <code>&ldquo;show me Python files that use async&rdquo;</code>.<br><br>
-          Click any folder in the tree to explore its summary.</p>
+          <h2>Your local context, on tap</h2>
+          <p>Indexa has built context for your files. Ask, export to your AI tool, or browse the tree.<br><br>
+          <code>&ldquo;where are my tax documents?&rdquo;</code> &nbsp;&middot;&nbsp; <code>&ldquo;where is auth handled in this repo?&rdquo;</code><br><br>
+          Click any folder in the tree to explore its context summary.</p>
         </div>
       </div>
       <div class="input-bar">
-        <input type="text" id="q" placeholder="Ask a question about your files… (⌘K)" autocomplete="off">
+        <input type="text" id="q" placeholder="Ask your local context… (⌘K)" autocomplete="off">
         <button id="send">Ask</button>
       </div>
     </div>

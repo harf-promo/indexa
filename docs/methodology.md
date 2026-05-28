@@ -1,12 +1,12 @@
-# Indexa — Indexing Methodology
+# Indexa — Context Construction Methodology
 
-This document explains the technical decisions behind how Indexa indexes files, generates embeddings, and retrieves answers. Every default described here is overridable via `config.toml` (see [Config Reference](config.md)).
+This document explains the technical decisions behind how Indexa builds context, generates embeddings, and retrieves answers. Every default described here is overridable via `config.toml` (see [Config Reference](config.md)).
 
 ---
 
 ## Overview
 
-Indexa uses a **two-phase scan** architecture:
+Indexa builds context in two phases:
 
 ```
 Phase 1 — Surface scan (fast):
