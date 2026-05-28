@@ -28,7 +28,7 @@ jobs:
               echo "  Subject: $(git log -1 --format='%s' $sha)"
               failed=1
             fi
-          done < <(git log --format="%H" "origin/main..HEAD")
+          done < <(git log --no-merges --format="%H" "origin/main..HEAD")
           if [ "$failed" -eq 1 ]; then
             echo ""
             echo "All commits in this PR must have a Signed-off-by trailer."
