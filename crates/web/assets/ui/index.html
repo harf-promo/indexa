@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Indexa</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div id="toast"></div>
+
+<!-- Topbar -->
+<header class="app-topbar">
+  <h1 class="app-logo">&#x2B21; Indexa</h1>
+  <span class="app-version" id="app-version"></span>
+  <button class="icon-btn" id="cmd-palette-btn" onclick="openCmdPalette()" title="Command palette (&#x2318;K)" aria-label="Open command palette">&#x2318;K</button>
+  <nav class="app-tabs">
+    <button class="tab" id="tab-tree" onclick="switchTab('tree')">Browse</button>
+    <button class="tab active" id="tab-chat" onclick="switchTab('chat')">Ask</button>
+    <button class="tab" id="tab-map" onclick="switchTab('map')">Map</button>
+    <button class="tab" id="tab-settings" onclick="switchTab('settings')">Settings</button>
+  </nav>
+  <div class="app-topbar-actions">
+    <span class="app-stats" id="stats">Loading&#x2026;</span>
+    <button class="icon-btn" id="sound-toggle" onclick="toggleSound()" title="Toggle sound notifications" aria-label="Toggle sound">&#x1F514;</button>
+    <button class="icon-btn" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" aria-label="Toggle theme">&#x1F317;</button>
+  </div>
+</header>
+
+<!-- Main body: sidebar + content -->
+<div class="app-body">
+  <aside class="app-sidebar" id="tree-pane">
+    <div class="sidebar-header">
+      <span class="sidebar-title">Folders</span>
+      <button class="icon-btn sm" onclick="reindexAll()" title="Re-index all roots" aria-label="Re-index all">&#x21BB;</button>
+      <button class="icon-btn sm" onclick="openAddRoot()" title="Add root folder" aria-label="Add root folder">+</button>
+    </div>
+    <div class="tree-search">
+      <input type="text" id="search-input" placeholder="Search files&#x2026;" autocomplete="off" oninput="onSearchInput(this.value)" aria-label="Search files">
+      <button id="search-clear" onclick="clearSearchInput()" style="display:none" title="Clear search" aria-label="Clear search">&#x2715;</button>
+    </div>
+    <div class="tree-list" id="tree-list"></div>
+  </aside>
+
+  <!-- Content panels — each tab gets its own panel with CSS fade -->
+  <main class="app-main">
+    <div class="tab-panel" id="panel-tree">
+      <div class="summary-view" id="summary-view"></div>
+    </div>
+    <div class="tab-panel active" id="panel-chat">
+      <div class="chat-view" id="chat-view">
+        <div class="chat-area" id="chat">
+          <div class="welcome">
+            <h2>Your local context, on tap</h2>
+            <p>Indexa has built context for your files. Ask, export to your AI tool, or browse the tree.<br><br>
+            <code>&#x201C;where are my tax documents?&#x201D;</code> &nbsp;&middot;&nbsp; <code>&#x201C;where is auth handled in this repo?&#x201D;</code><br><br>
+            Click any folder in the tree to explore its context summary.</p>
+          </div>
+        </div>
+        <div class="input-bar">
+          <input type="text" id="q" placeholder="Ask your local context&#x2026;" autocomplete="off" aria-label="Ask a question">
+          <button id="send">Ask</button>
+        </div>
+      </div>
+    </div>
+    <div class="tab-panel" id="panel-map">
+      <div class="map-view" id="map-view">
+        <h2 class="panel-heading">Index map</h2>
+        <table id="map-table"></table>
+      </div>
+    </div>
+    <div class="tab-panel" id="panel-settings">
+      <div class="settings-view" id="settings-view">
+        <div class="settings-section">
+          <h2>Local Models (Ollama)</h2>
+          <div id="models-list" class="model-list"><div style="color:var(--muted);font-size:13px">Loading&#x2026;</div></div>
+          <div class="pull-row">
+            <input type="text" id="pull-input" placeholder="Model name (e.g. gemma3:4b, nomic-embed-text)" autocomplete="off" list="model-suggestions" aria-label="Model name to pull">
+            <datalist id="model-suggestions">
+              <option value="gemma3:4b">
+              <option value="gemma3:12b">
+              <option value="gemma3:27b">
+              <option value="nomic-embed-text">
+              <option value="qwen2.5-coder:7b">
+              <option value="mistral:7b">
+            </datalist>
+            <button id="pull-btn" onclick="pullModel()">Pull</button>
+          </div>
+          <div id="pull-progress" class="pull-progress"></div>
+          <p class="settings-note">Models are stored by Ollama. After pulling, update <code>[describer] model</code> in <code>~/.indexa/config.toml</code> to use the new model.</p>
+        </div>
+        <div class="settings-section">
+          <h2>Cloud Provider API Keys</h2>
+          <div id="key-gate-notice" class="key-gate-notice" style="display:none">
+            API key editing is disabled. To enable: <code>INDEXA_WEB_ALLOW_KEY_EDIT=1 indexa serve</code>
+          </div>
+          <div class="key-rows">
+            <div class="key-row">
+              <span class="key-label">OpenAI</span>
+              <input type="password" class="key-input" id="key-openai" placeholder="sk-&#x2026;" autocomplete="off" aria-label="OpenAI API key">
+              <span class="key-set-badge" id="badge-openai"></span>
+              <button class="btn-sm" onclick="saveKey('openai')">Save</button>
+              <button class="btn-sm" onclick="clearKey('openai')">Clear</button>
+            </div>
+            <div class="key-row">
+              <span class="key-label">Anthropic</span>
+              <input type="password" class="key-input" id="key-anthropic" placeholder="sk-ant-&#x2026;" autocomplete="off" aria-label="Anthropic API key">
+              <span class="key-set-badge" id="badge-anthropic"></span>
+              <button class="btn-sm" onclick="saveKey('anthropic')">Save</button>
+              <button class="btn-sm" onclick="clearKey('anthropic')">Clear</button>
+            </div>
+            <div class="key-row">
+              <span class="key-label">Google</span>
+              <input type="password" class="key-input" id="key-google" placeholder="AIza&#x2026;" autocomplete="off" aria-label="Google API key">
+              <span class="key-set-badge" id="badge-google"></span>
+              <button class="btn-sm" onclick="saveKey('google')">Save</button>
+              <button class="btn-sm" onclick="clearKey('google')">Clear</button>
+            </div>
+          </div>
+          <p class="settings-note">Keys are saved to <code>~/.indexa/config.toml</code> (0600 permissions). Restart <code>indexa serve</code> after saving to apply.</p>
+        </div>
+        <div class="settings-section">
+          <h2>Refinement Passes</h2>
+          <div class="key-rows">
+            <div class="key-row">
+              <span class="key-label">First-time</span>
+              <input type="number" class="key-input" id="passes-first" min="1" max="3" value="2" style="width:60px" aria-label="Passes for first-time build">
+              <span class="key-set-badge" style="color:var(--muted);font-size:11px">default 2</span>
+            </div>
+            <div class="key-row">
+              <span class="key-label">Refresh</span>
+              <input type="number" class="key-input" id="passes-refresh" min="1" max="3" value="1" style="width:60px" aria-label="Passes for refresh">
+              <span class="key-set-badge" style="color:var(--muted);font-size:11px">default 1</span>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+            <button class="btn-sm" onclick="savePasses()">Save passes</button>
+            <span id="passes-status" style="font-size:12px;color:var(--muted)"></span>
+          </div>
+          <p class="settings-note">More passes = higher context quality at the cost of LLM calls. Cap is 3 (Self-Refine research: quality degrades above 3 passes).</p>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- Jobs dock — fixed bottom-right -->
+<div class="jobs-dock" id="jobs-panel" style="display:none" role="region" aria-label="Active jobs">
+  <div class="jobs-dock-header">
+    <span class="jobs-dock-title">Jobs</span>
+    <span class="queue-badge" id="queue-badge" style="display:none"></span>
+    <button class="icon-btn sm" onclick="toggleJobsDock()" id="jobs-dock-toggle" title="Collapse / Expand" aria-label="Toggle jobs panel">&#x25BE;</button>
+  </div>
+  <div id="jobs-list" class="jobs-list"></div>
+</div>
+
+<!-- Add-Root modal -->
+<div class="modal-overlay" id="add-root-modal" onclick="if(event.target===this)closeAddRoot()" role="dialog" aria-modal="true" aria-labelledby="add-root-title">
+  <div class="modal">
+    <h2 id="add-root-title">Add Root Folder</h2>
+    <div class="path-row">
+      <input type="text" id="add-root-path" placeholder="/Users/you/Documents" autocomplete="off"
+        oninput="onRootPathInput(this.value)" aria-label="Folder path">
+      <button onclick="browseFsTo(document.getElementById('add-root-path').value)">Browse</button>
+    </div>
+    <div class="fs-browser" id="fs-browser"><div class="fs-entry" style="color:var(--muted)">Loading&#x2026;</div></div>
+    <div class="modal-actions">
+      <button class="modal-btn" onclick="closeAddRoot()">Cancel</button>
+      <button class="modal-btn primary" onclick="startIndexRoot()">Index this folder</button>
+    </div>
+  </div>
+</div>
+
+<!-- ⌘K Command palette -->
+<dialog id="cmd-palette" class="cmd-palette" aria-label="Command palette">
+  <div class="cmd-palette-inner">
+    <div class="cmd-search-bar">
+      <span class="cmd-search-icon" aria-hidden="true">&#x2315;</span>
+      <input type="text" id="cmd-input" placeholder="Search commands and folders&#x2026;" autocomplete="off" aria-label="Command search">
+      <kbd class="cmd-esc-hint">ESC</kbd>
+    </div>
+    <div id="cmd-results" class="cmd-results" role="listbox"></div>
+  </div>
+</dialog>
+
+<script src="/assets/app.js" defer></script>
+</body>
+</html>

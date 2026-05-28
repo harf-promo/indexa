@@ -81,7 +81,7 @@ pub struct JobHandle {
 
 impl JobHandle {
     pub fn new(kind: impl Into<String>, path: impl Into<String>) -> Self {
-        let (tx, _) = broadcast::channel(128);
+        let (tx, _) = broadcast::channel(512);
         Self {
             id: Uuid::new_v4(),
             kind: kind.into(),

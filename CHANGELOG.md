@@ -5,6 +5,29 @@ All notable changes to Indexa will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] — 2026-05-29
+
+### Fixed
+
+- **Walk crash ("rayon thread-pool too busy")** — `jwalk::WalkDir` now uses `Parallelism::RayonNewPool(min(cpu_count, 4))` so each walk owns its own rayon pool instead of sharing the process-global one. Concurrent walks no longer deadlock. Added a `Semaphore::new(2)` in the web layer as defence-in-depth; additional walks queue rather than racing.
+- **"Connection lost" on page refresh** — the browser's `EventSource.onerror` handler no longer calls `es.close()`, which was killing the browser's built-in auto-reconnect. The new handler uses exponential backoff (250 ms → 4 s) and only marks a job gone after a 404 from `/api/jobs/:id` — eliminating false "connection lost" toasts for finished jobs.
+- **Dropped SSE events now visible** — when the broadcast channel lags (slow consumer), a `JobEvent::Warning` is emitted (`"dropped N events — refresh to resync"`) instead of silently discarding events. Broadcast channel capacity bumped 128 → 512 for headroom.
+
+### Added
+
+- **Job persistence across refresh** — active job IDs are written to `localStorage['indexa.activeJobs']` on subscribe and merged with the server's `/api/jobs` list on page load. A page refresh during a long indexing run now re-subscribes to the live stream automatically.
+- **60 s finished-job retention** — completed/failed job handles stay in the server's registry for 60 seconds after finishing. A page refresh within that window can replay history and re-attach to the final state without a 404.
+
+### Changed
+
+- **Full UI redesign (shadcn-style)** — the web UI has been completely rebuilt:
+  - HSL CSS design tokens (`--bg`, `--surface`, `--border`, `--text`, `--accent`, …) with light and dark themes, toggled via a topbar button and persisted to `localStorage`.
+  - Typography: Inter for chrome, JetBrains Mono for code and file paths (loaded via Google Fonts; system fallbacks if offline).
+  - New layout: fixed 52 px topbar with logo + tab navigation (Browse / Ask / Map / Settings); collapsible 260 px sidebar for the folder tree; docked bottom-right jobs panel (360 px wide, max-height 50 vh) replaces the cramped inline jobs list.
+  - ⌘K command palette — fuzzy-search across folder paths and actions; keyboard-navigable (↑ ↓ ↵ Esc).
+  - Animated tab transitions (180 ms fade + translateY), rounded cards with subtle shadows, and WCAG AA focus rings on every focusable element.
+- **UI assets extracted** — the ~1 350-line inline HTML/CSS/JS string is replaced by three `include_str!`-embedded files (`index.html`, `app.css`, `app.js`) served at `/`, `/assets/app.css`, and `/assets/app.js`. Binary is still fully self-contained.
+
 ## [0.3.4] — 2026-05-28
 
 ### Fixed
