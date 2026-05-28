@@ -5,6 +5,35 @@ All notable changes to Indexa will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] — 2026-05-28
+
+### Added
+
+#### Progress UX — "snapshot then process" model
+- **Granular per-file progress events** — `JobEvent::Progress` now carries `current_path`, `items_per_sec`, and `eta_secs` (all optional, backward-compatible). The deep and summarize phases emit one event per file instead of every 10th.
+- **Snapshot event** — a new `JobEvent::Snapshot { count, bytes }` fires once immediately after the file list is enumerated, before any processing begins. The UI uses it to switch the progress bar from indeterminate ("Snapshotting…") to a live `current/total` bar.
+- **Progress bar per job row** — each live-job card in the sidebar now shows a `<progress>` bar, the current file path, throughput in files/s, and an ETA. The bar is animated/indeterminate during the walk phase and becomes determinate once the Snapshot event arrives.
+- **LLM timing in summarize phase** — each summary item emits the per-call LLM duration as a note (`"4.2s · gemma3:4b"`) so you can see how fast the local model is moving.
+- **`GET /api/jobs/:id`** — new JSON snapshot endpoint (no SSE needed) that returns `{job_id, kind, path, started_at, status, last_event}`.
+
+#### Per-folder file/chunk counts in the tree
+- **Folder rows now show `(N files · M chunks)`** directly beside the folder name. The counts are returned by `GET /api/tree` and `GET /api/search` via SQL subselects on the `entries` and `chunks` tables. Counts are omitted when both are zero (e.g. before a deep-index run).
+
+#### Science-backed retrieval improvements
+- **Default embedding model bumped to `nomic-embed-text-v1.5`** (Matryoshka-trained, higher MTEB rank, 8192-token context vs 2048 for v1; same 768 dimensions — existing indexes keep working without re-embedding, but `indexa deep --force <path>` is recommended for the quality boost).
+- **Contextual Retrieval opt-in** — a new `describer.contextual_retrieval = true` config flag enables per-chunk context blurbs at index time (Anthropic 2024; 49% fewer retrieval failures measured). When enabled, `gemma3:4b` generates a 1-2 sentence situating blurb for each chunk before embedding. The original chunk text is stored unchanged; only the embedding uses the enriched text. Defaults `false` to avoid re-embedding existing indexes.
+- **Summary-boost reranking wired** — `retrieval.summary_weight` and `retrieval.summary_depth_alpha` (declared but never consumed) are now fed into the retrieval pipeline. After hybrid RRF fusion, parent-directory summary cosine similarity boosts chunk scores via `score += summary_weight × sim`. Default `summary_weight = 0.0` (disabled); set to `0.3–0.5` after running `indexa summarize` to try it.
+- **`QaConfig` extended** — `summary_weight` and `summary_depth_alpha` are now forwarded from `RetrievalConfig` through both the web API (`POST /api/ask`) and the CLI (`indexa ask`).
+
+### Changed
+
+- **UX: Alt/⌘-click a folder label** in the tree to scope the search box to that folder path (fills the search input with `<path>/` and fires a search).
+- **Code simplification (round 3)** — extracted `fireJob(kind, path)` JS helper; three call sites (per-row tree actions, add-root modal, re-index-all) now share it.
+
+### Notes
+
+- Cross-encoder reranking via `fastembed-rs` (plan stage D.2) is deferred to v0.3.4 — the ONNX runtime dependency adds significant CI compile time. The `retrieval.rerank` config flag is already reserved.
+
 ## [0.3.2] — 2026-05-28
 
 ### Changed

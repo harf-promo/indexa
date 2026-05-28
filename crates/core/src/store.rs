@@ -46,6 +46,7 @@ fn row_to_summary(r: &Row) -> rusqlite::Result<SummaryRecord> {
 
 /// Map a row from the `entries` + `summary_queue` join (used by `search_paths`
 /// and `tree_level`) into a `TreeNode`.
+/// Column order: path, kind, size, file_count, chunk_count, summary_state
 fn row_to_tree_node(r: &Row) -> rusqlite::Result<TreeNode> {
     let full_path: String = r.get(0)?;
     let name = std::path::Path::new(&full_path)
@@ -57,8 +58,10 @@ fn row_to_tree_node(r: &Row) -> rusqlite::Result<TreeNode> {
         name,
         kind: r.get(1)?,
         byte_size: r.get::<_, i64>(2)?,
+        file_count: r.get::<_, i64>(3).unwrap_or(0),
+        chunk_count: r.get::<_, i64>(4).unwrap_or(0),
         child_count: 0,
-        summary_state: r.get(3)?,
+        summary_state: r.get(5)?,
     })
 }
 
@@ -730,6 +733,10 @@ impl Store {
         let pattern = format!("%{query}%");
         let mut stmt = self.conn.prepare(
             "SELECT e.path, e.kind, e.size,
+                    (SELECT COUNT(*) FROM entries c
+                     WHERE c.parent_path = e.path AND c.kind = 'file') AS file_count,
+                    (SELECT COUNT(*) FROM chunks
+                     WHERE entry_path LIKE e.path || '/%') AS chunk_count,
                     sq.state AS summary_state
                FROM entries e
                LEFT JOIN summary_queue sq ON sq.path = e.path
@@ -744,6 +751,10 @@ impl Store {
     pub fn tree_level(&self, parent_path: &str) -> Result<Vec<TreeNode>> {
         let mut stmt = self.conn.prepare(
             "SELECT e.path, e.kind, e.size,
+                    (SELECT COUNT(*) FROM entries c
+                     WHERE c.parent_path = e.path AND c.kind = 'file') AS file_count,
+                    (SELECT COUNT(*) FROM chunks
+                     WHERE entry_path LIKE e.path || '/%') AS chunk_count,
                     sq.state AS summary_state
              FROM entries e
              LEFT JOIN summary_queue sq ON sq.path = e.path
@@ -799,6 +810,42 @@ impl Store {
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(limit);
         Ok(scored)
+    }
+
+    /// Optionally boost chunk-hit scores using parent-directory summary similarity.
+    ///
+    /// When `summary_weight == 0.0` this is a fast no-op. Otherwise it runs a
+    /// summary cosine search and adds `summary_weight × summary_sim` to every
+    /// hit whose `entry_path` falls under a matched summary directory.  Results
+    /// are re-sorted after boosting.
+    pub fn boost_with_summaries(
+        &self,
+        hits: &mut [SearchHit],
+        query_vec: &[f32],
+        summary_weight: f32,
+        depth_alpha: f32,
+    ) -> Result<()> {
+        if summary_weight == 0.0 || hits.is_empty() {
+            return Ok(());
+        }
+        let summaries = self.summary_cosine_search(query_vec, 20, depth_alpha)?;
+        for hit in hits.iter_mut() {
+            // Apply the score from the best matching summary (deepest parent wins).
+            for (summary_path, sim) in &summaries {
+                if hit.entry_path == *summary_path
+                    || hit.entry_path.starts_with(&format!("{summary_path}/"))
+                {
+                    hit.rrf_score += (summary_weight as f64) * (*sim as f64);
+                    break;
+                }
+            }
+        }
+        hits.sort_by(|a, b| {
+            b.rrf_score
+                .partial_cmp(&a.rrf_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(())
     }
 
     // ── Summary queue ────────────────────────────────────────────────────────
@@ -1021,6 +1068,10 @@ pub struct TreeNode {
     pub child_count: i64,
     pub byte_size: i64,
     pub summary_state: Option<String>,
+    /// Direct-child file count (0 for files).
+    pub file_count: i64,
+    /// Total chunk count for all entries under this path (0 for files).
+    pub chunk_count: i64,
 }
 
 #[derive(Debug, Clone, Default)]

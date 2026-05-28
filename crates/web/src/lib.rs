@@ -75,6 +75,8 @@ struct TreeNodeResponse {
     child_count: i64,
     byte_size: i64,
     summary_state: Option<String>,
+    file_count: i64,
+    chunk_count: i64,
 }
 
 #[derive(Serialize)]
@@ -231,6 +233,8 @@ impl From<indexa_core::store::TreeNode> for TreeNodeResponse {
             child_count: n.child_count,
             byte_size: n.byte_size,
             summary_state: n.summary_state,
+            file_count: n.file_count,
+            chunk_count: n.chunk_count,
         }
     }
 }
@@ -601,6 +605,9 @@ async fn api_map(State(state): State<AppState>) -> Json<Vec<MapRow>> {
 async fn api_ask(State(state): State<AppState>, Json(body): Json<AskRequest>) -> Response {
     let qa_cfg = QaConfig {
         top_k: state.config.retrieval.top_k,
+        rrf_k: state.config.retrieval.rrf_k as f32,
+        summary_weight: state.config.retrieval.summary_weight,
+        summary_depth_alpha: state.config.retrieval.summary_depth_alpha,
         ..QaConfig::default()
     };
 
@@ -613,17 +620,25 @@ async fn api_ask(State(state): State<AppState>, Json(body): Json<AskRequest>) ->
     // Step 2: sync store query (hold lock only for the synchronous call, no await).
     let hits = {
         let store = state.store.lock().await;
-        match store.hybrid_search(
+        let mut hits = match store.hybrid_search(
             &body.question,
             Some(&query_vec),
             &indexa_core::config::HybridMode::Rrf,
             None,
             qa_cfg.top_k,
-            state.config.retrieval.rrf_k as f32,
+            qa_cfg.rrf_k,
         ) {
             Ok(h) => h,
             Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-        }
+        };
+        // Optional summary-boost reranking (no-op when summary_weight == 0.0).
+        let _ = store.boost_with_summaries(
+            &mut hits,
+            &query_vec,
+            qa_cfg.summary_weight,
+            qa_cfg.summary_depth_alpha,
+        );
+        hits
     }; // MutexGuard dropped here — no store reference held across awaits
 
     // Step 3: LLM synthesis (async, store lock already released).
@@ -763,6 +778,25 @@ async fn api_jobs_events(Path(id): Path<Uuid>, State(s): State<AppState>) -> imp
         .into_response()
 }
 
+/// JSON snapshot of a single job (status + last progress event) without SSE.
+async fn api_job_get(Path(id): Path<Uuid>, State(s): State<AppState>) -> impl IntoResponse {
+    let jobs = s.jobs.read().await;
+    let Some(h) = jobs.get(&id) else {
+        return err_json(StatusCode::NOT_FOUND, "job not found");
+    };
+    let status = h.status.lock().unwrap().clone();
+    let last_event = h.history.lock().unwrap().last().cloned();
+    let resp = serde_json::json!({
+        "job_id": h.id,
+        "kind": h.kind,
+        "path": h.path,
+        "started_at": h.started_at,
+        "status": status,
+        "last_event": last_event,
+    });
+    (StatusCode::OK, Json(resp)).into_response()
+}
+
 async fn api_job_delete(Path(id): Path<Uuid>, State(s): State<AppState>) -> impl IntoResponse {
     let mut jobs = s.jobs.write().await;
     if let Some(handle) = jobs.get(&id) {
@@ -884,7 +918,10 @@ async fn run_scan_phase_with_entries(
         JobEvent::Progress {
             current: n,
             total: n,
-            note: format!("{n} entries scanned"),
+            note: Some(format!("{n} entries scanned")),
+            current_path: None,
+            items_per_sec: None,
+            eta_secs: None,
         },
     );
     true
@@ -902,6 +939,7 @@ async fn run_deep_phase(
         .filter(|e| e.kind == EntryKind::File)
         .collect();
     let n_files = files.len() as u64;
+    let total_bytes: u64 = files.iter().map(|e| e.size).sum();
 
     push(
         handle,
@@ -911,9 +949,29 @@ async fn run_deep_phase(
             total: Some(n_files),
         },
     );
+    push(
+        handle,
+        JobEvent::Snapshot {
+            count: n_files,
+            bytes: total_bytes,
+        },
+    );
 
     let embed_model = state.config.embedding.model.clone();
+    let cfg = state.config.describer.clone();
+    // Build a contextual-retrieval LLM if the feature is enabled.
+    let ctx_llm: Option<OllamaLlm> = if cfg.contextual_retrieval {
+        let base_url = OllamaLlm::resolve_base_url(Some(&cfg.base_url));
+        Some(OllamaLlm::new(&base_url, &cfg.file_model))
+    } else {
+        None
+    };
+
     let mut done = 0u64;
+    // Rolling throughput: ring buffer of (instant, items_done) samples, last ~5s.
+    let mut samples: std::collections::VecDeque<(std::time::Instant, u64)> =
+        std::collections::VecDeque::with_capacity(16);
+    samples.push_back((std::time::Instant::now(), 0));
 
     for entry in &files {
         let path_str = entry.path.to_string_lossy().into_owned();
@@ -924,54 +982,118 @@ async fn run_deep_phase(
         };
         if is_current {
             done += 1;
-            continue;
-        }
+        } else {
+            let ep = entry.path.clone();
+            let extracted =
+                match tokio::task::spawn_blocking(move || indexa_parsers::registry::parse(&ep))
+                    .await
+                {
+                    Ok(Ok(e)) => e,
+                    _ => {
+                        done += 1;
+                        push(
+                            handle,
+                            JobEvent::Progress {
+                                current: done,
+                                total: n_files,
+                                note: None,
+                                current_path: Some(path_str.clone()),
+                                items_per_sec: None,
+                                eta_secs: None,
+                            },
+                        );
+                        continue;
+                    }
+                };
 
-        let ep = entry.path.clone();
-        let extracted =
-            match tokio::task::spawn_blocking(move || indexa_parsers::registry::parse(&ep)).await {
-                Ok(Ok(e)) => e,
-                _ => {
-                    done += 1;
-                    continue;
+            if !extracted.chunks.is_empty() {
+                // Build a document-level context string for contextual retrieval.
+                let doc_context: Option<String> = ctx_llm.as_ref().map(|_| {
+                    let joined: String = extracted
+                        .chunks
+                        .iter()
+                        .map(|c| c.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    joined.chars().take(4000).collect()
+                });
+
+                let mut chunk_records = Vec::with_capacity(extracted.chunks.len());
+                for chunk in &extracted.chunks {
+                    // Optionally prepend a context blurb generated by the file LLM.
+                    let embed_text =
+                        if let (Some(ref llm), Some(ref doc)) = (&ctx_llm, &doc_context) {
+                            let prompt = format!(
+                                "<document>\n{doc}\n</document>\n\n\
+                             Here is the chunk we want to situate within the whole document:\n\
+                             <chunk>\n{}\n</chunk>\n\n\
+                             Give a short succinct context (1-2 sentences) to situate this chunk \
+                             within the overall document for improved search retrieval. \
+                             Answer only with the succinct context and nothing else.",
+                                chunk.text
+                            );
+                            match llm.generate(&prompt).await {
+                                Ok(blurb) => format!("{}\n\n{}", blurb.trim(), chunk.text),
+                                Err(_) => chunk.text.clone(),
+                            }
+                        } else {
+                            chunk.text.clone()
+                        };
+
+                    let embedding = state.embedder.embed(&embed_text).await.ok();
+                    chunk_records.push(ChunkRecord {
+                        entry_path: path_str.clone(),
+                        seq: chunk.seq,
+                        heading: chunk.heading.clone(),
+                        text: chunk.text.clone(), // store original text, embed enriched
+                        language: chunk.language.clone(),
+                        embedding,
+                        embed_model: Some(embed_model.clone()),
+                    });
                 }
-            };
-
-        if extracted.chunks.is_empty() {
+                let mut store = state.store.lock().await;
+                let _ = store.upsert_chunks(&chunk_records);
+            }
             done += 1;
-            continue;
         }
 
-        let mut chunk_records = Vec::with_capacity(extracted.chunks.len());
-        for chunk in &extracted.chunks {
-            let embedding = state.embedder.embed(&chunk.text).await.ok();
-            chunk_records.push(ChunkRecord {
-                entry_path: path_str.clone(),
-                seq: chunk.seq,
-                heading: chunk.heading.clone(),
-                text: chunk.text.clone(),
-                language: chunk.language.clone(),
-                embedding,
-                embed_model: Some(embed_model.clone()),
-            });
+        // Update rolling throughput window (evict samples older than 5s).
+        let now = std::time::Instant::now();
+        let cutoff = now - std::time::Duration::from_secs(5);
+        while samples.len() > 1 && samples.front().map(|(t, _)| *t < cutoff).unwrap_or(false) {
+            samples.pop_front();
         }
+        samples.push_back((now, done));
 
-        {
-            let mut store = state.store.lock().await;
-            let _ = store.upsert_chunks(&chunk_records);
-        }
+        let (rate, eta) = if samples.len() >= 2 {
+            let (oldest_t, oldest_done) = samples.front().unwrap();
+            let elapsed = oldest_t.elapsed().as_secs_f64();
+            let r = if elapsed > 0.0 {
+                (done - oldest_done) as f64 / elapsed
+            } else {
+                0.0
+            };
+            let e = if r > 0.0 {
+                (n_files - done) as f64 / r
+            } else {
+                0.0
+            };
+            (Some(r), Some(e))
+        } else {
+            (None, None)
+        };
 
-        done += 1;
-        if done.is_multiple_of(10) || done == n_files {
-            push(
-                handle,
-                JobEvent::Progress {
-                    current: done,
-                    total: n_files,
-                    note: format!("{done}/{n_files} files embedded"),
-                },
-            );
-        }
+        push(
+            handle,
+            JobEvent::Progress {
+                current: done,
+                total: n_files,
+                note: None,
+                current_path: Some(path_str),
+                items_per_sec: rate,
+                eta_secs: eta,
+            },
+        );
     }
 
     push(
@@ -1023,8 +1145,20 @@ async fn run_summarize_phase(
         }
     };
 
+    push(
+        handle,
+        JobEvent::Snapshot {
+            count: enqueued as u64,
+            bytes: 0,
+        },
+    );
+
     let mut done = 0usize;
     let mut errors = 0usize;
+    let mut samples: std::collections::VecDeque<(std::time::Instant, u64)> =
+        std::collections::VecDeque::with_capacity(16);
+    samples.push_back((std::time::Instant::now(), 0));
+
     loop {
         let item = match job_store.next_queue_item() {
             Ok(Some(i)) => i,
@@ -1034,6 +1168,8 @@ async fn run_summarize_phase(
                 return;
             }
         };
+        let item_path = item.path.clone();
+        let llm_start = std::time::Instant::now();
         let r = process_queue_item_with_passes(
             &mut job_store,
             &describer,
@@ -1043,20 +1179,50 @@ async fn run_summarize_phase(
             passes_override,
         )
         .await;
+        let llm_secs = llm_start.elapsed().as_secs_f64();
         match r {
             Ok(()) => done += 1,
             Err(_) => errors += 1,
         }
-        if (done + errors).is_multiple_of(5) {
-            push(
-                handle,
-                JobEvent::Progress {
-                    current: (done + errors) as u64,
-                    total: enqueued as u64,
-                    note: format!("{done}/{enqueued} summaries"),
-                },
-            );
+
+        let processed = (done + errors) as u64;
+        let now = std::time::Instant::now();
+        let cutoff = now - std::time::Duration::from_secs(5);
+        while samples.len() > 1 && samples.front().map(|(t, _)| *t < cutoff).unwrap_or(false) {
+            samples.pop_front();
         }
+        samples.push_back((now, processed));
+
+        let (rate, eta) = if samples.len() >= 2 {
+            let (oldest_t, oldest_done) = samples.front().unwrap();
+            let elapsed = oldest_t.elapsed().as_secs_f64();
+            let r = if elapsed > 0.0 {
+                (processed - oldest_done) as f64 / elapsed
+            } else {
+                0.0
+            };
+            let e = if r > 0.0 {
+                (enqueued as u64 - processed) as f64 / r
+            } else {
+                0.0
+            };
+            (Some(r), Some(e))
+        } else {
+            (None, None)
+        };
+
+        let note = Some(format!("{:.1}s · {}", llm_secs, cfg.file_model));
+        push(
+            handle,
+            JobEvent::Progress {
+                current: processed,
+                total: enqueued as u64,
+                note,
+                current_path: Some(item_path),
+                items_per_sec: rate,
+                eta_secs: eta,
+            },
+        );
     }
 
     push(
@@ -1119,7 +1285,7 @@ pub async fn serve(
         .route("/api/jobs/summarize", post(api_job_summarize))
         .route("/api/jobs/index", post(api_job_index))
         .route("/api/jobs/:id/events", get(api_jobs_events))
-        .route("/api/jobs/:id", delete(api_job_delete))
+        .route("/api/jobs/:id", get(api_job_get).delete(api_job_delete))
         .route("/api/entry", delete(api_delete_entry))
         .route("/api/version", get(api_version))
         .with_state(state)
@@ -1271,14 +1437,20 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
   /* ── Jobs panel ── */
   .jobs-panel { border-bottom: 1px solid var(--border); flex-shrink: 0; font-size: 11px; max-height: 35vh; overflow-y: auto; }
   .jobs-panel-header { padding: 5px 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; font-size: 10px; }
-  .job-row { padding: 4px 14px; display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--border); }
+  .job-row { padding: 5px 14px 4px; border-bottom: 1px solid var(--border); }
   .job-row:last-child { border-bottom: none; }
+  .job-row-header { display: flex; align-items: center; gap: 6px; }
   .job-kind { color: var(--accent); width: 68px; flex-shrink: 0; }
   .job-label { flex: 1; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .job-note { color: var(--muted); font-size: 10px; white-space: nowrap; flex-shrink: 0; }
-  .job-note.done { color: var(--green); }
-  .job-note.failed { color: var(--red); }
-  .job-note.running { animation: pulse 1.5s ease-in-out infinite; }
+  .job-status { color: var(--muted); font-size: 10px; white-space: nowrap; flex-shrink: 0; }
+  .job-status.done { color: var(--green); }
+  .job-status.failed { color: var(--red); }
+  .job-status.running { animation: pulse 1.5s ease-in-out infinite; }
+  .job-progress { display: block; width: 100%; height: 3px; margin: 3px 0 2px; accent-color: var(--accent); }
+  .job-detail { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); min-height: 13px; gap: 6px; }
+  .job-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; font-family: monospace; font-size: 9px; }
+  .job-speed { white-space: nowrap; flex-shrink: 0; }
+  .job-llm-note { white-space: nowrap; flex-shrink: 0; color: var(--accent); }
 
   /* ── Settings view ── */
   .settings-view { flex: 1; overflow-y: auto; padding: 24px; display: none; }
@@ -1510,6 +1682,13 @@ async function loadTreeLevel(parentPath, container) {
   }
 }
 
+/* ── Job helpers ── */
+async function fireJob(kind, path) {
+  const r = await fetch('/api/jobs/' + kind + '?path=' + encodeURIComponent(path), { method: 'POST' });
+  const d = await r.json();
+  subscribeJob(d.job_id, path);
+}
+
 function badgeFor(state) {
   if (!state) return '';
   if (state === 'done') return '<span class="tree-badge done" title="Summarized">✓</span>';
@@ -1527,10 +1706,19 @@ function buildTreeNode(node) {
   const badge = badgeFor(node.summary_state);
   const toggle = isDir ? '<span class="tree-toggle">▸</span>' : '<span class="tree-toggle"></span>';
 
+  const countSuffix = (isDir && (node.file_count > 0 || node.chunk_count > 0))
+    ? '<span style="color:var(--muted);font-size:10px;margin-left:4px;flex-shrink:0">' +
+        (node.file_count > 0 ? node.file_count + ' files' : '') +
+        (node.file_count > 0 && node.chunk_count > 0 ? ' · ' : '') +
+        (node.chunk_count > 0 ? node.chunk_count + ' chunks' : '') +
+      '</span>'
+    : '';
+
   const row = document.createElement('div');
   row.className = 'tree-node-row' + (node.path === selectedPath ? ' selected' : '');
   row.innerHTML = toggle + '<span class="tree-icon">' + icon + '</span>' +
     '<span class="tree-label" title="' + escapeAttr(node.path) + '">' + escapeHtml(node.name) + '</span>' +
+    countSuffix +
     badge +
     '<span class="tree-row-actions">' +
     '<button data-act="scan" title="Re-scan">&#x21BB;</button>' +
@@ -1553,9 +1741,7 @@ function buildTreeNode(node) {
         } catch(err) { toast('Remove failed: ' + err.message, 'error'); }
       } else {
         try {
-          const r = await fetch('/api/jobs/' + act + '?path=' + encodeURIComponent(node.path), { method: 'POST' });
-          const d = await r.json();
-          subscribeJob(d.job_id, node.path);
+          await fireJob(act, node.path);
         } catch(err) { toast('Failed to start job: ' + err.message, 'error'); }
       }
     });
@@ -1564,6 +1750,17 @@ function buildTreeNode(node) {
   const childContainer = document.createElement('div');
   childContainer.className = 'tree-children';
   childContainer.style.display = 'none';
+
+  // Alt-click (or Option-click on mac) scopes the search to this folder.
+  row.querySelector('.tree-label').addEventListener('click', function(e) {
+    if (e.altKey || e.metaKey) {
+      e.stopPropagation();
+      const inp = document.getElementById('search-input');
+      inp.value = node.path + '/';
+      document.getElementById('search-clear').style.display = '';
+      doSearch(node.path + '/');
+    }
+  });
 
   row.addEventListener('click', function(e) {
     e.stopPropagation();
@@ -1707,10 +1904,8 @@ async function startIndexRoot() {
   const path = document.getElementById('add-root-path').value.trim();
   if (!path) { toast('Enter a path first.', 'warn'); return; }
   try {
-    const r = await fetch('/api/jobs/index?path=' + encodeURIComponent(path), { method: 'POST' });
-    const d = await r.json();
     closeAddRoot();
-    subscribeJob(d.job_id, path);
+    await fireJob('index', path);
   } catch(e) {
     toast('Failed to start indexing: ' + e.message, 'error');
   }
@@ -1718,6 +1913,47 @@ async function startIndexRoot() {
 
 /* ── Jobs panel ── */
 var activeJobs = {}; // job_id → { es, row }
+var _pendingProgress = {}; // job_id → latest progress event
+var _rafPending = false;
+
+function _drainProgress() {
+  _rafPending = false;
+  for (var jid in _pendingProgress) {
+    _applyProgress(jid, _pendingProgress[jid]);
+  }
+  _pendingProgress = {};
+}
+
+function _applyProgress(jobId, ev) {
+  var row = document.getElementById('job-row-' + jobId);
+  if (!row) return;
+  var bar = row.querySelector('.job-progress');
+  var fileEl = row.querySelector('.job-file');
+  var speedEl = row.querySelector('.job-speed');
+  var llmEl = row.querySelector('.job-llm-note');
+  var statusEl = row.querySelector('.job-status');
+  if (bar && ev.total) {
+    bar.max = ev.total;
+    bar.value = ev.current;
+  }
+  if (fileEl && ev.current_path) {
+    var parts = ev.current_path.split('/');
+    var short = parts.length > 2 ? '…/' + parts.slice(-2).join('/') : ev.current_path;
+    fileEl.textContent = short;
+    fileEl.title = ev.current_path;
+  }
+  if (speedEl) {
+    var sp = [];
+    if (ev.items_per_sec && ev.items_per_sec > 0) sp.push(Math.round(ev.items_per_sec) + ' files/s');
+    if (ev.eta_secs && ev.eta_secs > 0) {
+      var eta = ev.eta_secs < 60 ? Math.round(ev.eta_secs) + 's' : Math.round(ev.eta_secs / 60) + 'm';
+      sp.push('ETA ' + eta);
+    }
+    speedEl.textContent = sp.join(' · ');
+  }
+  if (llmEl && ev.note) llmEl.textContent = ev.note;
+  if (statusEl) statusEl.textContent = ev.current + '/' + ev.total;
+}
 
 function getOrCreateJobRow(jobId) {
   if (activeJobs[jobId]) return activeJobs[jobId].row;
@@ -1727,9 +1963,18 @@ function getOrCreateJobRow(jobId) {
   const row = document.createElement('div');
   row.className = 'job-row';
   row.id = 'job-row-' + jobId;
-  row.innerHTML = '<span class="job-kind">…</span>' +
-    '<span class="job-label">Starting…</span>' +
-    '<span class="job-note running">●</span>';
+  row.innerHTML =
+    '<div class="job-row-header">' +
+      '<span class="job-kind">…</span>' +
+      '<span class="job-label">Starting…</span>' +
+      '<span class="job-status running">●</span>' +
+    '</div>' +
+    '<progress class="job-progress" style="display:none"></progress>' +
+    '<div class="job-detail">' +
+      '<span class="job-file"></span>' +
+      '<span class="job-llm-note"></span>' +
+      '<span class="job-speed"></span>' +
+    '</div>';
   list.appendChild(row);
   activeJobs[jobId] = { row: row, es: null };
   return row;
@@ -1746,18 +1991,28 @@ function subscribeJob(jobId, path) {
     try {
       const ev = JSON.parse(e.data);
       const kindEl = row.querySelector('.job-kind');
-      const noteEl = row.querySelector('.job-note');
+      const statusEl = row.querySelector('.job-status');
+      const bar = row.querySelector('.job-progress');
       if (ev.type === 'start') {
         kindEl.textContent = ev.kind;
-        noteEl.className = 'job-note running';
-        noteEl.textContent = ev.total ? '0/' + ev.total : '…';
+        statusEl.className = 'job-status running';
+        statusEl.textContent = ev.total ? '0/' + ev.total : '…';
+      } else if (ev.type === 'snapshot') {
+        if (bar && ev.count > 0) {
+          bar.max = ev.count;
+          bar.value = 0;
+          bar.style.display = '';
+        }
+        row.querySelector('.job-file').textContent = 'Snapshotting…';
       } else if (ev.type === 'progress') {
-        noteEl.textContent = ev.current + '/' + ev.total;
+        _pendingProgress[jobId] = ev;
+        if (!_rafPending) { _rafPending = true; requestAnimationFrame(_drainProgress); }
       } else if (ev.type === 'note') {
-        noteEl.textContent = ev.msg.slice(0, 30);
+        statusEl.textContent = ev.msg.slice(0, 30);
       } else if (ev.type === 'done') {
-        noteEl.className = 'job-note done';
-        noteEl.textContent = '✓ ' + ev.summary;
+        statusEl.className = 'job-status done';
+        statusEl.textContent = '✓ ' + ev.summary;
+        if (bar) bar.style.display = 'none';
         playPing('ok');
         es.close();
         setTimeout(function() {
@@ -1766,12 +2021,13 @@ function subscribeJob(jobId, path) {
           if (!document.getElementById('jobs-list').children.length) {
             document.getElementById('jobs-panel').style.display = 'none';
           }
-          initTree(); // refresh tree to show new root
+          initTree();
           loadStats();
         }, 5000);
       } else if (ev.type === 'failed') {
-        noteEl.className = 'job-note failed';
-        noteEl.textContent = '✗ ' + ev.error.slice(0, 40);
+        statusEl.className = 'job-status failed';
+        statusEl.textContent = '✗ ' + ev.error.slice(0, 40);
+        if (bar) bar.style.display = 'none';
         playPing('err');
         es.close();
         setTimeout(function() {
@@ -1785,10 +2041,10 @@ function subscribeJob(jobId, path) {
     } catch(_) {}
   };
   es.onerror = function() {
-    const noteEl = row.querySelector('.job-note');
-    if (noteEl.className.indexOf('done') === -1 && noteEl.className.indexOf('failed') === -1) {
-      noteEl.className = 'job-note failed';
-      noteEl.textContent = 'connection lost';
+    const statusEl = row.querySelector('.job-status');
+    if (statusEl && statusEl.className.indexOf('done') === -1 && statusEl.className.indexOf('failed') === -1) {
+      statusEl.className = 'job-status failed';
+      statusEl.textContent = 'connection lost';
     }
     es.close();
   };
@@ -2215,9 +2471,7 @@ async function reindexAll() {
     if (!roots.length) { toast('No indexed roots yet.', 'warn'); return; }
     if (!confirm('Re-index ' + roots.length + ' root(s) with deep scan?')) return;
     for (const root of roots) {
-      const rj = await fetch('/api/jobs/deep?path=' + encodeURIComponent(root.path), { method: 'POST' });
-      const d = await rj.json();
-      subscribeJob(d.job_id, root.path);
+      await fireJob('deep', root.path);
     }
   } catch(e) { toast('Failed: ' + e.message, 'error'); }
 }

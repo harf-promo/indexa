@@ -21,10 +21,22 @@ pub enum JobEvent {
         path: String,
         total: Option<u64>,
     },
+    /// Emitted once after the file-list snapshot is complete, before processing begins.
+    Snapshot {
+        count: u64,
+        bytes: u64,
+    },
     Progress {
         current: u64,
         total: u64,
-        note: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current_path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        items_per_sec: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        eta_secs: Option<f64>,
     },
     Note {
         msg: String,

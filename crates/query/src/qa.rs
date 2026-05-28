@@ -30,6 +30,10 @@ pub struct QaConfig {
     pub scope: Option<String>,
     /// RRF rank constant (industry default: 60).
     pub rrf_k: f32,
+    /// Weight applied to parent-directory summary similarity boost (0.0 = disabled).
+    pub summary_weight: f32,
+    /// Depth-boost coefficient α for summary cosine search.
+    pub summary_depth_alpha: f32,
 }
 
 impl Default for QaConfig {
@@ -40,6 +44,8 @@ impl Default for QaConfig {
             mode: HybridMode::Rrf,
             scope: None,
             rrf_k: 60.0,
+            summary_weight: 0.0,
+            summary_depth_alpha: 0.15,
         }
     }
 }
@@ -64,7 +70,7 @@ pub async fn ask(
 
     // 2. Hybrid retrieval (sync — no await while holding &store).
     let scope = cfg.scope.as_deref();
-    let hits = store.hybrid_search(
+    let mut hits = store.hybrid_search(
         question,
         query_vec.as_deref(),
         &cfg.mode,
@@ -72,6 +78,16 @@ pub async fn ask(
         cfg.top_k,
         cfg.rrf_k,
     )?;
+
+    // 2b. Optional summary-boosted reranking.
+    if let Some(ref qvec) = query_vec {
+        let _ = store.boost_with_summaries(
+            &mut hits,
+            qvec,
+            cfg.summary_weight,
+            cfg.summary_depth_alpha,
+        );
+    }
 
     // 3–5. Synthesize (no store access from here on).
     synthesize_from_hits(hits, llm, question, cfg).await

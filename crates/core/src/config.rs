@@ -60,7 +60,7 @@ impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
             provider: "ollama".into(),
-            model: "nomic-embed-text".into(),
+            model: "nomic-embed-text-v1.5".into(),
             dim: 768,
             base_url: "http://localhost:11434".into(),
         }
@@ -142,7 +142,7 @@ impl Default for RetrievalConfig {
             rrf_k: 60,
             top_k: 8,
             rerank: false,
-            summary_weight: 0.5,
+            summary_weight: 0.0,
             summary_depth_alpha: 0.15,
         }
     }
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn default_config_is_valid() {
         let cfg = Config::default();
-        assert_eq!(cfg.embedding.model, "nomic-embed-text");
+        assert_eq!(cfg.embedding.model, "nomic-embed-text-v1.5");
         assert_eq!(cfg.embedding.dim, 768);
         assert_eq!(cfg.retrieval.rrf_k, 60);
         assert!(!cfg.parsers.audio.transcribe);
