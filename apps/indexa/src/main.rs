@@ -326,6 +326,8 @@ async fn cmd_ask(
         mode,
         scope,
         rrf_k: cfg.retrieval.rrf_k as f32,
+        summary_weight: cfg.retrieval.summary_weight,
+        summary_depth_alpha: cfg.retrieval.summary_depth_alpha,
         ..QaConfig::default()
     };
 
