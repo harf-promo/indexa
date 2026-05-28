@@ -219,7 +219,12 @@ fn strip_xml_tags(xml: &str) -> String {
         }
     }
 
-    result.trim().to_owned()
+    let stripped = result.trim().to_owned();
+
+    // Decode XML entities (&amp; → &, &lt; → <, etc.)
+    quick_xml::escape::unescape(&stripped)
+        .map(|c| c.into_owned())
+        .unwrap_or(stripped)
 }
 
 #[cfg(test)]
@@ -261,5 +266,28 @@ mod tests {
         assert!(result.contains("Hello"));
         assert!(result.contains("world"));
         assert!(!result.contains('<'));
+    }
+
+    #[test]
+    fn strip_xml_tags_decodes_amp_entity() {
+        let xml = "<w:t>Tom &amp; Jerry</w:t>";
+        let result = strip_xml_tags(xml);
+        assert!(result.contains("Tom & Jerry"), "got: {result}");
+        assert!(!result.contains("&amp;"), "raw entity leaked: {result}");
+    }
+
+    #[test]
+    fn strip_xml_tags_decodes_lt_gt_entities() {
+        let xml = "<w:t>x &lt; y &gt; z</w:t>";
+        let result = strip_xml_tags(xml);
+        assert!(result.contains('<'), "< not decoded: {result}");
+        assert!(result.contains('>'), "> not decoded: {result}");
+    }
+
+    #[test]
+    fn strip_xml_tags_decodes_quot_and_numeric_entities() {
+        let xml = "<w:t>&quot;hello&quot; &#39;world&#39;</w:t>";
+        let result = strip_xml_tags(xml);
+        assert!(result.contains('"'), "quote not decoded: {result}");
     }
 }

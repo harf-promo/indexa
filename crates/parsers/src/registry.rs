@@ -1,9 +1,11 @@
 //! Parser registry — routes paths to the right parser by extension/MIME.
 
 use crate::code::CodeParser;
+use crate::epub::EpubParser;
 use crate::image::ImageParser;
 use crate::media::MediaParser;
 use crate::office::OfficeParser;
+use crate::org::OrgParser;
 use crate::pdf::PdfParser;
 use crate::text::{MarkdownParser, TextParser};
 use crate::types::{Extracted, Parser};
@@ -20,6 +22,8 @@ pub fn parse(path: &Path) -> Result<Extracted> {
     let parsers: Vec<Box<dyn Parser>> = vec![
         Box::new(CodeParser),
         Box::new(PdfParser),
+        Box::new(EpubParser),
+        Box::new(OrgParser::default()),
         Box::new(ImageParser),
         Box::new(MediaParser),
         Box::new(OfficeParser),
