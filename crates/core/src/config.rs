@@ -112,6 +112,10 @@ pub struct RetrievalConfig {
     pub top_k: usize,
     /// Enable cross-encoder reranking (adds ~200ms; requires a reranker model).
     pub rerank: bool,
+    /// Weight of summary hits relative to chunk hits in RRF fusion (0.0 = disabled).
+    pub summary_weight: f32,
+    /// Depth-boost coefficient α: parent summaries score 1 + α*(max_depth - depth) higher.
+    pub summary_depth_alpha: f32,
 }
 
 impl Default for RetrievalConfig {
@@ -121,20 +125,46 @@ impl Default for RetrievalConfig {
             rrf_k: 60,
             top_k: 8,
             rerank: false,
+            summary_weight: 0.5,
+            summary_depth_alpha: 0.15,
         }
     }
 }
 
 // ── Describer (answer synthesis LLM) ─────────────────────────────────────────
 
+/// Whether to keep full chunks alongside summaries, replace them, or skip chunking.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SummaryMode {
+    /// Keep existing chunks + add summaries. Default: best answer quality.
+    #[default]
+    Augment,
+    /// Summarize then drop chunk rows — ~10× smaller DB.
+    Compress,
+    /// Skip chunking entirely; file summaries only — ~100× smaller DB.
+    SummariesOnly,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DescriberConfig {
     pub provider: String,
+    /// Model for Q&A answer synthesis.
     pub model: String,
     pub base_url: String,
     /// Enable Anthropic-style per-chunk contextual prefix at index time.
     pub contextual_retrieval: bool,
+    /// Model for per-file summarization (smaller/faster is fine).
+    pub file_model: String,
+    /// Model for directory roll-up summaries (stronger model recommended).
+    pub dir_model: String,
+    /// Storage mode for summaries.
+    pub mode: SummaryMode,
+    /// Concurrent summary worker tasks.
+    pub queue_concurrency: usize,
+    /// Max child summaries fed into a single directory roll-up prompt.
+    pub max_children_per_summary: usize,
 }
 
 impl Default for DescriberConfig {
@@ -144,6 +174,11 @@ impl Default for DescriberConfig {
             model: "gemma2:9b".into(),
             base_url: "http://localhost:11434".into(),
             contextual_retrieval: false,
+            file_model: "gemma2:2b".into(),
+            dir_model: "gemma2:9b".into(),
+            mode: SummaryMode::Augment,
+            queue_concurrency: 2,
+            max_children_per_summary: 30,
         }
     }
 }

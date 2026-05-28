@@ -60,6 +60,42 @@ pub enum Commands {
         /// Show what would be parsed/indexed without writing to the DB.
         #[arg(long)]
         dry_run: bool,
+
+        /// Summary storage mode: augment (default), compress, summaries-only.
+        #[arg(long, default_value = "augment")]
+        mode: String,
+    },
+
+    /// Generate hierarchical summaries for indexed files and directories.
+    #[command(after_help = "Examples:
+  indexa summarize ~/Documents
+  indexa summarize ~/Documents --mode compress")]
+    Summarize {
+        /// Path to summarize. Omit to summarize the entire existing index.
+        #[arg(num_args = 0..)]
+        paths: Vec<String>,
+
+        /// Summary mode: augment (default), compress, summaries-only.
+        #[arg(long, default_value = "augment")]
+        mode: String,
+    },
+
+    /// Print the summary and breadcrumb chain for a specific path.
+    #[command(after_help = "Examples:
+  indexa describe ~/Documents/taxes")]
+    Describe {
+        /// Path to describe.
+        path: String,
+    },
+
+    /// Run the background summarization worker (drains the summary queue).
+    #[command(after_help = "Examples:
+  indexa worker
+  indexa worker --concurrency 4")]
+    Worker {
+        /// Number of concurrent summarization tasks.
+        #[arg(short, long, default_value_t = 2)]
+        concurrency: usize,
     },
 
     /// Ask a question about your indexed files.
