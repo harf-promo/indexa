@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Refinement Passes save** — the two spinner inputs in Settings now load their live values from `GET /api/config` on tab open, and a "Save passes" button writes them via `POST /api/config/passes` (gated by `INDEXA_WEB_ALLOW_KEY_EDIT=1`).
 - **Map tab** — new Map tab surfaces `GET /api/map` as a compact Category / Files / Size table.
 
+- **Live SSE job progress** — "Index this folder" in the Add-Root modal now triggers a real background job (`POST /api/jobs/index`) that runs scan → deep → summarize sequentially. A running-jobs panel appears at the bottom of the sidebar and updates live via `GET /api/jobs/:id/events` (Server-Sent Events). After the job completes, the tree auto-refreshes and shows the new root. In-flight jobs survive a browser refresh (reconnected on page load via `GET /api/jobs`).
+
 #### New API endpoints
 
 - `GET /api/roots` — implicit tree roots (parent dirs of scanned paths that are not themselves entries).
@@ -32,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `POST /api/queue/retry?path=` — reset a failed queue row to pending.
 - `GET /api/config` — safe config subset (passes, cap, max_children).
 - `POST /api/config/passes` — write passes config (gated by env var).
+- `POST /api/jobs/index?path=` — start scan→deep→summarize job; returns `{job_id}`.
+- `POST /api/jobs/scan?path=` / `deep?path=` / `summarize?path=` — individual-phase jobs.
+- `GET /api/jobs` — list active jobs.
+- `GET /api/jobs/:id/events` — SSE stream of `JobEvent` messages (replays history for late subscribers).
+- `DELETE /api/jobs/:id` — cancel and remove a job.
 
 ## [0.1.0-rc1] — 2026-05-28
 

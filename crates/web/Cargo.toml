@@ -17,9 +17,11 @@ axum = { version = "0.7", features = ["json"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 directories = { workspace = true }
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
+uuid = { version = "1", features = ["v4", "serde"] }
 indexa-core = { path = "../core" }
 indexa-embed = { path = "../embed" }
 indexa-llm = { path = "../llm" }
+indexa-parsers = { path = "../parsers" }
 indexa-query = { path = "../query" }
