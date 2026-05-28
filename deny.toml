@@ -12,6 +12,9 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Unicode-DFS-2016",
+    "CC0-1.0",          # notify v6 uses CC0 for some files
+    "MPL-2.0",          # option-ext (transitive via directories)
+    "CDLA-Permissive-2.0",  # webpki-roots v1
 ]
 exceptions = []
 
