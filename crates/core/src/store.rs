@@ -306,6 +306,30 @@ impl Store {
         Ok(n as u64)
     }
 
+    /// Top-N file extensions (or bare names) in the index that have no category assigned.
+    /// Returns (extension_or_name, count) pairs sorted by count descending.
+    pub fn unknown_extensions(&self, limit: usize) -> Result<Vec<(String, u64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+               CASE
+                 WHEN instr(path, '.') > 0
+                      AND instr(replace(path, rtrim(path, replace(path, '/', '')), ''), '.') > 0
+                 THEN lower(substr(path, length(path) - length(path) + instr(path, '.')))
+                 ELSE '(no extension)'
+               END AS ext,
+               COUNT(*) AS n
+             FROM entries
+             WHERE (hint_cat IS NULL OR hint_cat = 'unknown') AND kind = 'file'
+             GROUP BY ext
+             ORDER BY n DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Summary of top-level regions: (category, entry_count, total_size_bytes).
     pub fn region_summary(&self) -> Result<Vec<RegionSummary>> {
         let mut stmt = self.conn.prepare(

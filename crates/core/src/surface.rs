@@ -1,3 +1,4 @@
+use hyperpolyglot::LanguageType;
 use mime_guess::MimeGuess;
 use std::path::Path;
 
@@ -359,38 +360,60 @@ pub fn classify_file_by_extension(path: &Path) -> Option<PathHint> {
     }
 
     // MIME-based fallback.
-    let mime = MimeGuess::from_path(path).first()?;
-    let category = match (mime.type_().as_str(), mime.subtype().as_str()) {
-        ("image", _) | ("audio", _) | ("video", _) => "media",
-        ("font", _) => "font",
-        ("text", _) => "code",
-        ("application", "pdf")
-        | ("application", "msword")
-        | ("application", "epub+zip")
-        | ("application", "vnd.oasis.opendocument.text")
-        | ("application", "vnd.oasis.opendocument.spreadsheet")
-        | ("application", "vnd.oasis.opendocument.presentation") => "documents",
-        ("application", sub)
-            if sub.starts_with("vnd.openxmlformats-officedocument")
-                || sub.starts_with("vnd.ms-") =>
-        {
-            "documents"
+    if let Some(mime) = MimeGuess::from_path(path).first() {
+        let category = match (mime.type_().as_str(), mime.subtype().as_str()) {
+            ("image", _) | ("audio", _) | ("video", _) => "media",
+            ("font", _) => "font",
+            ("text", _) => "code",
+            ("application", "pdf")
+            | ("application", "msword")
+            | ("application", "epub+zip")
+            | ("application", "vnd.oasis.opendocument.text")
+            | ("application", "vnd.oasis.opendocument.spreadsheet")
+            | ("application", "vnd.oasis.opendocument.presentation") => "documents",
+            ("application", sub)
+                if sub.starts_with("vnd.openxmlformats-officedocument")
+                    || sub.starts_with("vnd.ms-") =>
+            {
+                "documents"
+            }
+            ("application", "zip")
+            | ("application", "x-tar")
+            | ("application", "gzip")
+            | ("application", "x-bzip")
+            | ("application", "x-bzip2")
+            | ("application", "x-7z-compressed")
+            | ("application", "x-rar-compressed")
+            | ("application", "x-xz")
+            | ("application", "zstd") => "archive",
+            ("application", "json")
+            | ("application", "toml")
+            | ("application", "xml")
+            | ("application", "x-yaml") => "code",
+            ("application", "x-sqlite3") | ("application", "vnd.sqlite3") => "data",
+            _ => {
+                // No MIME match — fall through to Linguist-based detection below.
+                ""
+            }
+        };
+        if !category.is_empty() {
+            return Some(PathHint {
+                label: "file",
+                category,
+                deep_scan: DeepScanPolicy::Index,
+            });
         }
-        ("application", "zip")
-        | ("application", "x-tar")
-        | ("application", "gzip")
-        | ("application", "x-bzip")
-        | ("application", "x-bzip2")
-        | ("application", "x-7z-compressed")
-        | ("application", "x-rar-compressed")
-        | ("application", "x-xz")
-        | ("application", "zstd") => "archive",
-        ("application", "json")
-        | ("application", "toml")
-        | ("application", "xml")
-        | ("application", "x-yaml") => "code",
-        ("application", "x-sqlite3") | ("application", "vnd.sqlite3") => "data",
-        _ => return None,
+    }
+
+    // Linguist-based fallback (hyperpolyglot): covers 700+ languages by filename,
+    // extension, shebang, and content heuristics. Only reads the file for genuinely
+    // ambiguous extensions (.h, .m, .pl, etc.).
+    let lang = hyperpolyglot::detect(path).ok().flatten()?;
+    let lang_info = hyperpolyglot::Language::try_from(lang.language()).ok()?;
+    let category = match lang_info.language_type {
+        LanguageType::Programming | LanguageType::Markup => "code",
+        LanguageType::Data => "data",
+        LanguageType::Prose => "documents",
     };
     Some(PathHint {
         label: "file",

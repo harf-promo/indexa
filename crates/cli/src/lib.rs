@@ -210,8 +210,13 @@ pub enum Commands {
 
     /// Show context store statistics.
     #[command(after_help = "Examples:
-  indexa status")]
-    Status,
+  indexa status
+  indexa status --unknown")]
+    Status {
+        /// Print the top-20 file extensions that could not be classified.
+        #[arg(long)]
+        unknown: bool,
+    },
 
     /// Remove one or more paths from the context store.
     #[command(after_help = "Examples:

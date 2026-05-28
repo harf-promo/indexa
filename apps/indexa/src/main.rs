@@ -83,7 +83,7 @@ async fn main() -> Result<()> {
             embed_model,
             llm_model,
         } => cmd_serve(port, embed_model, llm_model, &cfg).await,
-        Commands::Status => cmd_status(&cfg).await,
+        Commands::Status { unknown } => cmd_status(unknown, &cfg).await,
         Commands::Rm { paths, recursive } => cmd_rm(paths, recursive).await,
     }
 }
@@ -511,7 +511,7 @@ async fn cmd_serve(
     indexa_web::serve(port, store, embedder, llm, cfg.clone()).await
 }
 
-async fn cmd_status(cfg: &Config) -> Result<()> {
+async fn cmd_status(show_unknown: bool, cfg: &Config) -> Result<()> {
     let db_path = index_db_path()?;
     if !db_path.exists() {
         println!("No index found. Run `indexa scan <path>` first.");
@@ -575,6 +575,20 @@ async fn cmd_status(cfg: &Config) -> Result<()> {
         cfg.describer.file_model,
         cfg.describer.dir_model
     );
+
+    if show_unknown {
+        println!();
+        println!("Top unclassified file extensions:");
+        match store.unknown_extensions(20) {
+            Ok(rows) if rows.is_empty() => println!("  (none — all files classified)"),
+            Ok(rows) => {
+                for (ext, n) in rows {
+                    println!("  {:>5}  {ext}", n);
+                }
+            }
+            Err(e) => println!("  (error: {e})"),
+        }
+    }
 
     Ok(())
 }
