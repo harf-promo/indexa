@@ -5,6 +5,38 @@ All notable changes to Indexa will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] — 2026-05-28
+
+### Fixed
+
+- **Stuck jobs** — The per-row ⚡ (deep) and ↻ (scan) buttons now correctly finalize their job as `done` when complete. Previously `run_deep_phase` and `run_scan_phase` terminated with only a `Note` event and never mutated `handle.status`, leaving the EventSource open and the job row stuck forever in the UI.
+- **"Snapshotting…" frozen text** — when a deep job finds zero files (e.g. all files are already current, or the path is empty), the job row now shows `"No files to process"` and clears correctly once the `done` event arrives. Previously the `.job-file` slot showed `"Snapshotting…"` with no subsequent event to overwrite it.
+- **Walk errors swallowed in `api_job_deep`** — the handler previously called `.unwrap_or_default()` on walker failures, silently running a 0-file deep phase. Now uses `walk_for_job` (same as the full pipeline) which emits a proper `failed` event on walk errors.
+- **Silent failures surfaced as warnings** — parser errors, embedding failures, and chunk-storage errors inside the deep-index loop no longer swallow silently. Each emits a `JobEvent::Warning` so the job row shows a `⚠ N warnings` badge and the warning list is accessible on hover.
+- **Anyhow error chains preserved** — `JobEvent::Failed` and HTTP error responses now use `format!("{e:#}")` (full anyhow chain) instead of `e.to_string()` (top-level message only). Summarize failures stored in `summary_queue.error` are also expanded.
+
+### Added
+
+#### Structured error reporting
+
+- **`JobEvent::Failed` enriched** — the variant now carries optional `stage` (e.g. `"walk"`, `"deep"`, `"summarize"`), `item_path` (file being processed when the failure occurred), `chain` (full anyhow cause chain), and `code` (short stable error code). All new fields are optional and backward-compatible.
+- **`JobEvent::Warning` variant** — non-fatal per-file issues are broadcast as warnings rather than discarded or aborting the job.
+- **📋 Copy report button** — failed job rows now include a copy-report button that assembles a Markdown error report (version, stage, item, error chain) and appends the last 50 lines from the log file. Rows stay visible until manually dismissed via ×.
+- **`GET /api/logs/tail?lines=N`** — returns the last N lines of the most recent `indexa.log` file (default 50, max 500).
+- **Rolling log file** — `tracing-appender` writes daily-rolling JSON log files to `<data_dir>/logs/indexa.log.YYYY-MM-DD`. The stderr layer is unchanged (human-readable format, respects `RUST_LOG`).
+- **Panic hook** — a custom `panic::set_hook` captures the panic message and a full backtrace via `tracing::error!` before re-raising, ensuring crashes land in the log file.
+
+#### Live AI output view
+
+- **`Generator::generate_stream`** — new method on the `Generator` trait that calls a callback for each token/chunk as it arrives. Default implementation falls back to single-shot (one callback at end). `OllamaLlm` overrides this with a real NDJSON stream (`"stream": true` against `/api/generate`).
+- **`JobEvent::LlmFragment` variant** — broadcast-only (not stored in job history to prevent memory bloat) with `item_path`, `model`, `stage`, and `fragment` fields. Emitted during contextual-retrieval blurb generation when `describer.contextual_retrieval = true`.
+- **✨ Live AI panel per job row** — each job row has a ✨ toggle button that expands a collapsible panel showing the model's current output streaming in real time. Output is capped at 4 KB (sliding window). The `requestAnimationFrame` batching already used for progress events applies here too.
+
+### Changed
+
+- **Failed job rows pinned until dismissed** — the previous 30-second auto-remove for failed rows is removed. Rows stay until the user clicks ×, giving time to copy the error report.
+- Broadcast channel capacity bumped from 64 to 128 to accommodate `LlmFragment` bursts.
+
 ## [0.3.3] — 2026-05-28
 
 ### Added

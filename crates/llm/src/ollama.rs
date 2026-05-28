@@ -1,5 +1,6 @@
 use crate::{ChildSummary, Describer, Generator};
 use anyhow::{Context, Result};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 /// Default generation model — users override via config.toml `[describer] model = "..."`.
@@ -71,6 +72,14 @@ struct Resp {
     response: String,
 }
 
+/// One NDJSON line from Ollama's streaming `/api/generate` response.
+#[derive(Deserialize)]
+struct StreamChunk {
+    response: String,
+    #[serde(default)]
+    done: bool,
+}
+
 #[async_trait::async_trait]
 impl Generator for OllamaLlm {
     /// Send a prompt to Ollama's `/api/generate` and return the response text.
@@ -101,6 +110,65 @@ impl Generator for OllamaLlm {
             .await
             .context("parsing Ollama generate response")?;
         Ok(parsed.response)
+    }
+
+    /// Streaming variant: uses Ollama's NDJSON stream (`"stream": true`).
+    /// Calls `on_fragment` with each token/chunk as it arrives, returns full text.
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        on_fragment: &mut (dyn FnMut(String) + Send),
+    ) -> Result<String> {
+        let url = format!("{}/api/generate", self.base_url);
+        let body = Req {
+            model: &self.model,
+            prompt,
+            stream: true,
+        };
+
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("Ollama streaming request to {url}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Ollama returned {status}: {text}");
+        }
+
+        let mut stream = resp.bytes_stream();
+        let mut full = String::new();
+        let mut buf = Vec::new();
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk.context("reading Ollama stream chunk")?;
+            buf.extend_from_slice(&bytes);
+
+            // NDJSON: each complete line is one JSON object.
+            while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                let line_bytes = buf.drain(..=pos).collect::<Vec<u8>>();
+                let line = String::from_utf8_lossy(&line_bytes);
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(sc) = serde_json::from_str::<StreamChunk>(line) {
+                    if !sc.response.is_empty() {
+                        full.push_str(&sc.response);
+                        on_fragment(sc.response); // pass owned fragment
+                    }
+                    if sc.done {
+                        return Ok(full);
+                    }
+                }
+            }
+        }
+
+        Ok(full)
     }
 }
 

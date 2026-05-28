@@ -16,15 +16,51 @@ use indexa_query::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
+use tracing_subscriber::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
+    // Determine log directory: <data_dir>/logs/ or a fallback temp path.
+    let log_dir = indexa_core::config::default_data_dir()
+        .map(|d| d.join("logs"))
+        .unwrap_or_else(|| std::env::temp_dir().join("indexa-logs"));
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "indexa.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive(tracing::Level::INFO.into());
+
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(env_filter.clone()),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(non_blocking)
+                .with_filter(env_filter),
         )
         .init();
+
+    // Panic hook: capture backtraces to the log file before crashing.
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("<unknown>");
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "<unknown location>".to_owned());
+        let bt = std::backtrace::Backtrace::force_capture();
+        tracing::error!(panic = msg, location = %location, backtrace = %bt, "indexa panicked");
+    }));
 
     let cli = Cli::parse();
 
