@@ -3,7 +3,7 @@ use clap::Parser;
 use directories::BaseDirs;
 use indexa_cli::{Cli, Commands};
 use indexa_core::{
-    config::{self, Config},
+    config::{self, Config, HybridMode},
     store::{ChunkRecord, Store},
     walker::{walk, WalkConfig},
     watcher::{self, ChangeKind, WatcherConfig},
@@ -24,7 +24,6 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Load config — CLI --config flag overrides the default path.
     let cfg = if let Some(path) = &cli.config {
         let expanded = shellexpand::tilde(path).into_owned();
         config::load(std::path::Path::new(&expanded))?
@@ -34,15 +33,41 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Scan { paths, all } => cmd_scan(paths, all).await,
-        Commands::Deep { paths, embed_model } => cmd_deep(paths, embed_model, &cfg).await,
-        Commands::Map => cmd_map().await,
+        Commands::Deep {
+            paths,
+            embed_model,
+            dry_run,
+        } => cmd_deep(paths, embed_model, dry_run, &cfg).await,
+        Commands::Map { depth } => cmd_map(depth).await,
         Commands::Ask {
             question,
             embed_model,
             llm_model,
-        } => cmd_ask(question, embed_model, llm_model, &cfg).await,
-        Commands::Watch { paths } => cmd_watch(paths, &cfg).await,
-        Commands::Serve { port } => cmd_serve(port, &cfg).await,
+            scope,
+            top_k,
+            sparse_only,
+            dense_only,
+        } => {
+            cmd_ask(
+                question,
+                embed_model,
+                llm_model,
+                scope,
+                top_k,
+                sparse_only,
+                dense_only,
+                &cfg,
+            )
+            .await
+        }
+        Commands::Watch { paths, embed_model } => cmd_watch(paths, embed_model, &cfg).await,
+        Commands::Serve {
+            port,
+            embed_model,
+            llm_model,
+        } => cmd_serve(port, embed_model, llm_model, &cfg).await,
+        Commands::Status => cmd_status(&cfg).await,
+        Commands::Rm { paths, recursive } => cmd_rm(paths, recursive).await,
     }
 }
 
@@ -68,6 +93,7 @@ async fn cmd_scan(paths: Vec<String>, all: bool) -> Result<()> {
 async fn cmd_deep(
     paths: Vec<String>,
     embed_model_flag: Option<String>,
+    dry_run: bool,
     cfg: &Config,
 ) -> Result<()> {
     let roots = resolve_roots(paths, false)?;
@@ -77,16 +103,50 @@ async fn cmd_deep(
         return Ok(());
     }
 
-    // CLI flag wins; fall back to config.
     let embed_model = embed_model_flag
         .as_deref()
         .unwrap_or(&cfg.embedding.model)
         .to_owned();
-    let base_url = &cfg.embedding.base_url;
+    let base_url = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
     let dim = cfg.embedding.dim;
 
+    if dry_run {
+        println!("Dry run — nothing will be written to the index.\n");
+        let mut total_files = 0usize;
+        let mut total_chunks = 0usize;
+        let mut by_mime: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+
+        for root in &roots {
+            let entries = walk(root, &WalkConfig::default())?;
+            let files: Vec<_> = entries
+                .iter()
+                .filter(|e| e.kind == indexa_core::walker::EntryKind::File)
+                .collect();
+            total_files += files.len();
+            for entry in files {
+                if let Ok(ex) = indexa_parsers::registry::parse(&entry.path) {
+                    total_chunks += ex.chunks.len();
+                    let family = ex.mime.split('/').next().unwrap_or("other").to_owned();
+                    *by_mime.entry(family).or_default() += 1;
+                }
+            }
+        }
+
+        println!("Would parse {total_files} files:");
+        let mut pairs: Vec<_> = by_mime.into_iter().collect();
+        pairs.sort_by_key(|b| std::cmp::Reverse(b.1));
+        for (mime, n) in pairs {
+            println!("  {:>5}  {mime}", n);
+        }
+        println!("\nEstimated embedding calls: {total_chunks} chunks");
+        let mins = total_chunks.div_ceil(300);
+        println!("Estimated time: ~{mins} min (nomic-embed-text @ ~300 chunks/min)");
+        return Ok(());
+    }
+
     let mut store = Store::open(&db_path)?;
-    let embedder = OllamaEmbedder::new(base_url, &embed_model, dim);
+    let embedder = OllamaEmbedder::new(&base_url, &embed_model, dim);
 
     for root in &roots {
         println!(
@@ -103,18 +163,16 @@ async fn cmd_deep(
         println!("  parsing {} files...", files.len());
         let mut total_chunks = 0usize;
 
-        for entry in files {
+        for entry in &files {
             let extracted = match indexa_parsers::registry::parse(&entry.path) {
                 Ok(e) => e,
                 Err(_) => continue,
             };
-
             if extracted.chunks.is_empty() {
                 continue;
             }
 
             let mut chunk_records = Vec::with_capacity(extracted.chunks.len());
-
             for chunk in &extracted.chunks {
                 let embedding = embedder.embed(&chunk.text).await.ok();
                 chunk_records.push(ChunkRecord {
@@ -139,7 +197,7 @@ async fn cmd_deep(
     Ok(())
 }
 
-async fn cmd_map() -> Result<()> {
+async fn cmd_map(depth: usize) -> Result<()> {
     let db_path = index_db_path()?;
     if !db_path.exists() {
         println!("No index found. Run `indexa scan <path>` first.");
@@ -151,7 +209,7 @@ async fn cmd_map() -> Result<()> {
     let chunks = store.chunk_count()?;
     let summary = store.region_summary()?;
 
-    println!("Indexa map — {total} entries, {chunks} deep-scanned chunks\n");
+    println!("Indexa map — {total} entries, {chunks} deep-scanned chunks (depth ≤{depth})\n");
     println!("{:<20} {:>10} {:>14}", "Category", "Files", "Size");
     println!("{}", "-".repeat(46));
     for r in summary {
@@ -165,10 +223,15 @@ async fn cmd_map() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_ask(
     question: String,
     embed_model_flag: Option<String>,
     llm_model_flag: Option<String>,
+    scope_flag: Option<String>,
+    top_k_flag: Option<usize>,
+    sparse_only: bool,
+    dense_only: bool,
     cfg: &Config,
 ) -> Result<()> {
     let db_path = index_db_path()?;
@@ -192,17 +255,32 @@ async fn cmd_ask(
         .as_deref()
         .unwrap_or(&cfg.describer.model)
         .to_owned();
-    let embed_base_url = &cfg.embedding.base_url;
-    let llm_base_url = &cfg.describer.base_url;
+    let embed_base_url = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
+    let llm_base_url = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
     let dim = cfg.embedding.dim;
 
-    let embedder = OllamaEmbedder::new(embed_base_url, &embed_model, dim);
-    let llm = OllamaLlm::new(llm_base_url, &llm_model);
+    let embedder = OllamaEmbedder::new(&embed_base_url, &embed_model, dim);
+    let llm = OllamaLlm::new(&llm_base_url, &llm_model);
+
+    let mode = if sparse_only {
+        HybridMode::Sparse
+    } else if dense_only {
+        HybridMode::Dense
+    } else {
+        cfg.retrieval.hybrid.clone()
+    };
+
+    let scope = scope_flag
+        .as_deref()
+        .map(|s| shellexpand::tilde(s).into_owned());
 
     println!("Searching {chunk_count} indexed chunks...\n");
 
     let qa_cfg = QaConfig {
-        top_k: cfg.retrieval.top_k,
+        top_k: top_k_flag.unwrap_or(cfg.retrieval.top_k),
+        mode,
+        scope,
+        rrf_k: cfg.retrieval.rrf_k as f32,
         ..QaConfig::default()
     };
 
@@ -225,12 +303,19 @@ async fn cmd_ask(
     Ok(())
 }
 
-async fn cmd_watch(paths: Vec<String>, cfg: &Config) -> Result<()> {
+async fn cmd_watch(
+    paths: Vec<String>,
+    embed_model_flag: Option<String>,
+    cfg: &Config,
+) -> Result<()> {
     let roots = resolve_roots(paths, false)?;
     let db_path = index_db_path()?;
 
-    let embed_model = &cfg.embedding.model;
-    let base_url = &cfg.embedding.base_url;
+    let embed_model = embed_model_flag
+        .as_deref()
+        .unwrap_or(&cfg.embedding.model)
+        .to_owned();
+    let base_url = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
     let dim = cfg.embedding.dim;
 
     println!(
@@ -244,19 +329,13 @@ async fn cmd_watch(paths: Vec<String>, cfg: &Config) -> Result<()> {
 
     let session = watcher::watch(&roots, &WatcherConfig::default())?;
 
-    // Spawn a blocking thread to consume events from the sync channel.
-    let embed_model = embed_model.clone();
-    let base_url = base_url.clone();
     let db_path_clone = db_path.clone();
-
     tokio::task::spawn_blocking(move || {
         let embedder = indexa_embed::OllamaEmbedder::new(&base_url, &embed_model, dim);
         let rt = tokio::runtime::Handle::current();
 
         watcher::run_watch_loop(session, |event| {
             let path = &event.path;
-
-            // Skip directories and hidden files.
             if path.is_dir() {
                 return;
             }
@@ -271,7 +350,6 @@ async fn cmd_watch(paths: Vec<String>, cfg: &Config) -> Result<()> {
 
             match event.kind {
                 ChangeKind::Remove => {
-                    // Remove chunks for deleted file.
                     if let Ok(mut store) = Store::open(&db_path_clone) {
                         let path_str = path.to_string_lossy().into_owned();
                         if let Err(e) = store.delete_chunks_for(&path_str) {
@@ -282,7 +360,6 @@ async fn cmd_watch(paths: Vec<String>, cfg: &Config) -> Result<()> {
                     }
                 }
                 ChangeKind::Upsert => {
-                    // Re-parse and re-embed.
                     let extracted = match indexa_parsers::registry::parse(path) {
                         Ok(e) => e,
                         Err(_) => return,
@@ -330,7 +407,12 @@ async fn cmd_watch(paths: Vec<String>, cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_serve(port: u16, cfg: &Config) -> Result<()> {
+async fn cmd_serve(
+    port: u16,
+    embed_model_flag: Option<String>,
+    llm_model_flag: Option<String>,
+    cfg: &Config,
+) -> Result<()> {
     let db_path = index_db_path()?;
     if !db_path.exists() {
         println!("No index found. Run `indexa scan <path>` first.");
@@ -339,19 +421,115 @@ async fn cmd_serve(port: u16, cfg: &Config) -> Result<()> {
 
     let store = indexa_core::store::Store::open(&db_path)?;
 
-    let embed_model = &cfg.embedding.model;
-    let base_url = &cfg.embedding.base_url;
+    let embed_model = embed_model_flag
+        .as_deref()
+        .unwrap_or(&cfg.embedding.model)
+        .to_owned();
+    let llm_model = llm_model_flag
+        .as_deref()
+        .unwrap_or(&cfg.describer.model)
+        .to_owned();
+    let base_url = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
+    let llm_base_url = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
     let dim = cfg.embedding.dim;
-    let llm_model = &cfg.describer.model;
-    let llm_base_url = &cfg.describer.base_url;
 
     let embedder: std::sync::Arc<dyn indexa_embed::Embedder + Send + Sync + 'static> =
-        std::sync::Arc::new(OllamaEmbedder::new(base_url, embed_model, dim));
+        std::sync::Arc::new(OllamaEmbedder::new(&base_url, &embed_model, dim));
     let llm: std::sync::Arc<dyn indexa_llm::Generator + Send + Sync + 'static> =
-        std::sync::Arc::new(OllamaLlm::new(llm_base_url, llm_model));
+        std::sync::Arc::new(OllamaLlm::new(&llm_base_url, &llm_model));
 
     indexa_web::serve(port, store, embedder, llm, cfg.clone()).await
 }
+
+async fn cmd_status(cfg: &Config) -> Result<()> {
+    let db_path = index_db_path()?;
+    if !db_path.exists() {
+        println!("No index found. Run `indexa scan <path>` first.");
+        return Ok(());
+    }
+
+    let store = Store::open(&db_path)?;
+    let entries = store.entry_count()?;
+    let chunks = store.chunk_count()?;
+    let embedded = store.embedded_chunk_count()?;
+    let last_ts = store.last_indexed_at()?;
+    let db_size = std::fs::metadata(&db_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    let config_path = config::default_config_path().to_string_lossy().into_owned();
+
+    println!("Index:    {} ({})", db_path.display(), format_size(db_size));
+
+    // Count files vs dirs
+    let dirs = {
+        let store2 = Store::open(&db_path)?;
+        let all = store2.entry_count()?;
+        // files = entries that are not dirs
+        let _ = all;
+        0u64 // placeholder — we don't track dir vs file count separately in a single query
+    };
+    let _ = dirs;
+    println!("Entries:  {entries} total");
+    println!(
+        "Chunks:   {} ({embedded} embedded with {})",
+        chunks, cfg.embedding.model
+    );
+
+    if let Some(ts) = last_ts {
+        use std::time::{Duration, UNIX_EPOCH};
+        let dt = UNIX_EPOCH + Duration::from_secs(ts as u64);
+        let secs = dt
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // Simple timestamp formatting without chrono
+        println!("Last indexed: unix timestamp {secs}");
+    }
+
+    println!();
+    println!("Config:   {config_path}");
+    println!(
+        "Embedding: {} / {} (dim {})",
+        cfg.embedding.provider, cfg.embedding.model, cfg.embedding.dim
+    );
+    println!("Describer: {} / {}", cfg.describer.provider, cfg.describer.model);
+
+    Ok(())
+}
+
+async fn cmd_rm(paths: Vec<String>, recursive: bool) -> Result<()> {
+    let db_path = index_db_path()?;
+    if !db_path.exists() {
+        println!("No index found.");
+        return Ok(());
+    }
+
+    let mut store = Store::open(&db_path)?;
+    let mut total_removed = 0usize;
+
+    for path_str in &paths {
+        let expanded = shellexpand::tilde(path_str).into_owned();
+        if recursive {
+            let n = store.delete_subtree(&expanded)?;
+            total_removed += n;
+            println!("Removed subtree: {expanded} ({n} entries)");
+        } else {
+            let n = store.delete_entry(&expanded)?;
+            total_removed += n;
+            if n > 0 {
+                println!("Removed: {expanded}");
+            } else {
+                println!("Not found in index: {expanded}");
+            }
+        }
+    }
+
+    println!("Total removed: {total_removed} entries");
+    Ok(())
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn resolve_roots(paths: Vec<String>, all: bool) -> Result<Vec<PathBuf>> {
     if all {

@@ -119,7 +119,14 @@ async fn api_ask(State(state): State<AppState>, Json(body): Json<AskRequest>) ->
     // Step 2: sync store query (hold lock only for the synchronous call, no await).
     let hits = {
         let store = state.store.lock().await;
-        match store.hybrid_search(&body.question, Some(&query_vec), qa_cfg.top_k) {
+        match store.hybrid_search(
+            &body.question,
+            Some(&query_vec),
+            &indexa_core::config::HybridMode::Rrf,
+            None,
+            qa_cfg.top_k,
+            state.config.retrieval.rrf_k as f32,
+        ) {
             Ok(h) => h,
             Err(e) => {
                 return (
@@ -268,7 +275,7 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
       </div>
     </div>
     <div class="input-bar">
-      <input type="text" id="q" placeholder="Ask a question about your files&hellip;" autocomplete="off">
+      <input type="text" id="q" placeholder="Ask a question about your files&hellip; (⌘K)" autocomplete="off">
       <button id="send">Ask</button>
     </div>
   </main>
@@ -353,6 +360,13 @@ async function doAsk() {
 
 sendBtn.addEventListener('click', doAsk);
 qInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') doAsk(); });
+document.addEventListener('keydown', function(e) {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+    e.preventDefault();
+    qInput.focus();
+    qInput.select();
+  }
+});
 
 loadStats();
 loadMap();

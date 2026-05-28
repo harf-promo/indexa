@@ -34,11 +34,20 @@ impl OpenAICompatLlm {
         }
     }
 
+    /// Resolve OpenAI base URL: caller-supplied > `OPENAI_BASE_URL` env > default.
+    pub fn resolve_base_url(cfg_url: Option<&str>) -> String {
+        cfg_url
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
+            .unwrap_or_else(|| OPENAI_BASE.to_string())
+    }
+
     /// Create using `OPENAI_API_KEY` for the OpenAI cloud API.
     pub fn from_env(model: impl Into<String>) -> Result<Self> {
         let api_key = std::env::var("OPENAI_API_KEY")
             .context("OPENAI_API_KEY not set — required for OpenAI LLM")?;
-        Ok(Self::new(OPENAI_BASE, model, api_key))
+        let base_url = Self::resolve_base_url(None);
+        Ok(Self::new(base_url, model, api_key))
     }
 
     /// Create for a local llama.cpp server (no API key needed).

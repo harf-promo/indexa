@@ -1,10 +1,12 @@
+use crate::config::HybridMode;
 use crate::walker::{Entry, EntryKind};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct Store {
     conn: Connection,
+    db_path: PathBuf,
 }
 
 impl Store {
@@ -16,7 +18,7 @@ impl Store {
         }
         let conn = Connection::open(path)
             .with_context(|| format!("opening index at {}", path.display()))?;
-        let store = Self { conn };
+        let store = Self { conn, db_path: path.to_path_buf() };
         store.init_schema()?;
         Ok(store)
     }
@@ -24,9 +26,14 @@ impl Store {
     /// Open an in-memory database (useful for tests).
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let store = Self { conn };
+        let store = Self { conn, db_path: PathBuf::from(":memory:") };
         store.init_schema()?;
         Ok(store)
+    }
+
+    /// Path to the on-disk database file.
+    pub fn db_path(&self) -> &Path {
+        &self.db_path
     }
 
     fn init_schema(&self) -> Result<()> {
@@ -201,6 +208,55 @@ impl Store {
         Ok(())
     }
 
+    /// Remove a single entry (and its chunks) from the index by exact path.
+    pub fn delete_entry(&mut self, path: &str) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM chunks_fts WHERE entry_path = ?1", params![path])?;
+        tx.execute("DELETE FROM chunks WHERE entry_path = ?1", params![path])?;
+        let n = tx.execute("DELETE FROM entries WHERE path = ?1", params![path])?;
+        tx.commit()?;
+        Ok(n)
+    }
+
+    /// Remove all entries whose path starts with `prefix` (e.g. a whole directory subtree).
+    /// Returns the number of `entries` rows deleted.
+    pub fn delete_subtree(&mut self, prefix: &str) -> Result<usize> {
+        let pattern = format!("{prefix}%");
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM chunks_fts WHERE entry_path LIKE ?1",
+            params![pattern],
+        )?;
+        tx.execute(
+            "DELETE FROM chunks WHERE entry_path LIKE ?1",
+            params![pattern],
+        )?;
+        let n = tx.execute(
+            "DELETE FROM entries WHERE path LIKE ?1 OR parent_path LIKE ?1",
+            params![pattern],
+        )?;
+        tx.commit()?;
+        Ok(n)
+    }
+
+    /// Count of chunks that have an embedding stored.
+    pub fn embedded_chunk_count(&self) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// Unix timestamp of the most recently indexed chunk, if any.
+    pub fn last_indexed_at(&self) -> Result<Option<i64>> {
+        let ts: Option<i64> = self
+            .conn
+            .query_row("SELECT MAX(indexed_at) FROM chunks", [], |r| r.get(0))?;
+        Ok(ts)
+    }
+
     /// Count of indexed chunks.
     pub fn chunk_count(&self) -> Result<u64> {
         let n: i64 = self
@@ -229,40 +285,74 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Hybrid search: FTS5 BM25 + embedding cosine similarity, fused with RRF k=60.
-    /// `query_text` is used for FTS5. `query_embedding` (optional) adds vector similarity.
-    /// Returns up to `limit` results sorted by RRF score descending.
+    /// Hybrid search: FTS5 BM25 + embedding cosine similarity, fused with RRF.
+    ///
+    /// - `mode` selects which retrievers run (Rrf = both, Sparse = FTS only, Dense = cosine only)
+    /// - `scope` optionally filters results to paths starting with the given prefix
+    /// - `rrf_k` is the RRF rank constant (60 is the industry default)
     pub fn hybrid_search(
         &self,
         query_text: &str,
         query_embedding: Option<&[f32]>,
+        mode: &HybridMode,
+        scope: Option<&str>,
         limit: usize,
+        rrf_k: f32,
     ) -> Result<Vec<SearchHit>> {
-        const RRF_K: f64 = 60.0;
+        let rrf_k = rrf_k as f64;
 
         // ── FTS5 keyword retrieval ────────────────────────────────────────────
-        // Sanitize: wrap in quotes so FTS5 treats the whole query as a phrase,
-        // avoiding syntax errors from punctuation in natural-language questions.
-        let fts_query = fts5_quote(query_text);
-        let fts_candidates = {
-            let mut stmt = self.conn.prepare(
-                "SELECT CAST(chunk_id AS INTEGER), entry_path, bm25(chunks_fts) AS score
-                 FROM chunks_fts
-                 WHERE chunks_fts MATCH ?1
-                 ORDER BY score
-                 LIMIT 100",
-            )?;
-            let rows = stmt.query_map(params![fts_query], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-            })?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        let fts_candidates: Vec<(i64, String)> = match mode {
+            HybridMode::Dense => Vec::new(),
+            HybridMode::Weighted => anyhow::bail!("weighted mode not yet implemented; use rrf"),
+            _ => {
+                let fts_query = fts5_quote(query_text);
+                let (sql, scope_param) = if let Some(s) = scope {
+                    (
+                        "SELECT CAST(chunk_id AS INTEGER), entry_path, bm25(chunks_fts) AS score
+                         FROM chunks_fts
+                         WHERE chunks_fts MATCH ?1 AND entry_path LIKE ?2
+                         ORDER BY score LIMIT 100"
+                            .to_string(),
+                        Some(format!("{s}%")),
+                    )
+                } else {
+                    (
+                        "SELECT CAST(chunk_id AS INTEGER), entry_path, bm25(chunks_fts) AS score
+                         FROM chunks_fts
+                         WHERE chunks_fts MATCH ?1
+                         ORDER BY score LIMIT 100"
+                            .to_string(),
+                        None,
+                    )
+                };
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows: Vec<(i64, String)> = if let Some(ref sp) = scope_param {
+                    stmt.query_map(params![fts_query, sp], |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                } else {
+                    stmt.query_map(params![fts_query], |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                };
+                rows
+            }
         };
 
         // ── Dense embedding retrieval ────────────────────────────────────────
-        let dense_candidates: Vec<(i64, String)> = if let Some(qvec) = query_embedding {
-            self.cosine_search(qvec, 100)?
-        } else {
-            Vec::new()
+        let dense_candidates: Vec<(i64, String)> = match mode {
+            HybridMode::Sparse => Vec::new(),
+            HybridMode::Weighted => Vec::new(), // bailed above
+            _ => {
+                if let Some(qvec) = query_embedding {
+                    self.cosine_search(qvec, 100, scope)?
+                } else {
+                    Vec::new()
+                }
+            }
         };
 
         // ── RRF fusion ────────────────────────────────────────────────────────
@@ -271,11 +361,11 @@ impl Store {
         let mut id_to_path: HashMap<i64, String> = HashMap::new();
 
         for (rank, (id, path)) in fts_candidates.iter().enumerate() {
-            *scores.entry(*id).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
+            *scores.entry(*id).or_default() += 1.0 / (rrf_k + rank as f64 + 1.0);
             id_to_path.entry(*id).or_insert_with(|| path.clone());
         }
         for (rank, (id, path)) in dense_candidates.iter().enumerate() {
-            *scores.entry(*id).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
+            *scores.entry(*id).or_default() += 1.0 / (rrf_k + rank as f64 + 1.0);
             id_to_path.entry(*id).or_insert_with(|| path.clone());
         }
 
@@ -307,13 +397,26 @@ impl Store {
 
     /// Brute-force cosine similarity over all stored embeddings.
     /// Returns (chunk_id, entry_path) sorted by descending similarity.
-    fn cosine_search(&self, query: &[f32], limit: usize) -> Result<Vec<(i64, String)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, entry_path, embedding FROM chunks WHERE embedding IS NOT NULL")?;
+    fn cosine_search(
+        &self,
+        query: &[f32],
+        limit: usize,
+        scope: Option<&str>,
+    ) -> Result<Vec<(i64, String)>> {
+        let sql = if scope.is_some() {
+            "SELECT id, entry_path, embedding FROM chunks WHERE embedding IS NOT NULL AND entry_path LIKE ?1"
+        } else {
+            "SELECT id, entry_path, embedding FROM chunks WHERE embedding IS NOT NULL"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
 
         let mut scored: Vec<(i64, String, f32)> = Vec::new();
-        let mut rows = stmt.query([])?;
+        let scope_pattern = scope.map(|s| format!("{s}%"));
+        let mut rows = if let Some(ref p) = scope_pattern {
+            stmt.query(params![p])?
+        } else {
+            stmt.query([])?
+        };
 
         while let Some(row) = rows.next()? {
             let id: i64 = row.get(0)?;
@@ -466,7 +569,9 @@ mod tests {
         store.upsert_chunks(&chunks).unwrap();
         assert_eq!(store.chunk_count().unwrap(), 2);
 
-        let hits = store.hybrid_search("machine learning", None, 10).unwrap();
+        let hits = store
+            .hybrid_search("machine learning", None, &HybridMode::Rrf, None, 10, 60.0)
+            .unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].text.contains("machine learning"));
     }
@@ -482,7 +587,9 @@ mod tests {
         store.upsert_chunks(&[c1, c2]).unwrap();
 
         let query_vec = vec![1.0_f32, 0.0, 0.0];
-        let hits = store.hybrid_search("cats", Some(&query_vec), 10).unwrap();
+        let hits = store
+            .hybrid_search("cats", Some(&query_vec), &HybridMode::Rrf, None, 10, 60.0)
+            .unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].entry_path.contains("/a.md"));
     }

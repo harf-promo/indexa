@@ -1,4 +1,5 @@
 use anyhow::Result;
+use indexa_core::config::HybridMode;
 use indexa_core::store::{SearchHit, Store};
 use indexa_embed::Embedder;
 use indexa_llm::Generator;
@@ -23,6 +24,12 @@ pub struct QaConfig {
     pub top_k: usize,
     /// Max characters of context to include in the LLM prompt.
     pub context_budget: usize,
+    /// Retrieval mode (RRF / sparse / dense).
+    pub mode: HybridMode,
+    /// Limit search to paths starting with this prefix (tilde-expanded).
+    pub scope: Option<String>,
+    /// RRF rank constant (industry default: 60).
+    pub rrf_k: f32,
 }
 
 impl Default for QaConfig {
@@ -30,6 +37,9 @@ impl Default for QaConfig {
         Self {
             top_k: 8,
             context_budget: 4000,
+            mode: HybridMode::Rrf,
+            scope: None,
+            rrf_k: 60.0,
         }
     }
 }
@@ -46,11 +56,22 @@ pub async fn ask(
     question: &str,
     cfg: &QaConfig,
 ) -> Result<Answer> {
-    // 1. Embed the question.
-    let query_vec = embedder.embed(question).await?;
+    // 1. Embed the question (skip if sparse-only).
+    let query_vec = match cfg.mode {
+        HybridMode::Sparse => None,
+        _ => Some(embedder.embed(question).await?),
+    };
 
     // 2. Hybrid retrieval (sync — no await while holding &store).
-    let hits = store.hybrid_search(question, Some(&query_vec), cfg.top_k)?;
+    let scope = cfg.scope.as_deref();
+    let hits = store.hybrid_search(
+        question,
+        query_vec.as_deref(),
+        &cfg.mode,
+        scope,
+        cfg.top_k,
+        cfg.rrf_k,
+    )?;
 
     // 3–5. Synthesize (no store access from here on).
     synthesize_from_hits(hits, llm, question, cfg).await
@@ -89,7 +110,6 @@ fn pack_context(hits: &[SearchHit], budget: usize) -> (String, Vec<SourceCitatio
         let chunk = format!("{}{}\n\n", header, hit.text);
 
         if chars_used + chunk.len() > budget {
-            // Include a truncated version if there's still some budget.
             let remaining = budget.saturating_sub(chars_used);
             if remaining > header.len() + 40 {
                 let truncated = &chunk[..remaining];
@@ -143,7 +163,7 @@ mod tests {
             .collect();
 
         let (ctx, sources) = pack_context(&hits, 2000);
-        assert!(ctx.len() <= 2100); // slight slack for headers
+        assert!(ctx.len() <= 2100);
         assert!(!sources.is_empty());
     }
 

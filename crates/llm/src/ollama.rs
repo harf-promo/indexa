@@ -3,7 +3,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Default generation model — users override via config.toml `[describer] model = "..."`.
-pub const DEFAULT_MODEL: &str = "qwen2.5:14b";
+/// gemma2:9b (Google, Apache-2.0) — strong on summarization/RAG, ~5GB download.
+pub const DEFAULT_MODEL: &str = "gemma2:9b";
+
+const DEFAULT_BASE: &str = "http://localhost:11434";
 
 pub struct OllamaLlm {
     pub(crate) base_url: String,
@@ -20,8 +23,16 @@ impl OllamaLlm {
         }
     }
 
+    /// Resolve the Ollama base URL: caller-supplied > `OLLAMA_HOST` env > default.
+    pub fn resolve_base_url(cfg_url: Option<&str>) -> String {
+        cfg_url
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("OLLAMA_HOST").ok())
+            .unwrap_or_else(|| DEFAULT_BASE.to_string())
+    }
+
     pub fn default_local() -> Self {
-        Self::new("http://localhost:11434", DEFAULT_MODEL)
+        Self::new(Self::resolve_base_url(None), DEFAULT_MODEL)
     }
 }
 

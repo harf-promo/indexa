@@ -89,7 +89,57 @@ static HINTS: &[(Predicate, PathHint)] = &[
             deep_scan: DeepScanPolicy::Skip,
         },
     ),
-    // ── System / app data — structure only ───────────────────────────────
+    // ── System / virtual filesystems — skip ──────────────────────────────
+    (
+        |p| {
+            let s = p.to_str().unwrap_or("");
+            s == "/proc" || s == "/sys" || s == "/dev" || s == "/run" || s == "/tmp"
+        },
+        PathHint {
+            label: "Virtual filesystem",
+            category: "system",
+            deep_scan: DeepScanPolicy::Skip,
+        },
+    ),
+    // ── Linux XDG cache + snap/flatpak — skip ─────────────────────────────
+    (
+        |p| home_subdir(p, ".cache"),
+        PathHint {
+            label: "User cache",
+            category: "cache",
+            deep_scan: DeepScanPolicy::Skip,
+        },
+    ),
+    (
+        |p| home_subdir(p, "snap"),
+        PathHint {
+            label: "Snap packages",
+            category: "apps",
+            deep_scan: DeepScanPolicy::Skip,
+        },
+    ),
+    (
+        |p| {
+            // ~/.var/app is the Flatpak per-app data directory
+            p.to_str()
+                .is_some_and(|s| s.contains("/.var/app"))
+        },
+        PathHint {
+            label: "Flatpak app data",
+            category: "apps",
+            deep_scan: DeepScanPolicy::Skip,
+        },
+    ),
+    // ── Linux XDG config — structure only ─────────────────────────────────
+    (
+        |p| home_subdir(p, ".config"),
+        PathHint {
+            label: "User config files",
+            category: "config",
+            deep_scan: DeepScanPolicy::StructureOnly,
+        },
+    ),
+    // ── macOS system data ──────────────────────────────────────────────────
     (
         |p| path_contains(p, "Library/Caches"),
         PathHint {
@@ -121,7 +171,7 @@ static HINTS: &[(Predicate, PathHint)] = &[
                 || p.to_str().is_some_and(|s| {
                     s.ends_with("/Applications")
                         && p.parent()
-                            .is_some_and(|par| par.to_str().is_some_and(|ps| ps == dirs_home()))
+                            .is_some_and(|par| par.to_str() == Some(&dirs_home()))
                 })
         },
         PathHint {
@@ -130,7 +180,32 @@ static HINTS: &[(Predicate, PathHint)] = &[
             deep_scan: DeepScanPolicy::StructureOnly,
         },
     ),
-    // ── Code projects ─────────────────────────────────────────────────────
+    // ── Code projects — manifest-based fingerprints ───────────────────────
+    // These run BEFORE the generic .git matcher so the manifest label wins.
+    (
+        has_cargo_sibling,
+        PathHint {
+            label: "Rust project",
+            category: "code",
+            deep_scan: DeepScanPolicy::Index,
+        },
+    ),
+    (
+        has_pkg_json_sibling,
+        PathHint {
+            label: "JavaScript/TypeScript project",
+            category: "code",
+            deep_scan: DeepScanPolicy::Index,
+        },
+    ),
+    (
+        has_pyproject_sibling,
+        PathHint {
+            label: "Python project",
+            category: "code",
+            deep_scan: DeepScanPolicy::Index,
+        },
+    ),
     (
         |p| p.join(".git").is_dir(),
         PathHint {
@@ -218,6 +293,8 @@ static HINTS: &[(Predicate, PathHint)] = &[
     ),
 ];
 
+// ── Predicate helpers ─────────────────────────────────────────────────────────
+
 fn ends_with(path: &Path, segment: &str) -> bool {
     path.file_name().is_some_and(|n| n == segment)
 }
@@ -226,9 +303,10 @@ fn path_contains(path: &Path, fragment: &str) -> bool {
     path.to_str().is_some_and(|s| s.contains(fragment))
 }
 
-fn dirs_home() -> &'static str {
-    // Used only in a closure; returns empty string as fallback.
-    ""
+fn dirs_home() -> String {
+    directories::BaseDirs::new()
+        .map(|b| b.home_dir().to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn home_subdir(path: &Path, name: &str) -> bool {
@@ -237,6 +315,23 @@ fn home_subdir(path: &Path, name: &str) -> bool {
     } else {
         false
     }
+}
+
+// Each manifest gets its own fn because `Predicate = fn(&Path)` cannot capture.
+fn has_sibling(p: &Path, name: &str) -> bool {
+    p.parent().is_some_and(|par| par.join(name).exists())
+}
+
+fn has_cargo_sibling(p: &Path) -> bool {
+    has_sibling(p, "Cargo.toml")
+}
+
+fn has_pkg_json_sibling(p: &Path) -> bool {
+    has_sibling(p, "package.json")
+}
+
+fn has_pyproject_sibling(p: &Path) -> bool {
+    has_sibling(p, "pyproject.toml") || has_sibling(p, "setup.py")
 }
 
 #[cfg(test)]
@@ -264,5 +359,37 @@ mod tests {
         let hint = classify(dir.path()).unwrap();
         assert_eq!(hint.deep_scan, DeepScanPolicy::Index);
         assert_eq!(hint.category, "code");
+    }
+
+    #[test]
+    fn rust_project_manifest_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
+        // classify checks the *parent* of the directory — so we need a subdir
+        let subdir = dir.path().join("src");
+        std::fs::create_dir(&subdir).unwrap();
+        let hint = classify(&subdir);
+        assert!(hint.is_some());
+        assert_eq!(hint.unwrap().label, "Rust project");
+    }
+
+    #[test]
+    fn js_project_manifest_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        let subdir = dir.path().join("src");
+        std::fs::create_dir(&subdir).unwrap();
+        let hint = classify(&subdir);
+        assert!(hint.is_some());
+        assert_eq!(hint.unwrap().label, "JavaScript/TypeScript project");
+    }
+
+    #[test]
+    fn virtual_fs_skipped() {
+        for path in ["/proc", "/sys", "/dev", "/run", "/tmp"] {
+            let p = PathBuf::from(path);
+            let hint = classify(&p).unwrap();
+            assert_eq!(hint.deep_scan, DeepScanPolicy::Skip, "failed for {path}");
+        }
     }
 }

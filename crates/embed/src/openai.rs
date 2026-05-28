@@ -40,11 +40,20 @@ impl OpenAIEmbedder {
         }
     }
 
+    /// Resolve OpenAI base URL: caller-supplied > `OPENAI_BASE_URL` env > default.
+    pub fn resolve_base_url(cfg_url: Option<&str>) -> String {
+        cfg_url
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
+            .unwrap_or_else(|| "https://api.openai.com".to_string())
+    }
+
     /// Create using `OPENAI_API_KEY` from the environment.
     pub fn from_env(model: impl Into<String>, dim: usize) -> Result<Self> {
         let api_key = std::env::var("OPENAI_API_KEY")
             .context("OPENAI_API_KEY not set — required for OpenAI embeddings")?;
-        Ok(Self::new("https://api.openai.com", model, dim, api_key))
+        let base_url = Self::resolve_base_url(None);
+        Ok(Self::new(base_url, model, dim, api_key))
     }
 
     /// Create for a local llama.cpp server (no API key needed).

@@ -27,11 +27,18 @@ pub fn from_config(
     dim: usize,
     base_url: &str,
 ) -> anyhow::Result<Box<dyn Embedder>> {
+    let base = if base_url.is_empty() { None } else { Some(base_url) };
     match provider {
-        "ollama" => Ok(Box::new(OllamaEmbedder::new(base_url, model, dim))),
+        "ollama" => Ok(Box::new(OllamaEmbedder::new(
+            OllamaEmbedder::resolve_base_url(base),
+            model,
+            dim,
+        ))),
         "openai" => Ok(Box::new(OpenAIEmbedder::from_env(model, dim)?)),
         "llamacpp" => Ok(Box::new(OpenAIEmbedder::local_llamacpp(
-            base_url, model, dim,
+            OpenAIEmbedder::resolve_base_url(base),
+            model,
+            dim,
         ))),
         other => anyhow::bail!("unknown embedding provider: {other}"),
     }

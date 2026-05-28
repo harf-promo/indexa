@@ -34,11 +34,18 @@ pub fn from_config(
     model: &str,
     base_url: &str,
 ) -> anyhow::Result<Box<dyn Generator>> {
+    let base = if base_url.is_empty() { None } else { Some(base_url) };
     match provider {
-        "ollama" => Ok(Box::new(OllamaLlm::new(base_url, model))),
+        "ollama" => Ok(Box::new(OllamaLlm::new(
+            OllamaLlm::resolve_base_url(base),
+            model,
+        ))),
         "openai" => Ok(Box::new(OpenAICompatLlm::from_env(model)?)),
         "anthropic" => Ok(Box::new(AnthropicLlm::from_env(model)?)),
-        "llamacpp" => Ok(Box::new(OpenAICompatLlm::local_llamacpp(base_url, model))),
+        "llamacpp" => Ok(Box::new(OpenAICompatLlm::local_llamacpp(
+            OpenAICompatLlm::resolve_base_url(base),
+            model,
+        ))),
         other => anyhow::bail!("unknown LLM provider: {other}"),
     }
 }

@@ -14,6 +14,8 @@ pub struct OllamaEmbedder {
     client: reqwest::Client,
 }
 
+const DEFAULT_BASE: &str = "http://localhost:11434";
+
 impl OllamaEmbedder {
     pub fn new(base_url: impl Into<String>, model: impl Into<String>, dim: usize) -> Self {
         Self {
@@ -24,8 +26,16 @@ impl OllamaEmbedder {
         }
     }
 
+    /// Resolve the Ollama base URL: caller-supplied > `OLLAMA_HOST` env > default.
+    pub fn resolve_base_url(cfg_url: Option<&str>) -> String {
+        cfg_url
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("OLLAMA_HOST").ok())
+            .unwrap_or_else(|| DEFAULT_BASE.to_string())
+    }
+
     pub fn default_local() -> Self {
-        Self::new("http://localhost:11434", DEFAULT_MODEL, DEFAULT_DIM)
+        Self::new(Self::resolve_base_url(None), DEFAULT_MODEL, DEFAULT_DIM)
     }
 }
 
