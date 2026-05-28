@@ -28,10 +28,18 @@ pub struct WalkConfig {
 /// Walk `root` and return all entries. Directories whose hint is `Skip` are not
 /// descended into. Uses `jwalk` for parallel traversal.
 pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
-    use jwalk::WalkDir;
+    use jwalk::{Parallelism, WalkDir};
+
+    let pool_threads = std::thread::available_parallelism()
+        .map(|n| n.get().min(4))
+        .unwrap_or(2);
 
     let walker = {
-        let mut w = WalkDir::new(root).sort(false);
+        let mut w = WalkDir::new(root)
+            .sort(false)
+            // Each walk owns its own rayon pool to avoid deadlock when multiple
+            // walks run concurrently sharing the global rayon pool.
+            .parallelism(Parallelism::RayonNewPool(pool_threads));
         if let Some(d) = cfg.max_depth {
             w = w.max_depth(d);
         }
