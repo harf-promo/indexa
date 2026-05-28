@@ -29,6 +29,7 @@ pub async fn summarize_file(
     embedder: &dyn Embedder,
     path: &str,
     model: &str,
+    passes: u32,
 ) -> Result<bool> {
     // Try to get a content sample. Prefer first chunk text (already parsed),
     // fall back to raw file bytes.
@@ -41,11 +42,26 @@ pub async fn summarize_file(
         }
     };
 
-    let summary_text = describer.describe(path, &sample).await?;
-    let summary_text = summary_text.trim().to_owned();
-    if summary_text.is_empty() {
-        return Ok(false);
+    let mut summary_text: Option<String> = None;
+    for i in 0..passes.max(1) {
+        let next = describer
+            .describe(path, &sample, summary_text.as_deref())
+            .await?;
+        let next = next.trim().to_owned();
+        if next.is_empty() {
+            break;
+        }
+        if next == summary_text.as_deref().unwrap_or("") {
+            tracing::debug!("summarize {path} pass {}/{passes}: no change, stopping early", i + 1);
+            break;
+        }
+        tracing::info!("summarize {path} pass {}/{passes}", i + 1);
+        summary_text = Some(next);
     }
+    let summary_text = match summary_text {
+        Some(s) => s,
+        None => return Ok(false),
+    };
 
     let embedding = embedder.embed(&summary_text).await.ok();
 
@@ -80,6 +96,7 @@ pub async fn summarize_directory(
     dir_path: &str,
     dir_model: &str,
     max_children: usize,
+    passes: u32,
 ) -> Result<bool> {
     let children = store.children_summaries(dir_path)?;
     if children.is_empty() {
@@ -99,11 +116,26 @@ pub async fn summarize_directory(
         })
         .collect();
 
-    let summary_text = describer.summarize_dir(dir_path, &llm_children).await?;
-    let summary_text = summary_text.trim().to_owned();
-    if summary_text.is_empty() {
-        return Ok(false);
+    let mut summary_text: Option<String> = None;
+    for i in 0..passes.max(1) {
+        let next = describer
+            .summarize_dir(dir_path, &llm_children, summary_text.as_deref())
+            .await?;
+        let next = next.trim().to_owned();
+        if next.is_empty() {
+            break;
+        }
+        if next == summary_text.as_deref().unwrap_or("") {
+            tracing::debug!("summarize {dir_path} pass {}/{passes}: no change, stopping early", i + 1);
+            break;
+        }
+        tracing::info!("summarize {dir_path} pass {}/{passes}", i + 1);
+        summary_text = Some(next);
     }
+    let summary_text = match summary_text {
+        Some(s) => s,
+        None => return Ok(false),
+    };
 
     let embedding = embedder.embed(&summary_text).await.ok();
 
@@ -139,8 +171,33 @@ pub async fn process_queue_item(
     item: &QueueItem,
     cfg: &DescriberConfig,
 ) -> Result<()> {
+    process_queue_item_with_passes(store, describer, embedder, item, cfg, None).await
+}
+
+/// Like `process_queue_item` but accepts an explicit pass override (CLI `--passes`).
+/// When `passes_override` is None, the pass count is derived from config defaults.
+pub async fn process_queue_item_with_passes(
+    store: &mut Store,
+    describer: &dyn Describer,
+    embedder: &dyn Embedder,
+    item: &QueueItem,
+    cfg: &DescriberConfig,
+    passes_override: Option<u32>,
+) -> Result<()> {
+    let passes = match passes_override {
+        Some(n) => n.min(cfg.passes_cap),
+        None => {
+            let already_summarized = store.summary_by_path(&item.path)?.is_some();
+            if already_summarized {
+                cfg.passes_refresh
+            } else {
+                cfg.passes_first
+            }
+        }
+    };
+
     let result = if item.kind == "file" {
-        summarize_file(store, describer, embedder, &item.path, &cfg.file_model).await
+        summarize_file(store, describer, embedder, &item.path, &cfg.file_model, passes).await
     } else {
         summarize_directory(
             store,
@@ -149,6 +206,7 @@ pub async fn process_queue_item(
             &item.path,
             &cfg.dir_model,
             cfg.max_children_per_summary,
+            passes,
         )
         .await
     };
@@ -185,30 +243,63 @@ pub fn enqueue_subtree(store: &mut Store, root: &Path) -> Result<usize> {
 
 /// Synchronously summarise an entire subtree (no background queue).
 /// Progress is printed to stdout. Returns the count of successful summaries.
+/// `passes_override` overrides the config's automatic first/refresh selection when Some.
 pub async fn summarize_subtree_sync(
     store: &mut Store,
     describer: &dyn Describer,
     embedder: &dyn Embedder,
     root: &Path,
     cfg: &DescriberConfig,
+    passes_override: Option<u32>,
 ) -> Result<usize> {
     let enqueued = enqueue_subtree(store, root)
         .with_context(|| format!("enqueuing subtree {}", root.display()))?;
     println!("Enqueued {enqueued} items for summarization.");
 
     let mut done = 0usize;
+    let mut errors = 0usize;
+    let mut first_error: Option<String> = None;
     loop {
         let item = store.next_queue_item()?;
         match item {
             None => break,
             Some(item) => {
-                process_queue_item(store, describer, embedder, &item, cfg).await?;
-                done += 1;
-                if done.is_multiple_of(10) {
-                    println!("  {done}/{enqueued} summarized...");
+                let r = process_queue_item_with_passes(
+                    store,
+                    describer,
+                    embedder,
+                    &item,
+                    cfg,
+                    passes_override,
+                )
+                .await;
+                match r {
+                    Ok(()) => done += 1,
+                    Err(e) => {
+                        errors += 1;
+                        if first_error.is_none() {
+                            first_error = Some(e.to_string());
+                        }
+                    }
+                }
+                if (done + errors).is_multiple_of(10) {
+                    println!("  {}/{enqueued} processed ({errors} errors)...", done + errors);
                 }
             }
         }
+    }
+
+    if errors > 0 && done == 0 {
+        let msg = first_error.unwrap_or_default();
+        anyhow::bail!(
+            "summarize failed: 0/{} items succeeded. First error: {msg}\n\
+             Did you run `ollama pull {}`?",
+            enqueued,
+            cfg.dir_model
+        );
+    }
+    if errors > 0 {
+        eprintln!("Warning: summarize completed with {errors} errors.");
     }
 
     if cfg.mode == SummaryMode::Compress {

@@ -42,9 +42,12 @@ async fn main() -> Result<()> {
             embed_model,
             dry_run,
             mode,
-        } => cmd_deep(paths, embed_model, dry_run, mode, &cfg).await,
+            passes,
+        } => cmd_deep(paths, embed_model, dry_run, mode, passes, &cfg).await,
         Commands::Map { depth } => cmd_map(depth).await,
-        Commands::Summarize { paths, mode } => cmd_summarize(paths, mode, &cfg).await,
+        Commands::Summarize { paths, mode, passes } => {
+            cmd_summarize(paths, mode, passes, &cfg).await
+        }
         Commands::Describe { path } => cmd_describe(path).await,
         Commands::Worker { concurrency } => cmd_worker(concurrency, &cfg).await,
         Commands::Export {
@@ -109,6 +112,7 @@ async fn cmd_deep(
     embed_model_flag: Option<String>,
     dry_run: bool,
     mode: String,
+    _passes: Option<u32>,
     cfg: &Config,
 ) -> Result<()> {
     let summary_mode = match mode.as_str() {
@@ -606,7 +610,12 @@ async fn cmd_rm(paths: Vec<String>, recursive: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_summarize(paths: Vec<String>, mode: String, cfg: &Config) -> Result<()> {
+async fn cmd_summarize(
+    paths: Vec<String>,
+    mode: String,
+    passes: Option<u32>,
+    cfg: &Config,
+) -> Result<()> {
     let roots = resolve_roots(paths, false)?;
     let db_path = index_db_path()?;
     if !db_path.exists() {
@@ -634,8 +643,15 @@ async fn cmd_summarize(paths: Vec<String>, mode: String, cfg: &Config) -> Result
 
     for root in &roots {
         println!("Summarizing {} …", root.display());
-        let done =
-            summarize_subtree_sync(&mut store, &describer, &embedder, root, &summary_cfg).await?;
+        let done = summarize_subtree_sync(
+            &mut store,
+            &describer,
+            &embedder,
+            root,
+            &summary_cfg,
+            passes,
+        )
+        .await?;
         println!("  {done} summaries written.");
     }
 

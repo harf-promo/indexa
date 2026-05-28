@@ -32,13 +32,21 @@ pub struct ChildSummary {
 #[async_trait::async_trait]
 pub trait Describer: Send + Sync {
     /// One-sentence file description from a content sample.
-    async fn describe(&self, path: &str, content_sample: &[u8]) -> anyhow::Result<String>;
+    /// `previous_summary` is the prior draft on a refinement pass (None on first pass).
+    async fn describe(
+        &self,
+        path: &str,
+        content_sample: &[u8],
+        previous_summary: Option<&str>,
+    ) -> anyhow::Result<String>;
 
     /// 2–4 sentence directory summary synthesised from direct children.
+    /// `previous_summary` is the prior draft on a refinement pass (None on first pass).
     async fn summarize_dir(
         &self,
         dir_path: &str,
         children: &[ChildSummary],
+        previous_summary: Option<&str>,
     ) -> anyhow::Result<String>;
 }
 

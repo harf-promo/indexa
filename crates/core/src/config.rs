@@ -182,6 +182,12 @@ pub struct DescriberConfig {
     pub queue_concurrency: usize,
     /// Max child summaries fed into a single directory roll-up prompt.
     pub max_children_per_summary: usize,
+    /// Refinement passes when no prior summary exists (first-time build).
+    pub passes_first: u32,
+    /// Refinement passes when a summary row already exists (refresh).
+    pub passes_refresh: u32,
+    /// Hard ceiling on `--passes` flag; values above this are clamped.
+    pub passes_cap: u32,
 }
 
 impl Default for DescriberConfig {
@@ -196,6 +202,9 @@ impl Default for DescriberConfig {
             mode: SummaryMode::Augment,
             queue_concurrency: 2,
             max_children_per_summary: 30,
+            passes_first: 2,
+            passes_refresh: 1,
+            passes_cap: 3,
         }
     }
 }
