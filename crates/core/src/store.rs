@@ -691,6 +691,53 @@ impl Store {
     }
 
     /// One level of the tree: entries under `parent_path` with their summary states.
+    /// Return the implicit root paths — parent directories of indexed entries
+    /// that are not themselves entries. These are the top-level nodes for the
+    /// tree view when the user hasn't added an explicit root row.
+    pub fn root_paths(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT parent_path
+               FROM entries e1
+              WHERE parent_path != ''
+                AND NOT EXISTS (
+                    SELECT 1 FROM entries e2 WHERE e2.path = e1.parent_path
+                )
+              ORDER BY parent_path",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Search entries whose path contains `query` (case-insensitive LIKE).
+    pub fn search_paths(&self, query: &str, limit: usize) -> Result<Vec<TreeNode>> {
+        let pattern = format!("%{query}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT e.path, e.kind, e.size,
+                    sq.state AS summary_state
+               FROM entries e
+               LEFT JOIN summary_queue sq ON sq.path = e.path
+              WHERE e.path LIKE ?1
+              ORDER BY LENGTH(e.path) ASC, e.path ASC
+              LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![pattern, limit as i64], |r| {
+            let full_path: String = r.get(0)?;
+            let name = std::path::Path::new(&full_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| full_path.clone());
+            Ok(TreeNode {
+                path: full_path,
+                name,
+                kind: r.get(1)?,
+                byte_size: r.get::<_, i64>(2)?,
+                child_count: 0,
+                summary_state: r.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn tree_level(&self, parent_path: &str) -> Result<Vec<TreeNode>> {
         let mut stmt = self.conn.prepare(
             "SELECT e.path, e.kind, e.size,
@@ -844,6 +891,20 @@ impl Store {
         Ok(stats)
     }
 
+    /// Return up to `limit` items in the `failed` state, with their error messages.
+    pub fn failed_queue_items(&self, limit: usize) -> Result<Vec<FailedQueueItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, error FROM summary_queue WHERE state = 'failed' ORDER BY updated_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok(FailedQueueItem {
+                path: r.get(0)?,
+                error: r.get(1)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Brute-force cosine similarity over all stored embeddings.
     /// Returns (chunk_id, entry_path) sorted by descending similarity.
     fn cosine_search(
@@ -985,6 +1046,12 @@ pub struct QueueStats {
     pub in_flight: i64,
     pub done: i64,
     pub failed: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FailedQueueItem {
+    pub path: String,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone)]

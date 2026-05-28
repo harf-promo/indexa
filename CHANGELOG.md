@@ -5,6 +5,34 @@ All notable changes to Indexa will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-05-28
+
+### Fixed
+
+- **Empty tree pane** — `GET /api/tree?path=` (empty string) always returned zero rows because scanned paths use absolute parent paths. New `Store::root_paths()` query finds the implicit roots (parent dirs of scanned paths that are not themselves entries). `initTree()` now calls `GET /api/roots` first and renders each root as an expandable folder. Empty-state card shown when no roots exist yet.
+- **Raw string delimiter mismatch** — closing `"##` should have been `"#`; caused compile error on fresh build.
+
+### Added
+
+#### Web UI — full feature parity with CLI
+
+- **File-name search** — search box above the tree (200 ms debounce) calls `GET /api/search?q=&limit=50`. Live results replace the tree; clearing the box restores root view. Backed by new `Store::search_paths()`.
+- **Add-Root modal** — `+` button opens a modal with a path input and a Jupyter-style filesystem browser (`GET /api/fs/ls?path=`). Security-clamped to `$HOME`, rejects `..` traversal (403). Index button shows terminal command for now (SSE job infra coming in v0.3.1).
+- **Queue badge** — sidebar header polls `GET /api/queue` every 3 s and shows `N pending · N running · N failed` when the worker has activity.
+- **Refinement Passes save** — the two spinner inputs in Settings now load their live values from `GET /api/config` on tab open, and a "Save passes" button writes them via `POST /api/config/passes` (gated by `INDEXA_WEB_ALLOW_KEY_EDIT=1`).
+- **Map tab** — new Map tab surfaces `GET /api/map` as a compact Category / Files / Size table.
+
+#### New API endpoints
+
+- `GET /api/roots` — implicit tree roots (parent dirs of scanned paths that are not themselves entries).
+- `GET /api/search?q=&limit=` — file-name substring search.
+- `GET /api/fs/ls?path=` — list subdirectories of a path (home-clamped, no dotdot).
+- `GET /api/queue` — `{pending, in_flight, done, failed}` counts.
+- `GET /api/queue/failed` — failed summary-queue items with error messages.
+- `POST /api/queue/retry?path=` — reset a failed queue row to pending.
+- `GET /api/config` — safe config subset (passes, cap, max_children).
+- `POST /api/config/passes` — write passes config (gated by env var).
+
 ## [0.1.0-rc1] — 2026-05-28
 
 First release candidate. All core functionality is in place and end-to-end tested
