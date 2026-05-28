@@ -162,7 +162,10 @@ impl Describer for OllamaLlm {
             let text = resp.text().await.unwrap_or_default();
             anyhow::bail!("Ollama returned {status}: {text}");
         }
-        let parsed: Resp = resp.json().await.context("parsing Ollama generate response")?;
+        let parsed: Resp = resp
+            .json()
+            .await
+            .context("parsing Ollama generate response")?;
         Ok(parsed.response)
     }
 }

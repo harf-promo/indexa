@@ -493,9 +493,10 @@ impl Store {
 
     /// Insert or replace a summary row.
     pub fn upsert_summary(&mut self, record: &SummaryRecord) -> Result<()> {
-        let embedding_blob = record.embedding.as_ref().map(|v| {
-            v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>()
-        });
+        let embedding_blob = record
+            .embedding
+            .as_ref()
+            .map(|v| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>());
         self.conn.execute(
             "INSERT OR REPLACE INTO summaries
              (path, kind, parent_path, depth, summary, embedding,
@@ -651,13 +652,15 @@ impl Store {
         limit: usize,
         depth_alpha: f32,
     ) -> Result<Vec<(String, f32)>> {
-        let max_depth: i64 = self
-            .conn
-            .query_row("SELECT COALESCE(MAX(depth), 0) FROM summaries", [], |r| r.get(0))?;
+        let max_depth: i64 =
+            self.conn
+                .query_row("SELECT COALESCE(MAX(depth), 0) FROM summaries", [], |r| {
+                    r.get(0)
+                })?;
 
-        let mut stmt = self.conn.prepare(
-            "SELECT path, depth, embedding FROM summaries WHERE embedding IS NOT NULL",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, depth, embedding FROM summaries WHERE embedding IS NOT NULL")?;
         let mut scored: Vec<(String, f32)> = Vec::new();
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
@@ -740,9 +743,9 @@ impl Store {
 
     /// Queue statistics for status display.
     pub fn queue_stats(&self) -> Result<QueueStats> {
-        let mut stmt = self.conn.prepare(
-            "SELECT state, COUNT(*) FROM summary_queue GROUP BY state",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT state, COUNT(*) FROM summary_queue GROUP BY state")?;
         let mut stats = QueueStats::default();
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
@@ -1184,13 +1187,21 @@ mod tests {
     #[test]
     fn children_summaries_returns_direct_children() {
         let mut store = Store::open_in_memory().unwrap();
-        store.upsert_summary(&dummy_summary("/docs/a.txt", "file", Some("/docs"), 2)).unwrap();
-        store.upsert_summary(&dummy_summary("/docs/b.txt", "file", Some("/docs"), 2)).unwrap();
-        store.upsert_summary(&dummy_summary("/other/c.txt", "file", Some("/other"), 2)).unwrap();
+        store
+            .upsert_summary(&dummy_summary("/docs/a.txt", "file", Some("/docs"), 2))
+            .unwrap();
+        store
+            .upsert_summary(&dummy_summary("/docs/b.txt", "file", Some("/docs"), 2))
+            .unwrap();
+        store
+            .upsert_summary(&dummy_summary("/other/c.txt", "file", Some("/other"), 2))
+            .unwrap();
 
         let children = store.children_summaries("/docs").unwrap();
         assert_eq!(children.len(), 2);
-        assert!(children.iter().all(|c| c.parent_path.as_deref() == Some("/docs")));
+        assert!(children
+            .iter()
+            .all(|c| c.parent_path.as_deref() == Some("/docs")));
     }
 
     #[test]
@@ -1227,7 +1238,9 @@ mod tests {
         store.upsert_summary(&root).unwrap();
         store.upsert_summary(&leaf).unwrap();
 
-        let results = store.summary_cosine_search(&[1.0, 0.0, 0.0], 10, 0.15).unwrap();
+        let results = store
+            .summary_cosine_search(&[1.0, 0.0, 0.0], 10, 0.15)
+            .unwrap();
         assert!(!results.is_empty());
         // Root (depth=0) should score higher than leaf (depth=2) due to depth boost
         assert_eq!(results[0].0, "/");

@@ -524,8 +524,10 @@ async fn cmd_status(cfg: &Config) -> Result<()> {
     );
     println!(
         "Describer: {} / {} (file: {}, dir: {})",
-        cfg.describer.provider, cfg.describer.model,
-        cfg.describer.file_model, cfg.describer.dir_model
+        cfg.describer.provider,
+        cfg.describer.model,
+        cfg.describer.file_model,
+        cfg.describer.dir_model
     );
 
     Ok(())
@@ -590,8 +592,8 @@ async fn cmd_summarize(paths: Vec<String>, mode: String, cfg: &Config) -> Result
 
     for root in &roots {
         println!("Summarizing {} …", root.display());
-        let done = summarize_subtree_sync(&mut store, &describer, &embedder, root, &summary_cfg)
-            .await?;
+        let done =
+            summarize_subtree_sync(&mut store, &describer, &embedder, root, &summary_cfg).await?;
         println!("  {done} summaries written.");
     }
 
@@ -670,8 +672,11 @@ async fn cmd_worker(concurrency: usize, cfg: &Config) -> Result<()> {
             &cfg.describer.dir_model,
         ));
     let embed_base = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
-    let embedder: Arc<dyn indexa_embed::Embedder + Send + Sync> =
-        Arc::new(OllamaEmbedder::new(&embed_base, &cfg.embedding.model, cfg.embedding.dim));
+    let embedder: Arc<dyn indexa_embed::Embedder + Send + Sync> = Arc::new(OllamaEmbedder::new(
+        &embed_base,
+        &cfg.embedding.model,
+        cfg.embedding.dim,
+    ));
 
     let store = Arc::new(tokio::sync::Mutex::new(Store::open(&db_path)?));
 

@@ -24,7 +24,7 @@ pub trait Generator: Send + Sync {
 /// A child entry fed into a directory roll-up summary prompt.
 pub struct ChildSummary {
     pub name: String,
-    pub kind: String,   // "file" | "dir"
+    pub kind: String, // "file" | "dir"
     pub summary: String,
 }
 

@@ -132,10 +132,7 @@ async fn api_tree(
     )
 }
 
-async fn api_summary(
-    State(state): State<AppState>,
-    Query(params): Query<PathQuery>,
-) -> Response {
+async fn api_summary(State(state): State<AppState>, Query(params): Query<PathQuery>) -> Response {
     let path = match params.path {
         None => {
             return (
