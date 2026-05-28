@@ -4,6 +4,7 @@ pub mod code;
 pub mod image;
 pub mod media;
 pub mod office;
+pub mod pdf;
 pub mod registry;
 pub mod text;
 pub mod types;
