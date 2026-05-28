@@ -20,6 +20,8 @@ Thank you for your interest in contributing. This document covers everything you
 - **Git** ≥ 2.34
 - For the `parsers` crate on macOS/Linux: `ffprobe` (part of ffmpeg) for audio/video metadata
 
+> **PATH note:** `rustup` installs Cargo to `~/.cargo/bin`. If `cargo` is not found after installation, add `export PATH="$HOME/.cargo/bin:$PATH"` to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.) and restart your terminal. On macOS with a default shell, `~/.cargo/bin` is often missing from PATH in non-login shells.
+
 ```bash
 # Clone
 git clone https://github.com/harf-promo/indexa

@@ -178,6 +178,12 @@ pub async fn serve(
         config: Arc::new(config),
     };
 
+    // Restrict CORS to localhost only — prevents drive-by sites from reading the
+    // user's private index via cross-origin requests to the local server.
+    let origin = format!("http://localhost:{port}")
+        .parse::<axum::http::HeaderValue>()
+        .expect("valid localhost origin header");
+
     let app = Router::new()
         .route("/", get(serve_ui))
         .route("/api/stats", get(api_stats))
@@ -186,7 +192,7 @@ pub async fn serve(
         .with_state(state)
         .layer(
             tower_http::cors::CorsLayer::new()
-                .allow_origin(tower_http::cors::Any)
+                .allow_origin(origin)
                 .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
                 .allow_headers([header::CONTENT_TYPE]),
         );

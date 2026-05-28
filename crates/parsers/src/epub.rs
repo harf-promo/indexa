@@ -59,6 +59,11 @@ impl Parser for EpubParser {
                 format!("{opf_dir}{href}")
             };
 
+            // Reject paths with directory traversal components.
+            if full_path.split('/').any(|seg| seg == "..") {
+                continue;
+            }
+
             let xhtml = match archive.by_name(&full_path) {
                 Ok(mut entry) => {
                     let mut s = String::new();

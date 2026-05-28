@@ -94,10 +94,9 @@ struct EmbedValues {
 impl Embedder for GoogleEmbedder {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let model_path = format!("models/{}", self.model);
-        let url = format!(
-            "{}/v1beta/{}:embedContent?key={}",
-            self.base_url, model_path, self.api_key
-        );
+        // Use x-goog-api-key header instead of ?key= query param — keeps the key
+        // out of URLs which appear in HTTP logs, error messages, and tracing output.
+        let url = format!("{}/v1beta/{}:embedContent", self.base_url, model_path);
 
         let body = EmbedRequest {
             model: model_path,
@@ -111,6 +110,7 @@ impl Embedder for GoogleEmbedder {
         let resp = self
             .client
             .post(&url)
+            .header("x-goog-api-key", &self.api_key)
             .json(&body)
             .send()
             .await

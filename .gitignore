@@ -15,3 +15,8 @@ Cargo.lock
 # Build artifacts
 *.pdb
 dist/
+
+# Local environment secrets (never commit API keys)
+.env
+.env.*
+dart_defines.json

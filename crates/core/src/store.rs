@@ -221,18 +221,18 @@ impl Store {
     /// Remove all entries whose path starts with `prefix` (e.g. a whole directory subtree).
     /// Returns the number of `entries` rows deleted.
     pub fn delete_subtree(&mut self, prefix: &str) -> Result<usize> {
-        let pattern = format!("{prefix}%");
+        let pattern = like_prefix(prefix);
         let tx = self.conn.transaction()?;
         tx.execute(
-            "DELETE FROM chunks_fts WHERE entry_path LIKE ?1",
+            "DELETE FROM chunks_fts WHERE entry_path LIKE ?1 ESCAPE '\\'",
             params![pattern],
         )?;
         tx.execute(
-            "DELETE FROM chunks WHERE entry_path LIKE ?1",
+            "DELETE FROM chunks WHERE entry_path LIKE ?1 ESCAPE '\\'",
             params![pattern],
         )?;
         let n = tx.execute(
-            "DELETE FROM entries WHERE path LIKE ?1 OR parent_path LIKE ?1",
+            "DELETE FROM entries WHERE path LIKE ?1 ESCAPE '\\' OR parent_path LIKE ?1 ESCAPE '\\'",
             params![pattern],
         )?;
         tx.commit()?;
@@ -311,10 +311,10 @@ impl Store {
                     (
                         "SELECT CAST(chunk_id AS INTEGER), entry_path, bm25(chunks_fts) AS score
                          FROM chunks_fts
-                         WHERE chunks_fts MATCH ?1 AND entry_path LIKE ?2
+                         WHERE chunks_fts MATCH ?1 AND entry_path LIKE ?2 ESCAPE '\\'
                          ORDER BY score LIMIT 100"
                             .to_string(),
-                        Some(format!("{s}%")),
+                        Some(like_prefix(s)),
                     )
                 } else {
                     (
@@ -404,14 +404,14 @@ impl Store {
         scope: Option<&str>,
     ) -> Result<Vec<(i64, String)>> {
         let sql = if scope.is_some() {
-            "SELECT id, entry_path, embedding FROM chunks WHERE embedding IS NOT NULL AND entry_path LIKE ?1"
+            "SELECT id, entry_path, embedding FROM chunks WHERE embedding IS NOT NULL AND entry_path LIKE ?1 ESCAPE '\\'"
         } else {
             "SELECT id, entry_path, embedding FROM chunks WHERE embedding IS NOT NULL"
         };
         let mut stmt = self.conn.prepare(sql)?;
 
         let mut scored: Vec<(i64, String, f32)> = Vec::new();
-        let scope_pattern = scope.map(|s| format!("{s}%"));
+        let scope_pattern = scope.map(like_prefix);
         let mut rows = if let Some(ref p) = scope_pattern {
             stmt.query(params![p])?
         } else {
@@ -452,6 +452,13 @@ impl Store {
 fn fts5_quote(s: &str) -> String {
     // Escape any embedded double-quotes by doubling them.
     format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+/// Escape `%` and `_` wildcards in a path prefix before appending `%` for LIKE matching.
+/// Must be used with `LIKE ?n ESCAPE '\'` in the SQL clause.
+fn like_prefix(prefix: &str) -> String {
+    let escaped = prefix.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    format!("{escaped}%")
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -601,5 +608,122 @@ mod tests {
         store.upsert_chunks(&[c.clone()]).unwrap();
         store.upsert_chunks(&[c]).unwrap();
         assert_eq!(store.chunk_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn delete_entry_removes_entry_and_chunks() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[dummy_entry("/notes.txt", EntryKind::File, 100)])
+            .unwrap();
+        store
+            .upsert_chunks(&[dummy_chunk("/notes.txt", 0, "hello world")])
+            .unwrap();
+        assert_eq!(store.entry_count().unwrap(), 1);
+        assert_eq!(store.chunk_count().unwrap(), 1);
+
+        let deleted = store.delete_entry("/notes.txt").unwrap();
+        assert_eq!(deleted, 1);
+        assert_eq!(store.entry_count().unwrap(), 0);
+        assert_eq!(store.chunk_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_subtree_removes_all_under_prefix() {
+        let mut store = Store::open_in_memory().unwrap();
+        let entries = vec![
+            dummy_entry("/docs/a.txt", EntryKind::File, 10),
+            dummy_entry("/docs/b.txt", EntryKind::File, 10),
+            dummy_entry("/other/c.txt", EntryKind::File, 10),
+        ];
+        store.upsert_entries(&entries).unwrap();
+        assert_eq!(store.entry_count().unwrap(), 3);
+
+        let deleted = store.delete_subtree("/docs/").unwrap();
+        assert_eq!(deleted, 2);
+        assert_eq!(store.entry_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn delete_subtree_does_not_over_delete_similar_prefix() {
+        // "/foo" delete must NOT remove "/foobar/file.txt"
+        let mut store = Store::open_in_memory().unwrap();
+        let entries = vec![
+            dummy_entry("/foo/a.txt", EntryKind::File, 10),
+            dummy_entry("/foobar/b.txt", EntryKind::File, 10),
+        ];
+        store.upsert_entries(&entries).unwrap();
+
+        store.delete_subtree("/foo/").unwrap();
+
+        assert_eq!(store.entry_count().unwrap(), 1, "/foobar/b.txt should survive");
+    }
+
+    #[test]
+    fn hybrid_search_sparse_mode_returns_fts_results() {
+        let mut store = Store::open_in_memory().unwrap();
+        let chunks = vec![dummy_chunk("/doc.md", 0, "indexa sparse retrieval test")];
+        store.upsert_chunks(&chunks).unwrap();
+
+        let hits = store
+            .hybrid_search("sparse", None, &HybridMode::Sparse, None, 5, 60.0)
+            .unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits[0].text.contains("sparse"));
+    }
+
+    #[test]
+    fn hybrid_search_dense_mode_returns_vector_results() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut c = dummy_chunk("/vec.md", 0, "dense vector search");
+        c.embedding = Some(vec![1.0, 0.0, 0.0]);
+        store.upsert_chunks(&[c]).unwrap();
+
+        let query_vec = vec![1.0_f32, 0.0, 0.0];
+        let hits = store
+            .hybrid_search("dense", Some(&query_vec), &HybridMode::Dense, None, 5, 60.0)
+            .unwrap();
+        assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn hybrid_search_scope_filters_by_path_prefix() {
+        let mut store = Store::open_in_memory().unwrap();
+        let chunks = vec![
+            dummy_chunk("/docs/tax/form.pdf", 0, "tax return income"),
+            dummy_chunk("/photos/vacation.jpg", 0, "vacation photo hawaii"),
+        ];
+        store.upsert_chunks(&chunks).unwrap();
+
+        let hits = store
+            .hybrid_search(
+                "vacation",
+                None,
+                &HybridMode::Sparse,
+                Some("/docs/"),
+                10,
+                60.0,
+            )
+            .unwrap();
+        assert!(
+            hits.is_empty(),
+            "scope /docs/ should exclude /photos/ results"
+        );
+    }
+
+    #[test]
+    fn fts5_quote_escapes_double_quotes() {
+        let quoted = fts5_quote(r#"he said "hello""#);
+        assert!(quoted.starts_with('"'));
+        assert!(quoted.ends_with('"'));
+        assert!(quoted.contains(r#""""#), "embedded quotes should be doubled: {quoted}");
+    }
+
+    #[test]
+    fn like_prefix_escapes_wildcards_in_path() {
+        let p = like_prefix("/home/user/50%_done/");
+        assert!(p.contains("\\%"), "% should be escaped: {p}");
+        assert!(p.contains("\\_"), "_ should be escaped: {p}");
+        assert!(p.ends_with('%'), "pattern should end with trailing wildcard: {p}");
     }
 }
