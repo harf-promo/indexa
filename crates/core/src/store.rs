@@ -1,8 +1,95 @@
 use crate::config::HybridMode;
 use crate::walker::{Entry, EntryKind};
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use std::path::{Path, PathBuf};
+
+// ── Private encoding/decoding helpers ─────────────────────────────────────────
+
+/// Encode an `f32` vector as a little-endian byte blob (4 bytes per f32).
+fn embedding_to_blob(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+/// Decode a little-endian byte blob back into an `f32` vector.
+///
+/// Any trailing bytes that don't form a complete 4-byte chunk are silently
+/// dropped (via `chunks_exact`), matching the historical behavior at the
+/// summary call sites. Callers that need strict alignment validation should
+/// check `b.len().is_multiple_of(4)` before calling.
+fn blob_to_embedding(b: &[u8]) -> Vec<f32> {
+    b.chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+// ── Private row mappers ───────────────────────────────────────────────────────
+
+/// Map a row from the `summaries` table (in the canonical column order used by
+/// `summary_by_path` and `children_summaries`) into a `SummaryRecord`.
+fn row_to_summary(r: &Row) -> rusqlite::Result<SummaryRecord> {
+    let blob: Option<Vec<u8>> = r.get(5)?;
+    Ok(SummaryRecord {
+        path: r.get(0)?,
+        kind: r.get(1)?,
+        parent_path: r.get(2)?,
+        depth: r.get(3)?,
+        summary: r.get(4)?,
+        embedding: blob.map(|b| blob_to_embedding(&b)),
+        child_count: r.get(6)?,
+        byte_size: r.get(7)?,
+        model: r.get(8)?,
+        source_hash: r.get(9)?,
+        generated_at: r.get(10)?,
+    })
+}
+
+/// Map a row from the `entries` + `summary_queue` join (used by `search_paths`
+/// and `tree_level`) into a `TreeNode`.
+fn row_to_tree_node(r: &Row) -> rusqlite::Result<TreeNode> {
+    let full_path: String = r.get(0)?;
+    let name = std::path::Path::new(&full_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| full_path.clone());
+    Ok(TreeNode {
+        path: full_path,
+        name,
+        kind: r.get(1)?,
+        byte_size: r.get::<_, i64>(2)?,
+        child_count: 0,
+        summary_state: r.get(3)?,
+    })
+}
+
+// ── Private transaction helpers ───────────────────────────────────────────────
+
+/// Delete chunks (and their FTS5 entries) for every row whose `entry_path`
+/// matches the LIKE pattern. Shared by `delete_subtree` and
+/// `delete_chunks_for_subtree`.
+fn delete_chunks_under_prefix(tx: &Transaction, pattern: &str) -> rusqlite::Result<usize> {
+    tx.execute(
+        "DELETE FROM chunks_fts WHERE entry_path LIKE ?1 ESCAPE '\\'",
+        params![pattern],
+    )?;
+    tx.execute(
+        "DELETE FROM chunks WHERE entry_path LIKE ?1 ESCAPE '\\'",
+        params![pattern],
+    )
+}
+
+/// Delete all artifacts (chunks, FTS, summaries, entry) for one exact path.
+/// Returns the number of `entries` rows removed (0 or 1). Used by
+/// `reconcile_entries` to expunge a single ghost row.
+fn delete_path_artifacts_exact(tx: &Transaction, path: &str) -> rusqlite::Result<usize> {
+    tx.execute(
+        "DELETE FROM chunks_fts WHERE entry_path = ?1",
+        params![path],
+    )?;
+    tx.execute("DELETE FROM chunks WHERE entry_path = ?1", params![path])?;
+    tx.execute("DELETE FROM summaries WHERE path = ?1", params![path])?;
+    tx.execute("DELETE FROM entries WHERE path = ?1", params![path])
+}
 
 pub struct Store {
     conn: Connection,
@@ -210,11 +297,7 @@ impl Store {
             )?;
 
             for c in chunks {
-                let embedding_blob = c.embedding.as_ref().map(|v| {
-                    // Store f32 vec as little-endian bytes
-                    let bytes: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
-                    bytes
-                });
+                let embedding_blob = c.embedding.as_deref().map(embedding_to_blob);
 
                 stmt.execute(params![
                     c.entry_path,
@@ -305,13 +388,7 @@ impl Store {
         let tx = self.conn.transaction()?;
         let mut removed = 0usize;
         for path in &ghosts {
-            tx.execute(
-                "DELETE FROM chunks_fts WHERE entry_path = ?1",
-                params![path],
-            )?;
-            tx.execute("DELETE FROM chunks WHERE entry_path = ?1", params![path])?;
-            tx.execute("DELETE FROM summaries WHERE path = ?1", params![path])?;
-            removed += tx.execute("DELETE FROM entries WHERE path = ?1", params![path])?;
+            removed += delete_path_artifacts_exact(&tx, path)?;
         }
         tx.commit()?;
         Ok(removed)
@@ -322,14 +399,7 @@ impl Store {
     pub fn delete_subtree(&mut self, prefix: &str) -> Result<usize> {
         let pattern = like_prefix(prefix);
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "DELETE FROM chunks_fts WHERE entry_path LIKE ?1 ESCAPE '\\'",
-            params![pattern],
-        )?;
-        tx.execute(
-            "DELETE FROM chunks WHERE entry_path LIKE ?1 ESCAPE '\\'",
-            params![pattern],
-        )?;
+        delete_chunks_under_prefix(&tx, &pattern)?;
         let n = tx.execute(
             "DELETE FROM entries WHERE path LIKE ?1 ESCAPE '\\' OR parent_path LIKE ?1 ESCAPE '\\'",
             params![pattern],
@@ -559,14 +629,7 @@ impl Store {
     pub fn delete_chunks_for_subtree(&mut self, prefix: &str) -> Result<usize> {
         let pattern = like_prefix(prefix);
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "DELETE FROM chunks_fts WHERE entry_path LIKE ?1 ESCAPE '\\'",
-            params![pattern],
-        )?;
-        let n = tx.execute(
-            "DELETE FROM chunks WHERE entry_path LIKE ?1 ESCAPE '\\'",
-            params![pattern],
-        )?;
+        let n = delete_chunks_under_prefix(&tx, &pattern)?;
         tx.commit()?;
         Ok(n)
     }
@@ -575,10 +638,7 @@ impl Store {
 
     /// Insert or replace a summary row.
     pub fn upsert_summary(&mut self, record: &SummaryRecord) -> Result<()> {
-        let embedding_blob = record
-            .embedding
-            .as_ref()
-            .map(|v| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>());
+        let embedding_blob = record.embedding.as_deref().map(embedding_to_blob);
         self.conn.execute(
             "INSERT OR REPLACE INTO summaries
              (path, kind, parent_path, depth, summary, embedding,
@@ -608,32 +668,9 @@ impl Store {
                     child_count, byte_size, model, source_hash, generated_at
              FROM summaries WHERE path = ?1",
         )?;
-        let row = stmt.query_row(params![path], |r| {
-            let blob: Option<Vec<u8>> = r.get(5)?;
-            let embedding = blob.map(|b| {
-                b.chunks_exact(4)
-                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect()
-            });
-            Ok(SummaryRecord {
-                path: r.get(0)?,
-                kind: r.get(1)?,
-                parent_path: r.get(2)?,
-                depth: r.get(3)?,
-                summary: r.get(4)?,
-                embedding,
-                child_count: r.get(6)?,
-                byte_size: r.get(7)?,
-                model: r.get(8)?,
-                source_hash: r.get(9)?,
-                generated_at: r.get(10)?,
-            })
-        });
-        match row {
-            Ok(r) => Ok(Some(r)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        stmt.query_row(params![path], row_to_summary)
+            .optional()
+            .map_err(Into::into)
     }
 
     /// All summary rows whose parent_path == given path (direct children).
@@ -643,27 +680,7 @@ impl Store {
                     child_count, byte_size, model, source_hash, generated_at
              FROM summaries WHERE parent_path = ?1 ORDER BY kind DESC, path",
         )?;
-        let rows = stmt.query_map(params![parent_path], |r| {
-            let blob: Option<Vec<u8>> = r.get(5)?;
-            let embedding = blob.map(|b| {
-                b.chunks_exact(4)
-                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect()
-            });
-            Ok(SummaryRecord {
-                path: r.get(0)?,
-                kind: r.get(1)?,
-                parent_path: r.get(2)?,
-                depth: r.get(3)?,
-                summary: r.get(4)?,
-                embedding,
-                child_count: r.get(6)?,
-                byte_size: r.get(7)?,
-                model: r.get(8)?,
-                source_hash: r.get(9)?,
-                generated_at: r.get(10)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![parent_path], row_to_summary)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -720,21 +737,7 @@ impl Store {
               ORDER BY LENGTH(e.path) ASC, e.path ASC
               LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![pattern, limit as i64], |r| {
-            let full_path: String = r.get(0)?;
-            let name = std::path::Path::new(&full_path)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| full_path.clone());
-            Ok(TreeNode {
-                path: full_path,
-                name,
-                kind: r.get(1)?,
-                byte_size: r.get::<_, i64>(2)?,
-                child_count: 0,
-                summary_state: r.get(3)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![pattern, limit as i64], row_to_tree_node)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -747,21 +750,7 @@ impl Store {
              WHERE e.parent_path = ?1
              ORDER BY e.kind DESC, e.path",
         )?;
-        let rows = stmt.query_map(params![parent_path], |r| {
-            let full_path: String = r.get(0)?;
-            let name = std::path::Path::new(&full_path)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| full_path.clone());
-            Ok(TreeNode {
-                path: full_path,
-                name,
-                kind: r.get(1)?,
-                byte_size: r.get::<_, i64>(2)?,
-                child_count: 0,
-                summary_state: r.get(3)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![parent_path], row_to_tree_node)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -799,10 +788,7 @@ impl Store {
             if !blob.len().is_multiple_of(4) {
                 continue;
             }
-            let vec: Vec<f32> = blob
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect();
+            let vec = blob_to_embedding(&blob);
             if vec.len() != query.len() {
                 continue;
             }
@@ -937,10 +923,7 @@ impl Store {
             if !blob.len().is_multiple_of(4) {
                 continue;
             }
-            let vec: Vec<f32> = blob
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect();
+            let vec = blob_to_embedding(&blob);
 
             if vec.len() != query.len() {
                 continue;

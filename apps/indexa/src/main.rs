@@ -136,17 +136,14 @@ async fn cmd_deep(
         _ => SummaryMode::Augment,
     };
     let roots = resolve_roots(paths, false)?;
-    let db_path = index_db_path()?;
-    if !db_path.exists() {
-        println!("No index found. Run `indexa scan <path>` first.");
+    let Some(db_path) = require_index_db()? else {
         return Ok(());
-    }
+    };
 
     let embed_model = embed_model_flag
         .as_deref()
         .unwrap_or(&cfg.embedding.model)
         .to_owned();
-    let dim = cfg.embedding.dim;
 
     if dry_run {
         println!("Dry run — nothing will be written to the index.\n");
@@ -184,14 +181,7 @@ async fn cmd_deep(
     }
 
     let mut store = Store::open(&db_path)?;
-    let embedder = indexa_embed::from_config(
-        &cfg.embedding.provider,
-        &embed_model,
-        dim,
-        &cfg.embedding.base_url,
-        cfg.api_keys.openai.as_deref(),
-        cfg.api_keys.google.as_deref(),
-    )?;
+    let embedder = build_embedder(cfg, Some(&embed_model))?;
 
     for root in &roots {
         println!(
@@ -269,11 +259,9 @@ async fn cmd_deep(
 }
 
 async fn cmd_map(depth: usize) -> Result<()> {
-    let db_path = index_db_path()?;
-    if !db_path.exists() {
-        println!("No index found. Run `indexa scan <path>` first.");
+    let Some(db_path) = require_index_db()? else {
         return Ok(());
-    }
+    };
 
     let store = Store::open(&db_path)?;
     let total = store.entry_count()?;
@@ -305,11 +293,9 @@ async fn cmd_ask(
     dense_only: bool,
     cfg: &Config,
 ) -> Result<()> {
-    let db_path = index_db_path()?;
-    if !db_path.exists() {
-        println!("No index found. Run `indexa scan <path>` first.");
+    let Some(db_path) = require_index_db()? else {
         return Ok(());
-    }
+    };
 
     let store = Store::open(&db_path)?;
     let chunk_count = store.chunk_count()?;
@@ -318,31 +304,8 @@ async fn cmd_ask(
         return Ok(());
     }
 
-    let embed_model = embed_model_flag
-        .as_deref()
-        .unwrap_or(&cfg.embedding.model)
-        .to_owned();
-    let llm_model = llm_model_flag
-        .as_deref()
-        .unwrap_or(&cfg.describer.model)
-        .to_owned();
-    let dim = cfg.embedding.dim;
-
-    let embedder = indexa_embed::from_config(
-        &cfg.embedding.provider,
-        &embed_model,
-        dim,
-        &cfg.embedding.base_url,
-        cfg.api_keys.openai.as_deref(),
-        cfg.api_keys.google.as_deref(),
-    )?;
-    let llm = indexa_llm::from_config(
-        &cfg.describer.provider,
-        &llm_model,
-        &cfg.describer.base_url,
-        cfg.api_keys.openai.as_deref(),
-        cfg.api_keys.anthropic.as_deref(),
-    )?;
+    let embedder = build_embedder(cfg, embed_model_flag.as_deref())?;
+    let llm = build_llm(cfg, llm_model_flag.as_deref())?;
 
     let mode = if sparse_only {
         HybridMode::Sparse
@@ -397,16 +360,8 @@ async fn cmd_watch(
         .as_deref()
         .unwrap_or(&cfg.embedding.model)
         .to_owned();
-    let dim = cfg.embedding.dim;
 
-    let embedder = indexa_embed::from_config(
-        &cfg.embedding.provider,
-        &embed_model,
-        dim,
-        &cfg.embedding.base_url,
-        cfg.api_keys.openai.as_deref(),
-        cfg.api_keys.google.as_deref(),
-    )?;
+    let embedder = build_embedder(cfg, Some(&embed_model))?;
 
     println!(
         "Watching {} path(s) for changes. Press Ctrl-C to stop.",
@@ -500,51 +455,24 @@ async fn cmd_serve(
     llm_model_flag: Option<String>,
     cfg: &Config,
 ) -> Result<()> {
-    let db_path = index_db_path()?;
-    if !db_path.exists() {
-        println!("No index found. Run `indexa scan <path>` first.");
+    let Some(db_path) = require_index_db()? else {
         return Ok(());
-    }
+    };
 
     let store = indexa_core::store::Store::open(&db_path)?;
 
-    let embed_model = embed_model_flag
-        .as_deref()
-        .unwrap_or(&cfg.embedding.model)
-        .to_owned();
-    let llm_model = llm_model_flag
-        .as_deref()
-        .unwrap_or(&cfg.describer.model)
-        .to_owned();
-    let dim = cfg.embedding.dim;
-
-    let embedder: std::sync::Arc<dyn indexa_embed::Embedder + Send + Sync + 'static> =
-        Arc::from(indexa_embed::from_config(
-            &cfg.embedding.provider,
-            &embed_model,
-            dim,
-            &cfg.embedding.base_url,
-            cfg.api_keys.openai.as_deref(),
-            cfg.api_keys.google.as_deref(),
-        )?);
-    let llm: std::sync::Arc<dyn indexa_llm::Generator + Send + Sync + 'static> =
-        Arc::from(indexa_llm::from_config(
-            &cfg.describer.provider,
-            &llm_model,
-            &cfg.describer.base_url,
-            cfg.api_keys.openai.as_deref(),
-            cfg.api_keys.anthropic.as_deref(),
-        )?);
+    let embedder: Arc<dyn indexa_embed::Embedder + Send + Sync + 'static> =
+        Arc::from(build_embedder(cfg, embed_model_flag.as_deref())?);
+    let llm: Arc<dyn indexa_llm::Generator + Send + Sync + 'static> =
+        Arc::from(build_llm(cfg, llm_model_flag.as_deref())?);
 
     indexa_web::serve(port, store, embedder, llm, cfg.clone()).await
 }
 
 async fn cmd_status(show_unknown: bool, cfg: &Config) -> Result<()> {
-    let db_path = index_db_path()?;
-    if !db_path.exists() {
-        println!("No index found. Run `indexa scan <path>` first.");
+    let Some(db_path) = require_index_db()? else {
         return Ok(());
-    }
+    };
 
     let store = Store::open(&db_path)?;
     let entries = store.entry_count()?;
@@ -659,11 +587,9 @@ async fn cmd_summarize(
     cfg: &Config,
 ) -> Result<()> {
     let roots = resolve_roots(paths, false)?;
-    let db_path = index_db_path()?;
-    if !db_path.exists() {
-        println!("No index found. Run `indexa scan <path>` first.");
+    let Some(db_path) = require_index_db()? else {
         return Ok(());
-    }
+    };
 
     let mut summary_cfg = cfg.describer.clone();
     summary_cfg.mode = match mode.as_str() {
@@ -701,11 +627,9 @@ async fn cmd_summarize(
 }
 
 async fn cmd_describe(path: String) -> Result<()> {
-    let db_path = index_db_path()?;
-    if !db_path.exists() {
-        println!("No index found. Run `indexa scan <path>` first.");
+    let Some(db_path) = require_index_db()? else {
         return Ok(());
-    }
+    };
 
     let expanded = shellexpand::tilde(&path).into_owned();
     let store = Store::open(&db_path)?;
@@ -763,11 +687,9 @@ async fn cmd_export(
     depth: Option<usize>,
     output: Option<String>,
 ) -> Result<()> {
-    let db_path = index_db_path()?;
-    if !db_path.exists() {
-        println!("No index found. Run `indexa scan <path>` first.");
+    let Some(db_path) = require_index_db()? else {
         return Ok(());
-    }
+    };
     let store = Store::open(&db_path)?;
     let count = store.summary_count()?;
     if count == 0 {
@@ -827,11 +749,9 @@ async fn cmd_export(
 }
 
 async fn cmd_worker(concurrency: usize, cfg: &Config) -> Result<()> {
-    let db_path = index_db_path()?;
-    if !db_path.exists() {
-        println!("No index found. Run `indexa scan <path>` first.");
+    let Some(db_path) = require_index_db()? else {
         return Ok(());
-    }
+    };
 
     let base_url = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
     let describer: Arc<dyn indexa_llm::Describer + Send + Sync> =
@@ -874,6 +794,54 @@ async fn cmd_worker(concurrency: usize, cfg: &Config) -> Result<()> {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Return the index DB path if it exists, or `None` after printing the standard
+/// "no index found" hint. Call sites collapse to:
+///
+/// ```ignore
+/// let Some(db_path) = require_index_db()? else { return Ok(()); };
+/// ```
+///
+/// `cmd_rm` uses a slightly different hint and so opens the DB directly.
+fn require_index_db() -> Result<Option<PathBuf>> {
+    let db_path = index_db_path()?;
+    if !db_path.exists() {
+        println!("No index found. Run `indexa scan <path>` first.");
+        return Ok(None);
+    }
+    Ok(Some(db_path))
+}
+
+/// Build an embedder from config, optionally overriding the model name.
+fn build_embedder(
+    cfg: &Config,
+    model_override: Option<&str>,
+) -> Result<Box<dyn indexa_embed::Embedder + Send + Sync>> {
+    let model = model_override.unwrap_or(&cfg.embedding.model);
+    indexa_embed::from_config(
+        &cfg.embedding.provider,
+        model,
+        cfg.embedding.dim,
+        &cfg.embedding.base_url,
+        cfg.api_keys.openai.as_deref(),
+        cfg.api_keys.google.as_deref(),
+    )
+}
+
+/// Build an LLM generator from config, optionally overriding the model name.
+fn build_llm(
+    cfg: &Config,
+    model_override: Option<&str>,
+) -> Result<Box<dyn indexa_llm::Generator + Send + Sync>> {
+    let model = model_override.unwrap_or(&cfg.describer.model);
+    indexa_llm::from_config(
+        &cfg.describer.provider,
+        model,
+        &cfg.describer.base_url,
+        cfg.api_keys.openai.as_deref(),
+        cfg.api_keys.anthropic.as_deref(),
+    )
+}
 
 fn resolve_roots(paths: Vec<String>, all: bool) -> Result<Vec<PathBuf>> {
     if all {
