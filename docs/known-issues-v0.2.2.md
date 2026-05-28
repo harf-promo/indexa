@@ -1,7 +1,8 @@
 # Known issues — v0.2.2
 
 Observed during end-to-end testing on 2026-05-28.  
-All three re-index correctness issues are tracked in [GitHub issue #33](https://github.com/harf-promo/indexa/issues/33) and scheduled for v0.2.3.
+All issues below were fixed in **v0.2.3** (branch `feat/v0.2.3-context-quality`).  
+Issue tracker: [GitHub issue #33](https://github.com/harf-promo/indexa/issues/33).
 
 ---
 
@@ -13,7 +14,7 @@ All three re-index correctness issues are tracked in [GitHub issue #33](https://
 
 **Fix:** Bump `Cargo.toml:15` to the current release version whenever a release tag is created. Consider automating via `cargo-release` or a release workflow step that patches `version` to match the tag.
 
-**Deferred to:** v0.2.3 (trivial one-line change, but needs a test or CI check to prevent regression).
+**Fixed in v0.2.3:** Workspace `Cargo.toml` `version` bumped to `0.2.3`.
 
 ---
 
@@ -36,7 +37,7 @@ The only reason the second run was faster is that the embedding model was alread
 **Expected fix shape:**  
 Before embedding a chunk, check whether a row already exists in `chunks` with the same `(entry_path, seq)` AND the content hash (or `text` fingerprint) hasn't changed AND the `embed_model` matches. If all three hold, skip the embedding call and leave the row alone. A practical shortcut: skip if file `modified_s` in `entries` equals the stored timestamp at scan time and `embed_model` matches.
 
-**Deferred to:** v0.2.3.
+**Fixed in v0.2.3.**
 
 ---
 
@@ -60,7 +61,7 @@ Result included `/…/crates/embed/src/google.rs` even though the file no longer
 **Expected fix shape:**  
 After `walk()` produces the new entry set, compute the set difference against the currently stored paths under the same root(s), and call `store.delete_entry` (or a batch delete) for each removed path. Alternatively, do this as a reconcile pass: `DELETE FROM entries WHERE path LIKE '<root>/%' AND path NOT IN (<new paths>)`.
 
-**Deferred to:** v0.2.3.
+**Fixed in v0.2.3.**
 
 ---
 
@@ -91,7 +92,7 @@ A user upgrading from v0.1 to v0.2 (new Gemma 3 defaults) runs `indexa summarize
 - Return a non-zero exit code when any item failed.  
 - Consider adding a `--check-models` pre-flight that validates the configured models are reachable before attempting summarization.
 
-**Deferred to:** v0.2.3.
+**Fixed in v0.2.3.**
 
 ---
 
@@ -113,4 +114,4 @@ The config path uses a reverse-DNS bundle-ID style (`dev.indexa.indexa`) while t
 
 **Expected fix shape:** Explicitly construct both paths from `BaseDirs::home_dir()` with a consistent `~/.indexa/` prefix, bypassing the OS directory resolution, or document the two paths clearly in `indexa status`.
 
-**Deferred to:** v0.2.3.
+**Fixed in v0.2.3.**
