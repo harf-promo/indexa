@@ -43,12 +43,17 @@ pub trait Describer: Send + Sync {
 }
 
 /// Build a `Generator` from config values.
-/// Returns an error if credentials are missing.
+///
+/// `openai_key` / `anthropic_key` are used as fallbacks when the corresponding
+/// environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) are not set.
+/// Pass `None` to require the env var.
 pub fn from_config(
     provider: &str,
     model: &str,
     base_url: &str,
-) -> anyhow::Result<Box<dyn Generator>> {
+    openai_key: Option<&str>,
+    anthropic_key: Option<&str>,
+) -> anyhow::Result<Box<dyn Generator + Send + Sync>> {
     let base = if base_url.is_empty() {
         None
     } else {
@@ -59,8 +64,13 @@ pub fn from_config(
             OllamaLlm::resolve_base_url(base),
             model,
         ))),
-        "openai" => Ok(Box::new(OpenAICompatLlm::from_env(model)?)),
-        "anthropic" => Ok(Box::new(AnthropicLlm::from_env(model)?)),
+        "openai" => Ok(Box::new(OpenAICompatLlm::from_env_or_config(
+            model, openai_key,
+        )?)),
+        "anthropic" => Ok(Box::new(AnthropicLlm::from_env_or_config(
+            model,
+            anthropic_key,
+        )?)),
         "llamacpp" => Ok(Box::new(OpenAICompatLlm::local_llamacpp(
             OpenAICompatLlm::resolve_base_url(base),
             model,
