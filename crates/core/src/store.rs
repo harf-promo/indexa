@@ -617,7 +617,7 @@ mod tests {
     fn chunk_upsert_is_idempotent() {
         let mut store = Store::open_in_memory().unwrap();
         let c = dummy_chunk("/x.txt", 0, "hello world");
-        store.upsert_chunks(&[c.clone()]).unwrap();
+        store.upsert_chunks(std::slice::from_ref(&c)).unwrap();
         store.upsert_chunks(&[c]).unwrap();
         assert_eq!(store.chunk_count().unwrap(), 1);
     }

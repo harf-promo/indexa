@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn resolve_base_url_returns_default_when_no_env() {
         // Clear any accidental env var for the test
-        let _ = std::env::remove_var("GOOGLE_BASE_URL");
+        std::env::remove_var("GOOGLE_BASE_URL");
         let url = GoogleEmbedder::resolve_base_url(None);
         assert_eq!(url, DEFAULT_BASE);
     }
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn from_env_errors_without_api_key() {
-        let _ = std::env::remove_var("GOOGLE_API_KEY");
+        std::env::remove_var("GOOGLE_API_KEY");
         let result = GoogleEmbedder::from_env(DEFAULT_MODEL, DEFAULT_DIM);
         assert!(result.is_err());
         let msg = result.err().unwrap().to_string();
