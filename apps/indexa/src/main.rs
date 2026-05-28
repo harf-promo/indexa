@@ -3,15 +3,16 @@ use clap::Parser;
 use directories::BaseDirs;
 use indexa_cli::{Cli, Commands};
 use indexa_core::{
-    config::{self, Config, HybridMode},
+    config::{self, Config, HybridMode, SummaryMode},
     store::{ChunkRecord, Store},
     walker::{walk, WalkConfig},
     watcher::{self, ChangeKind, WatcherConfig},
 };
 use indexa_embed::{Embedder as _, OllamaEmbedder};
 use indexa_llm::OllamaLlm;
-use indexa_query::{ask, QaConfig};
+use indexa_query::{ask, enqueue_subtree, summarize_subtree_sync, QaConfig};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,8 +38,12 @@ async fn main() -> Result<()> {
             paths,
             embed_model,
             dry_run,
-        } => cmd_deep(paths, embed_model, dry_run, &cfg).await,
+            mode,
+        } => cmd_deep(paths, embed_model, dry_run, mode, &cfg).await,
         Commands::Map { depth } => cmd_map(depth).await,
+        Commands::Summarize { paths, mode } => cmd_summarize(paths, mode, &cfg).await,
+        Commands::Describe { path } => cmd_describe(path).await,
+        Commands::Worker { concurrency } => cmd_worker(concurrency, &cfg).await,
         Commands::Ask {
             question,
             embed_model,
@@ -94,8 +99,14 @@ async fn cmd_deep(
     paths: Vec<String>,
     embed_model_flag: Option<String>,
     dry_run: bool,
+    mode: String,
     cfg: &Config,
 ) -> Result<()> {
+    let summary_mode = match mode.as_str() {
+        "compress" => SummaryMode::Compress,
+        "summaries-only" => SummaryMode::SummariesOnly,
+        _ => SummaryMode::Augment,
+    };
     let roots = resolve_roots(paths, false)?;
     let db_path = index_db_path()?;
     if !db_path.exists() {
@@ -191,6 +202,19 @@ async fn cmd_deep(
         }
 
         println!("  embedded {total_chunks} chunks.");
+    }
+
+    // Enqueue summarization for non-Augment modes or always to populate the queue
+    if summary_mode != SummaryMode::SummariesOnly {
+        for root in &roots {
+            match enqueue_subtree(&mut store, root) {
+                Ok(n) if n > 0 => println!(
+                    "  enqueued {n} items for background summarization. Run `indexa worker` or use the web UI."
+                ),
+                Ok(_) => {}
+                Err(e) => println!("  warning: failed to enqueue summaries: {e}"),
+            }
+        }
     }
 
     println!("\nDeep index done. Run `indexa ask \"<question>\"` to query.");
@@ -485,6 +509,13 @@ async fn cmd_status(cfg: &Config) -> Result<()> {
         println!("Last indexed: unix timestamp {secs}");
     }
 
+    let summary_count = store.summary_count().unwrap_or(0);
+    let queue = store.queue_stats().unwrap_or_default();
+    println!(
+        "Summaries: {} (queue: {} pending / {} in-flight / {} failed)",
+        summary_count, queue.pending, queue.in_flight, queue.failed
+    );
+
     println!();
     println!("Config:   {config_path}");
     println!(
@@ -492,8 +523,11 @@ async fn cmd_status(cfg: &Config) -> Result<()> {
         cfg.embedding.provider, cfg.embedding.model, cfg.embedding.dim
     );
     println!(
-        "Describer: {} / {}",
-        cfg.describer.provider, cfg.describer.model
+        "Describer: {} / {} (file: {}, dir: {})",
+        cfg.describer.provider,
+        cfg.describer.model,
+        cfg.describer.file_model,
+        cfg.describer.dir_model
     );
 
     Ok(())
@@ -527,6 +561,146 @@ async fn cmd_rm(paths: Vec<String>, recursive: bool) -> Result<()> {
     }
 
     println!("Total removed: {total_removed} entries");
+    Ok(())
+}
+
+async fn cmd_summarize(paths: Vec<String>, mode: String, cfg: &Config) -> Result<()> {
+    let roots = resolve_roots(paths, false)?;
+    let db_path = index_db_path()?;
+    if !db_path.exists() {
+        println!("No index found. Run `indexa scan <path>` first.");
+        return Ok(());
+    }
+
+    let mut summary_cfg = cfg.describer.clone();
+    summary_cfg.mode = match mode.as_str() {
+        "compress" => SummaryMode::Compress,
+        "summaries-only" => SummaryMode::SummariesOnly,
+        _ => SummaryMode::Augment,
+    };
+
+    let base_url = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
+    let describer = OllamaLlm::new_with_dir_model(
+        &base_url,
+        &cfg.describer.file_model,
+        &cfg.describer.dir_model,
+    );
+    let embed_base = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
+    let embedder = OllamaEmbedder::new(&embed_base, &cfg.embedding.model, cfg.embedding.dim);
+
+    let mut store = Store::open(&db_path)?;
+
+    for root in &roots {
+        println!("Summarizing {} …", root.display());
+        let done =
+            summarize_subtree_sync(&mut store, &describer, &embedder, root, &summary_cfg).await?;
+        println!("  {done} summaries written.");
+    }
+
+    Ok(())
+}
+
+async fn cmd_describe(path: String) -> Result<()> {
+    let db_path = index_db_path()?;
+    if !db_path.exists() {
+        println!("No index found. Run `indexa scan <path>` first.");
+        return Ok(());
+    }
+
+    let expanded = shellexpand::tilde(&path).into_owned();
+    let store = Store::open(&db_path)?;
+
+    match store.summary_by_path(&expanded)? {
+        None => println!("No summary found for {expanded}. Run `indexa summarize` first."),
+        Some(rec) => {
+            // Print breadcrumb chain
+            let crumbs = store.ancestor_summaries(&expanded)?;
+            if !crumbs.is_empty() {
+                let chain: Vec<&str> = crumbs.iter().map(|c| c.path.as_str()).collect();
+                println!("Breadcrumb: {}", chain.join(" › "));
+                println!();
+                for crumb in &crumbs {
+                    let name = std::path::Path::new(&crumb.path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| crumb.path.clone());
+                    println!("  {name}: {}", crumb.summary);
+                }
+                println!();
+            }
+
+            let kind_icon = if rec.kind == "dir" { "📁" } else { "📄" };
+            println!("{kind_icon} {expanded}");
+            println!("  Model:  {}", rec.model);
+            println!("  Kind:   {}", rec.kind);
+            println!();
+            println!("{}", rec.summary);
+
+            // Show immediate children if directory
+            if rec.kind == "dir" {
+                let children = store.children_summaries(&expanded)?;
+                if !children.is_empty() {
+                    println!("\nChildren ({}):", children.len());
+                    for child in children.iter().take(20) {
+                        let name = std::path::Path::new(&child.path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| child.path.clone());
+                        let icon = if child.kind == "dir" { "📁" } else { "📄" };
+                        println!("  {icon} {name}: {}", child.summary);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_worker(concurrency: usize, cfg: &Config) -> Result<()> {
+    let db_path = index_db_path()?;
+    if !db_path.exists() {
+        println!("No index found. Run `indexa scan <path>` first.");
+        return Ok(());
+    }
+
+    let base_url = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
+    let describer: Arc<dyn indexa_llm::Describer + Send + Sync> =
+        Arc::new(OllamaLlm::new_with_dir_model(
+            &base_url,
+            &cfg.describer.file_model,
+            &cfg.describer.dir_model,
+        ));
+    let embed_base = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
+    let embedder: Arc<dyn indexa_embed::Embedder + Send + Sync> = Arc::new(OllamaEmbedder::new(
+        &embed_base,
+        &cfg.embedding.model,
+        cfg.embedding.dim,
+    ));
+
+    let store = Arc::new(tokio::sync::Mutex::new(Store::open(&db_path)?));
+
+    let stats = store.lock().await.queue_stats()?;
+    println!(
+        "Summary worker starting ({concurrency} concurrent). Queue: {} pending, {} done, {} failed.",
+        stats.pending, stats.done, stats.failed
+    );
+    println!("Press Ctrl-C to stop.");
+
+    let summary_cfg = cfg.describer.clone();
+    let mut handles = Vec::new();
+    for _ in 0..concurrency {
+        let s = Arc::clone(&store);
+        let d = Arc::clone(&describer);
+        let e = Arc::clone(&embedder);
+        let c = summary_cfg.clone();
+        handles.push(tokio::spawn(indexa_query::run_worker(s, d, e, c)));
+    }
+
+    // Wait for all (runs forever until Ctrl-C)
+    for h in handles {
+        let _ = h.await;
+    }
     Ok(())
 }
 

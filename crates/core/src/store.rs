@@ -1,7 +1,7 @@
 use crate::config::HybridMode;
 use crate::walker::{Entry, EntryKind};
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
 pub struct Store {
@@ -88,6 +88,38 @@ impl Store {
                 entry_path,
                 chunk_id
             );
+
+            -- Hierarchical summaries (one row per file or directory)
+            CREATE TABLE IF NOT EXISTS summaries (
+                path          TEXT PRIMARY KEY,
+                kind          TEXT NOT NULL CHECK(kind IN ('file','dir')),
+                parent_path   TEXT,
+                depth         INTEGER NOT NULL DEFAULT 0,
+                summary       TEXT NOT NULL,
+                embedding     BLOB,
+                child_count   INTEGER NOT NULL DEFAULT 0,
+                byte_size     INTEGER NOT NULL DEFAULT 0,
+                model         TEXT NOT NULL DEFAULT '',
+                source_hash   TEXT NOT NULL DEFAULT '',
+                generated_at  INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE INDEX IF NOT EXISTS idx_summaries_parent ON summaries(parent_path);
+            CREATE INDEX IF NOT EXISTS idx_summaries_depth  ON summaries(depth);
+            CREATE INDEX IF NOT EXISTS idx_summaries_kind   ON summaries(kind);
+
+            -- Background summarization queue
+            CREATE TABLE IF NOT EXISTS summary_queue (
+                path        TEXT PRIMARY KEY,
+                kind        TEXT NOT NULL CHECK(kind IN ('file','dir')),
+                depth       INTEGER NOT NULL DEFAULT 0,
+                state       TEXT NOT NULL DEFAULT 'pending'
+                                 CHECK(state IN ('pending','in_flight','done','failed')),
+                attempts    INTEGER NOT NULL DEFAULT 0,
+                enqueued_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                error       TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_summary_queue_state ON summary_queue(state);
             ",
         )?;
         Ok(())
@@ -404,6 +436,332 @@ impl Store {
         Ok(hits)
     }
 
+    // ── Misc helpers ─────────────────────────────────────────────────────────
+
+    /// Text of the first chunk for a given file path (used as description input).
+    pub fn first_chunk_text(&self, entry_path: &str) -> Result<Option<String>> {
+        let text: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT text FROM chunks WHERE entry_path = ?1 ORDER BY seq LIMIT 1",
+                params![entry_path],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(text)
+    }
+
+    /// Expose the raw rusqlite connection for use in helper modules that need
+    /// to run queries not covered by the public API (e.g. summarize.rs).
+    pub fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// All (path, kind) entries under `root` that are not yet in summary_queue
+    /// and whose deep_policy is not 'Skip'.
+    pub fn entries_for_summarization(&self, root: &str) -> Result<Vec<(String, String)>> {
+        let pattern = like_prefix(root);
+        let mut stmt = self.conn.prepare(
+            "SELECT path, kind FROM entries
+             WHERE (path LIKE ?1 ESCAPE '\\' OR parent_path LIKE ?1 ESCAPE '\\')
+               AND path NOT IN (SELECT path FROM summary_queue)
+               AND (deep_policy IS NULL OR deep_policy != 'Skip')",
+        )?;
+        let rows = stmt.query_map(params![pattern], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Delete chunks for every file whose path is under `prefix`.
+    pub fn delete_chunks_for_subtree(&mut self, prefix: &str) -> Result<usize> {
+        let pattern = like_prefix(prefix);
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM chunks_fts WHERE entry_path LIKE ?1 ESCAPE '\\'",
+            params![pattern],
+        )?;
+        let n = tx.execute(
+            "DELETE FROM chunks WHERE entry_path LIKE ?1 ESCAPE '\\'",
+            params![pattern],
+        )?;
+        tx.commit()?;
+        Ok(n)
+    }
+
+    // ── Summary writes ────────────────────────────────────────────────────────
+
+    /// Insert or replace a summary row.
+    pub fn upsert_summary(&mut self, record: &SummaryRecord) -> Result<()> {
+        let embedding_blob = record
+            .embedding
+            .as_ref()
+            .map(|v| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>());
+        self.conn.execute(
+            "INSERT OR REPLACE INTO summaries
+             (path, kind, parent_path, depth, summary, embedding,
+              child_count, byte_size, model, source_hash, generated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![
+                record.path,
+                record.kind,
+                record.parent_path,
+                record.depth,
+                record.summary,
+                embedding_blob,
+                record.child_count,
+                record.byte_size,
+                record.model,
+                record.source_hash,
+                record.generated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Look up a single summary row by exact path.
+    pub fn summary_by_path(&self, path: &str) -> Result<Option<SummaryRecord>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT path, kind, parent_path, depth, summary, embedding,
+                    child_count, byte_size, model, source_hash, generated_at
+             FROM summaries WHERE path = ?1",
+        )?;
+        let row = stmt.query_row(params![path], |r| {
+            let blob: Option<Vec<u8>> = r.get(5)?;
+            let embedding = blob.map(|b| {
+                b.chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect()
+            });
+            Ok(SummaryRecord {
+                path: r.get(0)?,
+                kind: r.get(1)?,
+                parent_path: r.get(2)?,
+                depth: r.get(3)?,
+                summary: r.get(4)?,
+                embedding,
+                child_count: r.get(6)?,
+                byte_size: r.get(7)?,
+                model: r.get(8)?,
+                source_hash: r.get(9)?,
+                generated_at: r.get(10)?,
+            })
+        });
+        match row {
+            Ok(r) => Ok(Some(r)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// All summary rows whose parent_path == given path (direct children).
+    pub fn children_summaries(&self, parent_path: &str) -> Result<Vec<SummaryRecord>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT path, kind, parent_path, depth, summary, embedding,
+                    child_count, byte_size, model, source_hash, generated_at
+             FROM summaries WHERE parent_path = ?1 ORDER BY kind DESC, path",
+        )?;
+        let rows = stmt.query_map(params![parent_path], |r| {
+            let blob: Option<Vec<u8>> = r.get(5)?;
+            let embedding = blob.map(|b| {
+                b.chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect()
+            });
+            Ok(SummaryRecord {
+                path: r.get(0)?,
+                kind: r.get(1)?,
+                parent_path: r.get(2)?,
+                depth: r.get(3)?,
+                summary: r.get(4)?,
+                embedding,
+                child_count: r.get(6)?,
+                byte_size: r.get(7)?,
+                model: r.get(8)?,
+                source_hash: r.get(9)?,
+                generated_at: r.get(10)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Ancestor chain from path up to root (breadcrumb), ordered shallow→deep.
+    pub fn ancestor_summaries(&self, path: &str) -> Result<Vec<SummaryRecord>> {
+        let mut crumbs: Vec<SummaryRecord> = Vec::new();
+        let mut current = std::path::Path::new(path)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned());
+        while let Some(p) = current {
+            if p.is_empty() || p == "/" {
+                break;
+            }
+            if let Some(rec) = self.summary_by_path(&p)? {
+                current = rec.parent_path.clone();
+                crumbs.push(rec);
+            } else {
+                current = std::path::Path::new(&p)
+                    .parent()
+                    .map(|pp| pp.to_string_lossy().into_owned());
+            }
+        }
+        crumbs.reverse();
+        Ok(crumbs)
+    }
+
+    /// One level of the tree: entries under `parent_path` with their summary states.
+    pub fn tree_level(&self, parent_path: &str) -> Result<Vec<TreeNode>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.path, e.kind, e.size,
+                    sq.state AS summary_state
+             FROM entries e
+             LEFT JOIN summary_queue sq ON sq.path = e.path
+             WHERE e.parent_path = ?1
+             ORDER BY e.kind DESC, e.path",
+        )?;
+        let rows = stmt.query_map(params![parent_path], |r| {
+            let full_path: String = r.get(0)?;
+            let name = std::path::Path::new(&full_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| full_path.clone());
+            Ok(TreeNode {
+                path: full_path,
+                name,
+                kind: r.get(1)?,
+                byte_size: r.get::<_, i64>(2)?,
+                child_count: 0,
+                summary_state: r.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Count of summary rows.
+    pub fn summary_count(&self) -> Result<u64> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM summaries", [], |r| r.get(0))?;
+        Ok(n as u64)
+    }
+
+    /// Brute-force cosine search over summary embeddings.
+    /// Returns (path, similarity) sorted descending, with depth boosting applied.
+    pub fn summary_cosine_search(
+        &self,
+        query: &[f32],
+        limit: usize,
+        depth_alpha: f32,
+    ) -> Result<Vec<(String, f32)>> {
+        let max_depth: i64 =
+            self.conn
+                .query_row("SELECT COALESCE(MAX(depth), 0) FROM summaries", [], |r| {
+                    r.get(0)
+                })?;
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, depth, embedding FROM summaries WHERE embedding IS NOT NULL")?;
+        let mut scored: Vec<(String, f32)> = Vec::new();
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let path: String = row.get(0)?;
+            let depth: i64 = row.get(1)?;
+            let blob: Vec<u8> = row.get(2)?;
+            if !blob.len().is_multiple_of(4) {
+                continue;
+            }
+            let vec: Vec<f32> = blob
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            if vec.len() != query.len() {
+                continue;
+            }
+            let sim = cosine_similarity(query, &vec);
+            let boost = 1.0 + depth_alpha * (max_depth - depth) as f32;
+            scored.push((path, sim * boost));
+        }
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        Ok(scored)
+    }
+
+    // ── Summary queue ────────────────────────────────────────────────────────
+
+    /// Enqueue (path, kind, depth) items; ignores duplicates.
+    pub fn enqueue_summary_items(&mut self, items: &[(String, String, i64)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR IGNORE INTO summary_queue (path, kind, depth, state)
+                 VALUES (?1, ?2, ?3, 'pending')",
+            )?;
+            for (path, kind, depth) in items {
+                stmt.execute(params![path, kind, depth])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Take one pending item — deepest first (files before their parent dirs).
+    pub fn next_queue_item(&mut self) -> Result<Option<QueueItem>> {
+        let item = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT path, kind, depth FROM summary_queue
+                 WHERE state = 'pending'
+                 ORDER BY depth DESC LIMIT 1",
+            )?;
+            stmt.query_row([], |r| {
+                Ok(QueueItem {
+                    path: r.get(0)?,
+                    kind: r.get(1)?,
+                    depth: r.get(2)?,
+                })
+            })
+            .optional()?
+        };
+        if let Some(ref it) = item {
+            self.conn.execute(
+                "UPDATE summary_queue
+                 SET state='in_flight', attempts=attempts+1, updated_at=unixepoch()
+                 WHERE path=?1",
+                params![it.path],
+            )?;
+        }
+        Ok(item)
+    }
+
+    /// Mark a queue item's state (e.g. "done" or "failed").
+    pub fn mark_queue_state(&mut self, path: &str, state: &str, error: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE summary_queue SET state=?1, error=?2, updated_at=unixepoch() WHERE path=?3",
+            params![state, error, path],
+        )?;
+        Ok(())
+    }
+
+    /// Queue statistics for status display.
+    pub fn queue_stats(&self) -> Result<QueueStats> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT state, COUNT(*) FROM summary_queue GROUP BY state")?;
+        let mut stats = QueueStats::default();
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let state: String = row.get(0)?;
+            let n: i64 = row.get(1)?;
+            match state.as_str() {
+                "pending" => stats.pending = n,
+                "in_flight" => stats.in_flight = n,
+                "done" => stats.done = n,
+                "failed" => stats.failed = n,
+                _ => {}
+            }
+        }
+        Ok(stats)
+    }
+
     /// Brute-force cosine similarity over all stored embeddings.
     /// Returns (chunk_id, entry_path) sorted by descending similarity.
     fn cosine_search(
@@ -512,6 +870,46 @@ pub struct RegionSummary {
     pub category: String,
     pub entry_count: u64,
     pub total_size: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SummaryRecord {
+    pub path: String,
+    pub kind: String,
+    pub parent_path: Option<String>,
+    pub depth: i64,
+    pub summary: String,
+    pub embedding: Option<Vec<f32>>,
+    pub child_count: i64,
+    pub byte_size: i64,
+    pub model: String,
+    pub source_hash: String,
+    pub generated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TreeNode {
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub child_count: i64,
+    pub byte_size: i64,
+    pub summary_state: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct QueueStats {
+    pub pending: i64,
+    pub in_flight: i64,
+    pub done: i64,
+    pub failed: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueueItem {
+    pub path: String,
+    pub kind: String,
+    pub depth: i64,
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -747,5 +1145,104 @@ mod tests {
             p.ends_with('%'),
             "pattern should end with trailing wildcard: {p}"
         );
+    }
+
+    fn dummy_summary(path: &str, kind: &str, parent: Option<&str>, depth: i64) -> SummaryRecord {
+        SummaryRecord {
+            path: path.to_owned(),
+            kind: kind.to_owned(),
+            parent_path: parent.map(|s| s.to_owned()),
+            depth,
+            summary: format!("summary of {path}"),
+            embedding: None,
+            child_count: 0,
+            byte_size: 100,
+            model: "gemma2:2b".to_owned(),
+            source_hash: String::new(),
+            generated_at: 0,
+        }
+    }
+
+    #[test]
+    fn summaries_upsert_and_lookup() {
+        let mut store = Store::open_in_memory().unwrap();
+        let rec = dummy_summary("/docs/file.txt", "file", Some("/docs"), 2);
+        store.upsert_summary(&rec).unwrap();
+        assert_eq!(store.summary_count().unwrap(), 1);
+
+        let got = store.summary_by_path("/docs/file.txt").unwrap().unwrap();
+        assert_eq!(got.kind, "file");
+        assert_eq!(got.summary, "summary of /docs/file.txt");
+    }
+
+    #[test]
+    fn summaries_upsert_is_idempotent() {
+        let mut store = Store::open_in_memory().unwrap();
+        let rec = dummy_summary("/a.txt", "file", Some("/"), 1);
+        store.upsert_summary(&rec).unwrap();
+        store.upsert_summary(&rec).unwrap();
+        assert_eq!(store.summary_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn children_summaries_returns_direct_children() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_summary(&dummy_summary("/docs/a.txt", "file", Some("/docs"), 2))
+            .unwrap();
+        store
+            .upsert_summary(&dummy_summary("/docs/b.txt", "file", Some("/docs"), 2))
+            .unwrap();
+        store
+            .upsert_summary(&dummy_summary("/other/c.txt", "file", Some("/other"), 2))
+            .unwrap();
+
+        let children = store.children_summaries("/docs").unwrap();
+        assert_eq!(children.len(), 2);
+        assert!(children
+            .iter()
+            .all(|c| c.parent_path.as_deref() == Some("/docs")));
+    }
+
+    #[test]
+    fn summary_queue_enqueue_and_dequeue() {
+        let mut store = Store::open_in_memory().unwrap();
+        let items = vec![
+            ("/docs/a.txt".to_owned(), "file".to_owned(), 2i64),
+            ("/docs/b.txt".to_owned(), "file".to_owned(), 2i64),
+        ];
+        store.enqueue_summary_items(&items).unwrap();
+
+        let stats = store.queue_stats().unwrap();
+        assert_eq!(stats.pending, 2);
+
+        let item = store.next_queue_item().unwrap().unwrap();
+        assert_eq!(item.kind, "file");
+
+        let stats2 = store.queue_stats().unwrap();
+        assert_eq!(stats2.in_flight, 1);
+        assert_eq!(stats2.pending, 1);
+
+        store.mark_queue_state(&item.path, "done", None).unwrap();
+        let stats3 = store.queue_stats().unwrap();
+        assert_eq!(stats3.done, 1);
+    }
+
+    #[test]
+    fn summary_cosine_search_returns_boosted_results() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut root = dummy_summary("/", "dir", None, 0);
+        root.embedding = Some(vec![1.0, 0.0, 0.0]);
+        let mut leaf = dummy_summary("/docs/file.txt", "file", Some("/docs"), 2);
+        leaf.embedding = Some(vec![1.0, 0.0, 0.0]);
+        store.upsert_summary(&root).unwrap();
+        store.upsert_summary(&leaf).unwrap();
+
+        let results = store
+            .summary_cosine_search(&[1.0, 0.0, 0.0], 10, 0.15)
+            .unwrap();
+        assert!(!results.is_empty());
+        // Root (depth=0) should score higher than leaf (depth=2) due to depth boost
+        assert_eq!(results[0].0, "/");
     }
 }

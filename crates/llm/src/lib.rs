@@ -21,10 +21,25 @@ pub trait Generator: Send + Sync {
     async fn generate(&self, prompt: &str) -> anyhow::Result<String>;
 }
 
-/// Generates a natural-language description for a file given its content sample.
+/// A child entry fed into a directory roll-up summary prompt.
+pub struct ChildSummary {
+    pub name: String,
+    pub kind: String, // "file" | "dir"
+    pub summary: String,
+}
+
+/// Generates natural-language descriptions for files and directory roll-ups.
 #[async_trait::async_trait]
 pub trait Describer: Send + Sync {
+    /// One-sentence file description from a content sample.
     async fn describe(&self, path: &str, content_sample: &[u8]) -> anyhow::Result<String>;
+
+    /// 2–4 sentence directory summary synthesised from direct children.
+    async fn summarize_dir(
+        &self,
+        dir_path: &str,
+        children: &[ChildSummary],
+    ) -> anyhow::Result<String>;
 }
 
 /// Build a `Generator` from config values.
