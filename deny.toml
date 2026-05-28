@@ -13,7 +13,6 @@ allow = [
     "Unicode-3.0",
     "Unicode-DFS-2016",
 ]
-deny = ["GPL-2.0", "GPL-3.0", "AGPL-3.0"]
 exceptions = []
 
 [advisories]
