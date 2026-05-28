@@ -1,6 +1,6 @@
 [package]
 name = "indexa"
-description = "The open index for your whole computer."
+description = "The local context engine for AI."
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

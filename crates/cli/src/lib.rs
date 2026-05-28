@@ -4,8 +4,17 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "indexa",
     version,
-    about = "The first tool to give your computer a memory.",
-    long_about = None,
+    about = "The local context engine for AI — index your disk once, hand grounded context to any AI.",
+    long_about = "Indexa reads your code or your disk once, builds a hierarchical context graph \
+(files → summaries → folder roll-ups), and serves it to AI tools on demand.\n\n\
+The index is the substrate; context is the product.\n\n\
+Local-first, model-agnostic, free of token-budget tax. Fully open source.\n\n\
+Quick start:\n  \
+indexa scan ~/code/myrepo           # build surface context map\n  \
+indexa deep ~/code/myrepo           # build deep context (parses, embeds)\n  \
+indexa summarize ~/code/myrepo      # generate hierarchical summaries\n  \
+indexa export ~/code/myrepo > ctx.xml  # export as XML for your AI tool\n  \
+indexa serve                        # open local web UI"
 )]
 pub struct Cli {
     /// Path to config file (default: platform config dir / config.toml).
@@ -18,7 +27,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Walk a path and build (or update) the surface index (fast — no AI).
+    /// Build the surface context map of a path (fast — no AI calls).
     #[command(after_help = "Examples:
   indexa scan ~/Documents
   indexa scan ~/Projects ~/Notes
@@ -43,7 +52,7 @@ pub enum Commands {
         depth: usize,
     },
 
-    /// Deep-scan a path: parse, embed, and index file contents.
+    /// Build deep context: parse, embed, and index file contents.
     #[command(after_help = "Examples:
   indexa deep ~/Documents
   indexa deep ~/Projects --embed-model nomic-embed-text:v1.5
@@ -66,7 +75,7 @@ pub enum Commands {
         mode: String,
     },
 
-    /// Generate hierarchical summaries for indexed files and directories.
+    /// Generate hierarchical context summaries for indexed files and directories.
     #[command(after_help = "Examples:
   indexa summarize ~/Documents
   indexa summarize ~/Documents --mode compress")]
@@ -121,9 +130,10 @@ pub enum Commands {
         output: Option<String>,
     },
 
-    /// Ask a question about your indexed files.
+    /// Query your local context with a natural-language question.
     #[command(after_help = "Examples:
   indexa ask \"where are my tax documents?\"
+  indexa ask \"where is auth handled in this repo?\"
   indexa ask --scope ~/Work \"what are my current priorities?\"
   indexa ask --sparse-only \"IndexOutOfBoundsException\"
   indexa ask --top-k 20 \"Python files using async\"")]
@@ -156,7 +166,7 @@ pub enum Commands {
         dense_only: bool,
     },
 
-    /// Watch one or more paths for changes and re-index them automatically.
+    /// Watch one or more paths for changes and keep their context current.
     #[command(after_help = "Examples:
   indexa watch ~/Documents
   indexa watch ~/Documents ~/Projects")]
@@ -187,12 +197,12 @@ pub enum Commands {
         llm_model: Option<String>,
     },
 
-    /// Show index statistics.
+    /// Show context store statistics.
     #[command(after_help = "Examples:
   indexa status")]
     Status,
 
-    /// Remove one or more paths from the index.
+    /// Remove one or more paths from the context store.
     #[command(after_help = "Examples:
   indexa rm ~/Documents/old-project
   indexa rm -r ~/Documents/old-folder")]
