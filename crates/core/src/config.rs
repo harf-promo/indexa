@@ -22,6 +22,23 @@ pub struct Config {
     /// Per-directory overrides. Matched by path prefix (longest wins).
     #[serde(default)]
     pub region: Vec<RegionConfig>,
+    /// Optional cloud-provider API keys persisted to config.toml.
+    #[serde(default)]
+    pub api_keys: ApiKeysConfig,
+}
+
+// ── API keys ──────────────────────────────────────────────────────────────────
+
+/// Optional cloud-provider API keys stored in config.toml.
+/// These are used as fallback when the corresponding environment variables
+/// (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`) are not set.
+/// Keys are stored at rest — ensure config.toml has 0600 permissions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApiKeysConfig {
+    pub openai: Option<String>,
+    pub anthropic: Option<String>,
+    pub google: Option<String>,
 }
 
 // ── Embedding ─────────────────────────────────────────────────────────────────
@@ -171,11 +188,11 @@ impl Default for DescriberConfig {
     fn default() -> Self {
         Self {
             provider: "ollama".into(),
-            model: "gemma2:9b".into(),
+            model: "gemma3:12b".into(),
             base_url: "http://localhost:11434".into(),
             contextual_retrieval: false,
-            file_model: "gemma2:2b".into(),
-            dir_model: "gemma2:9b".into(),
+            file_model: "gemma3:4b".into(),
+            dir_model: "gemma3:12b".into(),
             mode: SummaryMode::Augment,
             queue_concurrency: 2,
             max_children_per_summary: 30,
@@ -270,6 +287,27 @@ pub fn load_default() -> Result<Config> {
     load(&default_config_path())
 }
 
+/// Serialise `cfg` to `path`, creating parent directories as needed.
+/// On Unix, the file is written with `0600` permissions (owner read/write only)
+/// to protect any stored API keys.
+pub fn save(cfg: &Config, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating config dir: {}", parent.display()))?;
+    }
+    let text =
+        toml::to_string_pretty(cfg).with_context(|| "serialising config to TOML".to_owned())?;
+    std::fs::write(path, &text).with_context(|| format!("writing config: {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, perms)
+            .with_context(|| format!("setting permissions on {}", path.display()))?;
+    }
+    Ok(())
+}
+
 // ── Region matching ───────────────────────────────────────────────────────────
 
 impl Config {
@@ -332,7 +370,7 @@ top_k = 20
         assert_eq!(cfg.retrieval.top_k, 20);
         // Fields not specified fall back to struct defaults.
         assert_eq!(cfg.retrieval.rrf_k, 60);
-        assert_eq!(cfg.describer.model, "gemma2:9b");
+        assert_eq!(cfg.describer.model, "gemma3:12b");
     }
 
     #[test]

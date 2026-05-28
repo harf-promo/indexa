@@ -52,6 +52,21 @@ indexa serve   # opens http://localhost:7620
 
 ---
 
+## Free context for your paid AI coding tools
+
+Claude Code, GitHub Copilot, Cursor, and Codex burn their context windows — and your paid tokens — just *understanding what's in your repo*. Indexa indexes the entire codebase locally with Ollama (free, offline), builds a hierarchical summary tree, and exports it in the format Anthropic's own docs recommend for LLM context windows:
+
+```bash
+indexa scan ~/code/my-monorepo
+indexa summarize ~/code/my-monorepo
+indexa export ~/code/my-monorepo --format xml > .context.xml
+claude "given @.context.xml, find the auth flow and add MFA"
+```
+
+The paid model spends its budget on *the change you actually want* — not on re-reading your folder tree. **Zero tokens leave your machine during indexing.** You control exactly what gets handed to the cloud model.
+
+---
+
 ## How it works
 
 Indexa understands your files in two phases so you get value immediately, not after hours of processing.
@@ -78,7 +93,7 @@ Bring your own model. No model is bundled — Indexa works with whatever you alr
 | **OpenAI** | Cloud — data leaves your device. `OPENAI_API_KEY` required. |
 | **Anthropic** | Cloud — data leaves your device. `ANTHROPIC_API_KEY` required. |
 
-Default models: `nomic-embed-text` (embedding, Ollama) · `gemma2:9b` (answers, Ollama, Google/Apache-2.0).
+Default models: `nomic-embed-text` (embedding, Ollama) · `gemma3:12b` (answers, Ollama, Google/Apache-2.0) · `gemma3:4b` (file summaries).
 
 ---
 

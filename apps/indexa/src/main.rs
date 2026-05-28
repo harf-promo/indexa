@@ -10,7 +10,10 @@ use indexa_core::{
 };
 use indexa_embed::{Embedder as _, OllamaEmbedder};
 use indexa_llm::OllamaLlm;
-use indexa_query::{ask, enqueue_subtree, summarize_subtree_sync, QaConfig};
+use indexa_query::{
+    ask, build_tree, enqueue_subtree, render_json, render_markdown, render_xml,
+    summarize_subtree_sync, QaConfig,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -44,6 +47,12 @@ async fn main() -> Result<()> {
         Commands::Summarize { paths, mode } => cmd_summarize(paths, mode, &cfg).await,
         Commands::Describe { path } => cmd_describe(path).await,
         Commands::Worker { concurrency } => cmd_worker(concurrency, &cfg).await,
+        Commands::Export {
+            paths,
+            format,
+            depth,
+            output,
+        } => cmd_export(paths, format, depth, output).await,
         Commands::Ask {
             question,
             embed_model,
@@ -652,6 +661,75 @@ async fn cmd_describe(path: String) -> Result<()> {
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+async fn cmd_export(
+    paths: Vec<String>,
+    format: String,
+    depth: Option<usize>,
+    output: Option<String>,
+) -> Result<()> {
+    let db_path = index_db_path()?;
+    if !db_path.exists() {
+        println!("No index found. Run `indexa scan <path>` first.");
+        return Ok(());
+    }
+    let store = Store::open(&db_path)?;
+    let count = store.summary_count()?;
+    if count == 0 {
+        println!("No summaries found. Run `indexa summarize <path>` first.");
+        return Ok(());
+    }
+
+    let roots: Vec<String> = if paths.is_empty() {
+        // Export the roots of the summary tree (depth = 0).
+        store
+            .tree_level("")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|n| n.path)
+            .collect()
+    } else {
+        paths
+            .into_iter()
+            .map(|p| shellexpand::tilde(&p).into_owned())
+            .collect()
+    };
+
+    let now = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_else(|_| "0".to_owned())
+    };
+
+    let mut out_buf = String::new();
+    for root_path in &roots {
+        let tree = build_tree(&store, root_path, depth)?;
+        let Some(tree) = tree else {
+            eprintln!(
+                "No summary found for {root_path} — run `indexa summarize {root_path}` first."
+            );
+            continue;
+        };
+        let rendered = match format.as_str() {
+            "md" | "markdown" => render_markdown(&tree),
+            "json" => render_json(&tree),
+            _ => render_xml(&tree, &now), // xml is the default
+        };
+        out_buf.push_str(&rendered);
+        out_buf.push('\n');
+    }
+
+    if let Some(path) = output {
+        std::fs::write(&path, &out_buf)?;
+        println!("Wrote {} bytes to {path}.", out_buf.len());
+    } else {
+        print!("{out_buf}");
     }
 
     Ok(())
