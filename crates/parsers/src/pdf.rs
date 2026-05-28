@@ -12,10 +12,7 @@ pub struct PdfParser;
 
 impl Parser for PdfParser {
     fn accepts_path(&self, path: &Path) -> bool {
-        matches!(
-            path.extension().and_then(|e| e.to_str()),
-            Some("pdf")
-        )
+        matches!(path.extension().and_then(|e| e.to_str()), Some("pdf"))
     }
 
     fn accepts_mime(&self, mime: &str) -> bool {
@@ -174,7 +171,9 @@ mod tests {
     fn looks_like_heading_detects_short_title_case_lines() {
         assert!(looks_like_heading("Introduction"));
         assert!(looks_like_heading("Chapter One Background"));
-        assert!(!looks_like_heading("This is a full sentence with a period."));
+        assert!(!looks_like_heading(
+            "This is a full sentence with a period."
+        ));
         assert!(!looks_like_heading("word, another word, more words here"));
         assert!(!looks_like_heading(""));
         assert!(!looks_like_heading("lowercase heading"));
@@ -182,7 +181,8 @@ mod tests {
 
     #[test]
     fn split_by_headings_produces_sections() {
-        let text = "Introduction\nSome intro body text here.\nBackground\nMore background content.\n";
+        let text =
+            "Introduction\nSome intro body text here.\nBackground\nMore background content.\n";
         let sections = split_by_headings(text);
         assert!(sections.len() >= 2, "got {} sections", sections.len());
         assert_eq!(sections[0].0, "Introduction");

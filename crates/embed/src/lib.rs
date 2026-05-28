@@ -30,7 +30,11 @@ pub fn from_config(
     dim: usize,
     base_url: &str,
 ) -> anyhow::Result<Box<dyn Embedder>> {
-    let base = if base_url.is_empty() { None } else { Some(base_url) };
+    let base = if base_url.is_empty() {
+        None
+    } else {
+        Some(base_url)
+    };
     match provider {
         "ollama" => Ok(Box::new(OllamaEmbedder::new(
             OllamaEmbedder::resolve_base_url(base),

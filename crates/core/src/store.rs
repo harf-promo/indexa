@@ -18,7 +18,10 @@ impl Store {
         }
         let conn = Connection::open(path)
             .with_context(|| format!("opening index at {}", path.display()))?;
-        let store = Self { conn, db_path: path.to_path_buf() };
+        let store = Self {
+            conn,
+            db_path: path.to_path_buf(),
+        };
         store.init_schema()?;
         Ok(store)
     }
@@ -26,7 +29,10 @@ impl Store {
     /// Open an in-memory database (useful for tests).
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let store = Self { conn, db_path: PathBuf::from(":memory:") };
+        let store = Self {
+            conn,
+            db_path: PathBuf::from(":memory:"),
+        };
         store.init_schema()?;
         Ok(store)
     }
@@ -211,7 +217,10 @@ impl Store {
     /// Remove a single entry (and its chunks) from the index by exact path.
     pub fn delete_entry(&mut self, path: &str) -> Result<usize> {
         let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM chunks_fts WHERE entry_path = ?1", params![path])?;
+        tx.execute(
+            "DELETE FROM chunks_fts WHERE entry_path = ?1",
+            params![path],
+        )?;
         tx.execute("DELETE FROM chunks WHERE entry_path = ?1", params![path])?;
         let n = tx.execute("DELETE FROM entries WHERE path = ?1", params![path])?;
         tx.commit()?;
@@ -251,9 +260,9 @@ impl Store {
 
     /// Unix timestamp of the most recently indexed chunk, if any.
     pub fn last_indexed_at(&self) -> Result<Option<i64>> {
-        let ts: Option<i64> = self
-            .conn
-            .query_row("SELECT MAX(indexed_at) FROM chunks", [], |r| r.get(0))?;
+        let ts: Option<i64> =
+            self.conn
+                .query_row("SELECT MAX(indexed_at) FROM chunks", [], |r| r.get(0))?;
         Ok(ts)
     }
 
@@ -457,7 +466,10 @@ fn fts5_quote(s: &str) -> String {
 /// Escape `%` and `_` wildcards in a path prefix before appending `%` for LIKE matching.
 /// Must be used with `LIKE ?n ESCAPE '\'` in the SQL clause.
 fn like_prefix(prefix: &str) -> String {
-    let escaped = prefix.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let escaped = prefix
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
     format!("{escaped}%")
 }
 
@@ -656,7 +668,11 @@ mod tests {
 
         store.delete_subtree("/foo/").unwrap();
 
-        assert_eq!(store.entry_count().unwrap(), 1, "/foobar/b.txt should survive");
+        assert_eq!(
+            store.entry_count().unwrap(),
+            1,
+            "/foobar/b.txt should survive"
+        );
     }
 
     #[test]
@@ -716,7 +732,10 @@ mod tests {
         let quoted = fts5_quote(r#"he said "hello""#);
         assert!(quoted.starts_with('"'));
         assert!(quoted.ends_with('"'));
-        assert!(quoted.contains(r#""""#), "embedded quotes should be doubled: {quoted}");
+        assert!(
+            quoted.contains(r#""""#),
+            "embedded quotes should be doubled: {quoted}"
+        );
     }
 
     #[test]
@@ -724,6 +743,9 @@ mod tests {
         let p = like_prefix("/home/user/50%_done/");
         assert!(p.contains("\\%"), "% should be escaped: {p}");
         assert!(p.contains("\\_"), "_ should be escaped: {p}");
-        assert!(p.ends_with('%'), "pattern should end with trailing wildcard: {p}");
+        assert!(
+            p.ends_with('%'),
+            "pattern should end with trailing wildcard: {p}"
+        );
     }
 }

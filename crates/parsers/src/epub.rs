@@ -26,7 +26,9 @@ impl Parser for EpubParser {
         // Step 1: container.xml → OPF path
         let opf_path = {
             let mut xml = String::new();
-            archive.by_name("META-INF/container.xml")?.read_to_string(&mut xml)?;
+            archive
+                .by_name("META-INF/container.xml")?
+                .read_to_string(&mut xml)?;
             parse_container_xml(&xml)?
         };
 
@@ -137,9 +139,7 @@ fn parse_container_xml(xml: &str) -> Result<String> {
     let mut reader = Reader::from_str(xml);
     loop {
         match reader.read_event()? {
-            Event::Start(e) | Event::Empty(e)
-                if e.local_name().as_ref() == b"rootfile" =>
-            {
+            Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"rootfile" => {
                 for attr in e.attributes() {
                     let attr = attr?;
                     if attr.key.local_name().as_ref() == b"full-path" {
@@ -186,7 +186,9 @@ fn parse_opf(xml: &str) -> Result<(HashMap<String, String>, Vec<String>)> {
                         // Only include HTML content items
                         if !id.is_empty()
                             && !href.is_empty()
-                            && (media_type.contains("html") || href.ends_with(".html") || href.ends_with(".xhtml"))
+                            && (media_type.contains("html")
+                                || href.ends_with(".html")
+                                || href.ends_with(".xhtml"))
                         {
                             manifest.insert(id, href);
                         }
@@ -337,9 +339,7 @@ mod tests {
         // Chapter files
         for (id, body) in chapters {
             zip.start_file(format!("{id}.xhtml"), opts).unwrap();
-            let xhtml = format!(
-                r#"<?xml version="1.0"?><html><body>{body}</body></html>"#
-            );
+            let xhtml = format!(r#"<?xml version="1.0"?><html><body>{body}</body></html>"#);
             zip.write_all(xhtml.as_bytes()).unwrap();
         }
 
@@ -377,7 +377,10 @@ mod tests {
         let extracted = parser.parse(&path).unwrap();
         let text = &extracted.chunks[0].text;
         assert!(text.contains('&'), "& should be decoded: {text}");
-        assert!(text.contains('<') || text.contains("3"), "entities should decode: {text}");
+        assert!(
+            text.contains('<') || text.contains("3"),
+            "entities should decode: {text}"
+        );
     }
 
     #[test]

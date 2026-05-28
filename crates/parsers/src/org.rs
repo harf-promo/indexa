@@ -103,7 +103,11 @@ fn collect_sections(raw: &str) -> Vec<(String, String, Option<String>)> {
         if lower.starts_with("#+begin_src") {
             // Flush current prose section first
             flush_section(&heading_stack, &mut current_text, &mut sections);
-            let lang = line.trim()[11..].split_whitespace().next().unwrap_or("").to_string();
+            let lang = line.trim()[11..]
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_string();
             src_lang = Some(lang);
             continue;
         }

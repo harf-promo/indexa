@@ -453,9 +453,7 @@ async fn cmd_status(cfg: &Config) -> Result<()> {
     let chunks = store.chunk_count()?;
     let embedded = store.embedded_chunk_count()?;
     let last_ts = store.last_indexed_at()?;
-    let db_size = std::fs::metadata(&db_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
 
     let config_path = config::default_config_path().to_string_lossy().into_owned();
 
@@ -493,7 +491,10 @@ async fn cmd_status(cfg: &Config) -> Result<()> {
         "Embedding: {} / {} (dim {})",
         cfg.embedding.provider, cfg.embedding.model, cfg.embedding.dim
     );
-    println!("Describer: {} / {}", cfg.describer.provider, cfg.describer.model);
+    println!(
+        "Describer: {} / {}",
+        cfg.describer.provider, cfg.describer.model
+    );
 
     Ok(())
 }

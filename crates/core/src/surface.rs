@@ -121,8 +121,7 @@ static HINTS: &[(Predicate, PathHint)] = &[
     (
         |p| {
             // ~/.var/app is the Flatpak per-app data directory
-            p.to_str()
-                .is_some_and(|s| s.contains("/.var/app"))
+            p.to_str().is_some_and(|s| s.contains("/.var/app"))
         },
         PathHint {
             label: "Flatpak app data",

@@ -34,7 +34,11 @@ pub fn from_config(
     model: &str,
     base_url: &str,
 ) -> anyhow::Result<Box<dyn Generator>> {
-    let base = if base_url.is_empty() { None } else { Some(base_url) };
+    let base = if base_url.is_empty() {
+        None
+    } else {
+        Some(base_url)
+    };
     match provider {
         "ollama" => Ok(Box::new(OllamaLlm::new(
             OllamaLlm::resolve_base_url(base),
