@@ -5,28 +5,40 @@
 //! - `GET /api/stats`    — { entries, chunks }
 //! - `GET /api/map`      — [{ category, entry_count, total_size }]
 //! - `POST /api/ask`     — { question } → { answer, sources }
+//! - `POST /api/jobs/index?path=` — start scan→deep→summarize job, returns { job_id }
+//! - `GET /api/jobs`     — list active jobs
+//! - `GET /api/jobs/:id/events` — SSE progress stream
+
+mod jobs;
+use jobs::{push, JobEvent, JobHandle, JobStatus, Jobs};
 
 use anyhow::Result;
 use axum::{
     body::Body,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{header, StatusCode},
-    response::{IntoResponse, Response},
-    routing::{get, post},
+    response::{sse::Event, sse::KeepAlive, sse::Sse, IntoResponse, Response},
+    routing::{delete, get, post},
     Json, Router,
 };
 use futures_util::StreamExt;
 use indexa_core::{
     config::{self, Config},
-    store::Store,
+    store::{ChunkRecord, Store},
+    walker::{walk, EntryKind, WalkConfig},
 };
 use indexa_embed::Embedder;
-use indexa_llm::Generator;
-use indexa_query::{synthesize_from_hits, QaConfig};
+use indexa_llm::{Generator, OllamaLlm};
+use indexa_query::{
+    enqueue_subtree, process_queue_item_with_passes, synthesize_from_hits, QaConfig,
+};
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio_stream::wrappers::BroadcastStream;
 use tracing::info;
+use uuid::Uuid;
 
 // ── Shared state ──────────────────────────────────────────────────────────────
 
@@ -36,6 +48,8 @@ pub struct AppState {
     embedder: Arc<dyn Embedder + Send + Sync + 'static>,
     llm: Arc<dyn Generator + Send + Sync + 'static>,
     config: Arc<Config>,
+    jobs: Jobs,
+    db_path: Arc<std::path::PathBuf>,
 }
 
 // ── API types ─────────────────────────────────────────────────────────────────
@@ -117,6 +131,52 @@ struct KeysStatus {
 #[derive(Deserialize)]
 struct PathQuery {
     path: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct RootResponse {
+    path: String,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct FsEntry {
+    name: String,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct QueueStats {
+    pending: u64,
+    in_flight: u64,
+    done: u64,
+    failed: u64,
+}
+
+#[derive(Serialize)]
+struct QueueFailedItem {
+    path: String,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PassesRequest {
+    passes_first: u32,
+    passes_refresh: u32,
+}
+
+#[derive(Serialize)]
+struct ConfigResponse {
+    passes_first: u32,
+    passes_refresh: u32,
+    passes_cap: u32,
+    max_children_per_summary: usize,
 }
 
 #[derive(Deserialize)]
@@ -387,6 +447,217 @@ async fn api_keys_set(State(state): State<AppState>, Json(body): Json<KeyRequest
     }
 }
 
+async fn api_roots(State(state): State<AppState>) -> Json<Vec<RootResponse>> {
+    let store = state.store.lock().await;
+    let paths = store.root_paths().unwrap_or_default();
+    Json(
+        paths
+            .into_iter()
+            .map(|p| {
+                let name = std::path::Path::new(&p)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| p.clone());
+                RootResponse { path: p, name }
+            })
+            .collect(),
+    )
+}
+
+async fn api_search(
+    State(state): State<AppState>,
+    Query(params): Query<SearchQuery>,
+) -> Json<Vec<TreeNodeResponse>> {
+    let q = params.q.as_deref().unwrap_or("").trim().to_owned();
+    if q.is_empty() {
+        return Json(vec![]);
+    }
+    let limit = params.limit.unwrap_or(50).min(200);
+    let store = state.store.lock().await;
+    let nodes = store.search_paths(&q, limit).unwrap_or_default();
+    Json(
+        nodes
+            .into_iter()
+            .map(|n| TreeNodeResponse {
+                path: n.path,
+                name: n.name,
+                kind: n.kind,
+                child_count: n.child_count,
+                byte_size: n.byte_size,
+                summary_state: n.summary_state,
+            })
+            .collect(),
+    )
+}
+
+async fn api_fs_ls(Query(params): Query<PathQuery>) -> Response {
+    let raw = match params.path.as_deref() {
+        Some(p) if !p.is_empty() => p.to_owned(),
+        _ => {
+            let home = directories::BaseDirs::new()
+                .map(|b| b.home_dir().to_string_lossy().into_owned())
+                .unwrap_or_else(|| "/".to_owned());
+            home
+        }
+    };
+
+    // Security: reject path traversal and non-absolute paths.
+    let canon = match std::fs::canonicalize(&raw) {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "path not found" })),
+            )
+                .into_response();
+        }
+    };
+
+    let home_canon = directories::BaseDirs::new()
+        .map(|b| b.home_dir().to_path_buf())
+        .and_then(|h| std::fs::canonicalize(h).ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("/"));
+
+    // Clamp to HOME to prevent exposing system dirs.
+    if !canon.starts_with(&home_canon) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "path outside home directory" })),
+        )
+            .into_response();
+    }
+
+    let mut entries: Vec<FsEntry> = Vec::new();
+
+    // Add parent dir navigation (as long as we're not already at home).
+    if canon != home_canon {
+        if let Some(parent) = canon.parent() {
+            entries.push(FsEntry {
+                name: "..".into(),
+                path: parent.to_string_lossy().into_owned(),
+            });
+        }
+    }
+
+    match std::fs::read_dir(&canon) {
+        Ok(rd) => {
+            let mut dirs: Vec<FsEntry> = rd
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                        && !e.file_name().to_string_lossy().starts_with('.')
+                })
+                .map(|e| FsEntry {
+                    name: e.file_name().to_string_lossy().into_owned(),
+                    path: e.path().to_string_lossy().into_owned(),
+                })
+                .collect();
+            dirs.sort_by(|a, b| a.name.cmp(&b.name));
+            entries.extend(dirs);
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    }
+
+    Json(entries).into_response()
+}
+
+async fn api_queue_stats(State(state): State<AppState>) -> Json<QueueStats> {
+    let store = state.store.lock().await;
+    let qs = store.queue_stats().unwrap_or_default();
+    Json(QueueStats {
+        pending: qs.pending as u64,
+        in_flight: qs.in_flight as u64,
+        done: qs.done as u64,
+        failed: qs.failed as u64,
+    })
+}
+
+async fn api_queue_failed(State(state): State<AppState>) -> Json<Vec<QueueFailedItem>> {
+    let store = state.store.lock().await;
+    let items = store.failed_queue_items(50).unwrap_or_default();
+    Json(
+        items
+            .into_iter()
+            .map(|i| QueueFailedItem {
+                path: i.path,
+                error: i.error,
+            })
+            .collect(),
+    )
+}
+
+async fn api_queue_retry(
+    State(state): State<AppState>,
+    Query(params): Query<PathQuery>,
+) -> Response {
+    let path = match params.path.as_deref() {
+        Some(p) => p.to_owned(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "path required" })),
+            )
+                .into_response();
+        }
+    };
+    let mut store = state.store.lock().await;
+    match store.mark_queue_state(&path, "pending", None) {
+        Ok(_) => Json(serde_json::json!({ "queued": true })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn api_config_get(State(state): State<AppState>) -> Json<ConfigResponse> {
+    let cfg = &state.config.describer;
+    Json(ConfigResponse {
+        passes_first: cfg.passes_first,
+        passes_refresh: cfg.passes_refresh,
+        passes_cap: cfg.passes_cap,
+        max_children_per_summary: cfg.max_children_per_summary,
+    })
+}
+
+async fn api_config_passes(
+    State(state): State<AppState>,
+    Json(body): Json<PassesRequest>,
+) -> Response {
+    if std::env::var("INDEXA_WEB_ALLOW_KEY_EDIT").as_deref() != Ok("1") {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "INDEXA_WEB_ALLOW_KEY_EDIT not set" })),
+        )
+            .into_response();
+    }
+
+    let cap = state.config.describer.passes_cap;
+    let first = body.passes_first.min(cap).max(1);
+    let refresh = body.passes_refresh.min(cap).max(1);
+
+    let cfg_path = config::default_config_path();
+    let mut cfg = config::load(&cfg_path).unwrap_or_default();
+    cfg.describer.passes_first = first;
+    cfg.describer.passes_refresh = refresh;
+
+    match config::save(&cfg, &cfg_path) {
+        Ok(_) => Json(serde_json::json!({ "saved": true })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 async fn serve_ui() -> Response {
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -480,6 +751,416 @@ async fn api_ask(State(state): State<AppState>, Json(body): Json<AskRequest>) ->
     }
 }
 
+// ── Background job API ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct JobPathQuery {
+    path: String,
+    passes: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct JobStartResponse {
+    job_id: Uuid,
+}
+
+#[derive(Serialize)]
+struct JobListEntry {
+    job_id: Uuid,
+    kind: String,
+    path: String,
+    status: JobStatus,
+    started_at: i64,
+}
+
+async fn api_job_scan(
+    Query(q): Query<JobPathQuery>,
+    State(s): State<AppState>,
+) -> impl IntoResponse {
+    let handle = Arc::new(JobHandle::new("scan", q.path.clone()));
+    let id = handle.id;
+    s.jobs.write().await.insert(id, handle.clone());
+    let state = s.clone();
+    tokio::spawn(async move { run_scan_phase(&state, &q.path, &handle).await });
+    Json(JobStartResponse { job_id: id })
+}
+
+async fn api_job_deep(
+    Query(q): Query<JobPathQuery>,
+    State(s): State<AppState>,
+) -> impl IntoResponse {
+    let handle = Arc::new(JobHandle::new("deep", q.path.clone()));
+    let id = handle.id;
+    s.jobs.write().await.insert(id, handle.clone());
+    let state = s.clone();
+    let path = q.path.clone();
+    tokio::spawn(async move {
+        // Walk first then deep-index
+        let path_buf = std::path::PathBuf::from(&path);
+        let pb = path_buf.clone();
+        let entries = tokio::task::spawn_blocking(move || walk(&pb, &WalkConfig::default()))
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!(e)))
+            .unwrap_or_default();
+        run_deep_phase(&state, &path, &entries, &handle).await;
+    });
+    Json(JobStartResponse { job_id: id })
+}
+
+async fn api_job_summarize(
+    Query(q): Query<JobPathQuery>,
+    State(s): State<AppState>,
+) -> impl IntoResponse {
+    let handle = Arc::new(JobHandle::new("summarize", q.path.clone()));
+    let id = handle.id;
+    s.jobs.write().await.insert(id, handle.clone());
+    let state = s.clone();
+    tokio::spawn(async move { run_summarize_phase(&state, &q.path, q.passes, &handle).await });
+    Json(JobStartResponse { job_id: id })
+}
+
+async fn api_job_index(
+    Query(q): Query<JobPathQuery>,
+    State(s): State<AppState>,
+) -> impl IntoResponse {
+    let handle = Arc::new(JobHandle::new("index", q.path.clone()));
+    let id = handle.id;
+    s.jobs.write().await.insert(id, handle.clone());
+    let state = s.clone();
+    tokio::spawn(async move { run_index_job(state, q.path, handle).await });
+    Json(JobStartResponse { job_id: id })
+}
+
+async fn api_jobs_list(State(s): State<AppState>) -> impl IntoResponse {
+    let jobs = s.jobs.read().await;
+    let list: Vec<JobListEntry> = jobs
+        .values()
+        .map(|h| JobListEntry {
+            job_id: h.id,
+            kind: h.kind.clone(),
+            path: h.path.clone(),
+            status: h.status.lock().unwrap().clone(),
+            started_at: h.started_at,
+        })
+        .collect();
+    Json(list)
+}
+
+async fn api_jobs_events(Path(id): Path<Uuid>, State(s): State<AppState>) -> impl IntoResponse {
+    let handle = {
+        let jobs = s.jobs.read().await;
+        match jobs.get(&id) {
+            Some(h) => h.clone(),
+            None => {
+                return (StatusCode::NOT_FOUND, "job not found").into_response();
+            }
+        }
+    };
+
+    let history = handle.history.lock().unwrap().clone();
+    let rx = handle.tx.subscribe();
+
+    let replay = futures_util::stream::iter(history).map(|ev| {
+        let data = serde_json::to_string(&ev).unwrap_or_default();
+        Ok::<_, Infallible>(Event::default().data(data))
+    });
+
+    let live = BroadcastStream::new(rx)
+        .filter_map(|r| async move { r.ok() })
+        .map(|ev| {
+            let data = serde_json::to_string(&ev).unwrap_or_default();
+            Ok::<_, Infallible>(Event::default().data(data))
+        });
+
+    let stream = replay.chain(live);
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new())
+        .into_response()
+}
+
+async fn api_job_delete(Path(id): Path<Uuid>, State(s): State<AppState>) -> impl IntoResponse {
+    let mut jobs = s.jobs.write().await;
+    if let Some(handle) = jobs.get(&id) {
+        *handle.status.lock().unwrap() = JobStatus::Failed;
+    }
+    jobs.remove(&id);
+    StatusCode::NO_CONTENT
+}
+
+// ── Job runner ────────────────────────────────────────────────────────────────
+
+fn finalize_failed(handle: &Arc<JobHandle>, error: &str) {
+    push(
+        handle,
+        JobEvent::Failed {
+            error: error.to_owned(),
+        },
+    );
+    *handle.status.lock().unwrap() = JobStatus::Failed;
+}
+
+async fn run_index_job(state: AppState, path: String, handle: Arc<JobHandle>) {
+    // Phase 1: scan
+    let path_buf = std::path::PathBuf::from(&path);
+    let pb = path_buf.clone();
+    let entries = match tokio::task::spawn_blocking(move || walk(&pb, &WalkConfig::default()))
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!(e)))
+    {
+        Ok(e) => e,
+        Err(e) => {
+            finalize_failed(&handle, &e.to_string());
+            return;
+        }
+    };
+
+    if !run_scan_phase_with_entries(&state, &path, &entries, &handle).await {
+        return;
+    }
+
+    // Phase 2: deep index
+    if !run_deep_phase(&state, &path, &entries, &handle).await {
+        return;
+    }
+
+    // Phase 3: summarize
+    run_summarize_phase(&state, &path, None, &handle).await;
+}
+
+/// Returns true on success.
+async fn run_scan_phase(state: &AppState, path: &str, handle: &Arc<JobHandle>) -> bool {
+    let pb = std::path::PathBuf::from(path);
+    let entries = match tokio::task::spawn_blocking(move || walk(&pb, &WalkConfig::default()))
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!(e)))
+    {
+        Ok(e) => e,
+        Err(e) => {
+            finalize_failed(handle, &e.to_string());
+            return false;
+        }
+    };
+    run_scan_phase_with_entries(state, path, &entries, handle).await
+}
+
+async fn run_scan_phase_with_entries(
+    state: &AppState,
+    path: &str,
+    entries: &[indexa_core::walker::Entry],
+    handle: &Arc<JobHandle>,
+) -> bool {
+    let n = entries.len() as u64;
+    push(
+        handle,
+        JobEvent::Start {
+            kind: "scan".into(),
+            path: path.to_owned(),
+            total: Some(n),
+        },
+    );
+
+    let live_paths: std::collections::HashSet<String> = entries
+        .iter()
+        .map(|e| e.path.to_string_lossy().into_owned())
+        .collect();
+
+    let mut store = state.store.lock().await;
+    if let Err(e) = store.upsert_entries(entries) {
+        finalize_failed(handle, &e.to_string());
+        return false;
+    }
+    let _ = store.reconcile_entries(path, &live_paths);
+    drop(store);
+
+    push(
+        handle,
+        JobEvent::Progress {
+            current: n,
+            total: n,
+            note: format!("{n} entries scanned"),
+        },
+    );
+    true
+}
+
+/// Returns true on success.
+async fn run_deep_phase(
+    state: &AppState,
+    path: &str,
+    entries: &[indexa_core::walker::Entry],
+    handle: &Arc<JobHandle>,
+) -> bool {
+    let files: Vec<_> = entries
+        .iter()
+        .filter(|e| e.kind == EntryKind::File)
+        .collect();
+    let n_files = files.len() as u64;
+
+    push(
+        handle,
+        JobEvent::Start {
+            kind: "deep".into(),
+            path: path.to_owned(),
+            total: Some(n_files),
+        },
+    );
+
+    let embed_model = state.config.embedding.model.clone();
+    let mut done = 0u64;
+
+    for entry in &files {
+        let path_str = entry.path.to_string_lossy().into_owned();
+
+        let is_current = {
+            let store = state.store.lock().await;
+            store.chunks_are_current(&path_str).unwrap_or(false)
+        };
+        if is_current {
+            done += 1;
+            continue;
+        }
+
+        let ep = entry.path.clone();
+        let extracted =
+            match tokio::task::spawn_blocking(move || indexa_parsers::registry::parse(&ep)).await {
+                Ok(Ok(e)) => e,
+                _ => {
+                    done += 1;
+                    continue;
+                }
+            };
+
+        if extracted.chunks.is_empty() {
+            done += 1;
+            continue;
+        }
+
+        let mut chunk_records = Vec::with_capacity(extracted.chunks.len());
+        for chunk in &extracted.chunks {
+            let embedding = state.embedder.embed(&chunk.text).await.ok();
+            chunk_records.push(ChunkRecord {
+                entry_path: path_str.clone(),
+                seq: chunk.seq,
+                heading: chunk.heading.clone(),
+                text: chunk.text.clone(),
+                language: chunk.language.clone(),
+                embedding,
+                embed_model: Some(embed_model.clone()),
+            });
+        }
+
+        {
+            let mut store = state.store.lock().await;
+            let _ = store.upsert_chunks(&chunk_records);
+        }
+
+        done += 1;
+        if done.is_multiple_of(10) || done == n_files {
+            push(
+                handle,
+                JobEvent::Progress {
+                    current: done,
+                    total: n_files,
+                    note: format!("{done}/{n_files} files embedded"),
+                },
+            );
+        }
+    }
+
+    push(
+        handle,
+        JobEvent::Note {
+            msg: format!("Deep index complete: {done} files"),
+        },
+    );
+    true
+}
+
+async fn run_summarize_phase(
+    state: &AppState,
+    path: &str,
+    passes_override: Option<u32>,
+    handle: &Arc<JobHandle>,
+) {
+    push(
+        handle,
+        JobEvent::Start {
+            kind: "summarize".into(),
+            path: path.to_owned(),
+            total: None,
+        },
+    );
+
+    let db_path = (*state.db_path).clone();
+    let cfg = state.config.describer.clone();
+    let embedder = state.embedder.clone();
+    let root = std::path::PathBuf::from(path);
+    let base_url = OllamaLlm::resolve_base_url(Some(&cfg.base_url));
+    let describer = OllamaLlm::new_with_dir_model(&base_url, &cfg.file_model, &cfg.dir_model);
+
+    // Open a dedicated Store connection so we can hold it across async LLM awaits
+    // without poisoning the shared mutex-wrapped store used by API handlers.
+    let mut job_store = match indexa_core::store::Store::open(&db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            finalize_failed(handle, &format!("failed to open index: {e}"));
+            return;
+        }
+    };
+
+    let enqueued = match enqueue_subtree(&mut job_store, &root) {
+        Ok(n) => n,
+        Err(e) => {
+            finalize_failed(handle, &e.to_string());
+            return;
+        }
+    };
+
+    let mut done = 0usize;
+    let mut errors = 0usize;
+    loop {
+        let item = match job_store.next_queue_item() {
+            Ok(Some(i)) => i,
+            Ok(None) => break,
+            Err(e) => {
+                finalize_failed(handle, &e.to_string());
+                return;
+            }
+        };
+        let r = process_queue_item_with_passes(
+            &mut job_store,
+            &describer,
+            embedder.as_ref(),
+            &item,
+            &cfg,
+            passes_override,
+        )
+        .await;
+        match r {
+            Ok(()) => done += 1,
+            Err(_) => errors += 1,
+        }
+        if (done + errors).is_multiple_of(5) {
+            push(
+                handle,
+                JobEvent::Progress {
+                    current: (done + errors) as u64,
+                    total: enqueued as u64,
+                    note: format!("{done}/{enqueued} summaries"),
+                },
+            );
+        }
+    }
+
+    push(
+        handle,
+        JobEvent::Done {
+            summary: format!("{done} summaries generated"),
+        },
+    );
+    *handle.status.lock().unwrap() = JobStatus::Done;
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Start the web UI server on `port`. Runs until Ctrl-C or the process exits.
@@ -490,11 +1171,14 @@ pub async fn serve(
     llm: Arc<dyn Generator + Send + Sync + 'static>,
     config: Config,
 ) -> Result<()> {
+    let db_path = Arc::new(store.db_path().to_path_buf());
     let state = AppState {
         store: Arc::new(Mutex::new(store)),
         embedder,
         llm,
         config: Arc::new(config),
+        jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        db_path,
     };
 
     // Restrict CORS to localhost only — prevents drive-by sites from reading the
@@ -507,18 +1191,37 @@ pub async fn serve(
         .route("/", get(serve_ui))
         .route("/api/stats", get(api_stats))
         .route("/api/map", get(api_map))
+        .route("/api/roots", get(api_roots))
+        .route("/api/search", get(api_search))
+        .route("/api/fs/ls", get(api_fs_ls))
         .route("/api/ask", post(api_ask))
         .route("/api/tree", get(api_tree))
         .route("/api/summary", get(api_summary))
         .route("/api/summarize", post(api_summarize_enqueue))
+        .route("/api/queue", get(api_queue_stats))
+        .route("/api/queue/failed", get(api_queue_failed))
+        .route("/api/queue/retry", post(api_queue_retry))
+        .route("/api/config", get(api_config_get))
+        .route("/api/config/passes", post(api_config_passes))
         .route("/api/models/installed", get(api_models_installed))
         .route("/api/models/pull", post(api_models_pull))
         .route("/api/keys", get(api_keys_get).post(api_keys_set))
+        .route("/api/jobs", get(api_jobs_list))
+        .route("/api/jobs/scan", post(api_job_scan))
+        .route("/api/jobs/deep", post(api_job_deep))
+        .route("/api/jobs/summarize", post(api_job_summarize))
+        .route("/api/jobs/index", post(api_job_index))
+        .route("/api/jobs/:id/events", get(api_jobs_events))
+        .route("/api/jobs/:id", delete(api_job_delete))
         .with_state(state)
         .layer(
             tower_http::cors::CorsLayer::new()
                 .allow_origin(origin)
-                .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::DELETE,
+                ])
                 .allow_headers([header::CONTENT_TYPE]),
         );
 
@@ -574,6 +1277,29 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
   .tree-badge.failed { color: var(--red); }
   .tree-children { padding-left: 16px; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .tree-search { padding: 6px 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; display: flex; gap: 4px; }
+  .tree-search input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 5px; color: var(--text); font-family: inherit; font-size: 12px; padding: 4px 8px; outline: none; }
+  .tree-search input:focus { border-color: var(--accent); }
+  .tree-search button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 2px 4px; }
+  .add-root-btn { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--accent); font-size: 14px; font-weight: 600; cursor: pointer; padding: 0 5px; line-height: 16px; }
+  .add-root-btn:hover { background: rgba(88,166,255,0.1); }
+  .empty-state { padding: 24px 16px; text-align: center; color: var(--muted); font-size: 12px; line-height: 1.8; }
+  .empty-state .cta-link { color: var(--accent); cursor: pointer; }
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 100; display: none; align-items: center; justify-content: center; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 22px; width: 460px; max-width: 96vw; }
+  .modal h2 { font-size: 14px; font-weight: 600; margin-bottom: 14px; }
+  .modal .path-row { display: flex; gap: 6px; margin-bottom: 8px; }
+  .modal .path-row input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 5px; color: var(--text); font-family: inherit; font-size: 12px; padding: 5px 9px; outline: none; }
+  .modal .path-row input:focus { border-color: var(--accent); }
+  .modal .path-row button { background: none; border: 1px solid var(--border); border-radius: 5px; color: var(--muted); font-family: inherit; font-size: 11px; cursor: pointer; padding: 4px 8px; }
+  .fs-browser { background: var(--bg); border: 1px solid var(--border); border-radius: 5px; max-height: 170px; overflow-y: auto; margin-bottom: 12px; }
+  .fs-entry { padding: 5px 10px; cursor: pointer; font-size: 12px; color: var(--text); }
+  .fs-entry:hover { background: rgba(88,166,255,0.08); }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .modal-btn { border: 1px solid var(--border); border-radius: 5px; padding: 5px 14px; font-family: inherit; font-size: 12px; cursor: pointer; background: none; color: var(--text); }
+  .modal-btn.primary { background: var(--accent); border-color: var(--accent); color: #0d1117; font-weight: 600; }
+  .modal-btn:hover:not(.primary) { border-color: var(--accent); color: var(--accent); }
 
   /* ── Right panel (summary or chat) ── */
   .right-panel { display: flex; flex-direction: column; overflow: hidden; }
@@ -627,9 +1353,24 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
   .input-bar button:disabled { opacity: 0.4; cursor: default; }
   ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
+  /* ── Jobs panel ── */
+  .jobs-panel { border-top: 1px solid var(--border); flex-shrink: 0; font-size: 11px; }
+  .jobs-panel-header { padding: 5px 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; font-size: 10px; }
+  .job-row { padding: 4px 14px; display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--border); }
+  .job-row:last-child { border-bottom: none; }
+  .job-kind { color: var(--accent); width: 68px; flex-shrink: 0; }
+  .job-label { flex: 1; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .job-note { color: var(--muted); font-size: 10px; white-space: nowrap; flex-shrink: 0; }
+  .job-note.done { color: var(--green); }
+  .job-note.failed { color: var(--red); }
+  .job-note.running { animation: pulse 1.5s ease-in-out infinite; }
+
   /* ── Settings view ── */
   .settings-view { flex: 1; overflow-y: auto; padding: 24px; display: none; }
   .settings-view.visible { display: block; }
+  #map-table th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  #map-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); color: var(--text); }
+  #map-table tr:last-child td { border-bottom: none; }
   .settings-section { margin-bottom: 28px; }
   .settings-section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 14px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
   .model-list { display: flex; flex-direction: column; gap: 6px; }
@@ -663,6 +1404,7 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
   <div class="tabs">
     <button class="tab" id="tab-tree" onclick="switchTab('tree')">Tree</button>
     <button class="tab active" id="tab-chat" onclick="switchTab('chat')">Ask</button>
+    <button class="tab" id="tab-map" onclick="switchTab('map')">Map</button>
     <button class="tab" id="tab-settings" onclick="switchTab('settings')">Settings</button>
   </div>
 </header>
@@ -672,8 +1414,17 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
     <div class="tree-header">
       <span>Folder tree</span>
       <span class="queue-badge" id="queue-badge" style="display:none"></span>
+      <button class="add-root-btn" onclick="openAddRoot()" title="Add root folder">+</button>
+    </div>
+    <div class="tree-search">
+      <input type="text" id="search-input" placeholder="Search files&#x2026;" autocomplete="off" oninput="onSearchInput(this.value)">
+      <button id="search-clear" onclick="clearSearchInput()" style="display:none" title="Clear">&#x2715;</button>
     </div>
     <div class="tree-list" id="tree-list"></div>
+    <div class="jobs-panel" id="jobs-panel" style="display:none">
+      <div class="jobs-panel-header">Jobs</div>
+      <div id="jobs-list"></div>
+    </div>
   </div>
   <!-- Right panel switches between summary view, chat view, and settings view -->
   <div class="right-panel">
@@ -741,6 +1492,10 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
             <span class="key-set-badge" style="color:var(--muted);font-size:11px">default 1</span>
           </div>
         </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+          <button class="btn-sm" onclick="savePasses()">Save passes</button>
+          <span id="passes-status" style="font-size:11px;color:var(--muted)"></span>
+        </div>
         <p class="settings-note">More passes = higher context quality at the cost of LLM calls. Set in <code>[describer] passes-first</code> / <code>passes-refresh</code> in config.toml. Cap is 3 (Self-Refine research: quality degrades above 3 passes).</p>
       </div>
     </div>
@@ -758,6 +1513,26 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
         <button id="send">Ask</button>
       </div>
     </div>
+    <div class="map-view" id="map-view" style="display:none;flex:1;overflow-y:auto;padding:24px">
+      <h2 style="font-size:14px;font-weight:600;margin-bottom:16px;color:var(--text)">Index map</h2>
+      <table id="map-table" style="width:100%;border-collapse:collapse;font-size:12px;align-self:flex-start"></table>
+    </div>
+  </div>
+</div>
+<!-- Add-Root modal -->
+<div class="modal-overlay" id="add-root-modal" onclick="if(event.target===this)closeAddRoot()">
+  <div class="modal">
+    <h2>Add Root Folder</h2>
+    <div class="path-row">
+      <input type="text" id="add-root-path" placeholder="/Users/you/Documents" autocomplete="off"
+        oninput="onRootPathInput(this.value)">
+      <button onclick="browseFsTo(document.getElementById('add-root-path').value)">Browse</button>
+    </div>
+    <div class="fs-browser" id="fs-browser"><div class="fs-entry" style="color:var(--muted)">Loading&#x2026;</div></div>
+    <div class="modal-actions">
+      <button class="modal-btn" onclick="closeAddRoot()">Cancel</button>
+      <button class="modal-btn primary" onclick="startIndexRoot()">Index this folder</button>
+    </div>
   </div>
 </div>
 <script>
@@ -771,11 +1546,14 @@ function switchTab(tab) {
   currentTab = tab;
   document.getElementById('tab-tree').classList.toggle('active', tab === 'tree');
   document.getElementById('tab-chat').classList.toggle('active', tab === 'chat');
+  document.getElementById('tab-map').classList.toggle('active', tab === 'map');
   document.getElementById('tab-settings').classList.toggle('active', tab === 'settings');
   document.getElementById('summary-view').classList.toggle('visible', tab === 'tree' && selectedPath !== null);
   document.getElementById('chat-view').style.display = tab === 'chat' ? 'flex' : 'none';
+  document.getElementById('map-view').style.display = tab === 'map' ? 'flex' : 'none';
   document.getElementById('settings-view').classList.toggle('visible', tab === 'settings');
   if (tab === 'settings') loadSettings();
+  if (tab === 'map') loadMap();
 }
 
 /* ── Stats ── */
@@ -867,8 +1645,202 @@ function buildTreeNode(node) {
 
 async function initTree() {
   const list = document.getElementById('tree-list');
-  // Start from all top-level entries (empty parent path)
-  await loadTreeLevel('', list);
+  list.innerHTML = '<div style="padding:6px 12px;color:var(--muted);font-size:11px">Loading&#x2026;</div>';
+  try {
+    const r = await fetch('/api/roots');
+    const roots = await r.json();
+    if (!roots.length) {
+      list.innerHTML = '<div class="empty-state">No indexed roots yet.<br><span class="cta-link" onclick="openAddRoot()">+ Add Root</span> to get started, or run <code>indexa scan &lt;path&gt;</code> in your terminal.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    roots.forEach(function(root) {
+      list.appendChild(buildTreeNode({path: root.path, name: root.name, kind: 'dir', summary_state: null}));
+    });
+  } catch(e) {
+    list.innerHTML = '<div style="padding:6px 12px;color:var(--red);font-size:11px">Error loading tree</div>';
+  }
+}
+
+/* ── Search ── */
+var _searchTimer = null;
+function onSearchInput(val) {
+  document.getElementById('search-clear').style.display = val ? '' : 'none';
+  clearTimeout(_searchTimer);
+  if (!val.trim()) { initTree(); return; }
+  _searchTimer = setTimeout(function() { doSearch(val.trim()); }, 200);
+}
+function clearSearchInput() {
+  document.getElementById('search-input').value = '';
+  document.getElementById('search-clear').style.display = 'none';
+  initTree();
+}
+async function doSearch(q) {
+  const list = document.getElementById('tree-list');
+  list.innerHTML = '<div style="padding:6px 12px;color:var(--muted);font-size:11px">Searching&#x2026;</div>';
+  try {
+    const r = await fetch('/api/search?q=' + encodeURIComponent(q) + '&limit=50');
+    const nodes = await r.json();
+    if (!nodes.length) {
+      list.innerHTML = '<div style="padding:6px 12px;color:var(--muted);font-size:11px">No results</div>';
+      return;
+    }
+    list.innerHTML = '';
+    nodes.forEach(function(node) { list.appendChild(buildTreeNode(node)); });
+  } catch(e) {
+    list.innerHTML = '<div style="padding:6px 12px;color:var(--red);font-size:11px">Search error</div>';
+  }
+}
+
+/* ── Add-Root modal ── */
+var _rootPathDebounce = null;
+function openAddRoot() {
+  document.getElementById('add-root-modal').classList.add('open');
+  browseFsTo('');
+}
+function closeAddRoot() {
+  document.getElementById('add-root-modal').classList.remove('open');
+}
+function onRootPathInput(val) {
+  clearTimeout(_rootPathDebounce);
+  _rootPathDebounce = setTimeout(function() { browseFsTo(val); }, 350);
+}
+async function browseFsTo(path) {
+  if (path) document.getElementById('add-root-path').value = path;
+  const browser = document.getElementById('fs-browser');
+  browser.innerHTML = '<div class="fs-entry" style="color:var(--muted)">Loading&#x2026;</div>';
+  try {
+    const r = await fetch('/api/fs/ls?path=' + encodeURIComponent(path || ''));
+    if (!r.ok) {
+      const d = await r.json().catch(function(){return {};});
+      browser.innerHTML = '<div class="fs-entry" style="color:var(--red)">' + escapeHtml(d.error || 'Permission denied') + '</div>';
+      return;
+    }
+    const entries = await r.json();
+    browser.innerHTML = '';
+    if (path) {
+      const up = document.createElement('div');
+      up.className = 'fs-entry';
+      up.style.color = 'var(--muted)';
+      up.innerHTML = '⤴ ..';
+      up.onclick = function() {
+        const parts = path.replace(/\/$/, '').split('/');
+        parts.pop();
+        browseFsTo(parts.join('/') || '/');
+      };
+      browser.appendChild(up);
+    }
+    if (!entries.length) {
+      const empty = document.createElement('div');
+      empty.className = 'fs-entry';
+      empty.style.color = 'var(--muted)';
+      empty.textContent = 'No subdirectories';
+      browser.appendChild(empty);
+    } else {
+      entries.forEach(function(e) {
+        const el = document.createElement('div');
+        el.className = 'fs-entry';
+        el.innerHTML = '📁 ' + escapeHtml(e.name);
+        el.onclick = function() { browseFsTo(e.path); };
+        browser.appendChild(el);
+      });
+    }
+  } catch(err) {
+    browser.innerHTML = '<div class="fs-entry" style="color:var(--red)">Error</div>';
+  }
+}
+async function startIndexRoot() {
+  const path = document.getElementById('add-root-path').value.trim();
+  if (!path) { alert('Enter a path first.'); return; }
+  try {
+    const r = await fetch('/api/jobs/index?path=' + encodeURIComponent(path), { method: 'POST' });
+    const d = await r.json();
+    closeAddRoot();
+    subscribeJob(d.job_id, path);
+  } catch(e) {
+    alert('Failed to start indexing: ' + e.message);
+  }
+}
+
+/* ── Jobs panel ── */
+var activeJobs = {}; // job_id → { es, row }
+
+function getOrCreateJobRow(jobId) {
+  if (activeJobs[jobId]) return activeJobs[jobId].row;
+  const panel = document.getElementById('jobs-panel');
+  panel.style.display = '';
+  const list = document.getElementById('jobs-list');
+  const row = document.createElement('div');
+  row.className = 'job-row';
+  row.id = 'job-row-' + jobId;
+  row.innerHTML = '<span class="job-kind">…</span>' +
+    '<span class="job-label">Starting…</span>' +
+    '<span class="job-note running">●</span>';
+  list.appendChild(row);
+  activeJobs[jobId] = { row: row, es: null };
+  return row;
+}
+
+function subscribeJob(jobId, path) {
+  const row = getOrCreateJobRow(jobId);
+  row.querySelector('.job-label').textContent = (path || '').split('/').pop() || path || jobId;
+
+  const es = new EventSource('/api/jobs/' + jobId + '/events');
+  activeJobs[jobId].es = es;
+
+  es.onmessage = function(e) {
+    try {
+      const ev = JSON.parse(e.data);
+      const kindEl = row.querySelector('.job-kind');
+      const noteEl = row.querySelector('.job-note');
+      if (ev.type === 'start') {
+        kindEl.textContent = ev.kind;
+        noteEl.className = 'job-note running';
+        noteEl.textContent = ev.total ? '0/' + ev.total : '…';
+      } else if (ev.type === 'progress') {
+        noteEl.textContent = ev.current + '/' + ev.total;
+      } else if (ev.type === 'note') {
+        noteEl.textContent = ev.msg.slice(0, 30);
+      } else if (ev.type === 'done') {
+        noteEl.className = 'job-note done';
+        noteEl.textContent = '✓ ' + ev.summary;
+        es.close();
+        setTimeout(function() {
+          row.remove();
+          delete activeJobs[jobId];
+          if (!document.getElementById('jobs-list').children.length) {
+            document.getElementById('jobs-panel').style.display = 'none';
+          }
+          initTree(); // refresh tree to show new root
+          loadStats();
+        }, 5000);
+      } else if (ev.type === 'failed') {
+        noteEl.className = 'job-note failed';
+        noteEl.textContent = '✗ ' + ev.error.slice(0, 40);
+        es.close();
+      }
+    } catch(_) {}
+  };
+  es.onerror = function() {
+    const noteEl = row.querySelector('.job-note');
+    if (noteEl.className.indexOf('done') === -1 && noteEl.className.indexOf('failed') === -1) {
+      noteEl.className = 'job-note failed';
+      noteEl.textContent = 'connection lost';
+    }
+    es.close();
+  };
+}
+
+async function reconnectInFlightJobs() {
+  try {
+    const r = await fetch('/api/jobs');
+    const jobs = await r.json();
+    jobs.forEach(function(j) {
+      if (j.status === 'running') {
+        subscribeJob(j.job_id, j.path);
+      }
+    });
+  } catch(_) {}
 }
 
 /* ── Summary view ── */
@@ -1029,6 +2001,82 @@ async function loadSettings() {
   settingsLoaded = true;
   loadModels();
   loadKeys();
+  loadPasses();
+}
+async function loadPasses() {
+  try {
+    const r = await fetch('/api/config');
+    if (!r.ok) return;
+    const d = await r.json();
+    document.getElementById('passes-first').value = d.passes_first || 2;
+    document.getElementById('passes-refresh').value = d.passes_refresh || 1;
+  } catch(_) {}
+}
+async function savePasses() {
+  const first = parseInt(document.getElementById('passes-first').value, 10);
+  const refresh = parseInt(document.getElementById('passes-refresh').value, 10);
+  const status = document.getElementById('passes-status');
+  try {
+    const r = await fetch('/api/config/passes', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({passes_first: first, passes_refresh: refresh})
+    });
+    const d = await r.json();
+    if (d.error) { status.style.color = 'var(--red)'; status.textContent = d.error; return; }
+    status.style.color = 'var(--green)';
+    status.textContent = 'Saved';
+    setTimeout(function() { status.textContent = ''; }, 3000);
+  } catch(e) {
+    status.style.color = 'var(--red)';
+    status.textContent = 'Error: ' + e.message;
+  }
+}
+
+/* ── Queue badge ── */
+async function pollQueue() {
+  try {
+    const r = await fetch('/api/queue');
+    const d = await r.json();
+    const badge = document.getElementById('queue-badge');
+    const total = d.pending + d.in_flight + d.failed;
+    if (total === 0) { badge.style.display = 'none'; return; }
+    badge.style.display = '';
+    let parts = [];
+    if (d.pending > 0) parts.push(d.pending + ' pending');
+    if (d.in_flight > 0) parts.push(d.in_flight + ' running');
+    if (d.failed > 0) parts.push(d.failed + ' failed');
+    badge.textContent = parts.join(' \xB7 ');
+  } catch(_) {}
+}
+setInterval(pollQueue, 3000);
+pollQueue();
+
+/* ── Map view ── */
+let mapLoaded = false;
+async function loadMap() {
+  if (mapLoaded) return;
+  mapLoaded = true;
+  const table = document.getElementById('map-table');
+  try {
+    const r = await fetch('/api/map');
+    const d = await r.json();
+    if (!d.length) {
+      table.innerHTML = '<tr><td style="color:var(--muted);padding:12px 8px">No data yet. Run <code>indexa deep &lt;path&gt;</code> first.</td></tr>';
+      return;
+    }
+    table.innerHTML = '<thead><tr><th>Category</th><th>Files</th><th>Size</th></tr></thead>';
+    const tbody = document.createElement('tbody');
+    d.forEach(function(row) {
+      const tr = document.createElement('tr');
+      const sz = row.total_size > 0 ? (row.total_size > 1048576 ? (row.total_size/1048576).toFixed(1)+' MB' : (row.total_size/1024).toFixed(0)+' KB') : '';
+      tr.innerHTML = '<td>' + escapeHtml(row.category || 'Unknown') + '</td><td style="text-align:right">' + (row.entry_count||0).toLocaleString() + '</td><td style="text-align:right">' + sz + '</td>';
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+  } catch(e) {
+    table.innerHTML = '<tr><td style="color:var(--red)">' + escapeHtml(e.message) + '</td></tr>';
+  }
 }
 
 async function loadModels() {
@@ -1144,6 +2192,7 @@ function escapeAttr(s) { return escapeHtml(s); }
 loadStats();
 initTree();
 switchTab('chat');
+reconnectInFlightJobs();
 </script>
 </body>
 </html>"#;
