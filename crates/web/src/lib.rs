@@ -30,9 +30,7 @@ use indexa_core::{
 };
 use indexa_embed::Embedder;
 use indexa_llm::{Generator, OllamaLlm};
-use indexa_query::{
-    enqueue_subtree, process_queue_item_with_passes, synthesize_from_hits, QaConfig,
-};
+use indexa_query::{enqueue_subtree, process_queue_item_with_passes, QaConfig};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -658,54 +656,23 @@ async fn api_ask(State(state): State<AppState>, Json(body): Json<AskRequest>) ->
         rrf_k: state.config.retrieval.rrf_k as f32,
         summary_weight: state.config.retrieval.summary_weight,
         summary_depth_alpha: state.config.retrieval.summary_depth_alpha,
+        rerank: state.config.retrieval.rerank,
         ..QaConfig::default()
     };
 
-    // Step 1: embed query (async, no store lock needed).
-    let query_vec = match state.embedder.embed(&body.question).await {
-        Ok(v) => v,
-        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
-    };
-
-    // Step 2: sync store query (hold lock only for the synchronous call, no await).
-    let hits = {
-        let store = state.store.lock().await;
-        let mut hits = match store.hybrid_search(
-            &body.question,
-            Some(&query_vec),
-            &indexa_core::config::HybridMode::Rrf,
-            None,
-            qa_cfg.top_k,
-            qa_cfg.rrf_k,
-        ) {
-            Ok(h) => h,
-            Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
-        };
-        // Optional summary-boost reranking (no-op when summary_weight == 0.0).
-        let _ = store.boost_with_summaries(
-            &mut hits,
-            &query_vec,
-            qa_cfg.summary_weight,
-            qa_cfg.summary_depth_alpha,
-        );
-        hits
-    }; // MutexGuard dropped here — no store reference held across awaits
-
-    // Short-circuit: with no matching chunks the LLM would have zero grounding and
-    // could hallucinate a confident-sounding answer. Tell the user to index instead.
-    if hits.is_empty() {
-        return Json(AskResponse {
-            answer: "No indexed content matched your query. Run `indexa deep` and \
-                     `indexa summarize` on the relevant folder first (or use the ⚡ / 📝 \
-                     actions in the Browse tab), then ask again."
-                .to_owned(),
-            sources: vec![],
-        })
-        .into_response();
-    }
-
-    // Step 3: LLM synthesis (async, store lock already released).
-    match synthesize_from_hits(hits, state.llm.as_ref(), &body.question, &qa_cfg).await {
+    // Single shared, Send-safe pipeline (embed → scoped retrieve → optional
+    // rerank → synthesize). `answer` opens its own short-lived read connection
+    // from `db_path`, so we don't hold the shared store mutex across the LLM
+    // round-trips. Empty-hit short-circuit lives inside `answer`.
+    match indexa_query::answer(
+        &state.db_path,
+        state.embedder.as_ref(),
+        state.llm.as_ref(),
+        &body.question,
+        &qa_cfg,
+    )
+    .await
+    {
         Ok(answer) => Json(AskResponse {
             answer: answer.answer,
             sources: answer

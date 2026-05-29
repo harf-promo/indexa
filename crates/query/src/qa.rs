@@ -1,8 +1,12 @@
+use std::path::Path;
+
 use anyhow::Result;
 use indexa_core::config::HybridMode;
 use indexa_core::store::{SearchHit, Store};
 use indexa_embed::Embedder;
 use indexa_llm::Generator;
+
+use crate::rerank::{apply_rerank, LlmReranker};
 
 /// Result of a Q&A query.
 #[derive(Debug)]
@@ -34,6 +38,9 @@ pub struct QaConfig {
     pub summary_weight: f32,
     /// Depth-boost coefficient α for summary cosine search.
     pub summary_depth_alpha: f32,
+    /// Apply a cross-encoder rerank pass after retrieval (default off). Currently
+    /// a local LLM-listwise reranker; fails open (never errors `ask`).
+    pub rerank: bool,
 }
 
 impl Default for QaConfig {
@@ -46,41 +53,30 @@ impl Default for QaConfig {
             rrf_k: 60.0,
             summary_weight: 0.0,
             summary_depth_alpha: 0.15,
+            rerank: false,
         }
     }
 }
 
-/// Run the full RAG Q&A pipeline:
-///   embed(query) → hybrid_search → pack context → LLM → cited answer.
-///
-/// The store query is synchronous and completes before any async calls,
-/// so this function never holds `&Store` across an `.await` point.
-pub async fn ask(
+/// Synchronous retrieval: hybrid search + summary boost. Kept separate so the
+/// async orchestrator ([`answer`]) can scope the `&Store` borrow to a block that
+/// never spans an `.await` — keeping the resulting future `Send` (required by the
+/// axum web server and the rmcp MCP server). `query_vec` is `None` for sparse-only.
+pub fn retrieve(
     store: &Store,
-    embedder: &dyn Embedder,
-    llm: &dyn Generator,
     question: &str,
+    query_vec: Option<&[f32]>,
     cfg: &QaConfig,
-) -> Result<Answer> {
-    // 1. Embed the question (skip if sparse-only).
-    let query_vec = match cfg.mode {
-        HybridMode::Sparse => None,
-        _ => Some(embedder.embed(question).await?),
-    };
-
-    // 2. Hybrid retrieval (sync — no await while holding &store).
-    let scope = cfg.scope.as_deref();
+) -> Result<Vec<SearchHit>> {
     let mut hits = store.hybrid_search(
         question,
-        query_vec.as_deref(),
+        query_vec,
         &cfg.mode,
-        scope,
+        cfg.scope.as_deref(),
         cfg.top_k,
         cfg.rrf_k,
     )?;
-
-    // 2b. Optional summary-boosted reranking.
-    if let Some(ref qvec) = query_vec {
+    if let Some(qvec) = query_vec {
         let _ = store.boost_with_summaries(
             &mut hits,
             qvec,
@@ -88,8 +84,57 @@ pub async fn ask(
             cfg.summary_depth_alpha,
         );
     }
+    Ok(hits)
+}
 
-    // 3–5. Synthesize (no store access from here on).
+/// Run the full RAG Q&A pipeline against the index at `db_path`:
+///   embed(query) → retrieve → [rerank] → synthesize → cited answer.
+///
+/// **Send-safe and the single entry point** for all surfaces (CLI, web, MCP).
+/// The `&Store` is confined to a synchronous inner scope and dropped before any
+/// `.await`, so the returned future is `Send`. Opening a fresh connection per
+/// call is cheap (sub-millisecond) and avoids holding a lock across the LLM round-trips.
+pub async fn answer(
+    db_path: &Path,
+    embedder: &dyn Embedder,
+    llm: &dyn Generator,
+    question: &str,
+    cfg: &QaConfig,
+) -> Result<Answer> {
+    // 1. Embed (no store in scope). Skip for sparse-only.
+    let query_vec = match cfg.mode {
+        HybridMode::Sparse => None,
+        _ => Some(embedder.embed(question).await?),
+    };
+
+    // 2. Retrieve in a sync scope — `&Store` never crosses an await.
+    let hits = {
+        let store = Store::open(db_path)?;
+        retrieve(&store, question, query_vec.as_deref(), cfg)?
+    };
+
+    // 2b. Short-circuit on no matches: with zero grounding the LLM would
+    //     hallucinate a confident answer. Tell the user to index instead.
+    //     Centralised here so CLI, web, and MCP all behave the same.
+    if hits.is_empty() {
+        return Ok(Answer {
+            question: question.to_owned(),
+            answer: "No indexed content matched your query. Run `indexa deep` and \
+                     `indexa summarize` on the relevant folder first, then ask again."
+                .to_owned(),
+            sources: Vec::new(),
+        });
+    }
+
+    // 3. Optional cross-encoder rerank (fails open). Reaches every surface
+    //    because they all call this function.
+    let hits = if cfg.rerank {
+        apply_rerank(&LlmReranker::new(llm), question, hits).await
+    } else {
+        hits
+    };
+
+    // 4. Synthesize (no store access).
     synthesize_from_hits(hits, llm, question, cfg).await
 }
 

@@ -15,7 +15,7 @@ use indexa_core::{
 use indexa_embed::OllamaEmbedder;
 use indexa_llm::OllamaLlm;
 use indexa_query::{
-    ask, build_tree, enqueue_subtree, render_json, render_markdown, render_xml,
+    answer, build_tree, enqueue_subtree, render_json, render_markdown, render_xml,
     summarize_subtree_sync, QaConfig,
 };
 use std::path::PathBuf;
@@ -388,10 +388,21 @@ async fn cmd_ask(
         rrf_k: cfg.retrieval.rrf_k as f32,
         summary_weight: cfg.retrieval.summary_weight,
         summary_depth_alpha: cfg.retrieval.summary_depth_alpha,
+        rerank: cfg.retrieval.rerank,
         ..QaConfig::default()
     };
 
-    let answer = ask(&store, embedder.as_ref(), llm.as_ref(), &question, &qa_cfg).await?;
+    // `store` is no longer needed by the query path — `answer` opens its own
+    // scoped connection. Drop it so we don't hold two handles open.
+    drop(store);
+    let answer = answer(
+        &db_path,
+        embedder.as_ref(),
+        llm.as_ref(),
+        &question,
+        &qa_cfg,
+    )
+    .await?;
 
     println!("Answer:\n{}\n", answer.answer);
 
