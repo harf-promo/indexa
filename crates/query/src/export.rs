@@ -5,13 +5,22 @@
 //! (<https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/use-xml-tags>)
 
 use anyhow::{Context, Result};
-use indexa_core::store::{Store, SummaryRecord};
+use indexa_core::store::{abstract_from, Store, SummaryRecord};
 use std::path::Path;
 
 /// One node in the in-memory export tree.
 pub struct ExportNode {
     pub record: SummaryRecord,
     pub children: Vec<ExportNode>,
+}
+
+/// The L0 one-line abstract for a node: the stored `summary_l0`, or derived from
+/// the L1 summary as a fallback (older rows / records built without an abstract).
+fn node_abstract(node: &ExportNode) -> String {
+    node.record
+        .summary_l0
+        .clone()
+        .unwrap_or_else(|| abstract_from(&node.record.summary))
 }
 
 /// Build an export tree rooted at `root_path`, going at most `max_depth` levels deep.
@@ -87,6 +96,10 @@ fn render_xml_node(node: &ExportNode, out: &mut String, indent: usize) {
     ));
     out.push('\n');
     out.push_str(&format!(
+        "{pad}  <abstract>{}</abstract>\n",
+        xml_text(&node_abstract(node))
+    ));
+    out.push_str(&format!(
         "{pad}  <summary>{}</summary>\n",
         xml_text(&node.record.summary)
     ));
@@ -124,6 +137,7 @@ fn render_md_node(node: &ExportNode, out: &mut String, level: usize) {
     };
     out.push_str(&format!("{prefix} {icon} {name}\n\n"));
     out.push_str(&format!("`{}`\n\n", node.record.path));
+    out.push_str(&format!("**Abstract:** {}\n\n", node_abstract(node)));
     out.push_str(&format!("{}\n\n", node.record.summary));
     for child in &node.children {
         render_md_node(child, out, level + 1);
@@ -151,6 +165,10 @@ fn render_json_node(node: &ExportNode, out: &mut String, indent: usize) {
         json_str(&node.record.kind)
     ));
     out.push_str(&format!("{inner}\"depth\": {},\n", node.record.depth));
+    out.push_str(&format!(
+        "{inner}\"abstract\": {},\n",
+        json_str(&node_abstract(node))
+    ));
     out.push_str(&format!(
         "{inner}\"summary\": {}",
         json_str(&node.record.summary)
@@ -210,6 +228,7 @@ mod tests {
             parent_path: parent.map(|s| s.to_owned()),
             depth,
             summary: format!("Summary of {path}"),
+            summary_l0: Some(format!("Abstract of {path}")),
             embedding: None,
             child_count: 0,
             byte_size: 0,

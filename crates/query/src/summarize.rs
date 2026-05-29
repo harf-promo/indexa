@@ -92,6 +92,7 @@ pub async fn summarize_file(
         parent_path,
         depth,
         summary: summary_text,
+        summary_l0: None, // derived from summary by upsert_summary
         embedding,
         child_count: 0,
         byte_size,
@@ -183,6 +184,7 @@ pub async fn summarize_directory(
         parent_path,
         depth,
         summary: summary_text,
+        summary_l0: None, // derived from summary by upsert_summary
         embedding,
         child_count,
         byte_size,
