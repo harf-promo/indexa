@@ -124,6 +124,7 @@ async fn main() -> Result<()> {
             embed_model,
             llm_model,
         } => cmd_serve(port, embed_model, llm_model, &cfg).await,
+        Commands::Mcp {} => cmd_mcp(&cfg).await,
         Commands::Status { unknown } => cmd_status(unknown, &cfg).await,
         Commands::Rm { paths, recursive } => cmd_rm(paths, recursive).await,
         Commands::Doctor {
@@ -528,6 +529,20 @@ async fn cmd_serve(
         Arc::from(build_llm(cfg, llm_model_flag.as_deref())?);
 
     indexa_web::serve(port, store, embedder, llm, cfg.clone()).await
+}
+
+/// Run the MCP (Model Context Protocol) server over stdio so AI agents
+/// (Claude Desktop, Cursor, …) can browse the index live as tool calls.
+/// stdout is the JSON-RPC channel — Indexa's tracing already writes to stderr only.
+async fn cmd_mcp(cfg: &Config) -> Result<()> {
+    let Some(db_path) = require_index_db()? else {
+        return Ok(());
+    };
+    let embedder: Arc<dyn indexa_embed::Embedder + Send + Sync + 'static> =
+        Arc::from(build_embedder(cfg, None)?);
+    let llm: Arc<dyn indexa_llm::Generator + Send + Sync + 'static> =
+        Arc::from(build_llm(cfg, None)?);
+    indexa_mcp::serve_mcp(db_path, embedder, llm, cfg.clone()).await
 }
 
 async fn cmd_status(show_unknown: bool, cfg: &Config) -> Result<()> {

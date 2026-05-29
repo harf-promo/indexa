@@ -206,6 +206,16 @@ pub enum Commands {
         llm_model: Option<String>,
     },
 
+    /// Run the MCP (Model Context Protocol) server over stdio for AI agents.
+    ///
+    /// Exposes the index as agent tools (search, browse_tree, get_summary,
+    /// read_file, ask, get_stats) so clients like Claude Desktop and Cursor can
+    /// browse your local context live. Communicates over stdin/stdout.
+    #[command(after_help = "Examples:
+  indexa mcp
+  # Claude Desktop config: { \"command\": \"indexa\", \"args\": [\"mcp\"] }")]
+    Mcp {},
+
     /// Show context store statistics.
     #[command(after_help = "Examples:
   indexa status
