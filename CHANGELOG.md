@@ -5,6 +5,25 @@ All notable changes to Indexa will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-05-30
+
+The "agent-addressable" release: the local context engine is now reachable by AI
+agents over MCP and ranks its own retrieval — without adding a single native
+dependency or turning the engine into an app.
+
+### Added
+
+- **MCP server** — `indexa mcp` runs a stdio [Model Context Protocol](https://modelcontextprotocol.io) server (official `rmcp` SDK, pure Rust) so Claude Desktop / Cursor / any MCP client can browse the index live. Six tools: `search`, `browse_tree`, `get_summary` (with `tier` = l0/l1/l2 progressive disclosure), `read_file`, `ask`, `get_stats`. Logs to stderr only so stdout stays the protocol channel.
+- **Cross-encoder reranking** — the long-stubbed `[retrieval] rerank` flag now does something: a `CrossEncoder` trait with a default `LlmReranker` that listwise-reorders retrieved candidates in one local-model call. Off by default; **fails open** (any model error, empty, or unparseable output falls back to the original order, so it can never make `ask` worse). No new native dependency — an ONNX/`fastembed` cross-encoder stays a future cargo-feature so the default single binary remains ONNX-free.
+
+### Changed
+
+- **Single Send-safe Q&A pipeline** — the CLI, web `api_ask`, and MCP `ask` previously hand-rolled three near-identical retrieval pipelines (a workaround for the old `ask(&Store, …)` being `!Send`). They now all call one `query::answer(db_path, …)` that scopes the SQLite borrow to a synchronous block, so the reranker and the empty-result short-circuit apply uniformly across every surface.
+
+### Fixed
+
+- The empty-result guidance message (run `indexa deep` / `summarize` first) is now consistent across CLI, web, and MCP instead of web-only.
+
 ## [0.4.0] — 2026-05-29
 
 The "local context engine" release: Indexa now reads your machine's resources and
@@ -264,5 +283,6 @@ locally. Feedback welcome via [Discussions](../../discussions).
 ---
 
 [0.1.0-rc1]: https://github.com/harf-promo/indexa/releases/tag/v0.1.0-rc1
+[0.5.0]: https://github.com/harf-promo/indexa/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/harf-promo/indexa/compare/v0.3.5...v0.4.0
-[Unreleased]: https://github.com/harf-promo/indexa/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/harf-promo/indexa/compare/v0.5.0...HEAD
