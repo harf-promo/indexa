@@ -8,6 +8,7 @@ members = [
     "crates/query",
     "crates/cli",
     "crates/web",
+    "crates/mcp",
     "apps/indexa",
 ]
 
