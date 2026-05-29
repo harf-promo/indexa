@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use directories::BaseDirs;
 use indexa_cli::{Cli, Commands};
@@ -173,11 +173,7 @@ async fn cmd_deep(
     mode: String,
     cfg: &Config,
 ) -> Result<()> {
-    let summary_mode = match mode.as_str() {
-        "compress" => SummaryMode::Compress,
-        "summaries-only" => SummaryMode::SummariesOnly,
-        _ => SummaryMode::Augment,
-    };
+    let summary_mode = parse_summary_mode(&mode)?;
     let roots = resolve_roots(paths, false)?;
     let Some(db_path) = require_index_db()? else {
         return Ok(());
@@ -640,11 +636,7 @@ async fn cmd_summarize(
     };
 
     let mut summary_cfg = cfg.describer.clone();
-    summary_cfg.mode = match mode.as_str() {
-        "compress" => SummaryMode::Compress,
-        "summaries-only" => SummaryMode::SummariesOnly,
-        _ => SummaryMode::Augment,
-    };
+    summary_cfg.mode = parse_summary_mode(&mode)?;
 
     let base_url = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
     let describer = OllamaLlm::new_with_dir_model(
@@ -787,7 +779,18 @@ async fn cmd_export(
     }
 
     if let Some(path) = output {
-        std::fs::write(&path, &out_buf)?;
+        // Give an actionable hint when the parent directory doesn't exist, rather
+        // than surfacing a bare OS "No such file or directory" error.
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                anyhow::bail!(
+                    "cannot write to '{path}': the directory '{}' does not exist. \
+                     Create it first or choose an existing output path.",
+                    parent.display()
+                );
+            }
+        }
+        std::fs::write(&path, &out_buf).with_context(|| format!("writing export to '{path}'"))?;
         println!("Wrote {} bytes to {path}.", out_buf.len());
     } else {
         print!("{out_buf}");
@@ -825,13 +828,14 @@ async fn cmd_worker(concurrency: usize, cfg: &Config) -> Result<()> {
     println!("Press Ctrl-C to stop.");
 
     let summary_cfg = cfg.describer.clone();
+    let headroom = cfg.resource.effective_headroom_bytes();
     let mut handles = Vec::new();
     for _ in 0..concurrency {
         let s = Arc::clone(&store);
         let d = Arc::clone(&describer);
         let e = Arc::clone(&embedder);
         let c = summary_cfg.clone();
-        handles.push(tokio::spawn(indexa_query::run_worker(s, d, e, c)));
+        handles.push(tokio::spawn(indexa_query::run_worker(s, d, e, c, headroom)));
     }
 
     // Wait for all (runs forever until Ctrl-C)
@@ -1142,6 +1146,19 @@ fn migrate_legacy_data_dir(new_dir: &std::path::Path) {
                 );
             }
         }
+    }
+}
+
+/// Parse the `--mode` flag into a `SummaryMode`, rejecting unknown values with a
+/// clear error instead of silently treating a typo (e.g. `compres`) as `augment`.
+fn parse_summary_mode(mode: &str) -> Result<SummaryMode> {
+    match mode {
+        "augment" => Ok(SummaryMode::Augment),
+        "compress" => Ok(SummaryMode::Compress),
+        "summaries-only" => Ok(SummaryMode::SummariesOnly),
+        other => anyhow::bail!(
+            "unknown --mode '{other}'. Valid values: augment, compress, summaries-only"
+        ),
     }
 }
 

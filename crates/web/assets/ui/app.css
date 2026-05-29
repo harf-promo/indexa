@@ -329,8 +329,26 @@ code, kbd, pre, .mono { font-family: var(--font-mono); }
 .msg.assistant .bubble {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 2px 12px 12px 12px; padding: 14px 16px;
-  white-space: pre-wrap; line-height: 1.7; font-size: 14px;
+  line-height: 1.7; font-size: 14px;
   box-shadow: var(--shadow-sm);
+}
+/* Markdown elements rendered inside an assistant answer. */
+.msg.assistant .bubble h1, .msg.assistant .bubble h2,
+.msg.assistant .bubble h3, .msg.assistant .bubble h4 {
+  font-size: 15px; font-weight: 600; margin: 10px 0 4px;
+}
+.msg.assistant .bubble ul { margin: 6px 0 6px 18px; }
+.msg.assistant .bubble li { margin: 2px 0; }
+.msg.assistant .bubble code {
+  font-family: var(--font-mono); font-size: 12px;
+  background: var(--surface-2); border: 1px solid var(--border-subtle);
+  border-radius: 4px; padding: 1px 5px;
+}
+.msg.assistant .bubble pre.chat-code {
+  font-family: var(--font-mono); font-size: 12px;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 10px 12px; margin: 8px 0;
+  overflow-x: auto; white-space: pre; line-height: 1.5;
 }
 .msg.user { align-self: flex-end; }
 .msg.assistant { align-self: flex-start; }

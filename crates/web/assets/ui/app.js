@@ -125,7 +125,8 @@ function buildTreeNode(node) {
         if (!confirm('Remove ‹' + label + '› from the index?\nFiles on disk are not deleted.')) return;
         try {
           await fetch('/api/entry?path=' + encodeURIComponent(node.path), { method: 'DELETE' });
-          initTree();
+          expandedPaths.delete(node.path);
+          refreshTree();
           loadStats();
         } catch(err) { toast('Remove failed: ' + err.message, 'error'); }
       } else {
@@ -197,6 +198,41 @@ async function initTree() {
   } catch(e) {
     list.innerHTML = '<div style="padding:8px 12px;color:var(--red);font-size:12px">Error loading tree</div>';
   }
+}
+
+/* Expand a single already-rendered tree node by path (loads its children). */
+async function expandNodeByPath(path) {
+  const sel = '.tree-node[data-path="' + (window.CSS && CSS.escape ? CSS.escape(path) : path) + '"]';
+  const wrap = document.querySelector(sel);
+  if (!wrap) return;
+  const row = wrap.querySelector('.tree-node-row');
+  const childContainer = wrap.querySelector('.tree-children');
+  if (!row || !childContainer) return;
+  expandedPaths.add(path);
+  childContainer.style.display = 'block';
+  const toggle = row.querySelector('.tree-toggle');
+  if (toggle) toggle.textContent = '▾';
+  if (!childContainer.dataset.loaded) {
+    childContainer.dataset.loaded = '1';
+    await loadTreeLevel(path, childContainer);
+  }
+}
+
+/* Rebuild the tree while preserving expanded folders and scroll position.
+   Use this after a job completes instead of initTree(), which collapses everything. */
+async function refreshTree() {
+  const list = document.getElementById('tree-list');
+  const prevScroll = list ? list.scrollTop : 0;
+  // Snapshot the open folders, shallowest-first so parents expand before children.
+  const toRestore = Array.from(expandedPaths).sort(function(a, b) {
+    return a.split('/').length - b.split('/').length;
+  });
+  expandedPaths.clear();
+  await initTree();
+  for (const p of toRestore) {
+    await expandNodeByPath(p); // parent is already in the DOM by the time we reach a child
+  }
+  if (list) list.scrollTop = prevScroll;
 }
 
 /* ── Search ── */
@@ -319,7 +355,14 @@ function subscribeJob(jobId, path, kind) {
       if (!j) return;
 
       if (ev.type === 'start') {
-        j.kind = ev.kind || '?';
+        // A composite 'index' job runs scan→deep→summarize phases, each emitting
+        // its own start. Keep the umbrella 'index' kind on the badge and surface
+        // the current sub-phase separately instead of flipping the kind around.
+        if (j.kind === 'index' && ev.kind && ev.kind !== 'index') {
+          j.phase = ev.kind;
+        } else {
+          j.kind = ev.kind || j.kind || '?';
+        }
         j.path = ev.path || j.path;
         j.status = 'running';
         j._retries = 0;
@@ -340,8 +383,8 @@ function subscribeJob(jobId, path, kind) {
         _removeActiveJob(jobId);
         playPing('ok');
         _markDirty(jobId);
-        // Refresh tree and stats in background
-        setTimeout(function() { initTree(); loadStats(); }, 500);
+        // Refresh tree (preserving expand/scroll state) and stats in background.
+        setTimeout(function() { refreshTree(); loadStats(); }, 500);
 
       } else if (ev.type === 'failed') {
         j.status = 'failed';
@@ -616,7 +659,10 @@ function renderJobDetail(jobId) {
     let chipClass = 'jd-status-chip';
     let chipText = '';
     if (j.status === 'running' || j.status === 'reconnecting') {
-      chipClass += ' running'; chipText = j.status === 'reconnecting' ? 'reconnecting' : 'running';
+      chipClass += ' running';
+      chipText = j.status === 'reconnecting' ? 'reconnecting' : 'running';
+      // For a composite index job, show which phase is currently running.
+      if (j.phase) chipText += ' \xb7 ' + j.phase;
     } else if (j.status === 'done') { chipClass += ' done'; chipText = 'done'; }
     else if (j.status === 'failed') { chipClass += ' failed'; chipText = 'failed'; }
     statusChip.className = chipClass;
@@ -977,7 +1023,7 @@ async function doAsk() {
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || 'Request failed');
 
-    let html = escapeHtml(d.answer);
+    let html = renderMarkdown(d.answer);
     if (d.sources && d.sources.length > 0) {
       html += '<div class="sources"><h4>Sources</h4>' +
         d.sources.map(function(s) {
@@ -1206,6 +1252,63 @@ function escapeHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 function escapeAttr(s) { return escapeHtml(s); }
+
+/* Minimal, XSS-safe markdown renderer for LLM answers. HTML is escaped FIRST,
+   then a small set of markdown constructs are turned into tags. Supports fenced
+   code blocks, inline code, bold, italic, headings, and unordered lists. */
+function renderMarkdown(src) {
+  if (!src) return '';
+  // 1) Escape everything up front so no raw HTML from the model can execute.
+  let text = escapeHtml(src);
+
+  // 2) Pull fenced code blocks out into placeholders so inline rules don't touch them.
+  const blocks = [];
+  text = text.replace(/```([\s\S]*?)```/g, function(_m, code) {
+    blocks.push(code.replace(/^\n/, ''));
+    return ' CODEBLOCK' + (blocks.length - 1) + ' ';
+  });
+
+  // 3) Line-level: headings and unordered lists.
+  const lines = text.split('\n');
+  let out = '';
+  let inList = false;
+  for (let raw of lines) {
+    const line = raw;
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    const li = line.match(/^\s*[-*]\s+(.*)$/);
+    if (li) {
+      if (!inList) { out += '<ul>'; inList = true; }
+      out += '<li>' + inlineMd(li[1]) + '</li>';
+      continue;
+    }
+    if (inList) { out += '</ul>'; inList = false; }
+    if (h) {
+      const lvl = h[1].length;
+      out += '<h' + lvl + '>' + inlineMd(h[2]) + '</h' + lvl + '>';
+    } else if (line.trim() === '') {
+      out += '<br>';
+    } else if (line.indexOf(' CODEBLOCK') !== -1) {
+      out += line; // placeholder, restored below
+    } else {
+      out += inlineMd(line) + '<br>';
+    }
+  }
+  if (inList) out += '</ul>';
+
+  // 4) Restore code blocks as <pre><code>.
+  out = out.replace(/ CODEBLOCK(\d+) /g, function(_m, i) {
+    return '<pre class="chat-code">' + blocks[+i] + '</pre>';
+  });
+  return out;
+}
+
+/* Inline markdown: `code`, **bold**, *italic*. Operates on already-escaped text. */
+function inlineMd(s) {
+  return s
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*]+)\*([^*]|$)/g, '$1<em>$2</em>$3');
+}
 
 /* ── Sound ── */
 let _audioCtx = null;

@@ -15,16 +15,23 @@ use tokio::sync::Mutex;
 /// Run the background summarization worker until the channel is closed or the
 /// process exits. Items are processed one at a time per worker instance;
 /// launch multiple tasks for `cfg.queue_concurrency > 1`.
+///
+/// `headroom_bytes` is the memory headroom the watchdog keeps free (from the
+/// user's `[resource]` config). Pass 0 to fall back to a conservative 4 GB.
 pub async fn run_worker(
     store: Arc<Mutex<Store>>,
     describer: Arc<dyn Describer + Send + Sync>,
     embedder: Arc<dyn Embedder + Send + Sync>,
     cfg: DescriberConfig,
+    headroom_bytes: u64,
 ) {
     // Detect machine spec once for the watchdog.
     let spec = detect_machine();
-    // Use a conservative 4 GB headroom for the CLI worker (no resource config available here).
-    let headroom = 4 * 1024 * 1024 * 1024_u64;
+    let headroom = if headroom_bytes > 0 {
+        headroom_bytes
+    } else {
+        4 * 1024 * 1024 * 1024_u64
+    };
     let mut wdog = WatchdogState::new();
 
     // Open a dedicated Store connection owned by this worker so the LLM call below

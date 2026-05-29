@@ -25,8 +25,21 @@ pub struct WalkConfig {
     pub max_depth: Option<usize>,
 }
 
-/// Walk `root` and return all entries. Directories whose hint is `Skip` are not
-/// descended into. Uses `jwalk` for parallel traversal.
+/// True if `dir_path` is a directory we should never descend into — build
+/// artifacts (`target/`, `node_modules/`), VCS internals (`.git/`), caches, etc.
+/// Centralises the "don't waste time indexing generated files" decision so both
+/// the walker prune callback and any caller can share it.
+pub fn is_skip_dir(dir_path: &Path) -> bool {
+    classify(dir_path)
+        .map(|h| h.deep_scan == DeepScanPolicy::Skip)
+        .unwrap_or(false)
+}
+
+/// Walk `root` and return all entries. Directories classified `Skip` (build
+/// artifacts, caches, VCS internals) are recorded but **not descended into**, so
+/// we never index the thousands of generated files inside `target/`,
+/// `node_modules/`, `.git/`, etc. Uses `jwalk` for parallel traversal and prunes
+/// via the `process_read_dir` callback.
 pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
     use jwalk::{Parallelism, WalkDir};
 
@@ -34,12 +47,35 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
         .map(|n| n.get().min(4))
         .unwrap_or(2);
 
+    let skip_hidden = cfg.skip_hidden;
+
     let walker = {
         let mut w = WalkDir::new(root)
             .sort(false)
             // Each walk owns its own rayon pool to avoid deadlock when multiple
             // walks run concurrently sharing the global rayon pool.
-            .parallelism(Parallelism::RayonNewPool(pool_threads));
+            .parallelism(Parallelism::RayonNewPool(pool_threads))
+            // Prune at read-dir time: stop jwalk from descending into Skip dirs
+            // (and hidden dirs when requested). The dir entry itself is still
+            // yielded; we just don't read its children.
+            .process_read_dir(move |_depth, _path, _state, children| {
+                for child in children.iter_mut().flatten() {
+                    if !child.file_type().is_dir() {
+                        continue;
+                    }
+                    let cp = child.path();
+                    let hidden = skip_hidden
+                        && child
+                            .file_name()
+                            .to_str()
+                            .map(|n| n.starts_with('.'))
+                            .unwrap_or(false);
+                    if hidden || is_skip_dir(&cp) {
+                        // Prevent descending into this directory.
+                        child.read_children_path = None;
+                    }
+                }
+            });
         if let Some(d) = cfg.max_depth {
             w = w.max_depth(d);
         }
@@ -71,17 +107,6 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
                 None
             }
         });
-
-        // Don't descend into skipped dirs — we still record the dir itself.
-        if meta.is_dir() {
-            if let Some(ref h) = hint {
-                if h.deep_scan == DeepScanPolicy::Skip {
-                    // Record the dir but jwalk will still descend; we filter children below.
-                    // A real impl would use jwalk's `process_read_dir` callback to prune.
-                    // For now we record the entry and let the store handle deduplication.
-                }
-            }
-        }
 
         let kind = if meta.is_dir() {
             EntryKind::Dir
@@ -119,6 +144,29 @@ mod tests {
             .filter(|e| e.kind == EntryKind::File)
             .collect();
         assert_eq!(files.len(), 3);
+    }
+
+    #[test]
+    fn prunes_node_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("real.txt"), "keep me").unwrap();
+        let nm = dir.path().join("node_modules");
+        std::fs::create_dir(&nm).unwrap();
+        std::fs::write(nm.join("dep.js"), "generated").unwrap();
+        std::fs::create_dir(nm.join("nested")).unwrap();
+        std::fs::write(nm.join("nested").join("more.js"), "more").unwrap();
+
+        let entries = walk(dir.path(), &WalkConfig::default()).unwrap();
+        // The node_modules dir itself is recorded, but nothing inside it is.
+        let has_dep = entries.iter().any(|e| e.path.ends_with("dep.js"));
+        let has_nested = entries.iter().any(|e| e.path.ends_with("more.js"));
+        let has_real = entries.iter().any(|e| e.path.ends_with("real.txt"));
+        assert!(!has_dep, "node_modules contents must not be indexed");
+        assert!(
+            !has_nested,
+            "nested node_modules contents must not be indexed"
+        );
+        assert!(has_real, "real files must still be indexed");
     }
 
     #[test]
