@@ -24,6 +24,7 @@ use axum::{
 use futures_util::StreamExt;
 use indexa_core::{
     config::{self, Config},
+    resource::{assess, detect_machine, MachineSpec, Pressure, WatchdogState},
     store::{ChunkRecord, Store},
     walker::{walk, EntryKind, WalkConfig},
 };
@@ -53,6 +54,8 @@ pub struct AppState {
     log_dir: Arc<std::path::PathBuf>,
     /// Limits concurrent filesystem walks to prevent rayon global-pool starvation.
     walk_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Detected machine spec (RAM, cores, Apple Silicon flag) — used by the watchdog.
+    machine_spec: Arc<MachineSpec>,
 }
 
 // ── API types ─────────────────────────────────────────────────────────────────
@@ -244,14 +247,19 @@ impl From<indexa_core::store::TreeNode> for TreeNodeResponse {
 
 // ── Route handlers ────────────────────────────────────────────────────────────
 
-async fn api_tree(
-    State(state): State<AppState>,
-    Query(params): Query<PathQuery>,
-) -> Json<Vec<TreeNodeResponse>> {
+async fn api_tree(State(state): State<AppState>, Query(params): Query<PathQuery>) -> Response {
     let path = params.path.as_deref().unwrap_or("");
     let store = state.store.lock().await;
-    let nodes = store.tree_level(path).unwrap_or_default();
-    Json(nodes.into_iter().map(TreeNodeResponse::from).collect())
+    match store.tree_level(path) {
+        Ok(nodes) => Json(
+            nodes
+                .into_iter()
+                .map(TreeNodeResponse::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
 }
 
 async fn api_summary(State(state): State<AppState>, Query(params): Query<PathQuery>) -> Response {
@@ -417,32 +425,40 @@ async fn api_keys_set(State(state): State<AppState>, Json(body): Json<KeyRequest
     }
 }
 
-async fn api_roots(State(state): State<AppState>) -> Json<Vec<RootResponse>> {
+async fn api_roots(State(state): State<AppState>) -> Response {
     let store = state.store.lock().await;
-    let paths = store.root_paths().unwrap_or_default();
-    Json(
-        paths
-            .into_iter()
-            .map(|p| RootResponse {
-                name: file_name_of(&p),
-                path: p,
-            })
-            .collect(),
-    )
+    match store.root_paths() {
+        Ok(paths) => Json(
+            paths
+                .into_iter()
+                .map(|p| RootResponse {
+                    name: file_name_of(&p),
+                    path: p,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
 }
 
-async fn api_search(
-    State(state): State<AppState>,
-    Query(params): Query<SearchQuery>,
-) -> Json<Vec<TreeNodeResponse>> {
+async fn api_search(State(state): State<AppState>, Query(params): Query<SearchQuery>) -> Response {
     let q = params.q.as_deref().unwrap_or("").trim().to_owned();
     if q.is_empty() {
-        return Json(vec![]);
+        return Json(Vec::<TreeNodeResponse>::new()).into_response();
     }
     let limit = params.limit.unwrap_or(50).min(200);
     let store = state.store.lock().await;
-    let nodes = store.search_paths(&q, limit).unwrap_or_default();
-    Json(nodes.into_iter().map(TreeNodeResponse::from).collect())
+    match store.search_paths(&q, limit) {
+        Ok(nodes) => Json(
+            nodes
+                .into_iter()
+                .map(TreeNodeResponse::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
 }
 
 async fn api_fs_ls(Query(params): Query<PathQuery>) -> Response {
@@ -669,6 +685,19 @@ async fn api_ask(State(state): State<AppState>, Json(body): Json<AskRequest>) ->
         hits
     }; // MutexGuard dropped here — no store reference held across awaits
 
+    // Short-circuit: with no matching chunks the LLM would have zero grounding and
+    // could hallucinate a confident-sounding answer. Tell the user to index instead.
+    if hits.is_empty() {
+        return Json(AskResponse {
+            answer: "No indexed content matched your query. Run `indexa deep` and \
+                     `indexa summarize` on the relevant folder first (or use the ⚡ / 📝 \
+                     actions in the Browse tab), then ask again."
+                .to_owned(),
+            sources: vec![],
+        })
+        .into_response();
+    }
+
     // Step 3: LLM synthesis (async, store lock already released).
     match synthesize_from_hits(hits, state.llm.as_ref(), &body.question, &qa_cfg).await {
         Ok(answer) => Json(AskResponse {
@@ -792,8 +821,20 @@ async fn api_jobs_events(Path(id): Path<Uuid>, State(s): State<AppState>) -> imp
         None => return (StatusCode::NOT_FOUND, "job not found").into_response(),
     };
 
-    let history = handle.history.lock().unwrap().clone();
+    // Subscribe to the live channel FIRST, then snapshot history.  Doing it in this
+    // order guarantees no event is lost in the gap: any event pushed between the two
+    // statements lands in the live stream.  We dedupe the (small) overlap below by
+    // skipping live events whose serialized form already appears at the tail of the
+    // replayed history.
     let rx = handle.tx.subscribe();
+    let history = handle.history.lock().unwrap().clone();
+    // Tail of history used to suppress duplicates that also arrive on the live channel.
+    let history_tail: std::collections::HashSet<String> = history
+        .iter()
+        .rev()
+        .take(8)
+        .filter_map(|ev| serde_json::to_string(ev).ok())
+        .collect();
 
     fn to_sse(ev: JobEvent) -> Result<Event, Infallible> {
         let data = serde_json::to_string(&ev).unwrap_or_default();
@@ -801,16 +842,56 @@ async fn api_jobs_events(Path(id): Path<Uuid>, State(s): State<AppState>) -> imp
     }
 
     let replay = futures_util::stream::iter(history).map(to_sse);
+
+    // Capture a handle clone so that on a Lagged drop we can re-deliver the
+    // terminal event (Done/Failed), which must never be lost to channel overflow.
+    let handle_for_live = handle.clone();
+    // Dedup flag: only suppress history/live overlap during the initial window.
+    let still_deduping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+
     let live = BroadcastStream::new(rx)
-        .map(|r| match r {
-            Ok(ev) => ev,
-            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
-                JobEvent::Warning {
-                    stage: "sse".into(),
-                    item_path: None,
-                    message: format!("dropped {n} events — refresh to resync"),
+        .flat_map(move |r| {
+            use std::sync::atomic::Ordering;
+            let mut out: Vec<JobEvent> = Vec::new();
+            match r {
+                Ok(ev) => {
+                    // Suppress events that already appear in the replayed history tail
+                    // (the small subscribe/snapshot overlap), but stop once we see a
+                    // fresh event so legitimately-repeated events aren't dropped.
+                    if still_deduping.load(Ordering::Relaxed) {
+                        let serialized = serde_json::to_string(&ev).unwrap_or_default();
+                        if history_tail.contains(&serialized) {
+                            return futures_util::stream::iter(out);
+                        }
+                        still_deduping.store(false, Ordering::Relaxed);
+                    }
+                    out.push(ev);
+                }
+                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                    out.push(JobEvent::Warning {
+                        stage: "sse".into(),
+                        item_path: None,
+                        message: format!("dropped {n} events — resyncing"),
+                    });
+                    // A terminal event may have been among the dropped ones. Re-deliver
+                    // it from history so the client always learns the job finished.
+                    let status = handle_for_live.status.lock().unwrap().clone();
+                    if status != JobStatus::Running {
+                        if let Some(term) = handle_for_live
+                            .history
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .rev()
+                            .find(|e| matches!(e, JobEvent::Done { .. } | JobEvent::Failed { .. }))
+                            .cloned()
+                        {
+                            out.push(term);
+                        }
+                    }
                 }
             }
+            futures_util::stream::iter(out)
         })
         .map(to_sse);
 
@@ -826,24 +907,31 @@ async fn api_job_get(Path(id): Path<Uuid>, State(s): State<AppState>) -> impl In
         return err_json(StatusCode::NOT_FOUND, "job not found");
     };
     let status = h.status.lock().unwrap().clone();
-    let last_event = h.history.lock().unwrap().last().cloned();
+    let history = h.history.lock().unwrap().clone();
+    let last_event = history.last().cloned();
     let resp = serde_json::json!({
         "job_id": h.id,
         "kind": h.kind,
         "path": h.path,
         "started_at": h.started_at,
         "status": status,
+        "history": history,
         "last_event": last_event,
     });
     (StatusCode::OK, Json(resp)).into_response()
 }
 
 async fn api_job_delete(Path(id): Path<Uuid>, State(s): State<AppState>) -> impl IntoResponse {
-    let mut jobs = s.jobs.write().await;
+    // Request cancellation so the spawned task actually stops its work, rather than
+    // continuing to embed/call the LLM invisibly after being removed from the registry.
+    // We keep the handle in the registry so the running task can still observe the flag
+    // and emit its terminal event; the task's own cleanup removes it, or it ages out.
+    let jobs = s.jobs.read().await;
     if let Some(handle) = jobs.get(&id) {
-        *handle.status.lock().unwrap() = JobStatus::Failed;
+        handle
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    jobs.remove(&id);
     StatusCode::NO_CONTENT
 }
 
@@ -949,6 +1037,116 @@ fn finalize_done(handle: &Arc<JobHandle>, summary: &str) {
     *handle.status.lock().unwrap() = JobStatus::Done;
 }
 
+/// Emit a terminal Done event noting the job was cancelled mid-run.
+fn finalize_cancelled(handle: &Arc<JobHandle>, done: usize) {
+    push(
+        handle,
+        JobEvent::Done {
+            summary: format!("Cancelled after {done} items"),
+        },
+    );
+    *handle.status.lock().unwrap() = JobStatus::Done;
+}
+
+/// Check memory pressure before an Ollama call.
+///
+/// If pressure is Throttle or Critical:
+///   1. Emits a Warning event so the user can see it in the Jobs UI.
+///   2. Sleeps in a loop until pressure returns to Ok.
+///
+/// The caller should invoke this before every embedding or LLM call
+/// in the hot loops of `run_deep_phase` and `run_summarize_phase`.
+async fn run_watchdog_check(
+    wdog: &mut WatchdogState,
+    spec: &MachineSpec,
+    headroom: u64,
+    handle: &Arc<JobHandle>,
+    stage: &str,
+) {
+    let sample = wdog.sample();
+    let pressure = assess(&sample, spec, headroom);
+    if pressure == Pressure::Ok {
+        return;
+    }
+
+    let level = if pressure == Pressure::Critical {
+        "critical"
+    } else {
+        "high"
+    };
+    let swap_gb = sample.swap_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let swap_pct = sample
+        .swap_used_bytes
+        .checked_mul(100)
+        .and_then(|v| v.checked_div(sample.swap_total_bytes))
+        .unwrap_or(100);
+    push(
+        handle,
+        JobEvent::Warning {
+            stage: stage.to_owned(),
+            item_path: None,
+            message: format!(
+                "Memory pressure {level} — swap at {swap_pct}% ({swap_gb:.1} GB used). \
+                 Pausing to avoid freeze. Job will resume automatically."
+            ),
+        },
+    );
+
+    // Wait until pressure clears, with a hard maximum of ~5 minutes.
+    // Each tick is 5 s for Critical, 2 s for Throttle.
+    // Max ticks: 60 × 5 s = 300 s = 5 min (Critical); 150 × 2 s = 300 s (Throttle).
+    const MAX_TICKS: u32 = 60;
+    let mut ticks = 0u32;
+    loop {
+        let sleep_secs = if pressure == Pressure::Critical { 5 } else { 2 };
+        tokio::time::sleep(tokio::time::Duration::from_secs(sleep_secs)).await;
+        ticks += 1;
+
+        let s = wdog.sample();
+        if assess(&s, spec, headroom) == Pressure::Ok {
+            break;
+        }
+
+        // Hard timeout: give up and let the job attempt to proceed anyway.
+        if ticks >= MAX_TICKS {
+            push(
+                handle,
+                JobEvent::Warning {
+                    stage: stage.to_owned(),
+                    item_path: None,
+                    message: "Memory pressure did not clear after 5 minutes — \
+                              proceeding anyway. Consider closing other apps or \
+                              setting a lower headroom in [resource] config."
+                        .to_owned(),
+                },
+            );
+            break;
+        }
+
+        // Every 30 s emit a follow-up so the user isn't left wondering.
+        if ticks.is_multiple_of(6) {
+            let swap_gb = s.swap_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            let swap_pct = s
+                .swap_used_bytes
+                .checked_mul(100)
+                .and_then(|v| v.checked_div(s.swap_total_bytes))
+                .unwrap_or(100);
+            push(
+                handle,
+                JobEvent::Warning {
+                    stage: stage.to_owned(),
+                    item_path: None,
+                    message: format!(
+                        "Still waiting for swap to clear (swap: {swap_pct}% / {swap_gb:.1} GB) \
+                         — {}/{MAX_TICKS} checks …",
+                        ticks
+                    ),
+                },
+            );
+        }
+    }
+}
+
 /// Walk a path in a blocking thread; on failure, push the error to the job and return None.
 /// Acquires a permit from `sem` to limit concurrent walks and prevent rayon pool starvation.
 async fn walk_for_job(
@@ -979,9 +1177,19 @@ async fn run_index_job(state: AppState, path: String, handle: Arc<JobHandle>) {
     if !run_scan_phase_with_entries(&state, &path, &entries, &handle).await {
         return;
     }
+    // Cancellation requested during/after scan — stop before the expensive phases.
+    if handle.is_cancelled() {
+        finalize_cancelled(&handle, 0);
+        return;
+    }
 
-    // Phase 2: deep index
+    // Phase 2: deep index (its own loop also honors cancellation and emits the
+    // terminal event, in which case it returns false and we just stop here).
     if !run_deep_phase(&state, &path, &entries, &handle).await {
+        return;
+    }
+    if handle.is_cancelled() {
+        finalize_cancelled(&handle, 0);
         return;
     }
 
@@ -1095,6 +1303,10 @@ async fn run_deep_phase(
 
     let embed_model = state.config.embedding.model.clone();
     let cfg = state.config.describer.clone();
+    let resource_cfg = state.config.resource.clone();
+    let spec = state.machine_spec.clone();
+    let headroom = resource_cfg.effective_headroom_bytes();
+
     // Build a contextual-retrieval LLM if the feature is enabled.
     let ctx_llm: Option<OllamaLlm> = if cfg.contextual_retrieval {
         let base_url = OllamaLlm::resolve_base_url(Some(&cfg.base_url));
@@ -1103,13 +1315,26 @@ async fn run_deep_phase(
         None
     };
 
+    // Memory watchdog: checked before each Ollama call.
+    let mut wdog = WatchdogState::new();
+
     let mut done = 0u64;
-    // Rolling throughput: ring buffer of (instant, items_done) samples, last ~5s.
+    // M5 success tracking: distinguish "nothing to do" from "everything failed".
+    let mut skipped = 0u64; // files already current (legitimate no-op)
+    let mut chunks_written = 0u64; // chunks actually upserted
+    let mut hard_errors = 0u64; // parse/panic/upsert failures
+                                // Rolling throughput: ring buffer of (instant, items_done) samples, last ~5s.
     let mut samples: std::collections::VecDeque<(std::time::Instant, u64)> =
         std::collections::VecDeque::with_capacity(16);
     samples.push_back((std::time::Instant::now(), 0));
 
     for entry in &files {
+        // Honor cancellation requested via DELETE /api/jobs/:id.
+        if handle.is_cancelled() {
+            finalize_cancelled(handle, done as usize);
+            return false;
+        }
+
         let path_str = entry.path.to_string_lossy().into_owned();
 
         let is_current = {
@@ -1117,6 +1342,7 @@ async fn run_deep_phase(
             store.chunks_are_current(&path_str).unwrap_or(false)
         };
         if is_current {
+            skipped += 1;
             done += 1;
         } else {
             let ep = entry.path.clone();
@@ -1134,6 +1360,7 @@ async fn run_deep_phase(
                                 message: format!("{e:#}"),
                             },
                         );
+                        hard_errors += 1;
                         done += 1;
                         continue;
                     }
@@ -1146,6 +1373,7 @@ async fn run_deep_phase(
                                 message: format!("parse task panicked: {e}"),
                             },
                         );
+                        hard_errors += 1;
                         done += 1;
                         continue;
                     }
@@ -1209,6 +1437,9 @@ async fn run_deep_phase(
                             chunk.text.clone()
                         };
 
+                    // Watchdog: pause if memory is tight before the embed call.
+                    run_watchdog_check(&mut wdog, &spec, headroom, handle, "deep").await;
+
                     let embedding = match state.embedder.embed(&embed_text).await {
                         Ok(v) => Some(v),
                         Err(e) => {
@@ -1234,15 +1465,19 @@ async fn run_deep_phase(
                     });
                 }
                 let mut store = state.store.lock().await;
-                if let Err(e) = store.upsert_chunks(&chunk_records) {
-                    push(
-                        handle,
-                        JobEvent::Warning {
-                            stage: "deep".to_owned(),
-                            item_path: Some(path_str.clone()),
-                            message: format!("upsert_chunks failed: {e:#}"),
-                        },
-                    );
+                match store.upsert_chunks(&chunk_records) {
+                    Ok(()) => chunks_written += chunk_records.len() as u64,
+                    Err(e) => {
+                        push(
+                            handle,
+                            JobEvent::Warning {
+                                stage: "deep".to_owned(),
+                                item_path: Some(path_str.clone()),
+                                message: format!("upsert_chunks failed: {e:#}"),
+                            },
+                        );
+                        hard_errors += 1;
+                    }
                 }
             }
             done += 1;
@@ -1287,6 +1522,22 @@ async fn run_deep_phase(
         );
     }
 
+    // M5: if there were files to process but nothing was written and nothing was
+    // already current, and at least one file hard-errored, the phase genuinely
+    // failed — don't let the caller report "complete". (A folder of binary/empty
+    // files that simply yields no chunks is NOT a failure and still returns true.)
+    if !files.is_empty() && chunks_written == 0 && skipped == 0 && hard_errors > 0 {
+        finalize_failed(
+            handle,
+            "deep",
+            &anyhow::anyhow!(
+                "no chunks were indexed — all {} file(s) failed to parse or store",
+                files.len()
+            ),
+        );
+        return false;
+    }
+
     true
 }
 
@@ -1307,10 +1558,16 @@ async fn run_summarize_phase(
 
     let db_path = (*state.db_path).clone();
     let cfg = state.config.describer.clone();
+    let resource_cfg = state.config.resource.clone();
+    let spec = state.machine_spec.clone();
+    let headroom = resource_cfg.effective_headroom_bytes();
     let embedder = state.embedder.clone();
     let root = std::path::PathBuf::from(path);
     let base_url = OllamaLlm::resolve_base_url(Some(&cfg.base_url));
     let describer = OllamaLlm::new_with_dir_model(&base_url, &cfg.file_model, &cfg.dir_model);
+
+    // Memory watchdog: checked before each LLM summarization call.
+    let mut wdog = WatchdogState::new();
 
     // Open a dedicated Store connection so we can hold it across async LLM awaits
     // without poisoning the shared mutex-wrapped store used by API handlers.
@@ -1322,12 +1579,26 @@ async fn run_summarize_phase(
         }
     };
 
-    let enqueued = match enqueue_subtree(&mut job_store, &root) {
+    let newly_enqueued = match enqueue_subtree(&mut job_store, &root) {
         Ok(n) => n,
         Err(e) => {
             finalize_failed(handle, "summarize", &e);
             return;
         }
+    };
+
+    // The work total is the actual pending queue depth, not just the items WE
+    // enqueued: re-running summarize on an already-queued path enqueues 0 new
+    // items but still drains the existing backlog. Using `newly_enqueued` (0)
+    // as the total produced "4 / 0" progress and a garbage ETA. Fall back to
+    // the real pending count when nothing new was enqueued.
+    let enqueued = if newly_enqueued > 0 {
+        newly_enqueued
+    } else {
+        job_store
+            .queue_stats()
+            .map(|s| s.pending.max(0) as usize)
+            .unwrap_or(0)
     };
 
     push(
@@ -1345,6 +1616,12 @@ async fn run_summarize_phase(
     samples.push_back((std::time::Instant::now(), 0));
 
     loop {
+        // Honor cancellation requested via DELETE /api/jobs/:id.
+        if handle.is_cancelled() {
+            finalize_cancelled(handle, done);
+            return;
+        }
+
         let item = match job_store.next_queue_item() {
             Ok(Some(i)) => i,
             Ok(None) => break,
@@ -1354,16 +1631,60 @@ async fn run_summarize_phase(
             }
         };
         let item_path = item.path.clone();
+
+        // Watchdog: pause if memory is tight before the LLM summarization call.
+        run_watchdog_check(&mut wdog, &spec, headroom, handle, "summarize").await;
+
         let llm_start = std::time::Instant::now();
-        let r = process_queue_item_with_passes(
-            &mut job_store,
-            &describer,
-            embedder.as_ref(),
-            &item,
-            &cfg,
-            passes_override,
-        )
-        .await;
+
+        // Only stream tokens when someone is watching (receiver_count > 0).
+        // This avoids flooding the broadcast channel when no client is connected.
+        let r = if handle.tx.receiver_count() > 0 {
+            let h = handle.clone();
+            let ip = item_path.clone();
+            let model_name = if item.kind == "file" {
+                cfg.file_model.clone()
+            } else {
+                cfg.dir_model.clone()
+            };
+            let stage = if item.kind == "file" {
+                "summarize_file".to_owned()
+            } else {
+                "summarize_dir".to_owned()
+            };
+            let mut on_frag = move |frag: String| {
+                broadcast_only(
+                    &h,
+                    JobEvent::LlmFragment {
+                        item_path: ip.clone(),
+                        model: model_name.clone(),
+                        stage: stage.clone(),
+                        fragment: frag,
+                    },
+                );
+            };
+            process_queue_item_with_passes(
+                &mut job_store,
+                &describer,
+                embedder.as_ref(),
+                &item,
+                &cfg,
+                passes_override,
+                Some(&mut on_frag),
+            )
+            .await
+        } else {
+            process_queue_item_with_passes(
+                &mut job_store,
+                &describer,
+                embedder.as_ref(),
+                &item,
+                &cfg,
+                passes_override,
+                None,
+            )
+            .await
+        };
         let llm_secs = llm_start.elapsed().as_secs_f64();
         match r {
             Ok(()) => done += 1,
@@ -1386,8 +1707,10 @@ async fn run_summarize_phase(
             } else {
                 0.0
             };
+            // saturating_sub guards against processed > enqueued (the pending count
+            // can drift if items went in-flight between snapshot and processing).
             let e = if r > 0.0 {
-                (enqueued as u64 - processed) as f64 / r
+                (enqueued as u64).saturating_sub(processed) as f64 / r
             } else {
                 0.0
             };
@@ -1444,6 +1767,7 @@ pub async fn serve(
         db_path,
         log_dir,
         walk_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+        machine_spec: Arc::new(detect_machine()),
     };
 
     // Restrict CORS to localhost only — prevents drive-by sites from reading the

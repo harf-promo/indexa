@@ -4,6 +4,7 @@
 //! Unknown keys are silently ignored (deny_unknown_fields is off) so older config
 //! files stay compatible with newer binaries.
 
+use crate::resource::ResourceProfile;
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,8 @@ pub struct Config {
     pub retrieval: RetrievalConfig,
     pub describer: DescriberConfig,
     pub parsers: ParsersConfig,
+    /// Resource-awareness settings: memory headroom, model selection, ETA.
+    pub resource: ResourceConfig,
     /// Per-directory overrides. Matched by path prefix (longest wins).
     #[serde(default)]
     pub region: Vec<RegionConfig>,
@@ -60,7 +63,7 @@ impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
             provider: "ollama".into(),
-            model: "nomic-embed-text-v1.5".into(),
+            model: "nomic-embed-text".into(),
             dim: 768,
             base_url: "http://localhost:11434".into(),
         }
@@ -262,6 +265,70 @@ pub struct RegionConfig {
     pub embedding: Option<EmbeddingConfig>,
 }
 
+// ── Resource configuration ────────────────────────────────────────────────────
+
+/// Controls how aggressively Indexa uses system resources.
+///
+/// Indexa reads machine RAM and available memory before each AI job and
+/// enforces a budget so the machine never freezes.  The `profile` is the
+/// easiest knob; the individual fields let you fine-tune.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResourceConfig {
+    /// High-level resource profile.  Drives headroom, keep_alive, and model
+    /// selection defaults unless the individual fields are explicitly set.
+    pub profile: ResourceProfile,
+
+    /// Minimum RAM to keep free (GB).  Overrides the profile default when > 0.
+    /// 0.0 = use the profile's built-in headroom.
+    pub headroom_gb: f32,
+
+    /// Automatically downgrade to a smaller model if the preferred one won't
+    /// fit within the memory budget.  Default: true.
+    pub auto_select_model: bool,
+
+    /// Seconds to keep a model resident in Ollama after each call.
+    /// 0 = unload immediately (most conservative).
+    /// Overrides the profile default when > 0.
+    pub keep_alive_secs: i64,
+
+    /// Run a quick micro-benchmark at job start to measure real throughput
+    /// for the chosen model, improving ETA accuracy.  Default: true.
+    pub micro_benchmark: bool,
+}
+
+impl Default for ResourceConfig {
+    fn default() -> Self {
+        Self {
+            profile: ResourceProfile::Balanced,
+            headroom_gb: 0.0, // 0 = use profile default
+            auto_select_model: true,
+            keep_alive_secs: 0, // 0 = use profile default
+            micro_benchmark: true,
+        }
+    }
+}
+
+impl ResourceConfig {
+    /// Effective headroom in bytes (explicit headroom_gb takes precedence over profile).
+    pub fn effective_headroom_bytes(&self) -> u64 {
+        if self.headroom_gb > 0.0 {
+            (self.headroom_gb * 1024.0 * 1024.0 * 1024.0) as u64
+        } else {
+            self.profile.headroom_bytes()
+        }
+    }
+
+    /// Effective keep_alive in seconds (explicit value takes precedence over profile).
+    pub fn effective_keep_alive_secs(&self) -> i64 {
+        if self.keep_alive_secs > 0 {
+            self.keep_alive_secs
+        } else {
+            self.profile.keep_alive_secs()
+        }
+    }
+}
+
 // ── Loader ────────────────────────────────────────────────────────────────────
 
 /// Returns the canonical path to `~/.indexa/config.toml`
@@ -358,7 +425,7 @@ mod tests {
     #[test]
     fn default_config_is_valid() {
         let cfg = Config::default();
-        assert_eq!(cfg.embedding.model, "nomic-embed-text-v1.5");
+        assert_eq!(cfg.embedding.model, "nomic-embed-text");
         assert_eq!(cfg.embedding.dim, 768);
         assert_eq!(cfg.retrieval.rrf_k, 60);
         assert!(!cfg.parsers.audio.transcribe);

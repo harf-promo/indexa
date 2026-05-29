@@ -21,8 +21,10 @@ bytemuck = { version = "1", features = ["derive"] }
 toml = { workspace = true }
 shellexpand = { workspace = true }
 notify = { workspace = true }
+notify-debouncer-full = { workspace = true }
 mime_guess = "2"
 hyperpolyglot = "0.1"
+sysinfo = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

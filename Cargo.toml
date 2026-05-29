@@ -45,6 +45,7 @@ tracing-appender = "0.2"
 jwalk = "0.8"
 ignore = "0.4"
 notify = "6"
+notify-debouncer-full = "0.3"
 
 # Storage
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -60,3 +61,6 @@ shellexpand = "3"
 
 # Config file parsing
 toml = "0.8"
+
+# System resource detection
+sysinfo = { version = "0.30" }

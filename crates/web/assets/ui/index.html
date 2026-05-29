@@ -22,6 +22,7 @@
     <button class="tab active" id="tab-chat" onclick="switchTab('chat')">Ask</button>
     <button class="tab" id="tab-map" onclick="switchTab('map')">Map</button>
     <button class="tab" id="tab-settings" onclick="switchTab('settings')">Settings</button>
+    <button class="tab" id="tab-jobs" onclick="switchTab('jobs')">Jobs <span class="tab-jobs-badge" id="jobs-tab-badge" hidden></span></button>
   </nav>
   <div class="app-topbar-actions">
     <span class="app-stats" id="stats">Loading&#x2026;</span>
@@ -48,7 +49,13 @@
   <!-- Content panels — each tab gets its own panel with CSS fade -->
   <main class="app-main">
     <div class="tab-panel" id="panel-tree">
-      <div class="summary-view" id="summary-view"></div>
+      <div class="summary-view" id="summary-view">
+        <div class="welcome" id="browse-welcome">
+          <h2>Browse your context</h2>
+          <p>Click any folder in the sidebar to read its AI-generated summary and contents.<br><br>
+          Use the row actions to <strong>&#x21BB; scan</strong>, <strong>&#x26A1; deep-index</strong>, or <strong>&#x1F4DD; summarize</strong> a folder.</p>
+        </div>
+      </div>
     </div>
     <div class="tab-panel active" id="panel-chat">
       <div class="chat-view" id="chat-view">
@@ -90,7 +97,7 @@
             <button id="pull-btn" onclick="pullModel()">Pull</button>
           </div>
           <div id="pull-progress" class="pull-progress"></div>
-          <p class="settings-note">Models are stored by Ollama. After pulling, update <code>[describer] model</code> in <code>~/.indexa/config.toml</code> to use the new model.</p>
+          <p class="settings-note">Models are stored by Ollama. After pulling, update <code>[describer] model</code> in your config file to use the new model. Run <code>indexa status</code> to see its exact path.</p>
         </div>
         <div class="settings-section">
           <h2>Cloud Provider API Keys</h2>
@@ -120,7 +127,7 @@
               <button class="btn-sm" onclick="clearKey('google')">Clear</button>
             </div>
           </div>
-          <p class="settings-note">Keys are saved to <code>~/.indexa/config.toml</code> (0600 permissions). Restart <code>indexa serve</code> after saving to apply.</p>
+          <p class="settings-note">Keys are saved to your config file with 0600 permissions (run <code>indexa status</code> for its path). Restart <code>indexa serve</code> after saving to apply.</p>
         </div>
         <div class="settings-section">
           <h2>Refinement Passes</h2>
@@ -144,18 +151,101 @@
         </div>
       </div>
     </div>
+
+    <!-- ── Jobs tab ── -->
+    <div class="tab-panel" id="panel-jobs">
+      <div class="jobs-page">
+        <!-- Master list -->
+        <aside class="jobs-master">
+          <div class="jobs-master-head">
+            <span class="jobs-master-title">Jobs</span>
+            <span class="jobs-queue-stats" id="jobs-queue-stats"></span>
+            <div class="jobs-filter-pills" id="jobs-filter-pills">
+              <button class="jobs-filter active" data-filter="all" onclick="setJobsFilter('all')">All</button>
+              <button class="jobs-filter" data-filter="running" onclick="setJobsFilter('running')">Running</button>
+              <button class="jobs-filter" data-filter="done" onclick="setJobsFilter('done')">Done</button>
+              <button class="jobs-filter" data-filter="failed" onclick="setJobsFilter('failed')">Failed</button>
+            </div>
+            <button class="btn-sm" onclick="clearFinishedJobs()" title="Remove all completed and failed jobs from list">Clear finished</button>
+          </div>
+          <div class="jobs-master-list" id="jobs-master-list">
+            <div class="jobs-empty" id="jobs-empty">No jobs yet. Start one from the Browse tab.</div>
+          </div>
+        </aside>
+
+        <!-- Detail pane -->
+        <section class="jobs-detail" id="jobs-detail">
+          <div class="jd-placeholder" id="jd-placeholder">
+            <span>Select a job to see details</span>
+          </div>
+          <div class="jd-content" id="jd-content" hidden>
+            <!-- Header -->
+            <div class="jd-header">
+              <span class="jd-kind-badge" id="jd-kind"></span>
+              <span class="jd-path" id="jd-path" title=""></span>
+              <span class="jd-status-chip" id="jd-status-chip"></span>
+              <span class="jd-elapsed" id="jd-elapsed"></span>
+              <div style="flex:1"></div>
+              <button class="jd-copy-btn" id="jd-copy-btn" title="Copy error report" style="display:none" onclick="copyJobReport()">&#x1F4CB;</button>
+              <button class="jd-dismiss-btn" id="jd-dismiss-btn" title="Dismiss this job" onclick="dismissSelectedJob()">&#xd7;</button>
+            </div>
+
+            <!-- Progress -->
+            <div class="jd-progress-row" id="jd-progress-row">
+              <progress class="jd-bar" id="jd-bar" value="0" max="100"></progress>
+              <div class="jd-progress-meta">
+                <span id="jd-count"></span>
+                <span id="jd-speed"></span>
+              </div>
+            </div>
+
+            <!-- Live AI output -->
+            <div class="jd-live" id="jd-live">
+              <div class="jd-live-header">
+                <span class="jd-live-label">Now</span>
+                <span class="jd-live-file" id="jd-live-file"></span>
+                <span class="jd-live-model" id="jd-live-model"></span>
+                <button class="jd-ai-toggle" id="jd-ai-toggle" title="Toggle AI output" onclick="toggleDetailAi()">&#x2728; AI output</button>
+              </div>
+              <pre class="jd-ai-pre" id="jd-ai-pre" hidden></pre>
+            </div>
+
+            <!-- Stats row -->
+            <div class="jd-stats-row" id="jd-stats-row">
+              <span id="jd-stats-files"></span>
+              <span id="jd-stats-bytes"></span>
+              <span id="jd-warn-summary"></span>
+            </div>
+
+            <!-- Warnings -->
+            <div class="jd-warnings-section" id="jd-warnings-section" hidden>
+              <div class="jd-warn-head">
+                <span class="jd-warn-title" id="jd-warn-title"></span>
+                <select class="jd-warn-filter" id="jd-warn-stage-filter" onchange="applyWarnFilter()">
+                  <option value="">All stages</option>
+                </select>
+                <input class="jd-warn-search" id="jd-warn-search" type="text" placeholder="Filter messages&#x2026;" oninput="applyWarnFilter()">
+              </div>
+              <div class="jd-warn-list" id="jd-warn-list"></div>
+            </div>
+
+            <!-- Failed error -->
+            <div class="jd-error-section" id="jd-error-section" hidden>
+              <div class="jd-error-msg" id="jd-error-msg"></div>
+              <div class="jd-error-chain" id="jd-error-chain"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
   </main>
 </div>
 
-<!-- Jobs dock — fixed bottom-right -->
-<div class="jobs-dock" id="jobs-panel" style="display:none" role="region" aria-label="Active jobs">
-  <div class="jobs-dock-header">
-    <span class="jobs-dock-title">Jobs</span>
-    <span class="queue-badge" id="queue-badge" style="display:none"></span>
-    <button class="icon-btn sm" onclick="toggleJobsDock()" id="jobs-dock-toggle" title="Collapse / Expand" aria-label="Toggle jobs panel">&#x25BE;</button>
-  </div>
-  <div id="jobs-list" class="jobs-list"></div>
-</div>
+<!-- Jobs mini pill — ambient indicator when tab not active -->
+<button class="jobs-pill" id="jobs-pill" hidden onclick="switchTab('jobs')" aria-label="View active jobs">
+  <span class="jobs-pill-dot" id="jobs-pill-dot"></span>
+  <span id="jobs-pill-text"></span>
+</button>
 
 <!-- Add-Root modal -->
 <div class="modal-overlay" id="add-root-modal" onclick="if(event.target===this)closeAddRoot()" role="dialog" aria-modal="true" aria-labelledby="add-root-title">

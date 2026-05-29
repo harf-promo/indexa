@@ -61,6 +61,39 @@ pub trait Describer: Send + Sync {
         children: &[ChildSummary],
         previous_summary: Option<&str>,
     ) -> anyhow::Result<String>;
+
+    /// Streaming variant of `describe`: calls `on_fragment` with each token as it arrives.
+    /// The default implementation buffers the full result and calls `on_fragment` once.
+    /// Providers that support token streaming (e.g. Ollama) override this.
+    async fn describe_stream(
+        &self,
+        path: &str,
+        content_sample: &[u8],
+        previous_summary: Option<&str>,
+        on_fragment: &mut (dyn FnMut(String) + Send),
+    ) -> anyhow::Result<String> {
+        let full = self
+            .describe(path, content_sample, previous_summary)
+            .await?;
+        on_fragment(full.clone());
+        Ok(full)
+    }
+
+    /// Streaming variant of `summarize_dir`: calls `on_fragment` with each token.
+    /// The default implementation buffers the full result and calls `on_fragment` once.
+    async fn summarize_dir_stream(
+        &self,
+        dir_path: &str,
+        children: &[ChildSummary],
+        previous_summary: Option<&str>,
+        on_fragment: &mut (dyn FnMut(String) + Send),
+    ) -> anyhow::Result<String> {
+        let full = self
+            .summarize_dir(dir_path, children, previous_summary)
+            .await?;
+        on_fragment(full.clone());
+        Ok(full)
+    }
 }
 
 /// Build a `Generator` from config values.
@@ -75,16 +108,32 @@ pub fn from_config(
     openai_key: Option<&str>,
     anthropic_key: Option<&str>,
 ) -> anyhow::Result<Box<dyn Generator + Send + Sync>> {
+    from_config_with_keep_alive(provider, model, base_url, openai_key, anthropic_key, None)
+}
+
+/// Like `from_config` but also sets `keep_alive` on Ollama adapters.
+pub fn from_config_with_keep_alive(
+    provider: &str,
+    model: &str,
+    base_url: &str,
+    openai_key: Option<&str>,
+    anthropic_key: Option<&str>,
+    keep_alive: Option<i64>,
+) -> anyhow::Result<Box<dyn Generator + Send + Sync>> {
     let base = if base_url.is_empty() {
         None
     } else {
         Some(base_url)
     };
     match provider {
-        "ollama" => Ok(Box::new(OllamaLlm::new(
-            OllamaLlm::resolve_base_url(base),
-            model,
-        ))),
+        "ollama" => {
+            let url = OllamaLlm::resolve_base_url(base);
+            let llm = match keep_alive {
+                Some(ka) => OllamaLlm::new_with_keep_alive(url, model, None, ka),
+                None => OllamaLlm::new(url, model),
+            };
+            Ok(Box::new(llm))
+        }
         "openai" => Ok(Box::new(OpenAICompatLlm::from_env_or_config(
             model, openai_key,
         )?)),

@@ -25,17 +25,20 @@ function toggleTheme() {
 /* ── Tab switching ── */
 function switchTab(tab) {
   currentTab = tab;
-  ['tree','chat','map','settings'].forEach(function(t) {
+  ['tree','chat','map','settings','jobs'].forEach(function(t) {
     const btn = document.getElementById('tab-' + t);
     if (btn) btn.classList.toggle('active', t === tab);
     const panel = document.getElementById('panel-' + t);
     if (panel) panel.classList.toggle('active', t === tab);
   });
-  // Legacy: also handle inner views for backward compat
   const sv = document.getElementById('summary-view');
   if (sv) sv.style.display = (tab === 'tree' && selectedPath !== null) ? 'block' : '';
   if (tab === 'settings') loadSettings();
   if (tab === 'map') loadMap();
+  if (tab === 'jobs') renderJobsPage();
+  // Hide the pill when the jobs tab is active
+  const pill = document.getElementById('jobs-pill');
+  if (pill) pill.hidden = (tab === 'jobs');
 }
 
 /* ── Stats ── */
@@ -70,7 +73,9 @@ async function loadTreeLevel(parentPath, container) {
 async function fireJob(kind, path) {
   const r = await fetch('/api/jobs/' + kind + '?path=' + encodeURIComponent(path), { method: 'POST' });
   const d = await r.json();
-  subscribeJob(d.job_id, path);
+  subscribeJob(d.job_id, path, kind);
+  // Switch to jobs tab so user can watch progress
+  switchTab('jobs');
 }
 
 function badgeFor(state) {
@@ -117,10 +122,11 @@ function buildTreeNode(node) {
       const act = btn.dataset.act;
       if (act === 'remove') {
         const label = node.path.split('/').pop() || node.path;
-        if (!confirm('Remove ‹' + label + '› from the index?\nFiles on disk are not deleted.')) return;
+        if (!(await confirmModal('Remove ‹' + label + '› from the index?\nFiles on disk are not deleted.', 'Remove'))) return;
         try {
           await fetch('/api/entry?path=' + encodeURIComponent(node.path), { method: 'DELETE' });
-          initTree();
+          expandedPaths.delete(node.path);
+          refreshTree();
           loadStats();
         } catch(err) { toast('Remove failed: ' + err.message, 'error'); }
       } else {
@@ -135,7 +141,6 @@ function buildTreeNode(node) {
   childContainer.className = 'tree-children';
   childContainer.style.display = 'none';
 
-  // Alt/Option-click scopes the search to this folder
   row.querySelector('.tree-label').addEventListener('click', function(e) {
     if (e.altKey || e.metaKey) {
       e.stopPropagation();
@@ -195,211 +200,120 @@ async function initTree() {
   }
 }
 
+/* Expand a single already-rendered tree node by path (loads its children). */
+async function expandNodeByPath(path) {
+  const sel = '.tree-node[data-path="' + (window.CSS && CSS.escape ? CSS.escape(path) : path) + '"]';
+  const wrap = document.querySelector(sel);
+  if (!wrap) return;
+  const row = wrap.querySelector('.tree-node-row');
+  const childContainer = wrap.querySelector('.tree-children');
+  if (!row || !childContainer) return;
+  expandedPaths.add(path);
+  childContainer.style.display = 'block';
+  const toggle = row.querySelector('.tree-toggle');
+  if (toggle) toggle.textContent = '▾';
+  if (!childContainer.dataset.loaded) {
+    childContainer.dataset.loaded = '1';
+    await loadTreeLevel(path, childContainer);
+  }
+}
+
+/* Rebuild the tree while preserving expanded folders and scroll position.
+   Use this after a job completes instead of initTree(), which collapses everything. */
+async function refreshTree() {
+  const list = document.getElementById('tree-list');
+  const prevScroll = list ? list.scrollTop : 0;
+  // Snapshot the open folders, shallowest-first so parents expand before children.
+  const toRestore = Array.from(expandedPaths).sort(function(a, b) {
+    return a.split('/').length - b.split('/').length;
+  });
+  expandedPaths.clear();
+  await initTree();
+  for (const p of toRestore) {
+    await expandNodeByPath(p); // parent is already in the DOM by the time we reach a child
+  }
+  if (list) list.scrollTop = prevScroll;
+}
+
 /* ── Search ── */
 var _searchTimer = null;
 function onSearchInput(val) {
-  document.getElementById('search-clear').style.display = val ? '' : 'none';
+  const clearBtn = document.getElementById('search-clear');
+  if (clearBtn) clearBtn.style.display = val ? '' : 'none';
   clearTimeout(_searchTimer);
-  if (!val.trim()) { initTree(); return; }
-  _searchTimer = setTimeout(function() { doSearch(val.trim()); }, 200);
+  if (!val) { initTree(); return; }
+  _searchTimer = setTimeout(function() { doSearch(val); }, 250);
 }
+
 function clearSearchInput() {
-  document.getElementById('search-input').value = '';
-  document.getElementById('search-clear').style.display = 'none';
+  const inp = document.getElementById('search-input');
+  if (inp) inp.value = '';
+  const clearBtn = document.getElementById('search-clear');
+  if (clearBtn) clearBtn.style.display = 'none';
   initTree();
 }
-async function doSearch(q) {
+
+async function doSearch(query) {
   const list = document.getElementById('tree-list');
   list.innerHTML = '<div style="padding:8px 12px;color:var(--muted);font-size:12px">Searching…</div>';
   try {
-    const r = await fetch('/api/search?q=' + encodeURIComponent(q) + '&limit=50');
-    const nodes = await r.json();
-    if (!nodes.length) {
-      list.innerHTML = '<div style="padding:8px 12px;color:var(--muted);font-size:12px">No results</div>';
+    const r = await fetch('/api/search?q=' + encodeURIComponent(query));
+    const results = await r.json();
+    if (!results.length) {
+      list.innerHTML = '<div style="padding:8px 12px;color:var(--muted);font-size:12px">No results for "' + escapeHtml(query) + '"</div>';
       return;
     }
     list.innerHTML = '';
-    nodes.forEach(function(node) { list.appendChild(buildTreeNode(node)); });
+    results.forEach(function(node) { list.appendChild(buildTreeNode(node)); });
   } catch(e) {
     list.innerHTML = '<div style="padding:8px 12px;color:var(--red);font-size:12px">Search error</div>';
   }
 }
 
-/* ── Add-Root modal ── */
-var _rootPathDebounce = null;
-function openAddRoot() {
-  document.getElementById('add-root-modal').classList.add('open');
-  browseFsTo('');
-}
-function closeAddRoot() {
-  document.getElementById('add-root-modal').classList.remove('open');
-}
-function onRootPathInput(val) {
-  clearTimeout(_rootPathDebounce);
-  _rootPathDebounce = setTimeout(function() { browseFsTo(val); }, 350);
-}
-async function browseFsTo(path) {
-  if (path) document.getElementById('add-root-path').value = path;
-  const browser = document.getElementById('fs-browser');
-  browser.innerHTML = '<div class="fs-entry" style="color:var(--muted)">Loading…</div>';
-  try {
-    const r = await fetch('/api/fs/ls?path=' + encodeURIComponent(path || ''));
-    if (!r.ok) {
-      const d = await r.json().catch(function(){return {};});
-      browser.innerHTML = '<div class="fs-entry" style="color:var(--red)">' + escapeHtml(d.error || 'Permission denied') + '</div>';
-      return;
-    }
-    const entries = await r.json();
-    browser.innerHTML = '';
-    if (path) {
-      const up = document.createElement('div');
-      up.className = 'fs-entry';
-      up.style.color = 'var(--muted)';
-      up.innerHTML = '⤴ ..';
-      up.onclick = function() {
-        const parts = path.replace(/\/$/, '').split('/');
-        parts.pop();
-        browseFsTo(parts.join('/') || '/');
-      };
-      browser.appendChild(up);
-    }
-    if (!entries.length) {
-      const empty = document.createElement('div');
-      empty.className = 'fs-entry';
-      empty.style.color = 'var(--muted)';
-      empty.textContent = 'No subdirectories';
-      browser.appendChild(empty);
-    } else {
-      entries.forEach(function(e) {
-        const el = document.createElement('div');
-        el.className = 'fs-entry';
-        el.innerHTML = '📁 ' + escapeHtml(e.name);
-        el.onclick = function() { browseFsTo(e.path); };
-        browser.appendChild(el);
-      });
-    }
-  } catch(err) {
-    browser.innerHTML = '<div class="fs-entry" style="color:var(--red)">Error</div>';
-  }
-}
-async function startIndexRoot() {
-  const path = document.getElementById('add-root-path').value.trim();
-  if (!path) { toast('Enter a path first.', 'warn'); return; }
-  try {
-    closeAddRoot();
-    await fireJob('index', path);
-  } catch(e) {
-    toast('Failed to start indexing: ' + e.message, 'error');
-  }
-}
+/* ══════════════════════════════════════════════════════════════════
+   JOBS — data model + render system
+   ══════════════════════════════════════════════════════════════════ */
 
-/* ── Jobs dock ── */
-function toggleJobsDock() {
-  const dock = document.getElementById('jobs-panel');
-  if (!dock) return;
-  dock.classList.toggle('collapsed');
-  const toggle = document.getElementById('jobs-dock-toggle');
-  if (toggle) toggle.textContent = dock.classList.contains('collapsed') ? '▴' : '▾';
-}
-
+/**
+ * Central store for all job state. Keyed by jobId (string).
+ * Each entry is never deleted on completion — user must Dismiss it.
+ * Shape: { es, _retries, status, kind, path, startedAt, snapshot,
+ *          lastProgress, warnings, warningOverflow, stageCounts,
+ *          llm, failedEvent, summary }
+ */
 var activeJobs = {};
-var _pendingProgress = {};
-var _pendingLlm = {};
+
+/** Currently selected jobId in the Jobs tab detail pane. */
+var selectedJobId = null;
+
+/** Filter for the master list: 'all' | 'running' | 'done' | 'failed' */
+var jobsFilter = 'all';
+
+/** Whether the AI output panel in the detail pane is open. */
+var detailAiOpen = false;
+
+/* rAF batching for high-frequency updates */
+var _dirtyJobs = {};   // jobId → true when state changed
 var _rafPending = false;
 
-function _drainProgress() {
+function _markDirty(jobId) {
+  _dirtyJobs[jobId] = true;
+  if (!_rafPending) { _rafPending = true; requestAnimationFrame(_drain); }
+}
+
+function _drain() {
   _rafPending = false;
-  for (var jid in _pendingProgress) { _applyProgress(jid, _pendingProgress[jid]); }
-  _pendingProgress = {};
-  for (var jid in _pendingLlm) { _applyLlmOutput(jid, _pendingLlm[jid]); }
-  _pendingLlm = {};
+  var dirty = Object.keys(_dirtyJobs);
+  _dirtyJobs = {};
+  dirty.forEach(function(jid) {
+    renderJobCard(jid);
+    if (jid === selectedJobId) renderJobDetail(jid);
+  });
+  updateJobsPill();
+  updateJobsTabBadge();
 }
 
-function _applyLlmOutput(jobId, pending) {
-  var row = document.getElementById('job-row-' + jobId);
-  if (!row) return;
-  var pre = row.querySelector('.job-ai-pre');
-  var label = row.querySelector('.job-ai-label');
-  if (!pre) return;
-  if (pending.label && label) label.textContent = pending.label;
-  if (pending.reset) pre.textContent = '';
-  pre.textContent += pending.text;
-  if (pre.textContent.length > 4096) {
-    pre.textContent = pre.textContent.slice(pre.textContent.length - 4096);
-  }
-  var panel = row.querySelector('.job-ai-panel');
-  if (panel && panel.classList.contains('open')) {
-    pre.scrollTop = pre.scrollHeight;
-  }
-}
-
-function _applyProgress(jobId, ev) {
-  var row = document.getElementById('job-row-' + jobId);
-  if (!row) return;
-  var bar = row.querySelector('.job-progress');
-  var fileEl = row.querySelector('.job-file');
-  var speedEl = row.querySelector('.job-speed');
-  var llmEl = row.querySelector('.job-llm-note');
-  var statusEl = row.querySelector('.job-status');
-  if (bar && ev.total) { bar.max = ev.total; bar.value = ev.current; }
-  if (fileEl) {
-    if (ev.current_path) {
-      var parts = ev.current_path.split('/');
-      var short = parts.length > 2 ? '…/' + parts.slice(-2).join('/') : ev.current_path;
-      fileEl.textContent = short;
-      fileEl.title = ev.current_path;
-    } else {
-      fileEl.textContent = '';
-      fileEl.title = '';
-    }
-  }
-  if (speedEl) {
-    var sp = [];
-    if (ev.items_per_sec && ev.items_per_sec > 0) sp.push(Math.round(ev.items_per_sec) + ' files/s');
-    if (ev.eta_secs && ev.eta_secs > 0) {
-      var eta = ev.eta_secs < 60 ? Math.round(ev.eta_secs) + 's' : Math.round(ev.eta_secs / 60) + 'm';
-      sp.push('ETA ' + eta);
-    }
-    speedEl.textContent = sp.join(' \xb7 ');
-  }
-  if (llmEl && ev.note) llmEl.textContent = ev.note;
-  if (statusEl) statusEl.textContent = ev.current + '/' + ev.total;
-}
-
-function getOrCreateJobRow(jobId) {
-  if (activeJobs[jobId]) return activeJobs[jobId].row;
-  const dock = document.getElementById('jobs-panel');
-  if (dock) dock.style.display = '';
-  const list = document.getElementById('jobs-list');
-  const row = document.createElement('div');
-  row.className = 'job-row';
-  row.id = 'job-row-' + jobId;
-  row.innerHTML =
-    '<div class="job-row-header">' +
-      '<span class="job-kind">…</span>' +
-      '<span class="job-label">Starting…</span>' +
-      '<span class="job-status running">●</span>' +
-      '<button class="job-ai-toggle" title="Toggle AI output">✨</button>' +
-    '</div>' +
-    '<progress class="job-progress" style="display:none"></progress>' +
-    '<div class="job-detail">' +
-      '<span class="job-file"></span>' +
-      '<span class="job-llm-note"></span>' +
-      '<span class="job-speed"></span>' +
-    '</div>' +
-    '<div class="job-ai-panel">' +
-      '<div class="job-ai-label"></div>' +
-      '<pre class="job-ai-pre"></pre>' +
-    '</div>';
-  row.querySelector('.job-ai-toggle').onclick = function() {
-    row.querySelector('.job-ai-panel').classList.toggle('open');
-  };
-  list.appendChild(row);
-  activeJobs[jobId] = { row: row, es: null, warnings: [], _retries: 0 };
-  return row;
-}
-
-/* ── localStorage helpers (B.2) ── */
+/* ── localStorage helpers ── */
 function _saveActiveJob(jobId, path) {
   try {
     const stored = JSON.parse(localStorage.getItem('indexa.activeJobs') || '{}');
@@ -415,171 +329,126 @@ function _removeActiveJob(jobId) {
   } catch(_) {}
 }
 
-/* ── Subscribe to a job's SSE stream (B.1 reconnect backoff) ── */
-function subscribeJob(jobId, path) {
-  const row = getOrCreateJobRow(jobId);
-  row.querySelector('.job-label').textContent = (path || '').split('/').pop() || path || jobId;
+/* ── Subscribe to a job's SSE stream ── */
+function subscribeJob(jobId, path, kind) {
+  if (!activeJobs[jobId]) {
+    activeJobs[jobId] = {
+      es: null, _retries: 0,
+      status: 'running',
+      kind: kind || '?', path: path || jobId, startedAt: Date.now(),
+      snapshot: null, lastProgress: null,
+      warnings: [], warningOverflow: 0, stageCounts: {},
+      llm: { path: null, label: '', text: '' },
+      failedEvent: null, summary: null
+    };
+  }
   _saveActiveJob(jobId, path);
 
+  const job = activeJobs[jobId];
   const es = new EventSource('/api/jobs/' + jobId + '/events');
-  activeJobs[jobId].es = es;
-  if (!activeJobs[jobId]._retries) activeJobs[jobId]._retries = 0;
+  job.es = es;
 
   es.onmessage = function(e) {
     try {
       const ev = JSON.parse(e.data);
-      const kindEl = row.querySelector('.job-kind');
-      const statusEl = row.querySelector('.job-status');
-      const bar = row.querySelector('.job-progress');
+      const j = activeJobs[jobId];
+      if (!j) return;
 
       if (ev.type === 'start') {
-        kindEl.textContent = ev.kind;
-        statusEl.className = 'job-status running';
-        statusEl.textContent = ev.total ? '0/' + ev.total : '…';
-        // Reset retry counter on successful connect
-        if (activeJobs[jobId]) activeJobs[jobId]._retries = 0;
-      } else if (ev.type === 'snapshot') {
-        if (bar && ev.count > 0) { bar.max = ev.count; bar.value = 0; bar.style.display = ''; }
-        row.querySelector('.job-file').textContent = ev.count > 0 ? 'Starting…' : 'No files to process';
-      } else if (ev.type === 'progress') {
-        _pendingProgress[jobId] = ev;
-        if (!_rafPending) { _rafPending = true; requestAnimationFrame(_drainProgress); }
-      } else if (ev.type === 'done') {
-        statusEl.className = 'job-status done';
-        var warnCount = (activeJobs[jobId] && activeJobs[jobId].warnings) ? activeJobs[jobId].warnings.length : 0;
-        statusEl.textContent = '✓ ' + ev.summary + (warnCount ? ' ⚠ ' + warnCount : '');
-        if (bar) bar.style.display = 'none';
-        playPing('ok');
-        es.close();
-        _removeActiveJob(jobId);
-        setTimeout(function() {
-          row.remove();
-          delete activeJobs[jobId];
-          const list = document.getElementById('jobs-list');
-          if (list && !list.children.length) {
-            const dock = document.getElementById('jobs-panel');
-            if (dock) dock.style.display = 'none';
-          }
-          initTree();
-          loadStats();
-        }, 5000);
-      } else if (ev.type === 'failed') {
-        statusEl.className = 'job-status failed';
-        var stage = ev.stage ? '[' + ev.stage + '] ' : '';
-        statusEl.textContent = '✗ ' + stage + ev.error.slice(0, 60);
-        if (ev.chain && ev.chain.length) {
-          row.querySelector('.job-file').textContent = ev.chain.slice(0, 2).join(' → ');
-        }
-        if (bar) bar.style.display = 'none';
-        playPing('err');
-        es.close();
-        _removeActiveJob(jobId);
-        if (activeJobs[jobId]) activeJobs[jobId].failedEvent = ev;
-        // Copy-report button
-        var copyBtn = document.createElement('button');
-        copyBtn.className = 'job-dismiss';
-        copyBtn.title = 'Copy error report';
-        copyBtn.textContent = '📋';
-        var capturedEv = ev;
-        copyBtn.onclick = async function() {
-          try {
-            var r = await fetch('/api/logs/tail?lines=50');
-            var d = await r.json();
-            var chain = capturedEv.chain && capturedEv.chain.length
-              ? '\nCaused by:\n' + capturedEv.chain.map(function(c,i){return (i+1)+'. '+c;}).join('\n')
-              : '';
-            var report = '**Indexa error report**\n' +
-              '- Version: ' + (document.getElementById('app-version').textContent || '?') + '\n' +
-              '- Stage: ' + (capturedEv.stage || '?') + '\n' +
-              (capturedEv.item_path ? '- Item: ' + capturedEv.item_path + '\n' : '') +
-              '- Error: ' + capturedEv.error + chain + '\n\n' +
-              '**Logs (last 50 lines)**\n' + (d.lines || '(no log file found)');
-            await navigator.clipboard.writeText(report);
-            toast('Error report copied to clipboard', 'info');
-          } catch(err) { toast('Copy failed: ' + err.message, 'error'); }
-        };
-        // Dismiss button
-        var dismissBtn = document.createElement('button');
-        dismissBtn.className = 'job-dismiss';
-        dismissBtn.title = 'Dismiss';
-        dismissBtn.textContent = '\xd7';
-        dismissBtn.onclick = function() {
-          row.remove();
-          delete activeJobs[jobId];
-          const list = document.getElementById('jobs-list');
-          if (list && !list.children.length) {
-            const dock = document.getElementById('jobs-panel');
-            if (dock) dock.style.display = 'none';
-          }
-        };
-        row.querySelector('.job-row-header').appendChild(copyBtn);
-        row.querySelector('.job-row-header').appendChild(dismissBtn);
-      } else if (ev.type === 'warning') {
-        if (!activeJobs[jobId]) return;
-        activeJobs[jobId].warnings.push(ev);
-        var wc = activeJobs[jobId].warnings.length;
-        var warnEl = row.querySelector('.job-warn-count');
-        if (!warnEl) {
-          warnEl = document.createElement('span');
-          warnEl.className = 'job-warn-count';
-          row.querySelector('.job-detail').appendChild(warnEl);
-        }
-        warnEl.textContent = '⚠ ' + wc + (wc === 1 ? ' warning' : ' warnings');
-        warnEl.title = activeJobs[jobId].warnings.map(function(w) {
-          return (w.item_path ? w.item_path.split('/').pop() + ': ' : '') + w.message;
-        }).join('\n');
-      } else if (ev.type === 'llm_fragment') {
-        var job = activeJobs[jobId];
-        if (!job) return;
-        var reset = job.lastLlmPath !== ev.item_path;
-        job.lastLlmPath = ev.item_path;
-        var label = ev.model + ' \xb7 ' + ev.stage;
-        if (!_pendingLlm[jobId]) {
-          _pendingLlm[jobId] = { text: ev.fragment, label: label, reset: reset };
+        // A composite 'index' job runs scan→deep→summarize phases, each emitting
+        // its own start. Keep the umbrella 'index' kind on the badge and surface
+        // the current sub-phase separately instead of flipping the kind around.
+        if (j.kind === 'index' && ev.kind && ev.kind !== 'index') {
+          j.phase = ev.kind;
         } else {
-          if (reset) { _pendingLlm[jobId].reset = true; _pendingLlm[jobId].label = label; }
-          _pendingLlm[jobId].text += ev.fragment;
+          j.kind = ev.kind || j.kind || '?';
         }
-        if (!_rafPending) { _rafPending = true; requestAnimationFrame(_drainProgress); }
+        j.path = ev.path || j.path;
+        j.status = 'running';
+        j._retries = 0;
+        _markDirty(jobId);
+
+      } else if (ev.type === 'snapshot') {
+        j.snapshot = { count: ev.count, bytes: ev.bytes };
+        _markDirty(jobId);
+
+      } else if (ev.type === 'progress') {
+        j.lastProgress = ev;
+        _markDirty(jobId);
+
+      } else if (ev.type === 'done') {
+        j.status = 'done';
+        j.summary = ev.summary || '';
+        if (j.es) { j.es.close(); j.es = null; }
+        _removeActiveJob(jobId);
+        playPing('ok');
+        _markDirty(jobId);
+        // Refresh tree (preserving expand/scroll state) and stats in background.
+        setTimeout(function() { refreshTree(); loadStats(); }, 500);
+
+      } else if (ev.type === 'failed') {
+        j.status = 'failed';
+        j.failedEvent = ev;
+        if (j.es) { j.es.close(); j.es = null; }
+        _removeActiveJob(jobId);
+        playPing('err');
+        _markDirty(jobId);
+
+      } else if (ev.type === 'warning') {
+        const MAX_WARNINGS = 500;
+        if (j.warnings.length < MAX_WARNINGS) {
+          j.warnings.push(ev);
+        } else {
+          j.warningOverflow++;
+        }
+        j.stageCounts[ev.stage] = (j.stageCounts[ev.stage] || 0) + 1;
+        _markDirty(jobId);
+
+      } else if (ev.type === 'llm_fragment') {
+        const reset = j.llm.path !== ev.item_path;
+        if (reset) {
+          j.llm.path = ev.item_path;
+          j.llm.text = '';
+        }
+        j.llm.label = ev.model + ' \xb7 ' + ev.stage;
+        j.llm.text += ev.fragment;
+        // Cap at 8 KB client-side
+        if (j.llm.text.length > 8192) {
+          j.llm.text = j.llm.text.slice(j.llm.text.length - 8192);
+        }
+        _markDirty(jobId);
       }
     } catch(_) {}
   };
 
-  /* B.1 — Reconnect with exponential backoff ── */
   es.onerror = function() {
-    if (!activeJobs[jobId]) return;
-    const statusEl = row.querySelector('.job-status');
-    const isFinished = statusEl && (statusEl.className.indexOf('done') !== -1 || statusEl.className.indexOf('failed') !== -1);
-    if (isFinished) return;
+    const j = activeJobs[jobId];
+    if (!j) return;
+    if (j.status === 'done' || j.status === 'failed') return;
 
     es.close();
-    activeJobs[jobId].es = null;
+    j.es = null;
 
     fetch('/api/jobs/' + jobId).then(function(r) {
       if (r.status === 404) {
-        _removeActiveJob(jobId);
-        var j = activeJobs[jobId];
-        if (j && j.row && j.row.parentNode) j.row.parentNode.removeChild(j.row);
-        delete activeJobs[jobId];
+        // Server evicted the job (60 s after done)
         return;
       }
-      var retries = (activeJobs[jobId] && activeJobs[jobId]._retries) || 0;
-      var delays = [250, 500, 1000, 2000, 4000];
-      var delay = delays[Math.min(retries, delays.length - 1)];
-      if (statusEl && statusEl.className.indexOf('failed') === -1) {
-        statusEl.className = 'job-status running';
-        statusEl.textContent = retries > 2 ? 'reconnecting (' + retries + ')…' : 'reconnecting…';
-      }
+      const retries = j._retries || 0;
+      const delays = [250, 500, 1000, 2000, 4000];
+      const delay = delays[Math.min(retries, delays.length - 1)];
+      j.status = 'reconnecting';
+      _markDirty(jobId);
       setTimeout(function() {
         if (!activeJobs[jobId]) return;
-        activeJobs[jobId]._retries = retries + 1;
-        subscribeJob(jobId, path);
+        j._retries = retries + 1;
+        subscribeJob(jobId, j.path);
       }, delay);
     }).catch(function() {});
   };
 }
 
-/* B.2 — Reconnect in-flight jobs on page load ── */
+/* ── Reconnect in-flight jobs on page load ── */
 async function reconnectInFlightJobs() {
   const lsJobs = {};
   try {
@@ -592,7 +461,11 @@ async function reconnectInFlightJobs() {
     const jobs = await r.json();
     jobs.forEach(function(j) {
       if (j.status === 'running' || j.status === 'done' || j.status === 'failed') {
-        if (!activeJobs[j.job_id]) subscribeJob(j.job_id, j.path);
+        if (!activeJobs[j.job_id]) {
+          subscribeJob(j.job_id, j.path, j.kind);
+          // Seed the known status from the server so we don't flicker to 'running'
+          if (activeJobs[j.job_id]) activeJobs[j.job_id].status = j.status;
+        }
       }
     });
     Object.keys(lsJobs).forEach(function(id) {
@@ -603,6 +476,433 @@ async function reconnectInFlightJobs() {
     });
   } catch(_) {}
 }
+
+/* ── Jobs master list ── */
+function setJobsFilter(f) {
+  jobsFilter = f;
+  document.querySelectorAll('.jobs-filter').forEach(function(btn) {
+    btn.classList.toggle('active', btn.dataset.filter === f);
+  });
+  renderJobsPage();
+}
+
+function clearFinishedJobs() {
+  Object.keys(activeJobs).forEach(function(id) {
+    const j = activeJobs[id];
+    if (j.status === 'done' || j.status === 'failed') {
+      if (j.es) { j.es.close(); }
+      delete activeJobs[id];
+    }
+  });
+  if (selectedJobId && !activeJobs[selectedJobId]) selectedJobId = null;
+  renderJobsPage();
+  updateJobsPill();
+  updateJobsTabBadge();
+}
+
+function dismissSelectedJob() {
+  if (!selectedJobId) return;
+  const j = activeJobs[selectedJobId];
+  if (j && j.es) j.es.close();
+  delete activeJobs[selectedJobId];
+  selectedJobId = null;
+  renderJobsPage();
+  updateJobsPill();
+  updateJobsTabBadge();
+}
+
+function selectJob(jobId) {
+  selectedJobId = jobId;
+  document.querySelectorAll('.jobs-card').forEach(function(c) {
+    c.classList.toggle('selected', c.dataset.jobId === jobId);
+  });
+  renderJobDetail(jobId);
+}
+
+function renderJobsPage() {
+  if (currentTab !== 'jobs') return;
+  const masterList = document.getElementById('jobs-master-list');
+  const empty = document.getElementById('jobs-empty');
+  if (!masterList) return;
+
+  const all = Object.values(activeJobs).sort(function(a, b) { return b.startedAt - a.startedAt; });
+  const visible = all.filter(function(j) {
+    if (jobsFilter === 'all') return true;
+    if (jobsFilter === 'running') return j.status === 'running' || j.status === 'reconnecting';
+    return j.status === jobsFilter;
+  });
+
+  if (empty) empty.hidden = visible.length > 0;
+
+  // Build set of visible jobIds for O(1) lookup below.
+  var visibleIds = new Set(visible.map(function(j) {
+    return Object.keys(activeJobs).find(function(id) { return activeJobs[id] === j; });
+  }).filter(Boolean));
+
+  // Remove cards for jobs that are deleted OR filtered out.
+  masterList.querySelectorAll('.jobs-card').forEach(function(card) {
+    if (!visibleIds.has(card.dataset.jobId)) card.remove();
+  });
+
+  visible.forEach(function(j) {
+    const jobId = Object.keys(activeJobs).find(function(id) { return activeJobs[id] === j; });
+    if (!jobId) return;
+    let card = masterList.querySelector('.jobs-card[data-job-id="' + jobId + '"]');
+    if (!card) {
+      card = document.createElement('div');
+      card.className = 'jobs-card';
+      card.dataset.jobId = jobId;
+      card.addEventListener('click', function() { selectJob(jobId); });
+      masterList.prepend(card);
+    }
+    _renderCardContent(card, jobId, j);
+  });
+
+  // Auto-select: prefer a running job that matches the current filter.
+  if (!selectedJobId || !activeJobs[selectedJobId] || !visibleIds.has(selectedJobId)) {
+    const firstVisible = visibleIds.size > 0 ? visibleIds.values().next().value : null;
+    const running = [...visibleIds].find(function(id) {
+      var j = activeJobs[id];
+      return j && (j.status === 'running' || j.status === 'reconnecting');
+    });
+    const toSelect = running || firstVisible;
+    if (toSelect) { selectJob(toSelect); }
+    else {
+      // No visible jobs → show placeholder
+      const content = document.getElementById('jd-content');
+      const placeholder = document.getElementById('jd-placeholder');
+      if (content) content.hidden = true;
+      if (placeholder) placeholder.hidden = false;
+    }
+  } else {
+    renderJobDetail(selectedJobId);
+  }
+}
+
+function renderJobCard(jobId) {
+  const j = activeJobs[jobId];
+  if (!j) return;
+  const card = document.querySelector('.jobs-card[data-job-id="' + jobId + '"]');
+  if (card) {
+    _renderCardContent(card, jobId, j);
+    return;
+  }
+  // If the jobs tab is open, add it
+  if (currentTab === 'jobs') renderJobsPage();
+}
+
+function _renderCardContent(card, jobId, j) {
+  card.classList.toggle('selected', jobId === selectedJobId);
+  card.classList.toggle('running', j.status === 'running' || j.status === 'reconnecting');
+  card.classList.toggle('done', j.status === 'done');
+  card.classList.toggle('failed', j.status === 'failed');
+
+  const pathName = (j.path || '').split('/').filter(Boolean).pop() || j.path || jobId;
+  const warnCount = j.warnings.length + j.warningOverflow;
+  const warnBadge = warnCount > 0 ? '<span class="jc-warn-badge">⚠ ' + warnCount + '</span>' : '';
+  let statusText = '';
+  if (j.status === 'running' || j.status === 'reconnecting') {
+    if (j.lastProgress) {
+      statusText = j.lastProgress.current + '/' + j.lastProgress.total;
+    } else {
+      statusText = j.status === 'reconnecting' ? 'reconnecting…' : 'starting…';
+    }
+  } else if (j.status === 'done') {
+    statusText = '✓ ' + (j.summary || 'done');
+  } else if (j.status === 'failed') {
+    statusText = '✗ failed';
+  }
+
+  card.innerHTML =
+    '<div class="jc-header">' +
+      '<span class="jc-kind">' + escapeHtml(j.kind) + '</span>' +
+      '<span class="jc-path" title="' + escapeAttr(j.path) + '">' + escapeHtml(pathName) + '</span>' +
+      warnBadge +
+    '</div>' +
+    '<div class="jc-status">' + escapeHtml(statusText) + '</div>';
+
+  if (j.status === 'running' && j.lastProgress && j.lastProgress.total > 0) {
+    card.innerHTML += '<progress class="jc-bar" value="' + j.lastProgress.current + '" max="' + j.lastProgress.total + '"></progress>';
+  }
+
+  card.onclick = function() { selectJob(jobId); };
+}
+
+/* ── Jobs detail pane ── */
+var _elapsedInterval = null;
+
+function renderJobDetail(jobId) {
+  const j = activeJobs[jobId];
+  const content = document.getElementById('jd-content');
+  const placeholder = document.getElementById('jd-placeholder');
+  if (!content || !placeholder) return;
+
+  if (!j) {
+    content.hidden = true;
+    placeholder.hidden = false;
+    return;
+  }
+
+  content.hidden = false;
+  placeholder.hidden = true;
+
+  // Header
+  const kindEl = document.getElementById('jd-kind');
+  const pathEl = document.getElementById('jd-path');
+  const statusChip = document.getElementById('jd-status-chip');
+  const copyBtn = document.getElementById('jd-copy-btn');
+
+  if (kindEl) { kindEl.textContent = j.kind; kindEl.className = 'jd-kind-badge jd-kind-' + j.kind; }
+  if (pathEl) { pathEl.textContent = j.path; pathEl.title = j.path; }
+
+  if (statusChip) {
+    let chipClass = 'jd-status-chip';
+    let chipText = '';
+    if (j.status === 'running' || j.status === 'reconnecting') {
+      chipClass += ' running';
+      chipText = j.status === 'reconnecting' ? 'reconnecting' : 'running';
+      // For a composite index job, show which phase is currently running.
+      if (j.phase) chipText += ' \xb7 ' + j.phase;
+    } else if (j.status === 'done') { chipClass += ' done'; chipText = 'done'; }
+    else if (j.status === 'failed') { chipClass += ' failed'; chipText = 'failed'; }
+    statusChip.className = chipClass;
+    statusChip.textContent = chipText;
+  }
+
+  if (copyBtn) copyBtn.style.display = j.failedEvent ? '' : 'none';
+
+  // Elapsed timer
+  clearInterval(_elapsedInterval);
+  function updateElapsed() {
+    const el = document.getElementById('jd-elapsed');
+    if (!el) return;
+    const secs = Math.floor((Date.now() - j.startedAt) / 1000);
+    const m = Math.floor(secs / 60), s = secs % 60;
+    el.textContent = m > 0 ? m + 'm ' + s + 's' : s + 's';
+  }
+  updateElapsed();
+  if (j.status === 'running' || j.status === 'reconnecting') {
+    _elapsedInterval = setInterval(updateElapsed, 1000);
+  }
+
+  // Progress
+  const progressRow = document.getElementById('jd-progress-row');
+  const bar = document.getElementById('jd-bar');
+  const countEl = document.getElementById('jd-count');
+  const speedEl = document.getElementById('jd-speed');
+  const lp = j.lastProgress;
+  if (progressRow) progressRow.hidden = (j.status === 'done' || j.status === 'failed');
+  if (bar && lp && lp.total > 0) { bar.value = lp.current; bar.max = lp.total; }
+  if (countEl && lp) countEl.textContent = lp.current + ' / ' + lp.total;
+  if (speedEl && lp) {
+    const parts = [];
+    if (lp.items_per_sec && lp.items_per_sec > 0) parts.push(lp.items_per_sec.toFixed(1) + ' files/s');
+    if (lp.eta_secs && lp.eta_secs > 0) {
+      const eta = lp.eta_secs < 60 ? Math.round(lp.eta_secs) + 's' : Math.round(lp.eta_secs / 60) + 'm';
+      parts.push('ETA ' + eta);
+    }
+    if (lp.note) parts.push(lp.note);
+    speedEl.textContent = parts.join(' \xb7 ');
+  }
+
+  // Live AI section
+  const liveSection = document.getElementById('jd-live');
+  const liveFile = document.getElementById('jd-live-file');
+  const liveModel = document.getElementById('jd-live-model');
+  const aiPre = document.getElementById('jd-ai-pre');
+  const hasLlm = j.llm && j.llm.text;
+  if (liveSection) liveSection.hidden = !hasLlm && j.status !== 'running';
+  if (liveFile && lp && lp.current_path) {
+    const parts = lp.current_path.split('/');
+    liveFile.textContent = parts.slice(-2).join('/');
+    liveFile.title = lp.current_path;
+  }
+  if (liveModel && j.llm.label) liveModel.textContent = j.llm.label;
+  if (aiPre && hasLlm) {
+    aiPre.textContent = j.llm.text;
+    if (detailAiOpen) aiPre.scrollTop = aiPre.scrollHeight;
+  }
+  if (aiPre) aiPre.hidden = !detailAiOpen;
+
+  // Stats row
+  const statsFiles = document.getElementById('jd-stats-files');
+  const statsBytes = document.getElementById('jd-stats-bytes');
+  if (statsFiles && j.snapshot) statsFiles.textContent = j.snapshot.count.toLocaleString() + ' items';
+  if (statsBytes && j.snapshot && j.snapshot.bytes > 0) {
+    const mb = (j.snapshot.bytes / 1024 / 1024).toFixed(1);
+    statsBytes.textContent = mb + ' MB';
+  }
+
+  // Warnings summary badge
+  const warnSummary = document.getElementById('jd-warn-summary');
+  const totalWarns = j.warnings.length + j.warningOverflow;
+  if (warnSummary) {
+    warnSummary.textContent = totalWarns > 0 ? '⚠ ' + totalWarns + ' warning' + (totalWarns !== 1 ? 's' : '') : '';
+    warnSummary.style.color = totalWarns > 0 ? 'var(--orange)' : '';
+  }
+
+  // Warnings section
+  const warnSection = document.getElementById('jd-warnings-section');
+  if (warnSection) warnSection.hidden = totalWarns === 0;
+  if (totalWarns > 0) {
+    const warnTitle = document.getElementById('jd-warn-title');
+    if (warnTitle) warnTitle.textContent = '⚠ ' + totalWarns + (totalWarns !== 1 ? ' warnings' : ' warning');
+    _populateWarnStageFilter(j);
+    applyWarnFilter();
+  }
+
+  // Failed error section
+  const errSection = document.getElementById('jd-error-section');
+  if (errSection) errSection.hidden = !j.failedEvent;
+  if (j.failedEvent) {
+    const errMsg = document.getElementById('jd-error-msg');
+    const errChain = document.getElementById('jd-error-chain');
+    if (errMsg) errMsg.textContent = (j.failedEvent.stage ? '[' + j.failedEvent.stage + '] ' : '') + j.failedEvent.error;
+    if (errChain && j.failedEvent.chain && j.failedEvent.chain.length > 1) {
+      errChain.innerHTML = j.failedEvent.chain.map(function(c, i) {
+        return '<div class="jd-error-chain-item">' + escapeHtml((i + 1) + '. ' + c) + '</div>';
+      }).join('');
+    }
+  }
+}
+
+function _populateWarnStageFilter(j) {
+  const sel = document.getElementById('jd-warn-stage-filter');
+  if (!sel) return;
+  const stages = Object.keys(j.stageCounts).sort();
+  // Only rebuild the <select> when the SET of stages changes. Rebuilding on every
+  // render tick collapses the dropdown while the user is trying to pick a value.
+  const signature = stages.join('|');
+  if (sel.dataset.stageSig === signature) return;
+  sel.dataset.stageSig = signature;
+
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All stages (' + (j.warnings.length + j.warningOverflow) + ')</option>';
+  stages.forEach(function(s) {
+    const opt = document.createElement('option');
+    opt.value = s;
+    opt.textContent = s + ' (' + j.stageCounts[s] + ')';
+    sel.appendChild(opt);
+  });
+  if (current && stages.includes(current)) sel.value = current;
+}
+
+function applyWarnFilter() {
+  if (!selectedJobId || !activeJobs[selectedJobId]) return;
+  const j = activeJobs[selectedJobId];
+  const stageFilter = (document.getElementById('jd-warn-stage-filter') || {}).value || '';
+  const textFilter = ((document.getElementById('jd-warn-search') || {}).value || '').toLowerCase();
+  const list = document.getElementById('jd-warn-list');
+  if (!list) return;
+
+  const filtered = j.warnings.filter(function(w) {
+    if (stageFilter && w.stage !== stageFilter) return false;
+    if (textFilter) {
+      const hay = ((w.message || '') + ' ' + (w.item_path || '')).toLowerCase();
+      if (hay.indexOf(textFilter) === -1) return false;
+    }
+    return true;
+  });
+
+  list.innerHTML = filtered.slice(0, 500).map(function(w) {
+    const basename = w.item_path ? w.item_path.split('/').pop() : '';
+    return '<div class="warn-row" onclick="this.classList.toggle(\'expanded\')">' +
+      '<span class="warn-stage">' + escapeHtml(w.stage) + '</span>' +
+      (basename ? '<span class="warn-path" title="' + escapeAttr(w.item_path) + '">' + escapeHtml(basename) + '</span>' : '') +
+      '<span class="warn-msg">' + escapeHtml(w.message) + '</span>' +
+      (w.item_path ? '<div class="warn-full-path">' + escapeHtml(w.item_path) + '</div>' : '') +
+      '</div>';
+  }).join('');
+
+  if (filtered.length > 500) {
+    list.innerHTML += '<div class="warn-overflow">… and ' + (filtered.length - 500) + ' more (refine your filter)</div>';
+  }
+  if (j.warningOverflow > 0) {
+    list.innerHTML += '<div class="warn-overflow">' + j.warningOverflow + ' earlier warnings not shown (cap reached)</div>';
+  }
+}
+
+function toggleDetailAi() {
+  detailAiOpen = !detailAiOpen;
+  const btn = document.getElementById('jd-ai-toggle');
+  const pre = document.getElementById('jd-ai-pre');
+  if (pre) pre.hidden = !detailAiOpen;
+  if (btn) btn.classList.toggle('active', detailAiOpen);
+  if (detailAiOpen && pre) pre.scrollTop = pre.scrollHeight;
+}
+
+/* ── Copy error report ── */
+async function copyJobReport() {
+  if (!selectedJobId || !activeJobs[selectedJobId]) return;
+  const j = activeJobs[selectedJobId];
+  if (!j.failedEvent) return;
+  try {
+    const r = await fetch('/api/logs/tail?lines=50');
+    const d = await r.json();
+    const ev = j.failedEvent;
+    const chain = ev.chain && ev.chain.length
+      ? '\nCaused by:\n' + ev.chain.map(function(c, i) { return (i + 1) + '. ' + c; }).join('\n')
+      : '';
+    const report = '**Indexa error report**\n' +
+      '- Version: ' + (document.getElementById('app-version').textContent || '?') + '\n' +
+      '- Job: ' + j.kind + ' ' + j.path + '\n' +
+      '- Stage: ' + (ev.stage || '?') + '\n' +
+      (ev.item_path ? '- Item: ' + ev.item_path + '\n' : '') +
+      '- Error: ' + ev.error + chain + '\n\n' +
+      '**Logs (last 50 lines)**\n' + (d.lines || '(no log file found)');
+    await navigator.clipboard.writeText(report);
+    toast('Error report copied to clipboard', 'info');
+  } catch(err) { toast('Copy failed: ' + err.message, 'error'); }
+}
+
+/* ── Jobs mini pill ── */
+function updateJobsPill() {
+  const pill = document.getElementById('jobs-pill');
+  const pillText = document.getElementById('jobs-pill-text');
+  const pillDot = document.getElementById('jobs-pill-dot');
+  if (!pill) return;
+
+  const jobs = Object.values(activeJobs);
+  const running = jobs.filter(function(j) { return j.status === 'running' || j.status === 'reconnecting'; });
+  const failed = jobs.filter(function(j) { return j.status === 'failed'; });
+
+  if (jobs.length === 0 || currentTab === 'jobs') {
+    pill.hidden = true;
+    return;
+  }
+
+  pill.hidden = false;
+  if (pillDot) {
+    pillDot.className = 'jobs-pill-dot ' + (running.length > 0 ? 'running' : failed.length > 0 ? 'failed' : 'done');
+  }
+  if (pillText) {
+    if (running.length > 0) {
+      const j = running[0];
+      const lp = j.lastProgress;
+      const pct = (lp && lp.total > 0) ? Math.round((lp.current / lp.total) * 100) + '%' : '…';
+      pillText.textContent = running.length + (running.length > 1 ? ' jobs' : ' job') + ' \xb7 ' + pct;
+    } else if (failed.length > 0) {
+      pillText.textContent = failed.length + ' failed';
+    } else {
+      const done = jobs.filter(function(j) { return j.status === 'done'; });
+      pillText.textContent = done.length + ' done';
+    }
+  }
+}
+
+function updateJobsTabBadge() {
+  const badge = document.getElementById('jobs-tab-badge');
+  if (!badge) return;
+  const running = Object.values(activeJobs).filter(function(j) {
+    return j.status === 'running' || j.status === 'reconnecting';
+  }).length;
+  badge.hidden = running === 0;
+  badge.textContent = running > 0 ? running : '';
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   END JOBS SECTION
+   ══════════════════════════════════════════════════════════════════ */
 
 /* ── Summary view ── */
 async function showSummary(path) {
@@ -723,7 +1023,7 @@ async function doAsk() {
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || 'Request failed');
 
-    let html = escapeHtml(d.answer);
+    let html = renderMarkdown(d.answer);
     if (d.sources && d.sources.length > 0) {
       html += '<div class="sources"><h4>Sources</h4>' +
         d.sources.map(function(s) {
@@ -784,24 +1084,29 @@ async function savePasses() {
   }
 }
 
-/* ── Queue badge ── */
+/* ── Queue stats (shown in Jobs tab) ── */
 async function pollQueue() {
   try {
     const r = await fetch('/api/queue');
     const d = await r.json();
-    const badge = document.getElementById('queue-badge');
-    if (!badge) return;
+    // Update the Jobs tab queue row (if visible)
+    const queueEl = document.getElementById('jobs-queue-stats');
+    if (!queueEl) return;
     const total = d.pending + d.in_flight + d.failed;
-    if (total === 0) { badge.style.display = 'none'; return; }
-    badge.style.display = '';
-    let parts = [];
-    if (d.pending > 0) parts.push(d.pending + ' pending');
+    if (total === 0) {
+      queueEl.textContent = 'Summary queue: idle';
+      queueEl.style.color = 'var(--muted)';
+      return;
+    }
+    var parts = [];
+    if (d.pending > 0) parts.push(d.pending.toLocaleString() + ' pending');
     if (d.in_flight > 0) parts.push(d.in_flight + ' running');
     if (d.failed > 0) parts.push(d.failed + ' failed');
-    badge.textContent = parts.join(' \xb7 ');
+    queueEl.textContent = 'Summary queue: ' + parts.join(' \xb7 ');
+    queueEl.style.color = d.failed > 0 ? 'var(--red)' : d.in_flight > 0 ? 'var(--accent)' : 'var(--muted)';
   } catch(_) {}
 }
-setInterval(pollQueue, 3000);
+setInterval(pollQueue, 5000);
 pollQueue();
 
 /* ── Map view ── */
@@ -943,10 +1248,102 @@ function toast(msg, level) {
   container.appendChild(el);
   setTimeout(function() { if (el.parentElement) el.remove(); }, 4000);
 }
+
+/* In-app confirmation modal — returns a Promise<bool>. Replaces native confirm(),
+   which blocks the event loop and freezes headless/automated browser sessions. */
+function confirmModal(message, confirmLabel) {
+  return new Promise(function(resolve) {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay confirm-overlay';
+    overlay.style.display = 'flex';
+    const safeMsg = escapeHtml(message).replace(/\n/g, '<br>');
+    overlay.innerHTML =
+      '<div class="modal confirm-modal" role="dialog" aria-modal="true">' +
+        '<div class="confirm-msg">' + safeMsg + '</div>' +
+        '<div class="modal-actions">' +
+          '<button class="modal-btn" data-act="cancel">Cancel</button>' +
+          '<button class="modal-btn primary" data-act="ok">' + escapeHtml(confirmLabel || 'Confirm') + '</button>' +
+        '</div>' +
+      '</div>';
+    function close(result) {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      document.removeEventListener('keydown', onKey);
+      resolve(result);
+    }
+    function onKey(e) {
+      if (e.key === 'Escape') close(false);
+      else if (e.key === 'Enter') close(true);
+    }
+    overlay.querySelector('[data-act="cancel"]').onclick = function() { close(false); };
+    overlay.querySelector('[data-act="ok"]').onclick = function() { close(true); };
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) close(false); });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+    const okBtn = overlay.querySelector('[data-act="ok"]');
+    if (okBtn) okBtn.focus();
+  });
+}
 function escapeHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 function escapeAttr(s) { return escapeHtml(s); }
+
+/* Minimal, XSS-safe markdown renderer for LLM answers. HTML is escaped FIRST,
+   then a small set of markdown constructs are turned into tags. Supports fenced
+   code blocks, inline code, bold, italic, headings, and unordered lists. */
+function renderMarkdown(src) {
+  if (!src) return '';
+  // 1) Escape everything up front so no raw HTML from the model can execute.
+  let text = escapeHtml(src);
+
+  // 2) Pull fenced code blocks out into placeholders so inline rules don't touch them.
+  const blocks = [];
+  text = text.replace(/```([\s\S]*?)```/g, function(_m, code) {
+    blocks.push(code.replace(/^\n/, ''));
+    return ' CODEBLOCK' + (blocks.length - 1) + ' ';
+  });
+
+  // 3) Line-level: headings and unordered lists.
+  const lines = text.split('\n');
+  let out = '';
+  let inList = false;
+  for (let raw of lines) {
+    const line = raw;
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    const li = line.match(/^\s*[-*]\s+(.*)$/);
+    if (li) {
+      if (!inList) { out += '<ul>'; inList = true; }
+      out += '<li>' + inlineMd(li[1]) + '</li>';
+      continue;
+    }
+    if (inList) { out += '</ul>'; inList = false; }
+    if (h) {
+      const lvl = h[1].length;
+      out += '<h' + lvl + '>' + inlineMd(h[2]) + '</h' + lvl + '>';
+    } else if (line.trim() === '') {
+      out += '<br>';
+    } else if (line.indexOf(' CODEBLOCK') !== -1) {
+      out += line; // placeholder, restored below
+    } else {
+      out += inlineMd(line) + '<br>';
+    }
+  }
+  if (inList) out += '</ul>';
+
+  // 4) Restore code blocks as <pre><code>.
+  out = out.replace(/ CODEBLOCK(\d+) /g, function(_m, i) {
+    return '<pre class="chat-code">' + blocks[+i] + '</pre>';
+  });
+  return out;
+}
+
+/* Inline markdown: `code`, **bold**, *italic*. Operates on already-escaped text. */
+function inlineMd(s) {
+  return s
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*]+)\*([^*]|$)/g, '$1<em>$2</em>$3');
+}
 
 /* ── Sound ── */
 let _audioCtx = null;
@@ -1001,7 +1398,7 @@ async function reindexAll() {
     const r = await fetch('/api/roots');
     const roots = await r.json();
     if (!roots.length) { toast('No indexed roots yet.', 'warn'); return; }
-    if (!confirm('Re-index ' + roots.length + ' root(s) with deep scan?')) return;
+    if (!(await confirmModal('Re-index ' + roots.length + ' root(s) with a deep scan?', 'Re-index'))) return;
     for (const root of roots) { await fireJob('deep', root.path); }
   } catch(e) { toast('Failed: ' + e.message, 'error'); }
 }
@@ -1012,6 +1409,7 @@ const CMD_ACTIONS = [
   { icon: '📁', label: 'Switch to Browse', hint: '', action: function() { switchTab('tree'); } },
   { icon: '🗺️', label: 'Switch to Map', hint: '', action: function() { switchTab('map'); } },
   { icon: '⚙️', label: 'Switch to Settings', hint: '', action: function() { switchTab('settings'); } },
+  { icon: '⚙', label: 'Switch to Jobs', hint: '', action: function() { switchTab('jobs'); } },
   { icon: '🌙', label: 'Toggle theme', hint: '', action: toggleTheme },
   { icon: '+', label: 'Add root folder', hint: '', action: openAddRoot },
   { icon: '↻', label: 'Re-index all roots', hint: '', action: reindexAll },
@@ -1050,7 +1448,7 @@ function renderCmdResults(query) {
     return;
   }
   if (!matchedActions.length) {
-    container.innerHTML = '<div class="cmd-empty">No results for “' + escapeHtml(query) + '”</div>';
+    container.innerHTML = '<div class="cmd-empty">No results for "' + escapeHtml(query) + '"</div>';
     return;
   }
 
@@ -1059,7 +1457,7 @@ function renderCmdResults(query) {
     label.className = 'cmd-section-label';
     label.textContent = 'Commands';
     container.appendChild(label);
-    matchedActions.forEach(function(a, i) {
+    matchedActions.forEach(function(a) {
       const el = document.createElement('div');
       el.className = 'cmd-item';
       el.setAttribute('role', 'option');
@@ -1115,6 +1513,63 @@ document.addEventListener('keydown', function(e) {
     closeCmdPalette();
   }
 });
+
+/* ── Add-root modal (kept for compatibility) ── */
+function openAddRoot() {
+  const modal = document.getElementById('add-root-modal');
+  if (modal) modal.style.display = 'flex';
+  browseFsTo(document.getElementById('add-root-path').value || '');
+}
+function closeAddRoot() {
+  const modal = document.getElementById('add-root-modal');
+  if (modal) modal.style.display = 'none';
+}
+function onRootPathInput(val) {
+  clearTimeout(window._fsTimer);
+  window._fsTimer = setTimeout(function() { browseFsTo(val); }, 300);
+}
+async function browseFsTo(path) {
+  const browser = document.getElementById('fs-browser');
+  if (!browser) return;
+  browser.innerHTML = '<div class="fs-entry" style="color:var(--muted)">Loading…</div>';
+  try {
+    const r = await fetch('/api/fs/ls?path=' + encodeURIComponent(path || ''));
+    const d = await r.json();
+    if (d.error) { browser.innerHTML = '<div class="fs-entry" style="color:var(--red)">' + escapeHtml(d.error) + '</div>'; return; }
+    browser.innerHTML = '';
+    if (d.parent) {
+      const up = document.createElement('div');
+      up.className = 'fs-entry';
+      up.innerHTML = '↑ ..';
+      up.onclick = function() {
+        document.getElementById('add-root-path').value = d.parent;
+        browseFsTo(d.parent);
+      };
+      browser.appendChild(up);
+    }
+    (d.entries || []).forEach(function(entry) {
+      const el = document.createElement('div');
+      el.className = 'fs-entry' + (entry.is_dir ? '' : ' fs-file');
+      el.textContent = (entry.is_dir ? '📁 ' : '📄 ') + entry.name;
+      if (entry.is_dir) {
+        el.onclick = function() {
+          document.getElementById('add-root-path').value = entry.path;
+          browseFsTo(entry.path);
+        };
+      }
+      browser.appendChild(el);
+    });
+  } catch(e) {
+    browser.innerHTML = '<div class="fs-entry" style="color:var(--red)">' + escapeHtml(e.message) + '</div>';
+  }
+}
+async function startIndexRoot() {
+  const path = document.getElementById('add-root-path').value.trim();
+  if (!path) { toast('Enter a folder path', 'warn'); return; }
+  closeAddRoot();
+  try { await fireJob('index', path); }
+  catch(e) { toast('Failed: ' + e.message, 'error'); }
+}
 
 /* ── Init ── */
 loadStats();

@@ -1,9 +1,13 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use directories::BaseDirs;
 use indexa_cli::{Cli, Commands};
 use indexa_core::{
     config::{self, Config, HybridMode, SummaryMode},
+    resource::{
+        detect_machine, estimate_eta, format_duration_pub, lookup_footprint, sample_memory_once,
+        ResourceProfile,
+    },
     store::{ChunkRecord, Store},
     walker::{walk, WalkConfig},
     watcher::{self, ChangeKind, WatcherConfig},
@@ -78,8 +82,7 @@ async fn main() -> Result<()> {
             embed_model,
             dry_run,
             mode,
-            passes,
-        } => cmd_deep(paths, embed_model, dry_run, mode, passes, &cfg).await,
+        } => cmd_deep(paths, embed_model, dry_run, mode, &cfg).await,
         Commands::Map { depth } => cmd_map(depth).await,
         Commands::Summarize {
             paths,
@@ -123,6 +126,11 @@ async fn main() -> Result<()> {
         } => cmd_serve(port, embed_model, llm_model, &cfg).await,
         Commands::Status { unknown } => cmd_status(unknown, &cfg).await,
         Commands::Rm { paths, recursive } => cmd_rm(paths, recursive).await,
+        Commands::Doctor {
+            profile,
+            files,
+            chunks,
+        } => cmd_doctor(profile, files, chunks).await,
     }
 }
 
@@ -163,14 +171,9 @@ async fn cmd_deep(
     embed_model_flag: Option<String>,
     dry_run: bool,
     mode: String,
-    _passes: Option<u32>,
     cfg: &Config,
 ) -> Result<()> {
-    let summary_mode = match mode.as_str() {
-        "compress" => SummaryMode::Compress,
-        "summaries-only" => SummaryMode::SummariesOnly,
-        _ => SummaryMode::Augment,
-    };
+    let summary_mode = parse_summary_mode(&mode)?;
     let roots = resolve_roots(paths, false)?;
     let Some(db_path) = require_index_db()? else {
         return Ok(());
@@ -211,8 +214,28 @@ async fn cmd_deep(
             println!("  {:>5}  {mime}", n);
         }
         println!("\nEstimated embedding calls: {total_chunks} chunks");
-        let mins = total_chunks.div_ceil(300);
-        println!("Estimated time: ~{mins} min (nomic-embed-text @ ~300 chunks/min)");
+        // Use the calibrated ETA table instead of the old hardcoded 300 chunks/min.
+        let spec = detect_machine();
+        let embed_eta = estimate_eta(&embed_model, 0, total_chunks, 0, 1, spec.is_apple_silicon);
+        let sum_eta = estimate_eta(
+            &cfg.describer.file_model,
+            total_files,
+            0,
+            600,
+            cfg.describer.passes_first,
+            spec.is_apple_silicon,
+        );
+        println!(
+            "Estimated time: {} embed + {} summarize = {} total",
+            embed_eta.display,
+            sum_eta.display,
+            format_duration_pub((embed_eta.total_secs + sum_eta.total_secs) as u64),
+        );
+        println!(
+            "  (model: {embed_model} + {}, Apple Silicon: {})",
+            cfg.describer.file_model, spec.is_apple_silicon
+        );
+        println!("  Run `indexa doctor --files {total_files} --chunks {total_chunks}` for a full breakdown.");
         return Ok(());
     }
 
@@ -522,16 +545,6 @@ async fn cmd_status(show_unknown: bool, cfg: &Config) -> Result<()> {
     let config_path = config::default_config_path().to_string_lossy().into_owned();
 
     println!("Index:    {} ({})", db_path.display(), format_size(db_size));
-
-    // Count files vs dirs
-    let dirs = {
-        let store2 = Store::open(&db_path)?;
-        let all = store2.entry_count()?;
-        // files = entries that are not dirs
-        let _ = all;
-        0u64 // placeholder — we don't track dir vs file count separately in a single query
-    };
-    let _ = dirs;
     println!("Entries:  {entries} total");
     println!(
         "Chunks:   {} ({embedded} embedded with {})",
@@ -539,14 +552,7 @@ async fn cmd_status(show_unknown: bool, cfg: &Config) -> Result<()> {
     );
 
     if let Some(ts) = last_ts {
-        use std::time::{Duration, UNIX_EPOCH};
-        let dt = UNIX_EPOCH + Duration::from_secs(ts as u64);
-        let secs = dt
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        // Simple timestamp formatting without chrono
-        println!("Last indexed: unix timestamp {secs}");
+        println!("Last indexed: {}", format_unix_timestamp(ts));
     }
 
     let summary_count = store.summary_count().unwrap_or(0);
@@ -630,11 +636,7 @@ async fn cmd_summarize(
     };
 
     let mut summary_cfg = cfg.describer.clone();
-    summary_cfg.mode = match mode.as_str() {
-        "compress" => SummaryMode::Compress,
-        "summaries-only" => SummaryMode::SummariesOnly,
-        _ => SummaryMode::Augment,
-    };
+    summary_cfg.mode = parse_summary_mode(&mode)?;
 
     let base_url = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
     let describer = OllamaLlm::new_with_dir_model(
@@ -777,7 +779,18 @@ async fn cmd_export(
     }
 
     if let Some(path) = output {
-        std::fs::write(&path, &out_buf)?;
+        // Give an actionable hint when the parent directory doesn't exist, rather
+        // than surfacing a bare OS "No such file or directory" error.
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                anyhow::bail!(
+                    "cannot write to '{path}': the directory '{}' does not exist. \
+                     Create it first or choose an existing output path.",
+                    parent.display()
+                );
+            }
+        }
+        std::fs::write(&path, &out_buf).with_context(|| format!("writing export to '{path}'"))?;
         println!("Wrote {} bytes to {path}.", out_buf.len());
     } else {
         print!("{out_buf}");
@@ -815,19 +828,210 @@ async fn cmd_worker(concurrency: usize, cfg: &Config) -> Result<()> {
     println!("Press Ctrl-C to stop.");
 
     let summary_cfg = cfg.describer.clone();
+    let headroom = cfg.resource.effective_headroom_bytes();
     let mut handles = Vec::new();
     for _ in 0..concurrency {
         let s = Arc::clone(&store);
         let d = Arc::clone(&describer);
         let e = Arc::clone(&embedder);
         let c = summary_cfg.clone();
-        handles.push(tokio::spawn(indexa_query::run_worker(s, d, e, c)));
+        handles.push(tokio::spawn(indexa_query::run_worker(s, d, e, c, headroom)));
     }
 
     // Wait for all (runs forever until Ctrl-C)
     for h in handles {
         let _ = h.await;
     }
+    Ok(())
+}
+
+async fn cmd_doctor(
+    profile_str: String,
+    files_hint: Option<usize>,
+    chunks_hint: Option<usize>,
+) -> Result<()> {
+    let profile = match profile_str.as_str() {
+        "conservative" => ResourceProfile::Conservative,
+        "performance" => ResourceProfile::Performance,
+        _ => ResourceProfile::Balanced,
+    };
+
+    let spec = detect_machine();
+    let sample = sample_memory_once();
+
+    let total_gb = spec.total_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let free_gb = sample.free_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    // "Reclaimable" = total - actively used (wired+active); macOS's inactive file
+    // cache is reclaimable instantly so it counts as available for new allocations.
+    let reclaimable_gb = (spec.total_ram_bytes.saturating_sub(sample.used_bytes)) as f64
+        / (1024.0 * 1024.0 * 1024.0);
+    let wired_limit_gb = spec.gpu_wired_limit_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let headroom_gb = profile.headroom_bytes() as f64 / (1024.0 * 1024.0 * 1024.0);
+    use indexa_core::resource::compute_budget;
+    let budget_gb = compute_budget(&spec, &sample, profile.headroom_bytes()) as f64
+        / (1024.0 * 1024.0 * 1024.0);
+
+    println!("╔══════════════════════════════════════════════════════════╗");
+    println!("║              indexa doctor — machine profile             ║");
+    println!("╚══════════════════════════════════════════════════════════╝");
+    println!();
+
+    // ── Machine spec ──
+    println!("Machine");
+    if spec.is_apple_silicon {
+        println!("  Chip   Apple Silicon (unified memory — CPU+GPU share one pool)");
+    } else {
+        println!("  Arch   x86-64 / non-Apple");
+    }
+    // Show reclaimable (total − wired/active) alongside truly-free pages.
+    // macOS keeps inactive file cache in "free-looking" RAM; only swap = real pressure.
+    println!("  RAM    {total_gb:.0} GB total   {reclaimable_gb:.1} GB reclaimable  ({free_gb:.1} GB truly free)");
+    println!(
+        "  CPU    {} physical cores, {} logical threads",
+        spec.physical_cores, spec.logical_cores
+    );
+    if spec.is_apple_silicon {
+        println!(
+            "  GPU    Metal — wired ceiling ≈ {wired_limit_gb:.0} GB ({:.0}% of RAM)",
+            wired_limit_gb / total_gb * 100.0
+        );
+    }
+    println!();
+
+    // ── Profile & budget ──
+    println!("Resource profile: {}", profile.as_str().to_uppercase());
+    println!("  Headroom  {headroom_gb:.0} GB (kept free at all times)");
+    println!("  Budget    {budget_gb:.1} GB available for AI models right now");
+    println!(
+        "  keep_alive  {} s (model stays warm in Ollama between calls)",
+        profile.keep_alive_secs()
+    );
+    println!();
+
+    // ── Ollama env-var check ──
+    println!("Ollama server settings");
+    let max_loaded = std::env::var("OLLAMA_MAX_LOADED_MODELS").ok();
+    let num_parallel = std::env::var("OLLAMA_NUM_PARALLEL").ok();
+    let keep_alive_env = std::env::var("OLLAMA_KEEP_ALIVE").ok();
+
+    let check = |name: &str, val: Option<String>, recommended: &str| match val {
+        Some(v) => println!("  ✅  {name} = {v}"),
+        None => println!("  ⚠️   {name} not set — recommended: {recommended}"),
+    };
+    check(
+        "OLLAMA_MAX_LOADED_MODELS",
+        max_loaded,
+        "1  (prevents multiple models staying resident)",
+    );
+    check(
+        "OLLAMA_NUM_PARALLEL",
+        num_parallel,
+        "1  (prevents KV-cache multiplication)",
+    );
+    check(
+        "OLLAMA_KEEP_ALIVE",
+        keep_alive_env,
+        "30s  (lets models unload between jobs)",
+    );
+    println!();
+    println!("  NOTE: these env vars are read by the Ollama server at startup.");
+    println!("  To apply on macOS:");
+    println!("    launchctl setenv OLLAMA_MAX_LOADED_MODELS 1");
+    println!("    launchctl setenv OLLAMA_NUM_PARALLEL 1");
+    println!("    launchctl setenv OLLAMA_KEEP_ALIVE 30s");
+    println!("    # then quit and relaunch Ollama.app");
+    println!();
+
+    // ── Per-model memory table ──
+    println!("Model memory estimates  (num_ctx=4096, num_parallel=1)");
+    println!(
+        "  {:<28}  {:>10}  {:>8}  {:>6}",
+        "Model", "Peak RAM", "Fits?", "Role"
+    );
+    println!(
+        "  {}  {}  {}  {}",
+        "─".repeat(28),
+        "─".repeat(10),
+        "─".repeat(8),
+        "─".repeat(20)
+    );
+    let models_of_interest = [
+        ("nomic-embed-text", "embeddings"),
+        ("gemma3:4b", "file summaries"),
+        ("gemma3:12b", "dir roll-ups / Q&A"),
+    ];
+    for (model, role) in &models_of_interest {
+        let peak_display = lookup_footprint(model)
+            .map(|fp| fp.peak_display(4096))
+            .unwrap_or_else(|| "unknown".to_owned());
+        let fits = lookup_footprint(model)
+            .map(|fp| {
+                if fp.peak_bytes(4096) as f64 / (1024.0 * 1024.0 * 1024.0) <= budget_gb {
+                    "✅"
+                } else {
+                    "❌"
+                }
+            })
+            .unwrap_or("?");
+        println!(
+            "  {:<28}  {:>10}  {:>8}  {}",
+            model, peak_display, fits, role
+        );
+    }
+    println!();
+
+    // ── Why it freezes (explanation) ──
+    println!("Why Indexa can freeze the machine");
+    println!("  By default Ollama keeps each model warm for 5 minutes after use.");
+    println!("  If nomic-embed-text + gemma3:4b + gemma3:12b all stay resident");
+    println!("  at the same time, combined peak can reach 16–20+ GB.  On a");
+    println!("  {total_gb:.0} GB machine that pushes into swap → thrash → freeze.");
+    println!();
+    println!("  The fix Indexa now enforces:");
+    println!(
+        "    • keep_alive={} s (models unload faster)",
+        profile.keep_alive_secs()
+    );
+    println!("    • num_parallel=1 per request (no KV-cache multiplication)");
+    println!("    • Explicit unload when switching between models");
+    println!("    • Pre-flight fit check before each job");
+    println!();
+
+    // ── ETA estimates ──
+    let n_files = files_hint.unwrap_or(200);
+    let n_chunks = chunks_hint.unwrap_or(n_files * 8);
+    println!(
+        "ETA estimates  (for ~{n_files} files / ~{n_chunks} embed chunks, {} passes)",
+        2
+    );
+    println!(
+        "  {:<28}  {:>12}  {:>12}  {:>14}",
+        "Gen model", "Embed only", "Summarize", "Total (deep+summarize)"
+    );
+    println!(
+        "  {}  {}  {}  {}",
+        "─".repeat(28),
+        "─".repeat(12),
+        "─".repeat(12),
+        "─".repeat(14)
+    );
+    for (model, _role) in &models_of_interest[1..] {
+        // skip embed model
+        let embed_eta = estimate_eta("nomic-embed-text", 0, n_chunks, 0, 1, spec.is_apple_silicon);
+        let sum_eta = estimate_eta(model, n_files, 0, 600, 2, spec.is_apple_silicon);
+        let total_secs = embed_eta.total_secs + sum_eta.total_secs;
+        println!(
+            "  {:<28}  {:>12}  {:>12}  {:>14}",
+            model,
+            embed_eta.display,
+            sum_eta.display,
+            format_duration_pub(total_secs as u64),
+        );
+    }
+    println!();
+    println!("  Pass `--files N --chunks M` to customise for your index size.");
+    println!("  Run `indexa status` to see how many files are currently indexed.");
+
     Ok(())
 }
 
@@ -851,33 +1055,39 @@ fn require_index_db() -> Result<Option<PathBuf>> {
 }
 
 /// Build an embedder from config, optionally overriding the model name.
+/// Respects `cfg.resource.effective_keep_alive_secs()` for Ollama.
 fn build_embedder(
     cfg: &Config,
     model_override: Option<&str>,
 ) -> Result<Box<dyn indexa_embed::Embedder + Send + Sync>> {
     let model = model_override.unwrap_or(&cfg.embedding.model);
-    indexa_embed::from_config(
+    let keep_alive = cfg.resource.effective_keep_alive_secs();
+    indexa_embed::from_config_with_keep_alive(
         &cfg.embedding.provider,
         model,
         cfg.embedding.dim,
         &cfg.embedding.base_url,
         cfg.api_keys.openai.as_deref(),
         cfg.api_keys.google.as_deref(),
+        Some(keep_alive),
     )
 }
 
 /// Build an LLM generator from config, optionally overriding the model name.
+/// Respects `cfg.resource.effective_keep_alive_secs()` for Ollama.
 fn build_llm(
     cfg: &Config,
     model_override: Option<&str>,
 ) -> Result<Box<dyn indexa_llm::Generator + Send + Sync>> {
     let model = model_override.unwrap_or(&cfg.describer.model);
-    indexa_llm::from_config(
+    let keep_alive = cfg.resource.effective_keep_alive_secs();
+    indexa_llm::from_config_with_keep_alive(
         &cfg.describer.provider,
         model,
         &cfg.describer.base_url,
         cfg.api_keys.openai.as_deref(),
         cfg.api_keys.anthropic.as_deref(),
+        Some(keep_alive),
     )
 }
 
@@ -939,6 +1149,19 @@ fn migrate_legacy_data_dir(new_dir: &std::path::Path) {
     }
 }
 
+/// Parse the `--mode` flag into a `SummaryMode`, rejecting unknown values with a
+/// clear error instead of silently treating a typo (e.g. `compres`) as `augment`.
+fn parse_summary_mode(mode: &str) -> Result<SummaryMode> {
+    match mode {
+        "augment" => Ok(SummaryMode::Augment),
+        "compress" => Ok(SummaryMode::Compress),
+        "summaries-only" => Ok(SummaryMode::SummariesOnly),
+        other => anyhow::bail!(
+            "unknown --mode '{other}'. Valid values: augment, compress, summaries-only"
+        ),
+    }
+}
+
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1_024;
     const MB: u64 = KB * 1_024;
@@ -952,4 +1175,31 @@ fn format_size(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+/// Format a Unix timestamp (seconds since epoch) as a human-readable UTC datetime
+/// like `2026-05-29 14:32 UTC`. Uses Howard Hinnant's civil-date algorithm so we
+/// avoid pulling in `chrono` just for this one display string.
+fn format_unix_timestamp(ts: i64) -> String {
+    if ts <= 0 {
+        return "unknown".to_owned();
+    }
+    let secs = ts;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (hour, minute) = (rem / 3_600, (rem % 3_600) / 60);
+
+    // Civil-from-days (Hinnant): days since 1970-01-01 → (year, month, day).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if month <= 2 { y + 1 } else { y };
+
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
 }

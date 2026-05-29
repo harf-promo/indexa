@@ -7,11 +7,17 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_MODEL: &str = "nomic-embed-text";
 pub const DEFAULT_DIM: usize = 768;
 
+/// Timeout for embedding requests. Embeddings are fast; 30 s is generous.
+const EMBED_TIMEOUT_SECS: u64 = 30;
+
 pub struct OllamaEmbedder {
     base_url: String,
     model: String,
     dim: usize,
     client: reqwest::Client,
+    /// keep_alive value to send with every request (seconds).
+    /// 0 = unload immediately; -1 = keep forever; None = server default.
+    keep_alive: Option<i64>,
 }
 
 const DEFAULT_BASE: &str = "http://localhost:11434";
@@ -22,7 +28,31 @@ impl OllamaEmbedder {
             base_url: base_url.into(),
             model: model.into(),
             dim,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(EMBED_TIMEOUT_SECS))
+                .build()
+                .unwrap_or_default(),
+            keep_alive: None,
+        }
+    }
+
+    /// Construct with an explicit keep_alive (seconds).
+    /// Use `0` to unload the model immediately after each call.
+    pub fn new_with_keep_alive(
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        dim: usize,
+        keep_alive: i64,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            model: model.into(),
+            dim,
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(EMBED_TIMEOUT_SECS))
+                .build()
+                .unwrap_or_default(),
+            keep_alive: Some(keep_alive),
         }
     }
 
@@ -37,12 +67,40 @@ impl OllamaEmbedder {
     pub fn default_local() -> Self {
         Self::new(Self::resolve_base_url(None), DEFAULT_MODEL, DEFAULT_DIM)
     }
+
+    /// Explicitly unload a model from Ollama by sending keep_alive=0.
+    /// This is a best-effort call — errors are logged but not propagated.
+    pub async fn unload(&self, model: &str) {
+        let url = format!("{}/api/embeddings", self.base_url);
+        // Ollama interprets keep_alive=0 as "unload now".
+        let body = serde_json::json!({
+            "model": model,
+            "prompt": "",
+            "keep_alive": 0
+        });
+        if let Err(e) = self.client.post(&url).json(&body).send().await {
+            tracing::warn!("Failed to unload model '{model}' from Ollama: {e}");
+        }
+    }
 }
 
 #[derive(Serialize)]
 struct EmbedRequest<'a> {
     model: &'a str,
     prompt: &'a str,
+    /// Seconds to keep the model loaded after this call.
+    /// 0 = unload immediately.  Omitted when None (server default applies).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keep_alive: Option<i64>,
+    /// Inference options forwarded to Ollama (num_parallel, num_ctx, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<EmbedOptions>,
+}
+
+#[derive(Serialize)]
+struct EmbedOptions {
+    /// Lock to 1 parallel slot to prevent KV-cache multiplication.
+    num_parallel: u32,
 }
 
 #[derive(Deserialize)]
@@ -57,6 +115,8 @@ impl Embedder for OllamaEmbedder {
         let body = EmbedRequest {
             model: &self.model,
             prompt: text,
+            keep_alive: self.keep_alive,
+            options: Some(EmbedOptions { num_parallel: 1 }),
         };
         let resp = self
             .client
