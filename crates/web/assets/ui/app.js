@@ -723,7 +723,13 @@ function renderJobDetail(jobId) {
 function _populateWarnStageFilter(j) {
   const sel = document.getElementById('jd-warn-stage-filter');
   if (!sel) return;
-  const stages = Object.keys(j.stageCounts);
+  const stages = Object.keys(j.stageCounts).sort();
+  // Only rebuild the <select> when the SET of stages changes. Rebuilding on every
+  // render tick collapses the dropdown while the user is trying to pick a value.
+  const signature = stages.join('|');
+  if (sel.dataset.stageSig === signature) return;
+  sel.dataset.stageSig = signature;
+
   const current = sel.value;
   sel.innerHTML = '<option value="">All stages (' + (j.warnings.length + j.warningOverflow) + ')</option>';
   stages.forEach(function(s) {

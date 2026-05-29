@@ -53,11 +53,13 @@ pub enum Commands {
     },
 
     /// Build deep context: parse, embed, and index file contents.
+    ///
+    /// Summarization is enqueued for background processing — run `indexa summarize`
+    /// (which accepts `--passes`) or the web UI to generate the summaries.
     #[command(after_help = "Examples:
   indexa deep ~/Documents
   indexa deep ~/Projects --embed-model nomic-embed-text:v1.5
-  indexa deep --dry-run ~/Documents
-  indexa deep ~/Documents --passes 2")]
+  indexa deep --dry-run ~/Documents")]
     Deep {
         /// Path to deep-scan. Omit to deep-scan the entire existing index.
         #[arg(num_args = 0..)]
@@ -74,10 +76,6 @@ pub enum Commands {
         /// Summary storage mode: augment (default), compress, summaries-only.
         #[arg(long, default_value = "augment")]
         mode: String,
-
-        /// Refinement passes per summary. Default: 2 for new context, 1 for refresh.
-        #[arg(long)]
-        passes: Option<u32>,
     },
 
     /// Generate hierarchical context summaries for indexed files and directories.

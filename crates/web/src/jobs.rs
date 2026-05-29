@@ -77,6 +77,8 @@ pub struct JobHandle {
     pub status: Mutex<JobStatus>,
     pub history: Mutex<Vec<JobEvent>>,
     pub tx: broadcast::Sender<JobEvent>,
+    /// Set true to request the running job stop at the next loop iteration.
+    pub cancelled: std::sync::atomic::AtomicBool,
 }
 
 impl JobHandle {
@@ -93,7 +95,13 @@ impl JobHandle {
             status: Mutex::new(JobStatus::Running),
             history: Mutex::new(Vec::new()),
             tx,
+            cancelled: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// True if cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

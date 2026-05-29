@@ -247,14 +247,19 @@ impl From<indexa_core::store::TreeNode> for TreeNodeResponse {
 
 // ── Route handlers ────────────────────────────────────────────────────────────
 
-async fn api_tree(
-    State(state): State<AppState>,
-    Query(params): Query<PathQuery>,
-) -> Json<Vec<TreeNodeResponse>> {
+async fn api_tree(State(state): State<AppState>, Query(params): Query<PathQuery>) -> Response {
     let path = params.path.as_deref().unwrap_or("");
     let store = state.store.lock().await;
-    let nodes = store.tree_level(path).unwrap_or_default();
-    Json(nodes.into_iter().map(TreeNodeResponse::from).collect())
+    match store.tree_level(path) {
+        Ok(nodes) => Json(
+            nodes
+                .into_iter()
+                .map(TreeNodeResponse::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
 }
 
 async fn api_summary(State(state): State<AppState>, Query(params): Query<PathQuery>) -> Response {
@@ -420,32 +425,40 @@ async fn api_keys_set(State(state): State<AppState>, Json(body): Json<KeyRequest
     }
 }
 
-async fn api_roots(State(state): State<AppState>) -> Json<Vec<RootResponse>> {
+async fn api_roots(State(state): State<AppState>) -> Response {
     let store = state.store.lock().await;
-    let paths = store.root_paths().unwrap_or_default();
-    Json(
-        paths
-            .into_iter()
-            .map(|p| RootResponse {
-                name: file_name_of(&p),
-                path: p,
-            })
-            .collect(),
-    )
+    match store.root_paths() {
+        Ok(paths) => Json(
+            paths
+                .into_iter()
+                .map(|p| RootResponse {
+                    name: file_name_of(&p),
+                    path: p,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
 }
 
-async fn api_search(
-    State(state): State<AppState>,
-    Query(params): Query<SearchQuery>,
-) -> Json<Vec<TreeNodeResponse>> {
+async fn api_search(State(state): State<AppState>, Query(params): Query<SearchQuery>) -> Response {
     let q = params.q.as_deref().unwrap_or("").trim().to_owned();
     if q.is_empty() {
-        return Json(vec![]);
+        return Json(Vec::<TreeNodeResponse>::new()).into_response();
     }
     let limit = params.limit.unwrap_or(50).min(200);
     let store = state.store.lock().await;
-    let nodes = store.search_paths(&q, limit).unwrap_or_default();
-    Json(nodes.into_iter().map(TreeNodeResponse::from).collect())
+    match store.search_paths(&q, limit) {
+        Ok(nodes) => Json(
+            nodes
+                .into_iter()
+                .map(TreeNodeResponse::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
 }
 
 async fn api_fs_ls(Query(params): Query<PathQuery>) -> Response {
@@ -672,6 +685,19 @@ async fn api_ask(State(state): State<AppState>, Json(body): Json<AskRequest>) ->
         hits
     }; // MutexGuard dropped here — no store reference held across awaits
 
+    // Short-circuit: with no matching chunks the LLM would have zero grounding and
+    // could hallucinate a confident-sounding answer. Tell the user to index instead.
+    if hits.is_empty() {
+        return Json(AskResponse {
+            answer: "No indexed content matched your query. Run `indexa deep` and \
+                     `indexa summarize` on the relevant folder first (or use the ⚡ / 📝 \
+                     actions in the Browse tab), then ask again."
+                .to_owned(),
+            sources: vec![],
+        })
+        .into_response();
+    }
+
     // Step 3: LLM synthesis (async, store lock already released).
     match synthesize_from_hits(hits, state.llm.as_ref(), &body.question, &qa_cfg).await {
         Ok(answer) => Json(AskResponse {
@@ -795,8 +821,20 @@ async fn api_jobs_events(Path(id): Path<Uuid>, State(s): State<AppState>) -> imp
         None => return (StatusCode::NOT_FOUND, "job not found").into_response(),
     };
 
-    let history = handle.history.lock().unwrap().clone();
+    // Subscribe to the live channel FIRST, then snapshot history.  Doing it in this
+    // order guarantees no event is lost in the gap: any event pushed between the two
+    // statements lands in the live stream.  We dedupe the (small) overlap below by
+    // skipping live events whose serialized form already appears at the tail of the
+    // replayed history.
     let rx = handle.tx.subscribe();
+    let history = handle.history.lock().unwrap().clone();
+    // Tail of history used to suppress duplicates that also arrive on the live channel.
+    let history_tail: std::collections::HashSet<String> = history
+        .iter()
+        .rev()
+        .take(8)
+        .filter_map(|ev| serde_json::to_string(ev).ok())
+        .collect();
 
     fn to_sse(ev: JobEvent) -> Result<Event, Infallible> {
         let data = serde_json::to_string(&ev).unwrap_or_default();
@@ -804,16 +842,56 @@ async fn api_jobs_events(Path(id): Path<Uuid>, State(s): State<AppState>) -> imp
     }
 
     let replay = futures_util::stream::iter(history).map(to_sse);
+
+    // Capture a handle clone so that on a Lagged drop we can re-deliver the
+    // terminal event (Done/Failed), which must never be lost to channel overflow.
+    let handle_for_live = handle.clone();
+    // Dedup flag: only suppress history/live overlap during the initial window.
+    let still_deduping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+
     let live = BroadcastStream::new(rx)
-        .map(|r| match r {
-            Ok(ev) => ev,
-            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
-                JobEvent::Warning {
-                    stage: "sse".into(),
-                    item_path: None,
-                    message: format!("dropped {n} events — refresh to resync"),
+        .flat_map(move |r| {
+            use std::sync::atomic::Ordering;
+            let mut out: Vec<JobEvent> = Vec::new();
+            match r {
+                Ok(ev) => {
+                    // Suppress events that already appear in the replayed history tail
+                    // (the small subscribe/snapshot overlap), but stop once we see a
+                    // fresh event so legitimately-repeated events aren't dropped.
+                    if still_deduping.load(Ordering::Relaxed) {
+                        let serialized = serde_json::to_string(&ev).unwrap_or_default();
+                        if history_tail.contains(&serialized) {
+                            return futures_util::stream::iter(out);
+                        }
+                        still_deduping.store(false, Ordering::Relaxed);
+                    }
+                    out.push(ev);
+                }
+                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                    out.push(JobEvent::Warning {
+                        stage: "sse".into(),
+                        item_path: None,
+                        message: format!("dropped {n} events — resyncing"),
+                    });
+                    // A terminal event may have been among the dropped ones. Re-deliver
+                    // it from history so the client always learns the job finished.
+                    let status = handle_for_live.status.lock().unwrap().clone();
+                    if status != JobStatus::Running {
+                        if let Some(term) = handle_for_live
+                            .history
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .rev()
+                            .find(|e| matches!(e, JobEvent::Done { .. } | JobEvent::Failed { .. }))
+                            .cloned()
+                        {
+                            out.push(term);
+                        }
+                    }
                 }
             }
+            futures_util::stream::iter(out)
         })
         .map(to_sse);
 
@@ -844,11 +922,16 @@ async fn api_job_get(Path(id): Path<Uuid>, State(s): State<AppState>) -> impl In
 }
 
 async fn api_job_delete(Path(id): Path<Uuid>, State(s): State<AppState>) -> impl IntoResponse {
-    let mut jobs = s.jobs.write().await;
+    // Request cancellation so the spawned task actually stops its work, rather than
+    // continuing to embed/call the LLM invisibly after being removed from the registry.
+    // We keep the handle in the registry so the running task can still observe the flag
+    // and emit its terminal event; the task's own cleanup removes it, or it ages out.
+    let jobs = s.jobs.read().await;
     if let Some(handle) = jobs.get(&id) {
-        *handle.status.lock().unwrap() = JobStatus::Failed;
+        handle
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    jobs.remove(&id);
     StatusCode::NO_CONTENT
 }
 
@@ -949,6 +1032,17 @@ fn finalize_done(handle: &Arc<JobHandle>, summary: &str) {
         handle,
         JobEvent::Done {
             summary: summary.to_owned(),
+        },
+    );
+    *handle.status.lock().unwrap() = JobStatus::Done;
+}
+
+/// Emit a terminal Done event noting the job was cancelled mid-run.
+fn finalize_cancelled(handle: &Arc<JobHandle>, done: usize) {
+    push(
+        handle,
+        JobEvent::Done {
+            summary: format!("Cancelled after {done} items"),
         },
     );
     *handle.status.lock().unwrap() = JobStatus::Done;
@@ -1215,12 +1309,22 @@ async fn run_deep_phase(
     let mut wdog = WatchdogState::new();
 
     let mut done = 0u64;
-    // Rolling throughput: ring buffer of (instant, items_done) samples, last ~5s.
+    // M5 success tracking: distinguish "nothing to do" from "everything failed".
+    let mut skipped = 0u64; // files already current (legitimate no-op)
+    let mut chunks_written = 0u64; // chunks actually upserted
+    let mut hard_errors = 0u64; // parse/panic/upsert failures
+                                // Rolling throughput: ring buffer of (instant, items_done) samples, last ~5s.
     let mut samples: std::collections::VecDeque<(std::time::Instant, u64)> =
         std::collections::VecDeque::with_capacity(16);
     samples.push_back((std::time::Instant::now(), 0));
 
     for entry in &files {
+        // Honor cancellation requested via DELETE /api/jobs/:id.
+        if handle.is_cancelled() {
+            finalize_cancelled(handle, done as usize);
+            return false;
+        }
+
         let path_str = entry.path.to_string_lossy().into_owned();
 
         let is_current = {
@@ -1228,6 +1332,7 @@ async fn run_deep_phase(
             store.chunks_are_current(&path_str).unwrap_or(false)
         };
         if is_current {
+            skipped += 1;
             done += 1;
         } else {
             let ep = entry.path.clone();
@@ -1245,6 +1350,7 @@ async fn run_deep_phase(
                                 message: format!("{e:#}"),
                             },
                         );
+                        hard_errors += 1;
                         done += 1;
                         continue;
                     }
@@ -1257,6 +1363,7 @@ async fn run_deep_phase(
                                 message: format!("parse task panicked: {e}"),
                             },
                         );
+                        hard_errors += 1;
                         done += 1;
                         continue;
                     }
@@ -1348,15 +1455,19 @@ async fn run_deep_phase(
                     });
                 }
                 let mut store = state.store.lock().await;
-                if let Err(e) = store.upsert_chunks(&chunk_records) {
-                    push(
-                        handle,
-                        JobEvent::Warning {
-                            stage: "deep".to_owned(),
-                            item_path: Some(path_str.clone()),
-                            message: format!("upsert_chunks failed: {e:#}"),
-                        },
-                    );
+                match store.upsert_chunks(&chunk_records) {
+                    Ok(()) => chunks_written += chunk_records.len() as u64,
+                    Err(e) => {
+                        push(
+                            handle,
+                            JobEvent::Warning {
+                                stage: "deep".to_owned(),
+                                item_path: Some(path_str.clone()),
+                                message: format!("upsert_chunks failed: {e:#}"),
+                            },
+                        );
+                        hard_errors += 1;
+                    }
                 }
             }
             done += 1;
@@ -1399,6 +1510,22 @@ async fn run_deep_phase(
                 eta_secs: eta,
             },
         );
+    }
+
+    // M5: if there were files to process but nothing was written and nothing was
+    // already current, and at least one file hard-errored, the phase genuinely
+    // failed — don't let the caller report "complete". (A folder of binary/empty
+    // files that simply yields no chunks is NOT a failure and still returns true.)
+    if !files.is_empty() && chunks_written == 0 && skipped == 0 && hard_errors > 0 {
+        finalize_failed(
+            handle,
+            "deep",
+            &anyhow::anyhow!(
+                "no chunks were indexed — all {} file(s) failed to parse or store",
+                files.len()
+            ),
+        );
+        return false;
     }
 
     true
@@ -1465,6 +1592,12 @@ async fn run_summarize_phase(
     samples.push_back((std::time::Instant::now(), 0));
 
     loop {
+        // Honor cancellation requested via DELETE /api/jobs/:id.
+        if handle.is_cancelled() {
+            finalize_cancelled(handle, done);
+            return;
+        }
+
         let item = match job_store.next_queue_item() {
             Ok(Some(i)) => i,
             Ok(None) => break,

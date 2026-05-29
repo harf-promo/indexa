@@ -82,8 +82,7 @@ async fn main() -> Result<()> {
             embed_model,
             dry_run,
             mode,
-            passes,
-        } => cmd_deep(paths, embed_model, dry_run, mode, passes, &cfg).await,
+        } => cmd_deep(paths, embed_model, dry_run, mode, &cfg).await,
         Commands::Map { depth } => cmd_map(depth).await,
         Commands::Summarize {
             paths,
@@ -172,7 +171,6 @@ async fn cmd_deep(
     embed_model_flag: Option<String>,
     dry_run: bool,
     mode: String,
-    _passes: Option<u32>,
     cfg: &Config,
 ) -> Result<()> {
     let summary_mode = match mode.as_str() {
@@ -551,16 +549,6 @@ async fn cmd_status(show_unknown: bool, cfg: &Config) -> Result<()> {
     let config_path = config::default_config_path().to_string_lossy().into_owned();
 
     println!("Index:    {} ({})", db_path.display(), format_size(db_size));
-
-    // Count files vs dirs
-    let dirs = {
-        let store2 = Store::open(&db_path)?;
-        let all = store2.entry_count()?;
-        // files = entries that are not dirs
-        let _ = all;
-        0u64 // placeholder — we don't track dir vs file count separately in a single query
-    };
-    let _ = dirs;
     println!("Entries:  {entries} total");
     println!(
         "Chunks:   {} ({embedded} embedded with {})",
@@ -568,14 +556,7 @@ async fn cmd_status(show_unknown: bool, cfg: &Config) -> Result<()> {
     );
 
     if let Some(ts) = last_ts {
-        use std::time::{Duration, UNIX_EPOCH};
-        let dt = UNIX_EPOCH + Duration::from_secs(ts as u64);
-        let secs = dt
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        // Simple timestamp formatting without chrono
-        println!("Last indexed: unix timestamp {secs}");
+        println!("Last indexed: {}", format_unix_timestamp(ts));
     }
 
     let summary_count = store.summary_count().unwrap_or(0);
@@ -1177,4 +1158,31 @@ fn format_size(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+/// Format a Unix timestamp (seconds since epoch) as a human-readable UTC datetime
+/// like `2026-05-29 14:32 UTC`. Uses Howard Hinnant's civil-date algorithm so we
+/// avoid pulling in `chrono` just for this one display string.
+fn format_unix_timestamp(ts: i64) -> String {
+    if ts <= 0 {
+        return "unknown".to_owned();
+    }
+    let secs = ts;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (hour, minute) = (rem / 3_600, (rem % 3_600) / 60);
+
+    // Civil-from-days (Hinnant): days since 1970-01-01 → (year, month, day).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if month <= 2 { y + 1 } else { y };
+
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
 }

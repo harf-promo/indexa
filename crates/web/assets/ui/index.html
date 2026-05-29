@@ -49,7 +49,13 @@
   <!-- Content panels — each tab gets its own panel with CSS fade -->
   <main class="app-main">
     <div class="tab-panel" id="panel-tree">
-      <div class="summary-view" id="summary-view"></div>
+      <div class="summary-view" id="summary-view">
+        <div class="welcome" id="browse-welcome">
+          <h2>Browse your context</h2>
+          <p>Click any folder in the sidebar to read its AI-generated summary and contents.<br><br>
+          Use the row actions to <strong>&#x21BB; scan</strong>, <strong>&#x26A1; deep-index</strong>, or <strong>&#x1F4DD; summarize</strong> a folder.</p>
+        </div>
+      </div>
     </div>
     <div class="tab-panel active" id="panel-chat">
       <div class="chat-view" id="chat-view">
@@ -91,7 +97,7 @@
             <button id="pull-btn" onclick="pullModel()">Pull</button>
           </div>
           <div id="pull-progress" class="pull-progress"></div>
-          <p class="settings-note">Models are stored by Ollama. After pulling, update <code>[describer] model</code> in <code>~/.indexa/config.toml</code> to use the new model.</p>
+          <p class="settings-note">Models are stored by Ollama. After pulling, update <code>[describer] model</code> in your config file to use the new model. Run <code>indexa status</code> to see its exact path.</p>
         </div>
         <div class="settings-section">
           <h2>Cloud Provider API Keys</h2>
@@ -121,7 +127,7 @@
               <button class="btn-sm" onclick="clearKey('google')">Clear</button>
             </div>
           </div>
-          <p class="settings-note">Keys are saved to <code>~/.indexa/config.toml</code> (0600 permissions). Restart <code>indexa serve</code> after saving to apply.</p>
+          <p class="settings-note">Keys are saved to your config file with 0600 permissions (run <code>indexa status</code> for its path). Restart <code>indexa serve</code> after saving to apply.</p>
         </div>
         <div class="settings-section">
           <h2>Refinement Passes</h2>

@@ -27,15 +27,24 @@ pub async fn run_worker(
     let headroom = 4 * 1024 * 1024 * 1024_u64;
     let mut wdog = WatchdogState::new();
 
+    // Open a dedicated Store connection owned by this worker so the LLM call below
+    // never holds the shared mutex across an await — that would block every other
+    // reader (e.g. web UI handlers) for the full duration of the LLM round-trip.
+    let db_path = store.lock().await.db_path().to_path_buf();
+    let mut job_store = match Store::open(&db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("worker: failed to open dedicated store connection: {e}");
+            return;
+        }
+    };
+
     loop {
-        let item = {
-            let mut s = store.lock().await;
-            match s.next_queue_item() {
-                Ok(item) => item,
-                Err(e) => {
-                    tracing::warn!("worker: queue poll error: {e}");
-                    None
-                }
+        let item = match job_store.next_queue_item() {
+            Ok(item) => item,
+            Err(e) => {
+                tracing::warn!("worker: queue poll error: {e}");
+                None
             }
         };
 
@@ -72,12 +81,16 @@ pub async fn run_worker(
                     }
                 }
 
-                // The store mutex is held only while fetching the item; release it
-                // before the LLM call so other readers aren't blocked.
-                let mut s = store.lock().await;
-                if let Err(e) =
-                    process_queue_item(&mut s, describer.as_ref(), embedder.as_ref(), &item, &cfg)
-                        .await
+                // Process against the worker's dedicated connection — the shared
+                // `store` mutex is never held across this await.
+                if let Err(e) = process_queue_item(
+                    &mut job_store,
+                    describer.as_ref(),
+                    embedder.as_ref(),
+                    &item,
+                    &cfg,
+                )
+                .await
                 {
                     tracing::warn!("worker: process_queue_item error: {e}");
                 }

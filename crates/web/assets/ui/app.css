@@ -488,94 +488,6 @@ code, kbd, pre, .mono { font-family: var(--font-mono); }
 .modal-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
 .modal-btn:hover:not(.primary) { border-color: var(--accent); color: var(--accent); }
 
-/* ── Jobs dock (fixed bottom-right) ── */
-.jobs-dock {
-  position: fixed;
-  bottom: 16px; right: 16px;
-  width: 360px;
-  max-height: 50vh;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-lg);
-  z-index: 50;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  animation: slideUp 200ms ease-out;
-}
-.jobs-dock-header {
-  padding: 8px 12px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  background: var(--surface-2);
-}
-.jobs-dock-title {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-  color: var(--muted);
-  flex: 1;
-}
-.queue-badge {
-  background: var(--border); border-radius: 10px;
-  padding: 1px 8px; font-size: 10px; color: var(--text);
-  font-family: var(--font-mono);
-}
-.jobs-list { overflow-y: auto; flex: 1; }
-.jobs-dock.collapsed .jobs-list { display: none; }
-.jobs-dock.collapsed { max-height: none; }
-
-/* ── Job row cards ── */
-.job-row {
-  padding: 8px 12px 7px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-.job-row:last-child { border-bottom: none; }
-.job-row-header { display: flex; align-items: center; gap: 6px; }
-.job-kind {
-  font-size: 11px; font-weight: 600; color: var(--accent);
-  font-family: var(--font-mono); width: 62px; flex-shrink: 0;
-}
-.job-label {
-  flex: 1; color: var(--muted); overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; font-size: 12px; font-family: var(--font-mono);
-}
-.job-status { color: var(--muted); font-size: 11px; white-space: nowrap; flex-shrink: 0; }
-.job-status.done { color: var(--green); }
-.job-status.failed { color: var(--red); }
-.job-status.running { animation: pulse 1.5s ease-in-out infinite; color: var(--accent); }
-.job-progress {
-  display: block; width: 100%; height: 3px; margin: 4px 0 3px;
-  accent-color: var(--accent); border-radius: 2px;
-}
-.job-detail {
-  display: flex; justify-content: space-between;
-  font-size: 10px; color: var(--muted); min-height: 14px; gap: 6px;
-}
-.job-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; font-family: var(--font-mono); font-size: 10px; }
-.job-speed { white-space: nowrap; flex-shrink: 0; }
-.job-llm-note { white-space: nowrap; flex-shrink: 0; color: var(--accent); }
-.job-warn-count { white-space: nowrap; flex-shrink: 0; color: var(--orange); font-size: 10px; cursor: default; }
-.job-dismiss { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 13px; padding: 0 2px; flex-shrink: 0; transition: color 100ms; }
-.job-dismiss:hover { color: var(--red); }
-.job-ai-toggle { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 0 2px; flex-shrink: 0; transition: color 100ms; }
-.job-ai-toggle:hover { color: var(--accent); }
-.job-ai-panel { display: none; margin-top: 4px; }
-.job-ai-panel.open { display: block; }
-.job-ai-label { font-size: 10px; color: var(--accent); margin-bottom: 2px; font-family: var(--font-mono); }
-.job-ai-pre {
-  font-size: 10px; font-family: var(--font-mono);
-  background: var(--bg); border: 1px solid var(--border);
-  border-radius: var(--radius-sm); padding: 5px 8px;
-  max-height: 110px; overflow-y: auto; white-space: pre-wrap;
-  word-break: break-word; color: var(--text);
-}
-
 /* ── Toast ── */
 #toast {
   position: fixed; top: 60px; left: 50%; transform: translateX(-50%);
@@ -889,6 +801,3 @@ code, kbd, pre, .mono { font-family: var(--font-mono); }
 }
 .jd-error-msg { font-size: 13px; color: var(--red); margin-bottom: 6px; word-break: break-word; }
 .jd-error-chain-item { font-size: 11px; color: var(--muted); padding: 2px 0; }
-
-/* ── Old dock styles removed — kept for compat only ── */
-.jobs-dock { display: none !important; }

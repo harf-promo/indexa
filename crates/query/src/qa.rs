@@ -128,8 +128,15 @@ fn pack_context(hits: &[SearchHit], budget: usize) -> (String, Vec<SourceCitatio
         if chars_used + chunk.len() > budget {
             let remaining = budget.saturating_sub(chars_used);
             if remaining > header.len() + 40 {
-                let truncated = &chunk[..remaining];
-                context.push_str(truncated);
+                // Walk back to the nearest char boundary so we never slice mid-codepoint
+                // (slicing a String by a raw byte offset panics on any non-ASCII content:
+                // accented chars, CJK, emoji, em-dashes, etc.). `floor_char_boundary` is
+                // still nightly-only, so do it manually with is_char_boundary.
+                let mut safe_end = remaining.min(chunk.len());
+                while safe_end > 0 && !chunk.is_char_boundary(safe_end) {
+                    safe_end -= 1;
+                }
+                context.push_str(&chunk[..safe_end]);
                 context.push_str("...\n\n");
             }
             break;
