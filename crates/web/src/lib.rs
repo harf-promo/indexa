@@ -24,6 +24,7 @@ use axum::{
 use futures_util::StreamExt;
 use indexa_core::{
     config::{self, Config},
+    resource::{assess, detect_machine, MachineSpec, Pressure, WatchdogState},
     store::{ChunkRecord, Store},
     walker::{walk, EntryKind, WalkConfig},
 };
@@ -53,6 +54,8 @@ pub struct AppState {
     log_dir: Arc<std::path::PathBuf>,
     /// Limits concurrent filesystem walks to prevent rayon global-pool starvation.
     walk_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Detected machine spec (RAM, cores, Apple Silicon flag) — used by the watchdog.
+    machine_spec: Arc<MachineSpec>,
 }
 
 // ── API types ─────────────────────────────────────────────────────────────────
@@ -949,6 +952,75 @@ fn finalize_done(handle: &Arc<JobHandle>, summary: &str) {
     *handle.status.lock().unwrap() = JobStatus::Done;
 }
 
+/// Check memory pressure before an Ollama call.
+///
+/// If pressure is Throttle or Critical:
+///   1. Emits a Warning event so the user can see it in the Jobs UI.
+///   2. Sleeps in a loop until pressure returns to Ok.
+///
+/// The caller should invoke this before every embedding or LLM call
+/// in the hot loops of `run_deep_phase` and `run_summarize_phase`.
+async fn run_watchdog_check(
+    wdog: &mut WatchdogState,
+    spec: &MachineSpec,
+    headroom: u64,
+    handle: &Arc<JobHandle>,
+    stage: &str,
+) {
+    let sample = wdog.sample();
+    let pressure = assess(&sample, spec, headroom);
+    if pressure == Pressure::Ok {
+        return;
+    }
+
+    let level = if pressure == Pressure::Critical {
+        "critical"
+    } else {
+        "high"
+    };
+    let free_gb = sample.free_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let swap_gb = sample.swap_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    push(
+        handle,
+        JobEvent::Warning {
+            stage: stage.to_owned(),
+            item_path: None,
+            message: format!(
+                "Memory pressure {level} — pausing to avoid freeze \
+                 (free: {free_gb:.1} GB, swap used: {swap_gb:.1} GB). \
+                 Job will resume automatically."
+            ),
+        },
+    );
+
+    // Wait until pressure clears.
+    let mut ticks = 0u32;
+    loop {
+        let sleep_secs = if pressure == Pressure::Critical { 5 } else { 2 };
+        tokio::time::sleep(tokio::time::Duration::from_secs(sleep_secs)).await;
+        let s = wdog.sample();
+        if assess(&s, spec, headroom) == Pressure::Ok {
+            break;
+        }
+        ticks += 1;
+        // After 30 s, emit a follow-up warning so the user isn't left wondering.
+        if ticks.is_multiple_of(6) {
+            let free_gb = s.free_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            push(
+                handle,
+                JobEvent::Warning {
+                    stage: stage.to_owned(),
+                    item_path: None,
+                    message: format!(
+                        "Still waiting for memory pressure to clear \
+                         (free: {free_gb:.1} GB) …"
+                    ),
+                },
+            );
+        }
+    }
+}
+
 /// Walk a path in a blocking thread; on failure, push the error to the job and return None.
 /// Acquires a permit from `sem` to limit concurrent walks and prevent rayon pool starvation.
 async fn walk_for_job(
@@ -1095,6 +1167,10 @@ async fn run_deep_phase(
 
     let embed_model = state.config.embedding.model.clone();
     let cfg = state.config.describer.clone();
+    let resource_cfg = state.config.resource.clone();
+    let spec = state.machine_spec.clone();
+    let headroom = resource_cfg.effective_headroom_bytes();
+
     // Build a contextual-retrieval LLM if the feature is enabled.
     let ctx_llm: Option<OllamaLlm> = if cfg.contextual_retrieval {
         let base_url = OllamaLlm::resolve_base_url(Some(&cfg.base_url));
@@ -1102,6 +1178,9 @@ async fn run_deep_phase(
     } else {
         None
     };
+
+    // Memory watchdog: checked before each Ollama call.
+    let mut wdog = WatchdogState::new();
 
     let mut done = 0u64;
     // Rolling throughput: ring buffer of (instant, items_done) samples, last ~5s.
@@ -1209,6 +1288,9 @@ async fn run_deep_phase(
                             chunk.text.clone()
                         };
 
+                    // Watchdog: pause if memory is tight before the embed call.
+                    run_watchdog_check(&mut wdog, &spec, headroom, handle, "deep").await;
+
                     let embedding = match state.embedder.embed(&embed_text).await {
                         Ok(v) => Some(v),
                         Err(e) => {
@@ -1307,10 +1389,16 @@ async fn run_summarize_phase(
 
     let db_path = (*state.db_path).clone();
     let cfg = state.config.describer.clone();
+    let resource_cfg = state.config.resource.clone();
+    let spec = state.machine_spec.clone();
+    let headroom = resource_cfg.effective_headroom_bytes();
     let embedder = state.embedder.clone();
     let root = std::path::PathBuf::from(path);
     let base_url = OllamaLlm::resolve_base_url(Some(&cfg.base_url));
     let describer = OllamaLlm::new_with_dir_model(&base_url, &cfg.file_model, &cfg.dir_model);
+
+    // Memory watchdog: checked before each LLM summarization call.
+    let mut wdog = WatchdogState::new();
 
     // Open a dedicated Store connection so we can hold it across async LLM awaits
     // without poisoning the shared mutex-wrapped store used by API handlers.
@@ -1354,6 +1442,10 @@ async fn run_summarize_phase(
             }
         };
         let item_path = item.path.clone();
+
+        // Watchdog: pause if memory is tight before the LLM summarization call.
+        run_watchdog_check(&mut wdog, &spec, headroom, handle, "summarize").await;
+
         let llm_start = std::time::Instant::now();
         let r = process_queue_item_with_passes(
             &mut job_store,
@@ -1444,6 +1536,7 @@ pub async fn serve(
         db_path,
         log_dir,
         walk_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+        machine_spec: Arc::new(detect_machine()),
     };
 
     // Restrict CORS to localhost only — prevents drive-by sites from reading the

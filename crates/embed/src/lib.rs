@@ -35,17 +35,33 @@ pub fn from_config(
     openai_key: Option<&str>,
     google_key: Option<&str>,
 ) -> anyhow::Result<Box<dyn Embedder + Send + Sync>> {
+    from_config_with_keep_alive(provider, model, dim, base_url, openai_key, google_key, None)
+}
+
+/// Like `from_config` but also sets `keep_alive` on Ollama adapters.
+pub fn from_config_with_keep_alive(
+    provider: &str,
+    model: &str,
+    dim: usize,
+    base_url: &str,
+    openai_key: Option<&str>,
+    google_key: Option<&str>,
+    keep_alive: Option<i64>,
+) -> anyhow::Result<Box<dyn Embedder + Send + Sync>> {
     let base = if base_url.is_empty() {
         None
     } else {
         Some(base_url)
     };
     match provider {
-        "ollama" => Ok(Box::new(OllamaEmbedder::new(
-            OllamaEmbedder::resolve_base_url(base),
-            model,
-            dim,
-        ))),
+        "ollama" => {
+            let url = OllamaEmbedder::resolve_base_url(base);
+            let embedder = match keep_alive {
+                Some(ka) => OllamaEmbedder::new_with_keep_alive(url, model, dim, ka),
+                None => OllamaEmbedder::new(url, model, dim),
+            };
+            Ok(Box::new(embedder))
+        }
         "openai" => Ok(Box::new(OpenAIEmbedder::from_env_or_config(
             model, dim, openai_key,
         )?)),

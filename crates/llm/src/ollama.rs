@@ -17,6 +17,9 @@ pub struct OllamaLlm {
     /// Model used for `summarize_dir`; falls back to `model` when None.
     pub(crate) dir_model: Option<String>,
     pub(crate) client: reqwest::Client,
+    /// keep_alive value to send with every request (seconds).
+    /// 0 = unload immediately; -1 = keep forever; None = server default.
+    pub(crate) keep_alive: Option<i64>,
 }
 
 impl OllamaLlm {
@@ -26,6 +29,7 @@ impl OllamaLlm {
             model: model.into(),
             dir_model: None,
             client: reqwest::Client::new(),
+            keep_alive: None,
         }
     }
 
@@ -40,6 +44,23 @@ impl OllamaLlm {
             model: file_model.into(),
             dir_model: Some(dir_model.into()),
             client: reqwest::Client::new(),
+            keep_alive: None,
+        }
+    }
+
+    /// Construct with separate models and an explicit keep_alive (seconds).
+    pub fn new_with_keep_alive(
+        base_url: impl Into<String>,
+        file_model: impl Into<String>,
+        dir_model: Option<String>,
+        keep_alive: i64,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            model: file_model.into(),
+            dir_model,
+            client: reqwest::Client::new(),
+            keep_alive: Some(keep_alive),
         }
     }
 
@@ -58,6 +79,38 @@ impl OllamaLlm {
     fn effective_dir_model(&self) -> &str {
         self.dir_model.as_deref().unwrap_or(&self.model)
     }
+
+    /// Explicitly unload a model from Ollama by sending keep_alive=0.
+    /// Best-effort: errors are logged but not propagated.
+    pub async fn unload(&self, model: &str) {
+        let url = format!("{}/api/generate", self.base_url);
+        let body = serde_json::json!({
+            "model": model,
+            "prompt": "",
+            "stream": false,
+            "keep_alive": 0
+        });
+        if let Err(e) = self.client.post(&url).json(&body).send().await {
+            tracing::warn!("Failed to unload model '{model}' from Ollama: {e}");
+        }
+    }
+
+    /// Unload all models this instance may have loaded (file model + dir model).
+    pub async fn unload_all(&self) {
+        self.unload(&self.model).await;
+        if let Some(ref dm) = self.dir_model {
+            if dm != &self.model {
+                self.unload(dm).await;
+            }
+        }
+    }
+}
+
+/// Generation options forwarded to Ollama.
+#[derive(Serialize)]
+struct GenOptions {
+    /// Lock to 1 parallel slot to prevent KV-cache size multiplication.
+    num_parallel: u32,
 }
 
 #[derive(Serialize)]
@@ -65,6 +118,12 @@ struct Req<'a> {
     model: &'a str,
     prompt: &'a str,
     stream: bool,
+    /// Seconds to keep model loaded after this call (0 = unload immediately).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keep_alive: Option<i64>,
+    /// Inference options: pin num_parallel=1 to avoid KV-cache explosion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<GenOptions>,
 }
 
 #[derive(Deserialize)]
@@ -89,6 +148,8 @@ impl Generator for OllamaLlm {
             model: &self.model,
             prompt,
             stream: false,
+            keep_alive: self.keep_alive,
+            options: Some(GenOptions { num_parallel: 1 }),
         };
 
         let resp = self
@@ -124,6 +185,8 @@ impl Generator for OllamaLlm {
             model: &self.model,
             prompt,
             stream: true,
+            keep_alive: self.keep_alive,
+            options: Some(GenOptions { num_parallel: 1 }),
         };
 
         let resp = self
@@ -247,6 +310,8 @@ impl Describer for OllamaLlm {
             model: &model,
             prompt: &prompt,
             stream: false,
+            keep_alive: self.keep_alive,
+            options: Some(GenOptions { num_parallel: 1 }),
         };
         let resp = self
             .client
