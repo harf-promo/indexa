@@ -308,12 +308,21 @@ impl ResourceProfile {
 
 /// The effective memory budget available for a new model load.
 ///
-/// Uses `min(spec.gpu_wired_limit, sample.free_bytes) - headroom`.
-/// On macOS we use `free_bytes` rather than `available_bytes` because
-/// `available_memory()` is unreliable (see module docs).
+/// Uses `min(spec.gpu_wired_limit, total - used) - headroom`.
+///
+/// We compute available as `total_ram - used_bytes` where `used_bytes` from
+/// sysinfo represents active + wired pages (truly in-use, not reclaimable).
+/// This correctly excludes the ~10-15 GB of inactive file cache that macOS
+/// keeps as reclaimable buffer — that cache is returned to Ollama instantly
+/// when needed.  Using `free_bytes` or `available_bytes` from sysinfo is
+/// unreliable on macOS (sysinfo 0.30 returns 0 for available_memory on macOS).
 pub fn compute_budget(spec: &MachineSpec, sample: &MemSample, headroom: u64) -> i64 {
-    let candidate = spec.gpu_wired_limit_bytes.min(sample.free_bytes);
-    candidate as i64 - headroom as i64
+    // Approximate available = total RAM - actively used (wired + active pages).
+    let truly_available = spec
+        .total_ram_bytes
+        .saturating_sub(sample.used_bytes)
+        .min(spec.gpu_wired_limit_bytes);
+    truly_available as i64 - headroom as i64
 }
 
 /// Check whether all models used by a job fit within the current budget.
@@ -358,25 +367,35 @@ pub enum Pressure {
     Critical,
 }
 
-/// Assess current memory pressure.
+/// Assess current memory pressure for the watchdog.
 ///
-/// Triggers on **swap growth** and **low free pages**, not on "available"
-/// memory, because `sysinfo::available_memory()` is unreliable on macOS.
-pub fn assess(sample: &MemSample, spec: &MachineSpec, headroom: u64) -> Pressure {
-    let budget = compute_budget(spec, sample, headroom);
-
-    // Swap in use is the primary freeze predictor on macOS.
+/// **The only reliable freeze signal on macOS is swap usage.**
+///
+/// On macOS, `free_memory` is near-permanently low (0.3–2.5 GB) because the
+/// OS fills all free RAM with reclaimable file cache — this is by design and
+/// does NOT indicate pressure. Budget checks using free pages cause false
+/// positives that stall jobs on perfectly healthy machines. Only swap growth
+/// means the OS genuinely cannot satisfy allocations without thrashing.
+///
+/// `spec` and `headroom` are accepted for API compatibility but not used here;
+/// use `compute_budget` for model-fit pre-flight checks instead.
+pub fn assess(sample: &MemSample, _spec: &MachineSpec, _headroom: u64) -> Pressure {
+    // Swap in use is the primary (and on macOS, only reliable) freeze signal.
     let swap_fraction = if sample.swap_total_bytes > 0 {
         sample.swap_used_bytes as f64 / sample.swap_total_bytes as f64
     } else {
-        0.0
+        // No swap configured — treat any non-zero swap used as pressure.
+        if sample.swap_used_bytes > 0 {
+            1.0
+        } else {
+            0.0
+        }
     };
 
-    if swap_fraction > 0.5 || budget < 0 {
+    if swap_fraction > 0.5 {
         return Pressure::Critical;
     }
-
-    if swap_fraction > 0.2 || budget < (2_u64 * 1024 * 1024 * 1024) as i64 {
+    if swap_fraction > 0.2 {
         return Pressure::Throttle;
     }
 
@@ -510,7 +529,24 @@ mod tests {
         MemSample {
             free_bytes: free_gb * 1024 * 1024 * 1024,
             available_bytes: free_gb * 1024 * 1024 * 1024,
-            used_bytes: 0,
+            // Simulate used memory as total - free (so budget = total - used = free)
+            // This is used for compute_budget which uses total - used_bytes.
+            used_bytes: 0, // callers that care about budget set used_bytes explicitly
+            swap_used_bytes: swap_used_mb * 1024 * 1024,
+            swap_total_bytes: swap_total_mb * 1024 * 1024,
+        }
+    }
+
+    fn fake_sample_with_used(
+        free_gb: u64,
+        used_gb: u64,
+        swap_used_mb: u64,
+        swap_total_mb: u64,
+    ) -> MemSample {
+        MemSample {
+            free_bytes: free_gb * 1024 * 1024 * 1024,
+            available_bytes: free_gb * 1024 * 1024 * 1024,
+            used_bytes: used_gb * 1024 * 1024 * 1024,
             swap_used_bytes: swap_used_mb * 1024 * 1024,
             swap_total_bytes: swap_total_mb * 1024 * 1024,
         }
@@ -519,16 +555,18 @@ mod tests {
     #[test]
     fn gemma3_4b_fits_on_36gb_balanced() {
         let spec = fake_spec(36, true);
-        let sample = fake_sample(20, 0, 2048);
+        // 16 GB used → total - used = 20 GB → budget = 20 - 5 = 15 GB → fits
+        let sample = fake_sample_with_used(1, 16, 0, 2048);
         let headroom = ResourceProfile::Balanced.headroom_bytes();
         assert!(check_models_fit(&["gemma3:4b"], &spec, &sample, headroom).is_ok());
     }
 
     #[test]
-    fn model_doesnt_fit_when_free_too_low() {
+    fn model_doesnt_fit_when_active_memory_too_high() {
         let spec = fake_spec(36, true);
-        // Only 1 GB free — can't fit gemma3:12b (needs ~9+ GB)
-        let sample = fake_sample(1, 0, 2048);
+        // 34 GB actively used → total - used = 2 GB → budget = 2 - 5 = -3 GB
+        // gemma3:12b needs ~9 GB → doesn't fit
+        let sample = fake_sample_with_used(0, 34, 0, 2048);
         let headroom = ResourceProfile::Balanced.headroom_bytes();
         let result = check_models_fit(&["gemma3:12b"], &spec, &sample, headroom);
         assert!(result.is_err());

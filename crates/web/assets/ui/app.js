@@ -73,7 +73,7 @@ async function loadTreeLevel(parentPath, container) {
 async function fireJob(kind, path) {
   const r = await fetch('/api/jobs/' + kind + '?path=' + encodeURIComponent(path), { method: 'POST' });
   const d = await r.json();
-  subscribeJob(d.job_id, path);
+  subscribeJob(d.job_id, path, kind);
   // Switch to jobs tab so user can watch progress
   switchTab('jobs');
 }
@@ -294,12 +294,12 @@ function _removeActiveJob(jobId) {
 }
 
 /* ── Subscribe to a job's SSE stream ── */
-function subscribeJob(jobId, path) {
+function subscribeJob(jobId, path, kind) {
   if (!activeJobs[jobId]) {
     activeJobs[jobId] = {
       es: null, _retries: 0,
       status: 'running',
-      kind: '?', path: path || jobId, startedAt: Date.now(),
+      kind: kind || '?', path: path || jobId, startedAt: Date.now(),
       snapshot: null, lastProgress: null,
       warnings: [], warningOverflow: 0, stageCounts: {},
       llm: { path: null, label: '', text: '' },
@@ -418,7 +418,11 @@ async function reconnectInFlightJobs() {
     const jobs = await r.json();
     jobs.forEach(function(j) {
       if (j.status === 'running' || j.status === 'done' || j.status === 'failed') {
-        if (!activeJobs[j.job_id]) subscribeJob(j.job_id, j.path);
+        if (!activeJobs[j.job_id]) {
+          subscribeJob(j.job_id, j.path, j.kind);
+          // Seed the known status from the server so we don't flicker to 'running'
+          if (activeJobs[j.job_id]) activeJobs[j.job_id].status = j.status;
+        }
       }
     });
     Object.keys(lsJobs).forEach(function(id) {
@@ -487,9 +491,14 @@ function renderJobsPage() {
 
   if (empty) empty.hidden = visible.length > 0;
 
-  // Remove cards that are no longer visible
+  // Build set of visible jobIds for O(1) lookup below.
+  var visibleIds = new Set(visible.map(function(j) {
+    return Object.keys(activeJobs).find(function(id) { return activeJobs[id] === j; });
+  }).filter(Boolean));
+
+  // Remove cards for jobs that are deleted OR filtered out.
   masterList.querySelectorAll('.jobs-card').forEach(function(card) {
-    if (!activeJobs[card.dataset.jobId]) card.remove();
+    if (!visibleIds.has(card.dataset.jobId)) card.remove();
   });
 
   visible.forEach(function(j) {
@@ -506,14 +515,17 @@ function renderJobsPage() {
     _renderCardContent(card, jobId, j);
   });
 
-  // Auto-select first running job if nothing selected
-  if (!selectedJobId || !activeJobs[selectedJobId]) {
-    const running = Object.keys(activeJobs).find(function(id) { return activeJobs[id].status === 'running'; });
-    if (running) { selectJob(running); }
-    else if (Object.keys(activeJobs).length > 0 && !selectedJobId) {
-      selectJob(Object.keys(activeJobs)[0]);
-    } else {
-      // No jobs → show placeholder
+  // Auto-select: prefer a running job that matches the current filter.
+  if (!selectedJobId || !activeJobs[selectedJobId] || !visibleIds.has(selectedJobId)) {
+    const firstVisible = visibleIds.size > 0 ? visibleIds.values().next().value : null;
+    const running = [...visibleIds].find(function(id) {
+      var j = activeJobs[id];
+      return j && (j.status === 'running' || j.status === 'reconnecting');
+    });
+    const toSelect = running || firstVisible;
+    if (toSelect) { selectJob(toSelect); }
+    else {
+      // No visible jobs → show placeholder
       const content = document.getElementById('jd-content');
       const placeholder = document.getElementById('jd-placeholder');
       if (content) content.hidden = true;
@@ -1020,24 +1032,29 @@ async function savePasses() {
   }
 }
 
-/* ── Queue badge ── */
+/* ── Queue stats (shown in Jobs tab) ── */
 async function pollQueue() {
   try {
     const r = await fetch('/api/queue');
     const d = await r.json();
-    const badge = document.getElementById('queue-badge');
-    if (!badge) return;
+    // Update the Jobs tab queue row (if visible)
+    const queueEl = document.getElementById('jobs-queue-stats');
+    if (!queueEl) return;
     const total = d.pending + d.in_flight + d.failed;
-    if (total === 0) { badge.style.display = 'none'; return; }
-    badge.style.display = '';
-    let parts = [];
-    if (d.pending > 0) parts.push(d.pending + ' pending');
+    if (total === 0) {
+      queueEl.textContent = 'Summary queue: idle';
+      queueEl.style.color = 'var(--muted)';
+      return;
+    }
+    var parts = [];
+    if (d.pending > 0) parts.push(d.pending.toLocaleString() + ' pending');
     if (d.in_flight > 0) parts.push(d.in_flight + ' running');
     if (d.failed > 0) parts.push(d.failed + ' failed');
-    badge.textContent = parts.join(' \xb7 ');
+    queueEl.textContent = 'Summary queue: ' + parts.join(' \xb7 ');
+    queueEl.style.color = d.failed > 0 ? 'var(--red)' : d.in_flight > 0 ? 'var(--accent)' : 'var(--muted)';
   } catch(_) {}
 }
-setInterval(pollQueue, 3000);
+setInterval(pollQueue, 5000);
 pollQueue();
 
 /* ── Map view ── */

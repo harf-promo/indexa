@@ -11,6 +11,17 @@ pub const DEFAULT_FILE_MODEL: &str = "gemma3:4b";
 
 const DEFAULT_BASE: &str = "http://localhost:11434";
 
+/// Timeout for LLM generate requests.
+/// 3 minutes is generous even for a slow local model on a large file.
+const LLM_TIMEOUT_SECS: u64 = 180;
+
+fn ollama_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(LLM_TIMEOUT_SECS))
+        .build()
+        .unwrap_or_default()
+}
+
 pub struct OllamaLlm {
     pub(crate) base_url: String,
     pub(crate) model: String,
@@ -28,7 +39,7 @@ impl OllamaLlm {
             base_url: base_url.into(),
             model: model.into(),
             dir_model: None,
-            client: reqwest::Client::new(),
+            client: ollama_client(),
             keep_alive: None,
         }
     }
@@ -43,7 +54,7 @@ impl OllamaLlm {
             base_url: base_url.into(),
             model: file_model.into(),
             dir_model: Some(dir_model.into()),
-            client: reqwest::Client::new(),
+            client: ollama_client(),
             keep_alive: None,
         }
     }
@@ -59,7 +70,7 @@ impl OllamaLlm {
             base_url: base_url.into(),
             model: file_model.into(),
             dir_model,
-            client: reqwest::Client::new(),
+            client: ollama_client(),
             keep_alive: Some(keep_alive),
         }
     }

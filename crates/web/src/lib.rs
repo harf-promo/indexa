@@ -980,42 +980,72 @@ async fn run_watchdog_check(
     } else {
         "high"
     };
-    let free_gb = sample.free_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     let swap_gb = sample.swap_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let swap_pct = sample
+        .swap_used_bytes
+        .checked_mul(100)
+        .and_then(|v| v.checked_div(sample.swap_total_bytes))
+        .unwrap_or(100);
     push(
         handle,
         JobEvent::Warning {
             stage: stage.to_owned(),
             item_path: None,
             message: format!(
-                "Memory pressure {level} — pausing to avoid freeze \
-                 (free: {free_gb:.1} GB, swap used: {swap_gb:.1} GB). \
-                 Job will resume automatically."
+                "Memory pressure {level} — swap at {swap_pct}% ({swap_gb:.1} GB used). \
+                 Pausing to avoid freeze. Job will resume automatically."
             ),
         },
     );
 
-    // Wait until pressure clears.
+    // Wait until pressure clears, with a hard maximum of ~5 minutes.
+    // Each tick is 5 s for Critical, 2 s for Throttle.
+    // Max ticks: 60 × 5 s = 300 s = 5 min (Critical); 150 × 2 s = 300 s (Throttle).
+    const MAX_TICKS: u32 = 60;
     let mut ticks = 0u32;
     loop {
         let sleep_secs = if pressure == Pressure::Critical { 5 } else { 2 };
         tokio::time::sleep(tokio::time::Duration::from_secs(sleep_secs)).await;
+        ticks += 1;
+
         let s = wdog.sample();
         if assess(&s, spec, headroom) == Pressure::Ok {
             break;
         }
-        ticks += 1;
-        // After 30 s, emit a follow-up warning so the user isn't left wondering.
+
+        // Hard timeout: give up and let the job attempt to proceed anyway.
+        if ticks >= MAX_TICKS {
+            push(
+                handle,
+                JobEvent::Warning {
+                    stage: stage.to_owned(),
+                    item_path: None,
+                    message: "Memory pressure did not clear after 5 minutes — \
+                              proceeding anyway. Consider closing other apps or \
+                              setting a lower headroom in [resource] config."
+                        .to_owned(),
+                },
+            );
+            break;
+        }
+
+        // Every 30 s emit a follow-up so the user isn't left wondering.
         if ticks.is_multiple_of(6) {
-            let free_gb = s.free_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            let swap_gb = s.swap_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            let swap_pct = s
+                .swap_used_bytes
+                .checked_mul(100)
+                .and_then(|v| v.checked_div(s.swap_total_bytes))
+                .unwrap_or(100);
             push(
                 handle,
                 JobEvent::Warning {
                     stage: stage.to_owned(),
                     item_path: None,
                     message: format!(
-                        "Still waiting for memory pressure to clear \
-                         (free: {free_gb:.1} GB) …"
+                        "Still waiting for swap to clear (swap: {swap_pct}% / {swap_gb:.1} GB) \
+                         — {}/{MAX_TICKS} checks …",
+                        ticks
                     ),
                 },
             );

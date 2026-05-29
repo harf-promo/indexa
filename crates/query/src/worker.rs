@@ -46,24 +46,27 @@ pub async fn run_worker(
             }
             Some(item) => {
                 // Watchdog: check memory pressure before the LLM call.
+                // Hard timeout: max 100 × 3 s = ~5 min to avoid infinite pause.
                 let sample = wdog.sample();
                 let pressure = assess(&sample, &spec, headroom);
                 if pressure != Pressure::Ok {
-                    let level = if pressure == Pressure::Critical {
-                        "critical"
-                    } else {
-                        "high"
-                    };
-                    let free_gb = sample.free_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                    let avail_gb = sample.available_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
                     let swap_gb = sample.swap_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
                     tracing::warn!(
-                        "worker: memory pressure {level} — pausing \
-                         (free: {free_gb:.1} GB, swap: {swap_gb:.1} GB)"
+                        "worker: memory pressure — pausing \
+                         (available: {avail_gb:.1} GB, swap: {swap_gb:.1} GB)"
                     );
-                    // Pause until pressure clears.
+                    let mut ticks = 0u32;
                     loop {
                         tokio::time::sleep(Duration::from_secs(3)).await;
+                        ticks += 1;
                         if assess(&wdog.sample(), &spec, headroom) == Pressure::Ok {
+                            break;
+                        }
+                        if ticks >= 100 {
+                            tracing::warn!(
+                                "worker: memory pressure did not clear after 5 min — proceeding"
+                            );
                             break;
                         }
                     }

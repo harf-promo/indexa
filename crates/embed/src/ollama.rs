@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_MODEL: &str = "nomic-embed-text";
 pub const DEFAULT_DIM: usize = 768;
 
+/// Timeout for embedding requests. Embeddings are fast; 30 s is generous.
+const EMBED_TIMEOUT_SECS: u64 = 30;
+
 pub struct OllamaEmbedder {
     base_url: String,
     model: String,
@@ -25,7 +28,10 @@ impl OllamaEmbedder {
             base_url: base_url.into(),
             model: model.into(),
             dim,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(EMBED_TIMEOUT_SECS))
+                .build()
+                .unwrap_or_default(),
             keep_alive: None,
         }
     }
@@ -42,7 +48,10 @@ impl OllamaEmbedder {
             base_url: base_url.into(),
             model: model.into(),
             dim,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(EMBED_TIMEOUT_SECS))
+                .build()
+                .unwrap_or_default(),
             keep_alive: Some(keep_alive),
         }
     }

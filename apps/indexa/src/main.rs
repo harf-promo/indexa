@@ -876,11 +876,15 @@ async fn cmd_doctor(
 
     let total_gb = spec.total_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     let free_gb = sample.free_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    // "Reclaimable" = total - actively used (wired+active); macOS's inactive file
+    // cache is reclaimable instantly so it counts as available for new allocations.
+    let reclaimable_gb = (spec.total_ram_bytes.saturating_sub(sample.used_bytes)) as f64
+        / (1024.0 * 1024.0 * 1024.0);
     let wired_limit_gb = spec.gpu_wired_limit_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     let headroom_gb = profile.headroom_bytes() as f64 / (1024.0 * 1024.0 * 1024.0);
-    let budget_gb = (spec.gpu_wired_limit_bytes.min(sample.free_bytes) as f64
-        / (1024.0 * 1024.0 * 1024.0))
-        - headroom_gb;
+    use indexa_core::resource::compute_budget;
+    let budget_gb = compute_budget(&spec, &sample, profile.headroom_bytes()) as f64
+        / (1024.0 * 1024.0 * 1024.0);
 
     println!("╔══════════════════════════════════════════════════════════╗");
     println!("║              indexa doctor — machine profile             ║");
@@ -894,7 +898,9 @@ async fn cmd_doctor(
     } else {
         println!("  Arch   x86-64 / non-Apple");
     }
-    println!("  RAM    {total_gb:.0} GB total   {free_gb:.1} GB free right now");
+    // Show reclaimable (total − wired/active) alongside truly-free pages.
+    // macOS keeps inactive file cache in "free-looking" RAM; only swap = real pressure.
+    println!("  RAM    {total_gb:.0} GB total   {reclaimable_gb:.1} GB reclaimable  ({free_gb:.1} GB truly free)");
     println!(
         "  CPU    {} physical cores, {} logical threads",
         spec.physical_cores, spec.logical_cores
