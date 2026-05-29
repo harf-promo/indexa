@@ -1177,9 +1177,19 @@ async fn run_index_job(state: AppState, path: String, handle: Arc<JobHandle>) {
     if !run_scan_phase_with_entries(&state, &path, &entries, &handle).await {
         return;
     }
+    // Cancellation requested during/after scan — stop before the expensive phases.
+    if handle.is_cancelled() {
+        finalize_cancelled(&handle, 0);
+        return;
+    }
 
-    // Phase 2: deep index
+    // Phase 2: deep index (its own loop also honors cancellation and emits the
+    // terminal event, in which case it returns false and we just stop here).
     if !run_deep_phase(&state, &path, &entries, &handle).await {
+        return;
+    }
+    if handle.is_cancelled() {
+        finalize_cancelled(&handle, 0);
         return;
     }
 

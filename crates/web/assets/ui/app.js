@@ -122,7 +122,7 @@ function buildTreeNode(node) {
       const act = btn.dataset.act;
       if (act === 'remove') {
         const label = node.path.split('/').pop() || node.path;
-        if (!confirm('Remove ‹' + label + '› from the index?\nFiles on disk are not deleted.')) return;
+        if (!(await confirmModal('Remove ‹' + label + '› from the index?\nFiles on disk are not deleted.', 'Remove'))) return;
         try {
           await fetch('/api/entry?path=' + encodeURIComponent(node.path), { method: 'DELETE' });
           expandedPaths.delete(node.path);
@@ -1248,6 +1248,41 @@ function toast(msg, level) {
   container.appendChild(el);
   setTimeout(function() { if (el.parentElement) el.remove(); }, 4000);
 }
+
+/* In-app confirmation modal — returns a Promise<bool>. Replaces native confirm(),
+   which blocks the event loop and freezes headless/automated browser sessions. */
+function confirmModal(message, confirmLabel) {
+  return new Promise(function(resolve) {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay confirm-overlay';
+    overlay.style.display = 'flex';
+    const safeMsg = escapeHtml(message).replace(/\n/g, '<br>');
+    overlay.innerHTML =
+      '<div class="modal confirm-modal" role="dialog" aria-modal="true">' +
+        '<div class="confirm-msg">' + safeMsg + '</div>' +
+        '<div class="modal-actions">' +
+          '<button class="modal-btn" data-act="cancel">Cancel</button>' +
+          '<button class="modal-btn primary" data-act="ok">' + escapeHtml(confirmLabel || 'Confirm') + '</button>' +
+        '</div>' +
+      '</div>';
+    function close(result) {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      document.removeEventListener('keydown', onKey);
+      resolve(result);
+    }
+    function onKey(e) {
+      if (e.key === 'Escape') close(false);
+      else if (e.key === 'Enter') close(true);
+    }
+    overlay.querySelector('[data-act="cancel"]').onclick = function() { close(false); };
+    overlay.querySelector('[data-act="ok"]').onclick = function() { close(true); };
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) close(false); });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+    const okBtn = overlay.querySelector('[data-act="ok"]');
+    if (okBtn) okBtn.focus();
+  });
+}
 function escapeHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
@@ -1363,7 +1398,7 @@ async function reindexAll() {
     const r = await fetch('/api/roots');
     const roots = await r.json();
     if (!roots.length) { toast('No indexed roots yet.', 'warn'); return; }
-    if (!confirm('Re-index ' + roots.length + ' root(s) with deep scan?')) return;
+    if (!(await confirmModal('Re-index ' + roots.length + ' root(s) with a deep scan?', 'Re-index'))) return;
     for (const root of roots) { await fireJob('deep', root.path); }
   } catch(e) { toast('Failed: ' + e.message, 'error'); }
 }

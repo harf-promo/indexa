@@ -473,6 +473,9 @@ code, kbd, pre, .mono { font-family: var(--font-mono); }
   animation: slideUp 180ms ease-out;
 }
 .modal h2 { font-size: 15px; font-weight: 600; margin-bottom: 16px; }
+/* In-app confirm dialog (replaces native confirm()) */
+.confirm-modal { width: 420px; }
+.confirm-msg { font-size: 14px; line-height: 1.6; color: var(--text); margin-bottom: 18px; }
 .modal .path-row { display: flex; gap: 8px; margin-bottom: 8px; }
 .modal .path-row input {
   flex: 1; background: var(--bg); border: 1px solid var(--border);
