@@ -231,6 +231,28 @@ pub enum Commands {
         #[arg(short, long)]
         recursive: bool,
     },
+
+    /// Detect your machine's specs, recommend AI models, and estimate job times.
+    ///
+    /// Run this before your first deep/summarize job to understand what Indexa
+    /// will do with your hardware and how long it will take.
+    #[command(after_help = "Examples:
+  indexa doctor
+  indexa doctor --profile conservative
+  indexa doctor --files 500 --chunks 2000")]
+    Doctor {
+        /// Resource profile to evaluate: conservative, balanced (default), performance.
+        #[arg(long, default_value = "balanced")]
+        profile: String,
+
+        /// Estimated number of files for ETA calculation (overrides detection).
+        #[arg(long)]
+        files: Option<usize>,
+
+        /// Estimated number of embedding chunks for ETA calculation.
+        #[arg(long)]
+        chunks: Option<usize>,
+    },
 }
 
 #[cfg(test)]

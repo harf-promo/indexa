@@ -60,3 +60,6 @@ shellexpand = "3"
 
 # Config file parsing
 toml = "0.8"
+
+# System resource detection
+sysinfo = { version = "0.30" }

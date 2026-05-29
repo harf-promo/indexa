@@ -75,16 +75,32 @@ pub fn from_config(
     openai_key: Option<&str>,
     anthropic_key: Option<&str>,
 ) -> anyhow::Result<Box<dyn Generator + Send + Sync>> {
+    from_config_with_keep_alive(provider, model, base_url, openai_key, anthropic_key, None)
+}
+
+/// Like `from_config` but also sets `keep_alive` on Ollama adapters.
+pub fn from_config_with_keep_alive(
+    provider: &str,
+    model: &str,
+    base_url: &str,
+    openai_key: Option<&str>,
+    anthropic_key: Option<&str>,
+    keep_alive: Option<i64>,
+) -> anyhow::Result<Box<dyn Generator + Send + Sync>> {
     let base = if base_url.is_empty() {
         None
     } else {
         Some(base_url)
     };
     match provider {
-        "ollama" => Ok(Box::new(OllamaLlm::new(
-            OllamaLlm::resolve_base_url(base),
-            model,
-        ))),
+        "ollama" => {
+            let url = OllamaLlm::resolve_base_url(base);
+            let llm = match keep_alive {
+                Some(ka) => OllamaLlm::new_with_keep_alive(url, model, None, ka),
+                None => OllamaLlm::new(url, model),
+            };
+            Ok(Box::new(llm))
+        }
         "openai" => Ok(Box::new(OpenAICompatLlm::from_env_or_config(
             model, openai_key,
         )?)),
