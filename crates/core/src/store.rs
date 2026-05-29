@@ -23,24 +23,64 @@ fn blob_to_embedding(b: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// Derive an L0 one-line abstract from a fuller (L1) summary: the first sentence,
+/// truncated to ~120 chars on a char boundary. Used both when writing new summaries
+/// and as a lazy fallback for rows stored before tiered summaries existed.
+pub fn abstract_from(summary: &str) -> String {
+    let trimmed = summary.trim();
+    // First sentence: up to the first '. ', '! ', '? ', or newline.
+    let end = trimmed
+        .char_indices()
+        .find(|(i, c)| {
+            matches!(c, '.' | '!' | '?')
+                && trimmed[i + c.len_utf8()..]
+                    .chars()
+                    .next()
+                    .map(|n| n.is_whitespace())
+                    .unwrap_or(true)
+        })
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(trimmed.len());
+    let first = trimmed[..end].trim();
+    // Cap length on a char boundary.
+    const MAX: usize = 120;
+    if first.len() <= MAX {
+        return first.to_owned();
+    }
+    let mut cut = MAX;
+    while cut > 0 && !first.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…", first[..cut].trim_end())
+}
+
 // ── Private row mappers ───────────────────────────────────────────────────────
 
 /// Map a row from the `summaries` table (in the canonical column order used by
 /// `summary_by_path` and `children_summaries`) into a `SummaryRecord`.
+/// Column order: path, kind, parent_path, depth, summary, summary_l0, embedding,
+/// child_count, byte_size, model, source_hash, generated_at.
 fn row_to_summary(r: &Row) -> rusqlite::Result<SummaryRecord> {
-    let blob: Option<Vec<u8>> = r.get(5)?;
+    let summary: String = r.get(4)?;
+    // Lazily derive L0 for rows written before the summary_l0 column existed.
+    let summary_l0: Option<String> = r
+        .get::<_, Option<String>>(5)?
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| Some(abstract_from(&summary)));
+    let blob: Option<Vec<u8>> = r.get(6)?;
     Ok(SummaryRecord {
         path: r.get(0)?,
         kind: r.get(1)?,
         parent_path: r.get(2)?,
         depth: r.get(3)?,
-        summary: r.get(4)?,
+        summary,
+        summary_l0,
         embedding: blob.map(|b| blob_to_embedding(&b)),
-        child_count: r.get(6)?,
-        byte_size: r.get(7)?,
-        model: r.get(8)?,
-        source_hash: r.get(9)?,
-        generated_at: r.get(10)?,
+        child_count: r.get(7)?,
+        byte_size: r.get(8)?,
+        model: r.get(9)?,
+        source_hash: r.get(10)?,
+        generated_at: r.get(11)?,
     })
 }
 
@@ -186,6 +226,7 @@ impl Store {
                 parent_path   TEXT,
                 depth         INTEGER NOT NULL DEFAULT 0,
                 summary       TEXT NOT NULL,
+                summary_l0    TEXT,
                 embedding     BLOB,
                 child_count   INTEGER NOT NULL DEFAULT 0,
                 byte_size     INTEGER NOT NULL DEFAULT 0,
@@ -212,6 +253,19 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_summary_queue_state ON summary_queue(state);
             ",
         )?;
+
+        // Migration: add summaries.summary_l0 (L0 one-line abstract) to databases
+        // created before tiered summaries existed. SQLite has no ADD COLUMN IF NOT
+        // EXISTS, so we check table_info first and ignore if already present.
+        let has_l0: bool = self
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('summaries') WHERE name = 'summary_l0'")?
+            .exists([])?;
+        if !has_l0 {
+            self.conn
+                .execute_batch("ALTER TABLE summaries ADD COLUMN summary_l0 TEXT;")?;
+        }
+
         Ok(())
     }
 
@@ -642,17 +696,23 @@ impl Store {
     /// Insert or replace a summary row.
     pub fn upsert_summary(&mut self, record: &SummaryRecord) -> Result<()> {
         let embedding_blob = record.embedding.as_deref().map(embedding_to_blob);
+        // Always persist an L0 abstract: use the provided one, else derive from L1.
+        let l0 = record
+            .summary_l0
+            .clone()
+            .unwrap_or_else(|| abstract_from(&record.summary));
         self.conn.execute(
             "INSERT OR REPLACE INTO summaries
-             (path, kind, parent_path, depth, summary, embedding,
+             (path, kind, parent_path, depth, summary, summary_l0, embedding,
               child_count, byte_size, model, source_hash, generated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
                 record.path,
                 record.kind,
                 record.parent_path,
                 record.depth,
                 record.summary,
+                l0,
                 embedding_blob,
                 record.child_count,
                 record.byte_size,
@@ -667,7 +727,7 @@ impl Store {
     /// Look up a single summary row by exact path.
     pub fn summary_by_path(&self, path: &str) -> Result<Option<SummaryRecord>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT path, kind, parent_path, depth, summary, embedding,
+            "SELECT path, kind, parent_path, depth, summary, summary_l0, embedding,
                     child_count, byte_size, model, source_hash, generated_at
              FROM summaries WHERE path = ?1",
         )?;
@@ -679,7 +739,7 @@ impl Store {
     /// All summary rows whose parent_path == given path (direct children).
     pub fn children_summaries(&self, parent_path: &str) -> Result<Vec<SummaryRecord>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT path, kind, parent_path, depth, summary, embedding,
+            "SELECT path, kind, parent_path, depth, summary, summary_l0, embedding,
                     child_count, byte_size, model, source_hash, generated_at
              FROM summaries WHERE parent_path = ?1 ORDER BY kind DESC, path",
         )?;
@@ -1051,7 +1111,11 @@ pub struct SummaryRecord {
     pub kind: String,
     pub parent_path: Option<String>,
     pub depth: i64,
+    /// L1 — the full 1–4 sentence summary.
     pub summary: String,
+    /// L0 — a one-line abstract (first sentence of `summary`), for cheap scanning.
+    /// `None` on rows written before tiered summaries; readers derive it on the fly.
+    pub summary_l0: Option<String>,
     pub embedding: Option<Vec<f32>>,
     pub child_count: i64,
     pub byte_size: i64,
@@ -1337,6 +1401,7 @@ mod tests {
             parent_path: parent.map(|s| s.to_owned()),
             depth,
             summary: format!("summary of {path}"),
+            summary_l0: None,
             embedding: None,
             child_count: 0,
             byte_size: 100,
@@ -1356,6 +1421,27 @@ mod tests {
         let got = store.summary_by_path("/docs/file.txt").unwrap().unwrap();
         assert_eq!(got.kind, "file");
         assert_eq!(got.summary, "summary of /docs/file.txt");
+        // upsert_summary derives and persists an L0 abstract even when the record
+        // was constructed with summary_l0 = None.
+        assert_eq!(got.summary_l0.as_deref(), Some("summary of /docs/file.txt"));
+    }
+
+    #[test]
+    fn abstract_from_takes_first_sentence_and_caps_length() {
+        // First sentence only.
+        assert_eq!(
+            abstract_from("This is the gist. More detail follows here."),
+            "This is the gist."
+        );
+        // No sentence terminator → whole (short) string.
+        assert_eq!(abstract_from("Just a label"), "Just a label");
+        // Long single sentence is truncated with an ellipsis on a char boundary.
+        let long = "x".repeat(200);
+        let got = abstract_from(&long);
+        assert!(got.ends_with('…'));
+        assert!(got.chars().count() <= 121);
+        // Does not panic on multibyte content.
+        let _ = abstract_from("Café déjà vu — 日本語 résumé. second");
     }
 
     #[test]

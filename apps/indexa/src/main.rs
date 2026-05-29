@@ -697,6 +697,9 @@ async fn cmd_describe(path: String) -> Result<()> {
             println!("{kind_icon} {expanded}");
             println!("  Model:  {}", rec.model);
             println!("  Kind:   {}", rec.kind);
+            if let Some(ref abstract_) = rec.summary_l0 {
+                println!("  Abstract: {abstract_}");
+            }
             println!();
             println!("{}", rec.summary);
 

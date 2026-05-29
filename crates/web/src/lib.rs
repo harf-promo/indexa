@@ -90,6 +90,8 @@ struct SummaryChildResponse {
     path: String,
     name: String,
     kind: String,
+    #[serde(rename = "abstract")]
+    abstract_: String,
     summary: String,
     summary_state: Option<String>,
 }
@@ -105,6 +107,8 @@ struct BreadcrumbResponse {
 struct SummaryResponse {
     path: String,
     kind: String,
+    #[serde(rename = "abstract")]
+    abstract_: String,
     summary: String,
     model: String,
     generated_at: i64,
@@ -286,6 +290,7 @@ async fn api_summary(State(state): State<AppState>, Query(params): Query<PathQue
             name: file_name_of(&c.path),
             path: c.path,
             kind: c.kind,
+            abstract_: c.summary_l0.unwrap_or_default(),
             summary: c.summary,
             summary_state: Some("done".into()),
         })
@@ -303,6 +308,7 @@ async fn api_summary(State(state): State<AppState>, Query(params): Query<PathQue
     Json(SummaryResponse {
         path: rec.path,
         kind: rec.kind,
+        abstract_: rec.summary_l0.unwrap_or_default(),
         summary: rec.summary,
         model: rec.model,
         generated_at: rec.generated_at,
