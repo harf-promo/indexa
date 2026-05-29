@@ -5,6 +5,44 @@ All notable changes to Indexa will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-05-29
+
+The "local context engine" release: Indexa now reads your machine's resources and
+works **within** them so a local-AI index no longer freezes the computer, ships a
+full Jobs workspace with live AI output, and exposes a one-line abstract tier for
+agent-facing progressive disclosure.
+
+### Added
+
+- **Resource engine** — `crates/core/src/resource.rs` detects the machine (RAM, P/E cores, Apple-Silicon unified-memory GPU-wired limit via `sysinfo`), maintains a per-model memory-footprint table, and computes a fit budget. A **memory watchdog** pauses LLM/embedding work when swap pressure rises (the real freeze signal on macOS) and resumes automatically, with a hard 5-minute timeout. Three **resource profiles** (Conservative / Balanced / Performance) via the new `[resource]` config section.
+- **`indexa doctor`** — prints detected specs, a per-model peak-memory table, per-mode ETA estimates, and an Ollama env-var check (`OLLAMA_MAX_LOADED_MODELS` / `OLLAMA_NUM_PARALLEL` / `OLLAMA_KEEP_ALIVE`) with the exact `launchctl` commands.
+- **Dedicated Jobs tab** — master/detail layout replacing the cramped floating dock: per-job cards, filter pills (All/Running/Done/Failed), a live "what the AI is doing now" panel, expandable/filterable/selectable warnings, an elapsed timer, the summary-queue depth, and a bottom-right status pill.
+- **Live AI streaming during summarize** — `describe_stream` / `summarize_dir_stream` emit `LlmFragment` tokens so the Jobs tab shows the model writing each summary in real time (gated on a connected viewer to stay free when unwatched).
+- **Tiered summaries (L0/L1/L2)** — every node carries a one-line **abstract** (L0) derived for free from the full summary (L1); raw chunks are L2. Surfaced in export (`<abstract>` / `**Abstract:**` / `"abstract"`), the web `api_summary`, and `indexa describe`.
+- **Markdown rendering** in the Ask answer pane (code blocks, inline code, bold, italic, headings, lists) via an XSS-safe renderer.
+
+### Changed
+
+- **`keep_alive` + `num_parallel=1`** sent on every Ollama request so models unload promptly and KV-caches don't multiply — the core of the freeze fix. Single-model-resident discipline with explicit unload on model switch.
+- **Calibrated ETA** — the deep dry-run estimate now uses a per-model, prompt-eval-aware throughput model instead of a hardcoded `300 chunks/min`.
+- **Filesystem walk prunes build artifacts** — `target/`, `node_modules/`, `.git/`, and caches are no longer descended into (previously classified `Skip` but still indexed), dramatically cutting index size and wasted work.
+- **Debounced file watcher** — `watch` now uses `notify-debouncer-full`, coalescing editor save bursts into a single re-index on macOS/Linux (the old poll-interval only affected the fallback poller).
+- **In-app confirm modal** replaces blocking native `confirm()` dialogs.
+- **Default embedding model** corrected to `nomic-embed-text` (the previous `nomic-embed-text-v1.5` was not a valid Ollama tag).
+
+### Fixed
+
+- **Whole-machine freeze** during `deep`/`summarize` on Apple Silicon — multiple Ollama models staying resident simultaneously crossed the unified-memory swap threshold. The resource engine + `keep_alive` + watchdog prevent it.
+- **`indexa ask` panic on non-ASCII content** — context truncation sliced a `String` on a raw byte offset; now walks to a char boundary.
+- **Job cancellation** — `DELETE /api/jobs/:id` now actually stops the running job (cancellation flag checked in the deep/summarize/index loops) instead of letting it run invisibly.
+- **Worker no longer holds the store mutex across the LLM await**, so web endpoints don't block during background summarization.
+- **SSE reliability** — subscribe-before-snapshot eliminates a lost-event race; lagged clients get the terminal Done/Failed re-delivered.
+- **DB errors** in `api_tree` / `api_roots` / `api_search` return HTTP 500 instead of masking failures as empty results.
+- **`deep --passes`** (silently ignored) removed — passes belong to `summarize`. **Invalid `--mode`** values are rejected instead of silently treated as `augment`.
+- **`indexa status`** prints a human-readable UTC datetime instead of a raw epoch.
+- **Summarize ETA overflow** when re-running on an already-queued path (total was 0 → garbage ETA); now uses the real pending-queue depth with saturating arithmetic.
+- Request **timeouts** on all Ollama HTTP calls (30 s embed, 180 s generate) so a stalled server can't hang a job forever.
+
 ## [0.3.5] — 2026-05-29
 
 ### Fixed
@@ -226,4 +264,5 @@ locally. Feedback welcome via [Discussions](../../discussions).
 ---
 
 [0.1.0-rc1]: https://github.com/harf-promo/indexa/releases/tag/v0.1.0-rc1
-[Unreleased]: https://github.com/harf-promo/indexa/compare/v0.1.0-rc1...HEAD
+[0.4.0]: https://github.com/harf-promo/indexa/compare/v0.3.5...v0.4.0
+[Unreleased]: https://github.com/harf-promo/indexa/compare/v0.4.0...HEAD
