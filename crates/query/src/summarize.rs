@@ -23,6 +23,9 @@ fn now_secs() -> i64 {
 }
 
 /// Summarise one file and persist the row. Returns true if successful.
+///
+/// When `on_fragment` is `Some`, each generated token is forwarded to the
+/// callback for live streaming to the web UI.  Pass `None` for the CLI path.
 pub async fn summarize_file(
     store: &mut Store,
     describer: &dyn Describer,
@@ -30,6 +33,7 @@ pub async fn summarize_file(
     path: &str,
     model: &str,
     passes: u32,
+    mut on_fragment: Option<&mut (dyn FnMut(String) + Send)>,
 ) -> Result<bool> {
     // Try to get a content sample. Prefer first chunk text (already parsed),
     // fall back to raw file bytes.
@@ -44,9 +48,18 @@ pub async fn summarize_file(
 
     let mut summary_text: Option<String> = None;
     for i in 0..passes.max(1) {
-        let next = describer
-            .describe(path, &sample, summary_text.as_deref())
-            .await?;
+        let next = match on_fragment {
+            Some(ref mut f) => {
+                describer
+                    .describe_stream(path, &sample, summary_text.as_deref(), *f)
+                    .await?
+            }
+            None => {
+                describer
+                    .describe(path, &sample, summary_text.as_deref())
+                    .await?
+            }
+        };
         let next = next.trim().to_owned();
         if next.is_empty() {
             break;
@@ -91,6 +104,10 @@ pub async fn summarize_file(
 }
 
 /// Summarise a directory by composing its children's summaries.
+///
+/// When `on_fragment` is `Some`, each generated token is forwarded to the
+/// callback for live streaming to the web UI.  Pass `None` for the CLI path.
+#[allow(clippy::too_many_arguments)]
 pub async fn summarize_directory(
     store: &mut Store,
     describer: &dyn Describer,
@@ -99,6 +116,7 @@ pub async fn summarize_directory(
     dir_model: &str,
     max_children: usize,
     passes: u32,
+    mut on_fragment: Option<&mut (dyn FnMut(String) + Send)>,
 ) -> Result<bool> {
     let children = store.children_summaries(dir_path)?;
     if children.is_empty() {
@@ -120,9 +138,18 @@ pub async fn summarize_directory(
 
     let mut summary_text: Option<String> = None;
     for i in 0..passes.max(1) {
-        let next = describer
-            .summarize_dir(dir_path, &llm_children, summary_text.as_deref())
-            .await?;
+        let next = match on_fragment {
+            Some(ref mut f) => {
+                describer
+                    .summarize_dir_stream(dir_path, &llm_children, summary_text.as_deref(), *f)
+                    .await?
+            }
+            None => {
+                describer
+                    .summarize_dir(dir_path, &llm_children, summary_text.as_deref())
+                    .await?
+            }
+        };
         let next = next.trim().to_owned();
         if next.is_empty() {
             break;
@@ -175,11 +202,14 @@ pub async fn process_queue_item(
     item: &QueueItem,
     cfg: &DescriberConfig,
 ) -> Result<()> {
-    process_queue_item_with_passes(store, describer, embedder, item, cfg, None).await
+    process_queue_item_with_passes(store, describer, embedder, item, cfg, None, None).await
 }
 
-/// Like `process_queue_item` but accepts an explicit pass override (CLI `--passes`).
-/// When `passes_override` is None, the pass count is derived from config defaults.
+/// Like `process_queue_item` but accepts an explicit pass override and an optional
+/// streaming callback for live AI output in the web UI.
+///
+/// `on_fragment` receives each generated token as it arrives from the LLM.
+/// Pass `None` to use non-streaming (CLI path, background worker).
 pub async fn process_queue_item_with_passes(
     store: &mut Store,
     describer: &dyn Describer,
@@ -187,6 +217,7 @@ pub async fn process_queue_item_with_passes(
     item: &QueueItem,
     cfg: &DescriberConfig,
     passes_override: Option<u32>,
+    on_fragment: Option<&mut (dyn FnMut(String) + Send)>,
 ) -> Result<()> {
     let passes = match passes_override {
         Some(n) => n.min(cfg.passes_cap),
@@ -208,6 +239,7 @@ pub async fn process_queue_item_with_passes(
             &item.path,
             &cfg.file_model,
             passes,
+            on_fragment,
         )
         .await
     } else {
@@ -219,6 +251,7 @@ pub async fn process_queue_item_with_passes(
             &cfg.dir_model,
             cfg.max_children_per_summary,
             passes,
+            on_fragment,
         )
         .await
     };
@@ -272,9 +305,17 @@ pub async fn summarize_subtree_sync(
     let mut errors = 0usize;
     let mut first_error: Option<String> = None;
     while let Some(item) = store.next_queue_item()? {
-        let r =
-            process_queue_item_with_passes(store, describer, embedder, &item, cfg, passes_override)
-                .await;
+        // CLI path: no streaming callback (None).
+        let r = process_queue_item_with_passes(
+            store,
+            describer,
+            embedder,
+            &item,
+            cfg,
+            passes_override,
+            None,
+        )
+        .await;
         match r {
             Ok(()) => done += 1,
             Err(e) => {

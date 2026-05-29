@@ -80,6 +80,61 @@ impl OllamaLlm {
         self.dir_model.as_deref().unwrap_or(&self.model)
     }
 
+    /// Stream generation with an explicit model name — used by `summarize_dir_stream`
+    /// which needs the dir model, not `self.model`.
+    async fn stream_with_model(
+        &self,
+        model: &str,
+        prompt: &str,
+        on_fragment: &mut (dyn FnMut(String) + Send),
+    ) -> Result<String> {
+        let url = format!("{}/api/generate", self.base_url);
+        let body = Req {
+            model,
+            prompt,
+            stream: true,
+            keep_alive: self.keep_alive,
+            options: Some(GenOptions { num_parallel: 1 }),
+        };
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("Ollama streaming request to {url}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Ollama returned {status}: {text}");
+        }
+        let mut stream = resp.bytes_stream();
+        let mut full = String::new();
+        let mut buf = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk.context("reading Ollama stream chunk")?;
+            buf.extend_from_slice(&bytes);
+            while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                let line_bytes = buf.drain(..=pos).collect::<Vec<u8>>();
+                let line = String::from_utf8_lossy(&line_bytes);
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(sc) = serde_json::from_str::<StreamChunk>(line) {
+                    if !sc.response.is_empty() {
+                        full.push_str(&sc.response);
+                        on_fragment(sc.response);
+                    }
+                    if sc.done {
+                        return Ok(full);
+                    }
+                }
+            }
+        }
+        Ok(full)
+    }
+
     /// Explicitly unload a model from Ollama by sending keep_alive=0.
     /// Best-effort: errors are logged but not propagated.
     pub async fn unload(&self, model: &str) {
@@ -262,6 +317,78 @@ impl Describer for OllamaLlm {
             ),
         };
         Generator::generate(self, &prompt).await
+    }
+
+    /// Streaming override: builds the same prompt as `describe` but streams via NDJSON.
+    async fn describe_stream(
+        &self,
+        path: &str,
+        content_sample: &[u8],
+        previous_summary: Option<&str>,
+        on_fragment: &mut (dyn FnMut(String) + Send),
+    ) -> Result<String> {
+        let sample = std::str::from_utf8(content_sample)
+            .unwrap_or("[binary]")
+            .chars()
+            .take(800)
+            .collect::<String>();
+        let prompt = match previous_summary {
+            None => format!(
+                "Briefly describe what this file is about in 1-2 sentences.\nFile: {path}\nContent:\n{sample}"
+            ),
+            Some(prev) => format!(
+                "We have provided an existing summary up to a certain point:\n{prev}\n\n\
+                 We have the opportunity to refine the existing summary (only if needed) \
+                 with some more context below.\n\
+                 File: {path}\nContent:\n{sample}\n\n\
+                 Given the new context, refine the original summary. \
+                 If the context isn't useful, return the original summary."
+            ),
+        };
+        Generator::generate_stream(self, &prompt, on_fragment).await
+    }
+
+    /// Streaming override: builds the same prompt as `summarize_dir` but uses the dir model
+    /// and streams each token via `on_fragment`.
+    async fn summarize_dir_stream(
+        &self,
+        dir_path: &str,
+        children: &[ChildSummary],
+        previous_summary: Option<&str>,
+        on_fragment: &mut (dyn FnMut(String) + Send),
+    ) -> Result<String> {
+        let n_files = children.iter().filter(|c| c.kind == "file").count();
+        let n_dirs = children.iter().filter(|c| c.kind == "dir").count();
+        let bullets = children
+            .iter()
+            .take(30)
+            .map(|c| {
+                let icon = if c.kind == "dir" { "📁" } else { "📄" };
+                format!("  {icon} {}: {}", c.name, c.summary)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let base_desc = format!(
+            "You are describing a folder so a future search can understand its purpose.\n\
+             Folder: {dir_path}\n\
+             Direct children ({n_files} files, {n_dirs} subfolders):\n\
+             {bullets}\n\n\
+             Write 2-4 sentences capturing: (1) what this folder is for, \
+             (2) the kinds of work or content inside, (3) anything notable. \
+             Do not list filenames. Speak about themes."
+        );
+        let prompt = match previous_summary {
+            None => base_desc,
+            Some(prev) => format!(
+                "We have provided an existing summary up to a certain point:\n{prev}\n\n\
+                 We have the opportunity to refine the existing summary (only if needed) \
+                 with some more context below.\n{base_desc}\n\n\
+                 Given the new context, refine the original summary. \
+                 If the context isn't useful, return the original summary."
+            ),
+        };
+        let model = self.effective_dir_model().to_owned();
+        self.stream_with_model(&model, &prompt, on_fragment).await
     }
 
     async fn summarize_dir(
