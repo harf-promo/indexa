@@ -1579,12 +1579,26 @@ async fn run_summarize_phase(
         }
     };
 
-    let enqueued = match enqueue_subtree(&mut job_store, &root) {
+    let newly_enqueued = match enqueue_subtree(&mut job_store, &root) {
         Ok(n) => n,
         Err(e) => {
             finalize_failed(handle, "summarize", &e);
             return;
         }
+    };
+
+    // The work total is the actual pending queue depth, not just the items WE
+    // enqueued: re-running summarize on an already-queued path enqueues 0 new
+    // items but still drains the existing backlog. Using `newly_enqueued` (0)
+    // as the total produced "4 / 0" progress and a garbage ETA. Fall back to
+    // the real pending count when nothing new was enqueued.
+    let enqueued = if newly_enqueued > 0 {
+        newly_enqueued
+    } else {
+        job_store
+            .queue_stats()
+            .map(|s| s.pending.max(0) as usize)
+            .unwrap_or(0)
     };
 
     push(
@@ -1693,8 +1707,10 @@ async fn run_summarize_phase(
             } else {
                 0.0
             };
+            // saturating_sub guards against processed > enqueued (the pending count
+            // can drift if items went in-flight between snapshot and processing).
             let e = if r > 0.0 {
-                (enqueued as u64 - processed) as f64 / r
+                (enqueued as u64).saturating_sub(processed) as f64 / r
             } else {
                 0.0
             };
