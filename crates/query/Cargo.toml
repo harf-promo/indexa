@@ -16,3 +16,4 @@ tracing = { workspace = true }
 indexa-core = { path = "../core" }
 indexa-embed = { path = "../embed" }
 indexa-llm = { path = "../llm" }
+async-trait.workspace = true

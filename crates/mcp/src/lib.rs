@@ -20,13 +20,10 @@ use rmcp::{
 };
 use serde::Deserialize;
 
-use indexa_core::{
-    config::{Config, HybridMode},
-    store::Store,
-};
+use indexa_core::{config::Config, store::Store};
 use indexa_embed::Embedder;
 use indexa_llm::Generator;
-use indexa_query::{synthesize_from_hits, QaConfig};
+use indexa_query::QaConfig;
 
 /// Max bytes returned by `read_file` (L2 raw content).
 const READ_FILE_CAP: usize = 40 * 1024;
@@ -231,45 +228,22 @@ impl IndexaMcp {
             rrf_k: self.config.retrieval.rrf_k as f32,
             summary_weight: self.config.retrieval.summary_weight,
             summary_depth_alpha: self.config.retrieval.summary_depth_alpha,
+            rerank: self.config.retrieval.rerank,
             ..QaConfig::default()
         };
 
-        // Send-safe pipeline (mirrors web `api_ask`): never hold `&Store` across an
-        // await. Embed first; do the synchronous store work in a scope that drops the
-        // connection before synthesis. (PR 3 will consolidate this with api_ask into a
-        // single Send-safe `query` function, then add the reranker.)
-        let query_vec = self.embedder.embed(&question).await.map_err(mcp_err)?;
-
-        let hits = {
-            let store = self.store()?;
-            let mut hits = store
-                .hybrid_search(
-                    &question,
-                    Some(&query_vec),
-                    &HybridMode::Rrf,
-                    None,
-                    cfg.top_k,
-                    cfg.rrf_k,
-                )
-                .map_err(mcp_err)?;
-            let _ = store.boost_with_summaries(
-                &mut hits,
-                &query_vec,
-                cfg.summary_weight,
-                cfg.summary_depth_alpha,
-            );
-            hits
-        };
-
-        if hits.is_empty() {
-            return Ok(ok_text(
-                "No indexed content matched your query. Run `indexa deep` and `indexa summarize` first.",
-            ));
-        }
-
-        let answer = synthesize_from_hits(hits, self.llm.as_ref(), &question, &cfg)
-            .await
-            .map_err(mcp_err)?;
+        // Single shared, Send-safe pipeline (embed → scoped retrieve → optional
+        // rerank → synthesize). `answer` opens its own short-lived read connection
+        // from `db_path`; the empty-hit short-circuit lives inside it.
+        let answer = indexa_query::answer(
+            &self.db_path,
+            self.embedder.as_ref(),
+            self.llm.as_ref(),
+            &question,
+            &cfg,
+        )
+        .await
+        .map_err(mcp_err)?;
 
         let mut out = answer.answer;
         if !answer.sources.is_empty() {
