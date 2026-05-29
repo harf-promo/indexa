@@ -1449,15 +1449,55 @@ async fn run_summarize_phase(
         run_watchdog_check(&mut wdog, &spec, headroom, handle, "summarize").await;
 
         let llm_start = std::time::Instant::now();
-        let r = process_queue_item_with_passes(
-            &mut job_store,
-            &describer,
-            embedder.as_ref(),
-            &item,
-            &cfg,
-            passes_override,
-        )
-        .await;
+
+        // Only stream tokens when someone is watching (receiver_count > 0).
+        // This avoids flooding the broadcast channel when no client is connected.
+        let r = if handle.tx.receiver_count() > 0 {
+            let h = handle.clone();
+            let ip = item_path.clone();
+            let model_name = if item.kind == "file" {
+                cfg.file_model.clone()
+            } else {
+                cfg.dir_model.clone()
+            };
+            let stage = if item.kind == "file" {
+                "summarize_file".to_owned()
+            } else {
+                "summarize_dir".to_owned()
+            };
+            let mut on_frag = move |frag: String| {
+                broadcast_only(
+                    &h,
+                    JobEvent::LlmFragment {
+                        item_path: ip.clone(),
+                        model: model_name.clone(),
+                        stage: stage.clone(),
+                        fragment: frag,
+                    },
+                );
+            };
+            process_queue_item_with_passes(
+                &mut job_store,
+                &describer,
+                embedder.as_ref(),
+                &item,
+                &cfg,
+                passes_override,
+                Some(&mut on_frag),
+            )
+            .await
+        } else {
+            process_queue_item_with_passes(
+                &mut job_store,
+                &describer,
+                embedder.as_ref(),
+                &item,
+                &cfg,
+                passes_override,
+                None,
+            )
+            .await
+        };
         let llm_secs = llm_start.elapsed().as_secs_f64();
         match r {
             Ok(()) => done += 1,

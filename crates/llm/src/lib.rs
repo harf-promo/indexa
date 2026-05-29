@@ -61,6 +61,39 @@ pub trait Describer: Send + Sync {
         children: &[ChildSummary],
         previous_summary: Option<&str>,
     ) -> anyhow::Result<String>;
+
+    /// Streaming variant of `describe`: calls `on_fragment` with each token as it arrives.
+    /// The default implementation buffers the full result and calls `on_fragment` once.
+    /// Providers that support token streaming (e.g. Ollama) override this.
+    async fn describe_stream(
+        &self,
+        path: &str,
+        content_sample: &[u8],
+        previous_summary: Option<&str>,
+        on_fragment: &mut (dyn FnMut(String) + Send),
+    ) -> anyhow::Result<String> {
+        let full = self
+            .describe(path, content_sample, previous_summary)
+            .await?;
+        on_fragment(full.clone());
+        Ok(full)
+    }
+
+    /// Streaming variant of `summarize_dir`: calls `on_fragment` with each token.
+    /// The default implementation buffers the full result and calls `on_fragment` once.
+    async fn summarize_dir_stream(
+        &self,
+        dir_path: &str,
+        children: &[ChildSummary],
+        previous_summary: Option<&str>,
+        on_fragment: &mut (dyn FnMut(String) + Send),
+    ) -> anyhow::Result<String> {
+        let full = self
+            .summarize_dir(dir_path, children, previous_summary)
+            .await?;
+        on_fragment(full.clone());
+        Ok(full)
+    }
 }
 
 /// Build a `Generator` from config values.
