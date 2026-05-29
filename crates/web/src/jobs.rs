@@ -100,9 +100,35 @@ impl JobHandle {
 /// Shared jobs registry.
 pub type Jobs = Arc<RwLock<HashMap<Uuid, Arc<JobHandle>>>>;
 
+/// Maximum number of Warning events stored in job history.
+/// Older warnings are dropped when this cap is reached.
+pub const MAX_STORED_WARNINGS: usize = 500;
+
 /// Push an event into a job's history and broadcast it to subscribers.
+///
+/// Warning events are capped at `MAX_STORED_WARNINGS` to bound memory.
+/// The true count can be recovered from `stageCounts` on the client.
 pub fn push(handle: &Arc<JobHandle>, event: JobEvent) {
-    handle.history.lock().unwrap().push(event.clone());
+    {
+        let mut history = handle.history.lock().unwrap();
+        // For Warning events: cap stored history to avoid unbounded growth.
+        if matches!(event, JobEvent::Warning { .. }) {
+            let warn_count = history
+                .iter()
+                .filter(|e| matches!(e, JobEvent::Warning { .. }))
+                .count();
+            if warn_count >= MAX_STORED_WARNINGS {
+                // Drop the oldest warning to make room.
+                if let Some(pos) = history
+                    .iter()
+                    .position(|e| matches!(e, JobEvent::Warning { .. }))
+                {
+                    history.remove(pos);
+                }
+            }
+        }
+        history.push(event.clone());
+    }
     let _ = handle.tx.send(event);
 }
 

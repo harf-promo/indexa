@@ -829,13 +829,15 @@ async fn api_job_get(Path(id): Path<Uuid>, State(s): State<AppState>) -> impl In
         return err_json(StatusCode::NOT_FOUND, "job not found");
     };
     let status = h.status.lock().unwrap().clone();
-    let last_event = h.history.lock().unwrap().last().cloned();
+    let history = h.history.lock().unwrap().clone();
+    let last_event = history.last().cloned();
     let resp = serde_json::json!({
         "job_id": h.id,
         "kind": h.kind,
         "path": h.path,
         "started_at": h.started_at,
         "status": status,
+        "history": history,
         "last_event": last_event,
     });
     (StatusCode::OK, Json(resp)).into_response()
