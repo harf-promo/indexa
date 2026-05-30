@@ -131,6 +131,7 @@ fn delete_path_artifacts_exact(tx: &Transaction, path: &str) -> rusqlite::Result
     )?;
     tx.execute("DELETE FROM chunks WHERE entry_path = ?1", params![path])?;
     tx.execute("DELETE FROM summaries WHERE path = ?1", params![path])?;
+    tx.execute("DELETE FROM summary_queue WHERE path = ?1", params![path])?;
     tx.execute("DELETE FROM entries WHERE path = ?1", params![path])
 }
 
@@ -178,6 +179,11 @@ impl Store {
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
             PRAGMA foreign_keys = ON;
+            -- WAL allows one writer at a time across connections. The worker pool, the
+            -- per-event watcher, and the web summarize path each open their own connection,
+            -- so without a busy timeout a contended write fails immediately with SQLITE_BUSY.
+            -- Block-and-retry for up to 5s instead.
+            PRAGMA busy_timeout = 5000;
 
             -- Surface-scan entries (paths, sizes, surface hints)
             CREATE TABLE IF NOT EXISTS entries (
@@ -336,18 +342,37 @@ impl Store {
 
     // ── Deep-scan writes ──────────────────────────────────────────────────────
 
-    /// Insert or replace a batch of chunks (text + optional embedding).
-    /// The FTS5 index is kept in sync via triggers / manual insert.
+    /// Re-index a batch of chunks (text + optional embedding), making the operation
+    /// idempotent per `entry_path`.
+    ///
+    /// Every chunk + FTS row for each `entry_path` in the batch is cleared first, then the
+    /// new chunks are inserted. This avoids two bugs in the old `INSERT OR REPLACE` approach:
+    /// on a `UNIQUE(entry_path, seq)` conflict, REPLACE deleted the old chunk and inserted a
+    /// new one with a *fresh* rowid, so the follow-up `DELETE FROM chunks_fts WHERE
+    /// chunk_id = last_insert_rowid()` matched the *new* id and orphaned the old FTS row
+    /// (unbounded FTS bloat + skewed BM25); and re-indexing a file that had *shrunk* left the
+    /// stale higher-`seq` chunks (and their FTS rows) behind as phantom search hits. Clearing
+    /// by `entry_path` and doing a plain INSERT fixes both at once.
     pub fn upsert_chunks(&mut self, chunks: &[ChunkRecord]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
+            // 1. Clear existing chunks + FTS rows for each distinct entry_path in the batch.
+            let mut del_fts = tx.prepare_cached("DELETE FROM chunks_fts WHERE entry_path = ?1")?;
+            let mut del_chunks = tx.prepare_cached("DELETE FROM chunks WHERE entry_path = ?1")?;
+            let mut cleared: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for c in chunks {
+                if cleared.insert(c.entry_path.as_str()) {
+                    del_fts.execute(params![c.entry_path])?;
+                    del_chunks.execute(params![c.entry_path])?;
+                }
+            }
+
+            // 2. Insert the new chunk set, keeping FTS5 in sync on the fresh rowid.
             let mut stmt = tx.prepare_cached(
-                "INSERT OR REPLACE INTO chunks
+                "INSERT INTO chunks
                  (entry_path, seq, heading, text, language, embedding, embed_model)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
-            let mut fts_del =
-                tx.prepare_cached("DELETE FROM chunks_fts WHERE chunk_id = CAST(?1 AS TEXT)")?;
             let mut fts_ins = tx.prepare_cached(
                 "INSERT INTO chunks_fts(text, heading, entry_path, chunk_id)
                  VALUES (?1, ?2, ?3, ?4)",
@@ -366,11 +391,7 @@ impl Store {
                     c.embed_model,
                 ])?;
 
-                // Get the rowid just inserted / replaced
                 let rowid = tx.last_insert_rowid();
-
-                // Keep FTS5 in sync (delete any prior FTS entry, re-insert)
-                fts_del.execute(params![rowid.to_string()])?;
                 fts_ins.execute(params![c.text, c.heading, c.entry_path, rowid.to_string()])?;
             }
         }
@@ -403,7 +424,8 @@ impl Store {
         Ok(())
     }
 
-    /// Remove a single entry (and its chunks) from the index by exact path.
+    /// Remove a single entry (and its chunks, summary, and any queued summary work)
+    /// from the index by exact path.
     pub fn delete_entry(&mut self, path: &str) -> Result<usize> {
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -411,6 +433,11 @@ impl Store {
             params![path],
         )?;
         tx.execute("DELETE FROM chunks WHERE entry_path = ?1", params![path])?;
+        // Keep the summary tables symmetric with chunks/entries: leaving these behind
+        // orphans summary rows and (worse) leaves a stale summary_queue row that
+        // `entries_for_summarization` filters on, permanently blocking re-summarization.
+        tx.execute("DELETE FROM summaries WHERE path = ?1", params![path])?;
+        tx.execute("DELETE FROM summary_queue WHERE path = ?1", params![path])?;
         let n = tx.execute("DELETE FROM entries WHERE path = ?1", params![path])?;
         tx.commit()?;
         Ok(n)
@@ -451,12 +478,23 @@ impl Store {
         Ok(removed)
     }
 
-    /// Remove all entries whose path starts with `prefix` (e.g. a whole directory subtree).
+    /// Remove all entries whose path starts with `prefix` (e.g. a whole directory subtree),
+    /// along with their chunks, summaries, and any queued summary work.
     /// Returns the number of `entries` rows deleted.
     pub fn delete_subtree(&mut self, prefix: &str) -> Result<usize> {
         let pattern = like_prefix(prefix);
         let tx = self.conn.transaction()?;
         delete_chunks_under_prefix(&tx, &pattern)?;
+        // Summaries + queue must be cleared too (symmetry across all tables); an orphaned
+        // summary_queue row would otherwise block re-summarization if the path is re-indexed.
+        tx.execute(
+            "DELETE FROM summaries WHERE path LIKE ?1 ESCAPE '\\' OR parent_path LIKE ?1 ESCAPE '\\'",
+            params![pattern],
+        )?;
+        tx.execute(
+            "DELETE FROM summary_queue WHERE path LIKE ?1 ESCAPE '\\'",
+            params![pattern],
+        )?;
         let n = tx.execute(
             "DELETE FROM entries WHERE path LIKE ?1 ESCAPE '\\' OR parent_path LIKE ?1 ESCAPE '\\'",
             params![pattern],
@@ -491,28 +529,35 @@ impl Store {
         Ok(n as u64)
     }
 
-    /// Top-N file extensions (or bare names) in the index that have no category assigned.
-    /// Returns (extension_or_name, count) pairs sorted by count descending.
+    /// Top-N file extensions in the index that have no category assigned.
+    /// Returns (`.ext` or `(no extension)`, count) pairs sorted by count descending,
+    /// ties broken alphabetically.
+    ///
+    /// The extension is computed in Rust via `Path::extension` rather than in SQL: the
+    /// previous pure-SQL expression used `length(path) - length(path)` (always 0), so it
+    /// sliced from the *first* dot anywhere in the path (e.g. `/home/user.name/a.tar.gz`
+    /// yielded `.name/a.tar.gz`) — a near-useless grouping.
     pub fn unknown_extensions(&self, limit: usize) -> Result<Vec<(String, u64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT
-               CASE
-                 WHEN instr(path, '.') > 0
-                      AND instr(replace(path, rtrim(path, replace(path, '/', '')), ''), '.') > 0
-                 THEN lower(substr(path, length(path) - length(path) + instr(path, '.')))
-                 ELSE '(no extension)'
-               END AS ext,
-               COUNT(*) AS n
-             FROM entries
-             WHERE (hint_cat IS NULL OR hint_cat = 'unknown') AND kind = 'file'
-             GROUP BY ext
-             ORDER BY n DESC
-             LIMIT ?1",
+            "SELECT path FROM entries
+             WHERE (hint_cat IS NULL OR hint_cat = 'unknown') AND kind = 'file'",
         )?;
-        let rows = stmt.query_map(params![limit as i64], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+
+        let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for path in rows {
+            let path = path?;
+            let ext = Path::new(&path)
+                .extension()
+                .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
+                .unwrap_or_else(|| "(no extension)".to_string());
+            *counts.entry(ext).or_insert(0) += 1;
+        }
+
+        let mut sorted: Vec<(String, u64)> = counts.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        sorted.truncate(limit);
+        Ok(sorted)
     }
 
     /// Summary of top-level regions: (category, entry_count, total_size_bytes).
@@ -1265,6 +1310,133 @@ mod tests {
         store.upsert_chunks(std::slice::from_ref(&c)).unwrap();
         store.upsert_chunks(&[c]).unwrap();
         assert_eq!(store.chunk_count().unwrap(), 1);
+    }
+
+    fn fts_row_count(store: &Store) -> i64 {
+        store
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunks_fts", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn reindex_replaces_chunks_and_keeps_fts_in_sync() {
+        let mut store = Store::open_in_memory().unwrap();
+        // Two files so the chunks table has several rowids — the old `INSERT OR REPLACE`
+        // bug only orphaned FTS rows when the replaced chunk was not the table's max rowid.
+        store
+            .upsert_chunks(&[
+                dummy_chunk("/a.txt", 0, "alpha keep"),
+                dummy_chunk("/a.txt", 1, "beta middle"),
+                dummy_chunk("/a.txt", 2, "gamma tail"),
+                dummy_chunk("/b.txt", 0, "delta other"),
+            ])
+            .unwrap();
+        assert_eq!(store.chunk_count().unwrap(), 4);
+        assert_eq!(fts_row_count(&store), 4);
+
+        // Re-index /a.txt shrunk from 3 chunks down to 1.
+        store
+            .upsert_chunks(&[dummy_chunk("/a.txt", 0, "alpha keep updated")])
+            .unwrap();
+
+        // /a.txt now has exactly 1 chunk; /b.txt untouched → 2 total. FTS must match the
+        // chunk count exactly: no orphaned rows, no stale tail chunk left behind.
+        assert_eq!(store.chunk_count().unwrap(), 2);
+        assert_eq!(
+            fts_row_count(&store),
+            2,
+            "FTS rows must equal chunk rows after a shrinking re-index (no orphans)"
+        );
+
+        // The removed tail content must no longer be searchable.
+        let gamma = store
+            .hybrid_search("gamma", None, &HybridMode::Sparse, None, 10, 60.0)
+            .unwrap();
+        assert!(gamma.is_empty(), "stale tail chunk 'gamma' should be gone");
+
+        // The surviving file is still searchable.
+        let delta = store
+            .hybrid_search("delta", None, &HybridMode::Sparse, None, 10, 60.0)
+            .unwrap();
+        assert_eq!(delta.len(), 1);
+        assert!(delta[0].entry_path.contains("/b.txt"));
+    }
+
+    #[test]
+    fn delete_subtree_clears_summaries_and_queue() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_summary(&dummy_summary("/docs/a.txt", "file", Some("/docs"), 1))
+            .unwrap();
+        store
+            .upsert_summary(&dummy_summary("/docs/b.txt", "file", Some("/docs"), 1))
+            .unwrap();
+        store
+            .upsert_summary(&dummy_summary("/other/c.txt", "file", Some("/other"), 1))
+            .unwrap();
+        store
+            .enqueue_summary_items(&[
+                ("/docs/a.txt".to_owned(), "file".to_owned(), 1),
+                ("/other/c.txt".to_owned(), "file".to_owned(), 1),
+            ])
+            .unwrap();
+
+        store.delete_subtree("/docs/").unwrap();
+
+        assert!(store.summary_by_path("/docs/a.txt").unwrap().is_none());
+        assert!(store.summary_by_path("/docs/b.txt").unwrap().is_none());
+        assert!(
+            store.summary_by_path("/other/c.txt").unwrap().is_some(),
+            "summary outside the deleted subtree must survive"
+        );
+        let stats = store.queue_stats().unwrap();
+        assert_eq!(
+            stats.pending, 1,
+            "the /docs queue row must be cleared; /other remains"
+        );
+    }
+
+    #[test]
+    fn delete_entry_clears_summary_and_queue() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_summary(&dummy_summary("/notes.txt", "file", None, 0))
+            .unwrap();
+        store
+            .enqueue_summary_items(&[("/notes.txt".to_owned(), "file".to_owned(), 0)])
+            .unwrap();
+
+        store.delete_entry("/notes.txt").unwrap();
+
+        assert!(store.summary_by_path("/notes.txt").unwrap().is_none());
+        assert_eq!(store.queue_stats().unwrap().pending, 0);
+    }
+
+    #[test]
+    fn unknown_extensions_uses_basename_extension() {
+        let mut store = Store::open_in_memory().unwrap();
+        // A directory containing a dot plus a multi-dot filename: the old SQL sliced from
+        // the FIRST dot in the whole path; the fix must use the true basename extension.
+        store
+            .upsert_entries(&[
+                dummy_entry("/home/user.name/report.tar.gz", EntryKind::File, 1),
+                dummy_entry("/home/user.name/notes.gz", EntryKind::File, 1),
+                dummy_entry("/home/user.name/README", EntryKind::File, 1),
+            ])
+            .unwrap();
+
+        let exts = store.unknown_extensions(10).unwrap();
+        let gz = exts
+            .iter()
+            .find(|(e, _)| e == ".gz")
+            .expect(".gz must be detected");
+        assert_eq!(gz.1, 2, ".gz should count both .tar.gz and .gz files");
+        assert!(exts.iter().any(|(e, n)| e == "(no extension)" && *n == 1));
+        assert!(
+            !exts.iter().any(|(e, _)| e.contains('/')),
+            "must not produce a directory-fragment 'extension'"
+        );
     }
 
     #[test]
