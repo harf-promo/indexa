@@ -121,14 +121,17 @@ impl Embedder for GoogleEmbedder {
             },
         };
 
-        let resp = self
-            .client
-            .post(&url)
-            .header("x-goog-api-key", &self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .context("Google embedContent request failed")?;
+        let resp = crate::send_with_retry(
+            || {
+                self.client
+                    .post(&url)
+                    .header("x-goog-api-key", &self.api_key)
+                    .json(&body)
+            },
+            2,
+        )
+        .await
+        .context("Google embedContent request failed")?;
 
         if !resp.status().is_success() {
             let status = resp.status();
