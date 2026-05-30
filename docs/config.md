@@ -80,17 +80,16 @@ Controls how search results are ranked and how many are returned.
 
 ```toml
 [retrieval]
-hybrid               = "rrf"  # rrf | sparse | dense  (weighted is reserved, see below)
+hybrid               = "rrf"  # rrf | sparse | dense
 rrf_k                = 60     # RRF rank constant (higher = less weight to top ranks)
 top_k                = 8      # results to retrieve before reranking
 rerank               = false  # enable cross-encoder reranking (one extra local-model call; fails open)
 summary_weight       = 0.0    # 0.0 disables the parent-summary boost; >0 blends folder-summary similarity into ranking
 summary_depth_alpha  = 0.15   # depth-boost coefficient for summary-aware retrieval
+context_budget       = 4000   # max characters of retrieved context packed into the answer prompt
 ```
 
-> `hybrid = "weighted"` is currently reserved — selecting it errors (`weighted mode not yet
-> implemented; use rrf`). Use `rrf`, `sparse`, or `dense`. The summary-boost (`summary_weight`)
-> only takes effect for dense/RRF modes and is off (0.0) by default.
+> The summary-boost (`summary_weight`) only takes effect for dense/RRF modes and is off (0.0) by default.
 
 ### Hybrid modes
 
@@ -99,7 +98,6 @@ summary_depth_alpha  = 0.15   # depth-boost coefficient for summary-aware retrie
 | `rrf` | **Default.** Reciprocal Rank Fusion — combines sparse (BM25) and dense (cosine) results parameter-free. |
 | `sparse` | Full-text search only (BM25/FTS5). |
 | `dense` | Semantic search only (cosine similarity). |
-| `weighted` | Future: weighted linear combination. |
 
 ---
 

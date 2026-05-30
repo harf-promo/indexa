@@ -225,6 +225,8 @@ impl IndexaMcp {
         let question = params.0.question;
         let cfg = QaConfig {
             top_k: self.config.retrieval.top_k,
+            mode: self.config.retrieval.hybrid.clone(),
+            context_budget: self.config.retrieval.context_budget,
             rrf_k: self.config.retrieval.rrf_k as f32,
             summary_weight: self.config.retrieval.summary_weight,
             summary_depth_alpha: self.config.retrieval.summary_depth_alpha,

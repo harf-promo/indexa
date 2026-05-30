@@ -599,7 +599,6 @@ impl Store {
         // ── FTS5 keyword retrieval ────────────────────────────────────────────
         let fts_candidates: Vec<(i64, String)> = match mode {
             HybridMode::Dense => Vec::new(),
-            HybridMode::Weighted => anyhow::bail!("weighted mode not yet implemented; use rrf"),
             _ => {
                 let fts_query = fts5_quote(query_text);
                 let (sql, scope_param) = if let Some(s) = scope {
@@ -640,7 +639,6 @@ impl Store {
         // ── Dense embedding retrieval ────────────────────────────────────────
         let dense_candidates: Vec<(i64, String)> = match mode {
             HybridMode::Sparse => Vec::new(),
-            HybridMode::Weighted => Vec::new(), // bailed above
             _ => {
                 if let Some(qvec) = query_embedding {
                     self.cosine_search(qvec, 100, scope)?

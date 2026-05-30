@@ -394,11 +394,11 @@ async fn cmd_ask(
         top_k: top_k_flag.unwrap_or(cfg.retrieval.top_k),
         mode,
         scope,
+        context_budget: cfg.retrieval.context_budget,
         rrf_k: cfg.retrieval.rrf_k as f32,
         summary_weight: cfg.retrieval.summary_weight,
         summary_depth_alpha: cfg.retrieval.summary_depth_alpha,
         rerank: cfg.retrieval.rerank,
-        ..QaConfig::default()
     };
 
     // `store` is no longer needed by the query path — `answer` opens its own
