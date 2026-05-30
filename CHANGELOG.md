@@ -7,8 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Toward **v0.5.1** — a "correctness & hardening" pass over the shipped v0.5.0 engine, plus a docs
-refresh. (Further entries land as the fix PRs merge.)
+Toward **v0.5.1** — a "correctness & hardening" pass over the shipped v0.5.0 engine (found by a
+full code review), plus a docs refresh. No new features; existing behavior is unchanged except
+where noted as a bug fix.
+
+### Fixed
+
+- **Re-index no longer corrupts the FTS index or leaves stale chunks** — `upsert_chunks` used
+  `INSERT OR REPLACE`, which reassigned the chunk rowid and orphaned the old FTS5 row on every
+  re-index (unbounded FTS bloat, skewed BM25, stale/dropped hits); a file edited to *fewer* chunks
+  also left its old tail chunks behind. It now deletes a path's chunks + FTS rows then re-inserts.
+- **Summary-queue items no longer leak as `in_flight`** after a crash/kill/cancel — a startup sweep
+  resets stale `in_flight` rows to `pending` (failing those past an attempt cap). Queue claims are
+  now a single atomic `UPDATE … RETURNING` (no double-processing across worker + web connections),
+  and a `PRAGMA busy_timeout` makes contended writers block-and-retry instead of erroring.
+- **`indexa summarize` now reports real failures** — per-item failures were swallowed as success,
+  so the "0/N succeeded — did you `ollama pull`?" guidance could never fire.
+- **One malformed or oversized file can no longer abort a scan** — parser invocations are wrapped
+  in `catch_unwind` (a bad PDF could panic `pdf-extract`), and a configurable `[parsers] max_file_mb`
+  (default 100) skips oversized files instead of reading them fully into memory.
+- **Cloud adapters now have request timeouts** — OpenAI/Google/Anthropic clients were built without
+  any timeout, so a stalled connection hung the worker/web/MCP request forever. Ollama mid-stream
+  `error` responses are surfaced instead of returning an empty answer as success.
+- **web + MCP now honor the configured retrieval mode and context budget** (they previously forced
+  RRF and a hardcoded budget); `[retrieval] context_budget` is configurable. The unimplemented
+  `weighted` hybrid mode was removed.
+- **DB errors surface as HTTP 500** on `/api/stats`, `/api/map`, and the queue endpoints (previously
+  masked as an empty index); `DELETE /api/entry` rejects an empty path; deletes now clear summaries
+  and queue rows too; the config file is created at mode `0600` atomically (no TOCTOU window).
+- **MCP `read_file` / `get_summary(l2)` are confined to indexed roots** — they previously read any
+  client-supplied path (contract hygiene for the local-stdio server).
+- Fixed a latent word-window underflow/stall in the Org/PDF/Office/EPUB chunkers (consolidated into
+  one shared `chunk_words` helper).
+
+### Added
+
+- `[parsers] max_file_mb` and `[retrieval] context_budget` configuration options.
+- A cross-surface integration test for the unified `query::answer()` pipeline, plus regression tests
+  for re-index FTS integrity, queue lifecycle, the memory-watchdog pause, parser malformed/oversized
+  input, and adapter error handling.
 
 ### Documentation
 
