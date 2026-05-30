@@ -24,7 +24,10 @@ use axum::{
 use futures_util::StreamExt;
 use indexa_core::{
     config::{self, Config},
-    resource::{assess, detect_machine, MachineSpec, Pressure, WatchdogState},
+    resource::{
+        assess, detect_machine, pause_decision, MachineSpec, PauseAction, Pressure, WatchdogState,
+        MAX_PAUSE_SECS,
+    },
     store::{ChunkRecord, Store},
     walker::{walk, EntryKind, WalkConfig},
 };
@@ -1065,57 +1068,56 @@ async fn run_watchdog_check(
         },
     );
 
-    // Wait until pressure clears, with a hard maximum of ~5 minutes.
-    // Each tick is 5 s for Critical, 2 s for Throttle.
-    // Max ticks: 60 × 5 s = 300 s = 5 min (Critical); 150 × 2 s = 300 s (Throttle).
-    const MAX_TICKS: u32 = 60;
-    let mut ticks = 0u32;
+    // Wait until pressure clears, capped at resource::MAX_PAUSE_SECS. The shared
+    // `pause_decision` is re-evaluated against a fresh sample each tick, so an escalation
+    // (Throttle → Critical) immediately tightens the cadence — the old loop fixed the
+    // interval from the pre-loop level and capped Throttle at only 2 minutes.
+    let mut elapsed = 0u64;
+    let mut next_status_at = 30u64;
     loop {
-        let sleep_secs = if pressure == Pressure::Critical { 5 } else { 2 };
-        tokio::time::sleep(tokio::time::Duration::from_secs(sleep_secs)).await;
-        ticks += 1;
-
         let s = wdog.sample();
-        if assess(&s, spec, headroom) == Pressure::Ok {
-            break;
-        }
-
-        // Hard timeout: give up and let the job attempt to proceed anyway.
-        if ticks >= MAX_TICKS {
-            push(
-                handle,
-                JobEvent::Warning {
-                    stage: stage.to_owned(),
-                    item_path: None,
-                    message: "Memory pressure did not clear after 5 minutes — \
-                              proceeding anyway. Consider closing other apps or \
-                              setting a lower headroom in [resource] config."
-                        .to_owned(),
-                },
-            );
-            break;
-        }
-
-        // Every 30 s emit a follow-up so the user isn't left wondering.
-        if ticks.is_multiple_of(6) {
-            let swap_gb = s.swap_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-            let swap_pct = s
-                .swap_used_bytes
-                .checked_mul(100)
-                .and_then(|v| v.checked_div(s.swap_total_bytes))
-                .unwrap_or(100);
-            push(
-                handle,
-                JobEvent::Warning {
-                    stage: stage.to_owned(),
-                    item_path: None,
-                    message: format!(
-                        "Still waiting for swap to clear (swap: {swap_pct}% / {swap_gb:.1} GB) \
-                         — {}/{MAX_TICKS} checks …",
-                        ticks
-                    ),
-                },
-            );
+        match pause_decision(assess(&s, spec, headroom), elapsed) {
+            PauseAction::Resume => break,
+            PauseAction::Proceed => {
+                push(
+                    handle,
+                    JobEvent::Warning {
+                        stage: stage.to_owned(),
+                        item_path: None,
+                        message: format!(
+                            "Memory pressure did not clear after {MAX_PAUSE_SECS} s — \
+                             proceeding anyway. Consider closing other apps or setting a \
+                             lower headroom in [resource] config."
+                        ),
+                    },
+                );
+                break;
+            }
+            PauseAction::Sleep(secs) => {
+                // Emit a follow-up roughly every 30 s so the user isn't left wondering.
+                if elapsed >= next_status_at {
+                    let swap_gb = s.swap_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                    let swap_pct = s
+                        .swap_used_bytes
+                        .checked_mul(100)
+                        .and_then(|v| v.checked_div(s.swap_total_bytes))
+                        .unwrap_or(100);
+                    push(
+                        handle,
+                        JobEvent::Warning {
+                            stage: stage.to_owned(),
+                            item_path: None,
+                            message: format!(
+                                "Still waiting for swap to clear (swap: {swap_pct}% / \
+                                 {swap_gb:.1} GB) — {elapsed}/{MAX_PAUSE_SECS} s …"
+                            ),
+                        },
+                    );
+                    next_status_at += 30;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
+                elapsed += secs;
+            }
         }
     }
 }
@@ -1660,8 +1662,9 @@ async fn run_summarize_phase(
         };
         let llm_secs = llm_start.elapsed().as_secs_f64();
         match r {
-            Ok(()) => done += 1,
-            Err(_) => errors += 1,
+            Ok(true) => done += 1,
+            // Ok(false) = item failed but was recorded in the queue; Err = unexpected store error.
+            Ok(false) | Err(_) => errors += 1,
         }
 
         let processed = (done + errors) as u64;
@@ -1720,7 +1723,7 @@ async fn run_summarize_phase(
 /// Start the web UI server on `port`. Runs until Ctrl-C or the process exits.
 pub async fn serve(
     port: u16,
-    store: Store,
+    mut store: Store,
     embedder: Arc<dyn Embedder + Send + Sync + 'static>,
     llm: Arc<dyn Generator + Send + Sync + 'static>,
     config: Config,
@@ -1731,6 +1734,17 @@ pub async fn serve(
             .map(|d| d.join("logs"))
             .unwrap_or_else(|| std::env::temp_dir().join("indexa-logs")),
     );
+
+    // Startup sweep: reset any queue items left `in_flight` by a previous run that crashed
+    // or was killed mid-summarize. Safe to do here — no summarize job can be running yet.
+    match store.requeue_stale_in_flight(3) {
+        Ok((requeued, failed)) if requeued > 0 || failed > 0 => {
+            tracing::info!("startup: requeued {requeued} stale in-flight summary items, failed {failed} over the attempt cap");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("startup: failed to sweep stale in-flight queue items: {e}"),
+    }
+
     let state = AppState {
         store: Arc::new(Mutex::new(store)),
         embedder,

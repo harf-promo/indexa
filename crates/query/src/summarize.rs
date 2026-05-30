@@ -197,13 +197,15 @@ pub async fn summarize_directory(
 }
 
 /// Process one item from the summary queue (called by the background worker).
+/// Returns `Ok(true)` on success, `Ok(false)` if summarization failed (the item is
+/// recorded as `failed` in the queue), or `Err` only for an unexpected store error.
 pub async fn process_queue_item(
     store: &mut Store,
     describer: &dyn Describer,
     embedder: &dyn Embedder,
     item: &QueueItem,
     cfg: &DescriberConfig,
-) -> Result<()> {
+) -> Result<bool> {
     process_queue_item_with_passes(store, describer, embedder, item, cfg, None, None).await
 }
 
@@ -220,7 +222,7 @@ pub async fn process_queue_item_with_passes(
     cfg: &DescriberConfig,
     passes_override: Option<u32>,
     on_fragment: Option<&mut (dyn FnMut(String) + Send)>,
-) -> Result<()> {
+) -> Result<bool> {
     let passes = match passes_override {
         Some(n) => n.min(cfg.passes_cap),
         None => {
@@ -259,14 +261,21 @@ pub async fn process_queue_item_with_passes(
     };
 
     match result {
-        Ok(_) => store.mark_queue_state(&item.path, "done", None)?,
+        Ok(_) => {
+            store.mark_queue_state(&item.path, "done", None)?;
+            Ok(true)
+        }
         Err(e) => {
+            // The item is recorded as `failed` (with the message) and we return Ok(false)
+            // rather than Ok(()) so callers can distinguish a real success from a failure
+            // — previously every outcome returned Ok(()), so `summarize` reported success
+            // even when the model was missing and every item failed.
             let msg = format!("{e:#}");
             tracing::warn!("summarize failed for {}: {msg}", item.path);
             store.mark_queue_state(&item.path, "failed", Some(&msg))?;
+            Ok(false)
         }
     }
-    Ok(())
 }
 
 /// Enqueue all files + directories under `root` that are not yet in the queue.
@@ -319,7 +328,8 @@ pub async fn summarize_subtree_sync(
         )
         .await;
         match r {
-            Ok(()) => done += 1,
+            Ok(true) => done += 1,
+            Ok(false) => errors += 1,
             Err(e) => {
                 errors += 1;
                 if first_error.is_none() {
@@ -336,7 +346,17 @@ pub async fn summarize_subtree_sync(
     }
 
     if errors > 0 && done == 0 {
-        let msg = first_error.unwrap_or_default();
+        // Most failures now arrive as Ok(false) (the item is marked `failed` in the queue),
+        // so fall back to the queue's recorded error for the guidance message.
+        let msg = first_error
+            .or_else(|| {
+                store
+                    .failed_queue_items(1)
+                    .ok()
+                    .and_then(|v| v.into_iter().next())
+                    .and_then(|f| f.error)
+            })
+            .unwrap_or_default();
         anyhow::bail!(
             "summarize failed: 0/{} items succeeded. First error: {msg}\n\
              Did you run `ollama pull {}`?",

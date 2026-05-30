@@ -971,32 +971,61 @@ impl Store {
         Ok(())
     }
 
-    /// Take one pending item — deepest first (files before their parent dirs).
+    /// Atomically claim one pending item — deepest first (files before their parent dirs).
+    ///
+    /// Uses a single `UPDATE ... WHERE path = (SELECT ... LIMIT 1) RETURNING` statement so the
+    /// select-and-claim is one atomic write. The previous SELECT-then-separate-UPDATE let two
+    /// connections (multiple workers + the web summarize path each open their own connection)
+    /// read the same pending row before either flipped it, claiming and summarizing it twice.
+    /// With WAL + `busy_timeout`, concurrent claims now serialize and each sees the prior claim.
     pub fn next_queue_item(&mut self) -> Result<Option<QueueItem>> {
-        let item = {
-            let mut stmt = self.conn.prepare_cached(
-                "SELECT path, kind, depth FROM summary_queue
-                 WHERE state = 'pending'
-                 ORDER BY depth DESC LIMIT 1",
-            )?;
-            stmt.query_row([], |r| {
-                Ok(QueueItem {
-                    path: r.get(0)?,
-                    kind: r.get(1)?,
-                    depth: r.get(2)?,
-                })
-            })
-            .optional()?
-        };
-        if let Some(ref it) = item {
-            self.conn.execute(
+        let item = self
+            .conn
+            .query_row(
                 "UPDATE summary_queue
                  SET state='in_flight', attempts=attempts+1, updated_at=unixepoch()
-                 WHERE path=?1",
-                params![it.path],
-            )?;
-        }
+                 WHERE path = (
+                     SELECT path FROM summary_queue
+                     WHERE state='pending'
+                     ORDER BY depth DESC LIMIT 1
+                 )
+                 RETURNING path, kind, depth",
+                [],
+                |r| {
+                    Ok(QueueItem {
+                        path: r.get(0)?,
+                        kind: r.get(1)?,
+                        depth: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
         Ok(item)
+    }
+
+    /// Reset items left `in_flight` by a previously crashed/killed run back to `pending`
+    /// so they get retried; items whose `attempts` already reached `max_attempts` are marked
+    /// `failed` instead (they keep crashing). Returns `(requeued, failed)`.
+    ///
+    /// Call this **once at process startup, before any worker begins claiming** — never while
+    /// workers are draining, or it would reset an item another worker is actively processing.
+    pub fn requeue_stale_in_flight(&mut self, max_attempts: u32) -> Result<(usize, usize)> {
+        let tx = self.conn.transaction()?;
+        let failed = tx.execute(
+            "UPDATE summary_queue
+             SET state='failed', error='exceeded max attempts after interruption',
+                 updated_at=unixepoch()
+             WHERE state='in_flight' AND attempts >= ?1",
+            params![max_attempts],
+        )?;
+        let requeued = tx.execute(
+            "UPDATE summary_queue
+             SET state='pending', updated_at=unixepoch()
+             WHERE state='in_flight'",
+            [],
+        )?;
+        tx.commit()?;
+        Ok((requeued, failed))
     }
 
     /// Mark a queue item's state (e.g. "done" or "failed").
@@ -1667,6 +1696,30 @@ mod tests {
         store.mark_queue_state(&item.path, "done", None).unwrap();
         let stats3 = store.queue_stats().unwrap();
         assert_eq!(stats3.done, 1);
+    }
+
+    #[test]
+    fn requeue_stale_in_flight_resets_then_caps() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .enqueue_summary_items(&[("/a".to_owned(), "file".to_owned(), 1)])
+            .unwrap();
+
+        // Claim → attempts=1, in_flight (simulates a crash mid-processing).
+        store.next_queue_item().unwrap().unwrap();
+        assert_eq!(store.queue_stats().unwrap().in_flight, 1);
+
+        // Below the cap → requeued to pending.
+        assert_eq!(store.requeue_stale_in_flight(3).unwrap(), (1, 0));
+        assert_eq!(store.queue_stats().unwrap().pending, 1);
+
+        store.next_queue_item().unwrap().unwrap(); // attempts=2
+        assert_eq!(store.requeue_stale_in_flight(3).unwrap(), (1, 0));
+        store.next_queue_item().unwrap().unwrap(); // attempts=3 — reaches cap
+
+        // At the cap → failed instead of requeued (it keeps crashing).
+        assert_eq!(store.requeue_stale_in_flight(3).unwrap(), (0, 1));
+        assert_eq!(store.queue_stats().unwrap().failed, 1);
     }
 
     #[test]

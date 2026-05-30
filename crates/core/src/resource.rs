@@ -402,6 +402,38 @@ pub fn assess(sample: &MemSample, _spec: &MachineSpec, _headroom: u64) -> Pressu
     Pressure::Ok
 }
 
+/// Maximum total time a memory-pressure pause may last before the job proceeds
+/// anyway, regardless of level. Shared by the CLI worker and the web summarize loop
+/// so the two pause paths agree (they previously disagreed: 5 min vs 2 min).
+pub const MAX_PAUSE_SECS: u64 = 300;
+
+/// What a memory-pressure pause loop should do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseAction {
+    /// Pressure cleared — resume work.
+    Resume,
+    /// Pressure persisted past [`MAX_PAUSE_SECS`] — proceed anyway (caller logs it).
+    Proceed,
+    /// Keep waiting: sleep this many seconds, then re-evaluate.
+    Sleep(u64),
+}
+
+/// Decide the next pause action from the *current* pressure level and how long the
+/// loop has already paused. Pure and sleep-free so it is unit-testable, and re-sampling
+/// `current` each tick means an escalation (Throttle → Critical) is reflected immediately.
+/// Critical waits in 5 s ticks, Throttle in 2 s ticks; both cap at [`MAX_PAUSE_SECS`].
+pub fn pause_decision(current: Pressure, elapsed_secs: u64) -> PauseAction {
+    if current == Pressure::Ok {
+        PauseAction::Resume
+    } else if elapsed_secs >= MAX_PAUSE_SECS {
+        PauseAction::Proceed
+    } else if current == Pressure::Critical {
+        PauseAction::Sleep(5)
+    } else {
+        PauseAction::Sleep(2)
+    }
+}
+
 // ── ETA estimation ────────────────────────────────────────────────────────────
 
 /// Per-model ETA estimates.
@@ -606,6 +638,38 @@ mod tests {
         assert!(
             ResourceProfile::Balanced.headroom_bytes()
                 > ResourceProfile::Performance.headroom_bytes()
+        );
+    }
+
+    #[test]
+    fn pause_decision_resumes_when_pressure_clears() {
+        assert_eq!(pause_decision(Pressure::Ok, 0), PauseAction::Resume);
+        assert_eq!(
+            pause_decision(Pressure::Ok, MAX_PAUSE_SECS),
+            PauseAction::Resume
+        );
+    }
+
+    #[test]
+    fn pause_decision_sleep_interval_tracks_current_level() {
+        // Re-sampled each tick, so an escalation changes the cadence immediately.
+        assert_eq!(pause_decision(Pressure::Throttle, 0), PauseAction::Sleep(2));
+        assert_eq!(pause_decision(Pressure::Critical, 0), PauseAction::Sleep(5));
+        assert_eq!(
+            pause_decision(Pressure::Throttle, 100),
+            PauseAction::Sleep(2)
+        );
+    }
+
+    #[test]
+    fn pause_decision_proceeds_after_cap_for_both_levels() {
+        assert_eq!(
+            pause_decision(Pressure::Throttle, MAX_PAUSE_SECS),
+            PauseAction::Proceed
+        );
+        assert_eq!(
+            pause_decision(Pressure::Critical, MAX_PAUSE_SECS + 10),
+            PauseAction::Proceed
         );
     }
 }
