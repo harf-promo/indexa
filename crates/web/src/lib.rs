@@ -525,29 +525,37 @@ async fn api_fs_ls(Query(params): Query<PathQuery>) -> Response {
     Json(entries).into_response()
 }
 
-async fn api_queue_stats(State(state): State<AppState>) -> Json<QueueStats> {
+async fn api_queue_stats(State(state): State<AppState>) -> Response {
     let store = state.store.lock().await;
-    let qs = store.queue_stats().unwrap_or_default();
-    Json(QueueStats {
-        pending: qs.pending as u64,
-        in_flight: qs.in_flight as u64,
-        done: qs.done as u64,
-        failed: qs.failed as u64,
-    })
+    // Surface a DB fault as 500 rather than masking it as an empty/zero queue (which would
+    // misreport a corrupt/locked index as "nothing queued").
+    match store.queue_stats() {
+        Ok(qs) => Json(QueueStats {
+            pending: qs.pending as u64,
+            in_flight: qs.in_flight as u64,
+            done: qs.done as u64,
+            failed: qs.failed as u64,
+        })
+        .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
 }
 
-async fn api_queue_failed(State(state): State<AppState>) -> Json<Vec<QueueFailedItem>> {
+async fn api_queue_failed(State(state): State<AppState>) -> Response {
     let store = state.store.lock().await;
-    let items = store.failed_queue_items(50).unwrap_or_default();
-    Json(
-        items
-            .into_iter()
-            .map(|i| QueueFailedItem {
-                path: i.path,
-                error: i.error,
-            })
-            .collect(),
-    )
+    match store.failed_queue_items(50) {
+        Ok(items) => Json(
+            items
+                .into_iter()
+                .map(|i| QueueFailedItem {
+                    path: i.path,
+                    error: i.error,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
 }
 
 async fn api_queue_retry(
@@ -631,26 +639,29 @@ async fn serve_ui_js() -> Response {
         .into_response()
 }
 
-async fn api_stats(State(state): State<AppState>) -> Json<StatsResponse> {
+async fn api_stats(State(state): State<AppState>) -> Response {
     let store = state.store.lock().await;
-    let entries = store.entry_count().unwrap_or(0);
-    let chunks = store.chunk_count().unwrap_or(0);
-    Json(StatsResponse { entries, chunks })
+    match (store.entry_count(), store.chunk_count()) {
+        (Ok(entries), Ok(chunks)) => Json(StatsResponse { entries, chunks }).into_response(),
+        (Err(e), _) | (_, Err(e)) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
 }
 
-async fn api_map(State(state): State<AppState>) -> Json<Vec<MapRow>> {
+async fn api_map(State(state): State<AppState>) -> Response {
     let store = state.store.lock().await;
-    let rows = store
-        .region_summary()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|r| MapRow {
-            category: r.category,
-            entry_count: r.entry_count,
-            total_size: r.total_size,
-        })
-        .collect();
-    Json(rows)
+    match store.region_summary() {
+        Ok(rows) => Json(
+            rows.into_iter()
+                .map(|r| MapRow {
+                    category: r.category,
+                    entry_count: r.entry_count,
+                    total_size: r.total_size,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
 }
 
 async fn api_ask(State(state): State<AppState>, Json(body): Json<AskRequest>) -> Response {
@@ -923,6 +934,11 @@ async fn api_delete_entry(
         Ok(p) => p,
         Err(resp) => return resp,
     };
+    // require_path accepts an empty string; guard the one destructive endpoint so an empty
+    // (or whitespace) path can't reach delete_subtree.
+    if path.trim().is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "path must not be empty");
+    }
     let mut store = s.store.lock().await;
     match store.delete_subtree(&path) {
         Ok(removed) => Json(serde_json::json!({ "removed": removed })).into_response(),

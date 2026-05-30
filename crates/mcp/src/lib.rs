@@ -9,7 +9,7 @@
 //! Tools: `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
 //! disclosure), `read_file`, `ask`, `get_stats`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -269,8 +269,29 @@ impl IndexaMcp {
     }
 
     /// Shared raw-content reader used by `read_file` and `get_summary(tier=l2)`.
+    ///
+    /// Reads are **confined to files under an indexed root**. The tool contract is "an indexed
+    /// file"; an MCP client must not be able to read arbitrary paths (`/etc/passwd`, `../../…`)
+    /// through it. (Threat model is local stdio — the client already has the user's filesystem
+    /// rights — so this is contract hygiene / defense-in-depth, not a privilege boundary.)
     fn read_file_inner(&self, path: &str) -> Result<CallToolResult, ErrorData> {
-        let bytes = std::fs::read(path).map_err(|e| mcp_err(format!("reading {path}: {e}")))?;
+        let requested =
+            std::fs::canonicalize(path).map_err(|e| mcp_err(format!("reading {path}: {e}")))?;
+        let store = Store::open(&self.db_path).map_err(mcp_err)?;
+        let roots: Vec<PathBuf> = store
+            .root_paths()
+            .map_err(mcp_err)?
+            .iter()
+            .filter_map(|r| std::fs::canonicalize(r).ok())
+            .collect();
+        if !path_within_roots(&requested, &roots) {
+            return Err(mcp_err(format!(
+                "path is not within an indexed root: {path}"
+            )));
+        }
+
+        let bytes =
+            std::fs::read(&requested).map_err(|e| mcp_err(format!("reading {path}: {e}")))?;
         let text = String::from_utf8_lossy(&bytes);
         let mut safe_end = text.len().min(READ_FILE_CAP);
         while safe_end > 0 && !text.is_char_boundary(safe_end) {
@@ -317,4 +338,35 @@ pub async fn serve_mcp(
     let service = handler.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+/// True if `requested` lies within any of the (canonicalized) indexed `roots`.
+/// Uses component-wise [`Path::starts_with`], so the root `/home/u/proj` does NOT match
+/// `/home/u/proj-evil` (a plain string-prefix check would wrongly accept it).
+fn path_within_roots(requested: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| requested.starts_with(root))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_within_roots_confines_to_index() {
+        let roots = vec![PathBuf::from("/home/u/proj"), PathBuf::from("/data/notes")];
+        // Inside a root → allowed.
+        assert!(path_within_roots(
+            Path::new("/home/u/proj/src/a.rs"),
+            &roots
+        ));
+        assert!(path_within_roots(Path::new("/data/notes/x.md"), &roots));
+        assert!(path_within_roots(Path::new("/home/u/proj"), &roots));
+        // Outside every root → rejected.
+        assert!(!path_within_roots(Path::new("/etc/passwd"), &roots));
+        assert!(!path_within_roots(Path::new("/home/u/secret.txt"), &roots));
+        // Sibling that merely shares a string prefix → rejected (component-wise match).
+        assert!(!path_within_roots(Path::new("/home/u/proj-evil/x"), &roots));
+        // No indexed roots → nothing is readable.
+        assert!(!path_within_roots(Path::new("/home/u/proj/a"), &[]));
+    }
 }
