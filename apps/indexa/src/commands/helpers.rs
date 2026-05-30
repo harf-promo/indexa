@@ -36,6 +36,7 @@ pub(crate) fn build_embedder(
         cfg.api_keys.openai.as_deref(),
         cfg.api_keys.google.as_deref(),
         Some(keep_alive),
+        cfg.describer.num_ctx,
     )
 }
 
@@ -54,6 +55,7 @@ pub(crate) fn build_llm(
         cfg.api_keys.openai.as_deref(),
         cfg.api_keys.anthropic.as_deref(),
         Some(keep_alive),
+        cfg.describer.num_ctx,
     )
 }
 

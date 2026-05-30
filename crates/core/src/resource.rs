@@ -434,6 +434,42 @@ pub fn pause_decision(current: Pressure, elapsed_secs: u64) -> PauseAction {
     }
 }
 
+/// Decide the next pause action from a fresh memory sample, resuming the moment memory has
+/// **actually recovered** rather than waiting for sticky swap to drain.
+///
+/// # Why this exists (the freeze bug)
+/// `assess()` keys off the *absolute* swap fraction, which on macOS is sticky: once the OS
+/// has swapped, `swap_used` does **not** fall when RAM frees. A loop that gates resume on
+/// `assess() == Ok` therefore never resumes after a Critical pause — it just waits out
+/// `MAX_PAUSE_SECS` every time. The real recovery signal is *free RAM returning*, which
+/// [`compute_budget`] measures (`total - used - headroom`). When unloading the resident model
+/// frees its wired pages, `used_bytes` drops and `compute_budget` climbs back above 0 even
+/// while swap stays high — that is the moment to resume.
+///
+/// Resume when **either**:
+///   - `compute_budget(spec, sample, headroom) > 0` — truly-available RAM exceeds headroom
+///     (recovered), *or*
+///   - the entry pressure signal has cleared (`assess(sample) == Ok`).
+///
+/// Otherwise it delegates to [`pause_decision`] for the unchanged 5 s (Critical) / 2 s
+/// (Throttle) tick cadence and the [`MAX_PAUSE_SECS`] → `Proceed` backstop. Pure and
+/// sleep-free so it is unit-testable; both the web loop and the CLI worker call it so the
+/// two pause paths agree.
+pub fn pause_step(
+    spec: &MachineSpec,
+    sample: &MemSample,
+    headroom: u64,
+    elapsed_secs: u64,
+) -> PauseAction {
+    if compute_budget(spec, sample, headroom) > 0 {
+        // RAM recovered — resume even if swap is still sticky-high.
+        return PauseAction::Resume;
+    }
+    // No recovery yet: fall back to swap-based cadence + the time backstop. `assess() == Ok`
+    // (entry signal cleared) also resolves to Resume here.
+    pause_decision(assess(sample, spec, headroom), elapsed_secs)
+}
+
 // ── ETA estimation ────────────────────────────────────────────────────────────
 
 /// Per-model ETA estimates.
@@ -659,6 +695,76 @@ mod tests {
             pause_decision(Pressure::Throttle, 100),
             PauseAction::Sleep(2)
         );
+    }
+
+    // ── pause_step: recover-aware resume (the freeze fix) ──────────────────────
+
+    #[test]
+    fn pause_step_resumes_on_recovery_despite_sticky_swap() {
+        // Sticky swap pinned at 100% (assess() would say Critical forever), BUT only 10 GB
+        // of 36 GB is actively used → compute_budget ≈ 21 GB > 0 (RAM recovered, e.g. after
+        // unloading the model). Must resume even though swap never drained.
+        let spec = fake_spec(36, true);
+        let headroom = ResourceProfile::Balanced.headroom_bytes();
+        let sample = fake_sample_with_used(0, 10, 2048, 2048); // swap 100%, used 10 GB
+        assert_eq!(assess(&sample, &spec, headroom), Pressure::Critical); // entry signal still hot
+        assert!(compute_budget(&spec, &sample, headroom) > 0);
+        assert_eq!(
+            pause_step(&spec, &sample, headroom, 0),
+            PauseAction::Resume,
+            "RAM recovered → resume regardless of sticky swap"
+        );
+    }
+
+    #[test]
+    fn entry_gate_skips_pause_on_sticky_swap_after_recovery() {
+        // The watchdog gates *entry* into a pause on `pause_step(.., 0) == Resume` (skip),
+        // NOT on raw `assess()`. After the first pressure event macOS swap stays sticky-high,
+        // so `assess()` would report Critical for the rest of the job and re-enter the pause
+        // (warn + unload + reload the model) on every file. This asserts the entry gate skips
+        // once RAM has recovered, even while `assess()` is still Critical.
+        let spec = fake_spec(36, true);
+        let headroom = ResourceProfile::Balanced.headroom_bytes();
+        let sample = fake_sample_with_used(0, 12, 2048, 2048); // swap 100%, used 12 GB → budget > 0
+        assert_eq!(assess(&sample, &spec, headroom), Pressure::Critical); // sticky entry signal
+        assert_eq!(
+            pause_step(&spec, &sample, headroom, 0),
+            PauseAction::Resume,
+            "entry gate must skip the pause when RAM has recovered (no per-file thrash)"
+        );
+    }
+
+    #[test]
+    fn pause_step_keeps_sleeping_until_cap_when_unrecovered() {
+        // High swap AND no RAM recovery (34 GB used → budget < 0). Sleep in 5 s ticks
+        // (Critical) until elapsed ≥ MAX_PAUSE_SECS, then Proceed.
+        let spec = fake_spec(36, true);
+        let headroom = ResourceProfile::Balanced.headroom_bytes();
+        let sample = fake_sample_with_used(0, 34, 2048, 2048); // swap 100%, used 34 GB
+        assert!(compute_budget(&spec, &sample, headroom) <= 0);
+        assert_eq!(
+            pause_step(&spec, &sample, headroom, 0),
+            PauseAction::Sleep(5)
+        );
+        assert_eq!(
+            pause_step(&spec, &sample, headroom, 100),
+            PauseAction::Sleep(5)
+        );
+        assert_eq!(
+            pause_step(&spec, &sample, headroom, MAX_PAUSE_SECS),
+            PauseAction::Proceed,
+            "unrecovered pressure proceeds at the time backstop"
+        );
+    }
+
+    #[test]
+    fn pause_step_resumes_immediately_with_no_pressure() {
+        // No swap, plenty of free RAM → resume on the first check.
+        let spec = fake_spec(36, true);
+        let headroom = ResourceProfile::Balanced.headroom_bytes();
+        let sample = fake_sample_with_used(20, 8, 0, 2048); // no swap, 8 GB used
+        assert_eq!(assess(&sample, &spec, headroom), Pressure::Ok);
+        assert_eq!(pause_step(&spec, &sample, headroom, 0), PauseAction::Resume);
     }
 
     #[test]

@@ -6,11 +6,12 @@ use crate::jobs::{broadcast_only, push, JobEvent, JobHandle, JobStatus, Jobs};
 use crate::AppState;
 use indexa_core::{
     resource::{
-        assess, pause_decision, MachineSpec, PauseAction, Pressure, WatchdogState, MAX_PAUSE_SECS,
+        assess, pause_step, MachineSpec, PauseAction, Pressure, WatchdogState, MAX_PAUSE_SECS,
     },
     store::ChunkRecord,
     walker::{walk, EntryKind, WalkConfig},
 };
+use indexa_embed::Embedder;
 use indexa_llm::{Generator, OllamaLlm};
 use indexa_query::{enqueue_subtree, process_queue_item_with_passes};
 use std::sync::Arc;
@@ -63,11 +64,30 @@ fn finalize_cancelled(handle: &Arc<JobHandle>, done: usize) {
     *handle.status.lock().unwrap() = JobStatus::Done;
 }
 
+/// Compute the swap-used percentage of total swap (0–100), saturating to 100 on no swap.
+fn swap_pct(sample: &indexa_core::resource::MemSample) -> u64 {
+    sample
+        .swap_used_bytes
+        .checked_mul(100)
+        .and_then(|v| v.checked_div(sample.swap_total_bytes))
+        .unwrap_or(100)
+}
+
 /// Check memory pressure before an Ollama call.
 ///
 /// If pressure is Throttle or Critical:
-///   1. Emits a Warning event so the user can see it in the Jobs UI.
-///   2. Sleeps in a loop until pressure returns to Ok.
+///   1. Emits a calm, actionable Warning event so the user can see it in the Jobs UI.
+///   2. On a **Critical** entry, unloads the resident model(s) once so their wired RAM
+///      frees — that is what lets the recovery check below trigger (macOS swap is sticky
+///      and never drains on its own, so we cannot wait for swap to fall).
+///   3. Loops on the recover-aware [`pause_step`] predicate: resumes the moment free RAM
+///      climbs back above headroom (`compute_budget > 0`) — even while swap stays high —
+///      or the entry signal clears; otherwise sleeps on the 5 s/2 s cadence up to
+///      [`MAX_PAUSE_SECS`], then proceeds.
+///
+/// `embedder` / `llm` are the handles whose models to unload on a Critical pause; the deep
+/// loop always passes the embedder (and the contextual-retrieval LLM when present), and the
+/// summarize loop passes its describer + embedder.
 ///
 /// The caller should invoke this before every embedding or LLM call
 /// in the hot loops of `run_deep_phase` and `run_summarize_phase`.
@@ -77,45 +97,57 @@ async fn run_watchdog_check(
     headroom: u64,
     handle: &Arc<JobHandle>,
     stage: &str,
+    embedder: Option<&dyn Embedder>,
+    llm: Option<&dyn Generator>,
 ) {
     let sample = wdog.sample();
-    let pressure = assess(&sample, spec, headroom);
-    if pressure == Pressure::Ok {
+    // Gate entry on the SAME recover-aware predicate as resume, not raw `assess()`. macOS swap
+    // is sticky: after the first event `assess()` reports Critical for the rest of the job even
+    // once RAM has recovered. Using `assess()` here would re-enter the pause (warn + unload +
+    // reload the model) on *every* subsequent file. `pause_step(.., 0) == Resume` means "RAM is
+    // fine OR no real signal" → skip. Only when RAM is genuinely low (compute_budget <= 0) do we
+    // fall through and pause.
+    if pause_step(spec, &sample, headroom, 0) == PauseAction::Resume {
         return;
     }
+    // RAM is genuinely low. Use `assess()` only to choose the unload gate (Critical vs Throttle).
+    let pressure = assess(&sample, spec, headroom);
 
-    let level = if pressure == Pressure::Critical {
-        "critical"
-    } else {
-        "high"
-    };
-    let swap_gb = sample.swap_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-    let swap_pct = sample
-        .swap_used_bytes
-        .checked_mul(100)
-        .and_then(|v| v.checked_div(sample.swap_total_bytes))
-        .unwrap_or(100);
+    let pct = swap_pct(&sample);
     push(
         handle,
         JobEvent::Warning {
             stage: stage.to_owned(),
             item_path: None,
             message: format!(
-                "Memory pressure {level} — swap at {swap_pct}% ({swap_gb:.1} GB used). \
-                 Pausing to avoid freeze. Job will resume automatically."
+                "Low on memory (swap {pct}%). Easing off and freeing the model to keep your \
+                 machine responsive — this resumes automatically. \
+                 Tip: lower the workload in Settings → Resource Profile."
             ),
         },
     );
 
-    // Wait until pressure clears, capped at resource::MAX_PAUSE_SECS. The shared
-    // `pause_decision` is re-evaluated against a fresh sample each tick, so an escalation
-    // (Throttle → Critical) immediately tightens the cadence — the old loop fixed the
-    // interval from the pre-loop level and capped Throttle at only 2 minutes.
+    // On a Critical entry, unload the resident model(s) once so their wired pages free and
+    // `compute_budget` can climb back above 0. macOS swap is sticky and never drains on its
+    // own, so gating resume on swap level alone would stall here for the full backstop.
+    if pressure == Pressure::Critical {
+        if let Some(e) = embedder {
+            e.unload().await;
+        }
+        if let Some(l) = llm {
+            l.unload().await;
+        }
+    }
+
+    // Wait until memory actually recovers, capped at resource::MAX_PAUSE_SECS. `pause_step`
+    // re-evaluates a fresh sample each tick: it resumes when free RAM returns above headroom
+    // (recovery) regardless of sticky swap, and escalation (Throttle → Critical) tightens the
+    // cadence immediately.
     let mut elapsed = 0u64;
     let mut next_status_at = 30u64;
     loop {
         let s = wdog.sample();
-        match pause_decision(assess(&s, spec, headroom), elapsed) {
+        match pause_step(spec, &s, headroom, elapsed) {
             PauseAction::Resume => break,
             PauseAction::Proceed => {
                 push(
@@ -124,31 +156,23 @@ async fn run_watchdog_check(
                         stage: stage.to_owned(),
                         item_path: None,
                         message: format!(
-                            "Memory pressure did not clear after {MAX_PAUSE_SECS} s — \
-                             proceeding anyway. Consider closing other apps or setting a \
-                             lower headroom in [resource] config."
+                            "Memory didn't recover within {MAX_PAUSE_SECS}s — continuing gently. \
+                             If this repeats, lower the workload in Settings → Resource Profile."
                         ),
                     },
                 );
                 break;
             }
             PauseAction::Sleep(secs) => {
-                // Emit a follow-up roughly every 30 s so the user isn't left wondering.
+                // Emit a calm follow-up roughly every 30 s so the user isn't left wondering.
                 if elapsed >= next_status_at {
-                    let swap_gb = s.swap_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-                    let swap_pct = s
-                        .swap_used_bytes
-                        .checked_mul(100)
-                        .and_then(|v| v.checked_div(s.swap_total_bytes))
-                        .unwrap_or(100);
                     push(
                         handle,
                         JobEvent::Warning {
                             stage: stage.to_owned(),
                             item_path: None,
                             message: format!(
-                                "Still waiting for swap to clear (swap: {swap_pct}% / \
-                                 {swap_gb:.1} GB) — {elapsed}/{MAX_PAUSE_SECS} s …"
+                                "Still easing off while memory recovers … ({elapsed}s)"
                             ),
                         },
                     );
@@ -332,7 +356,7 @@ async fn run_deep_phase(
     // Build a contextual-retrieval LLM if the feature is enabled.
     let ctx_llm: Option<OllamaLlm> = if cfg.contextual_retrieval {
         let base_url = OllamaLlm::resolve_base_url(Some(&cfg.base_url));
-        Some(OllamaLlm::new(&base_url, &cfg.file_model))
+        Some(OllamaLlm::new(&base_url, &cfg.file_model).with_num_ctx(cfg.num_ctx))
     } else {
         None
     };
@@ -462,8 +486,19 @@ async fn run_deep_phase(
                             chunk.text.clone()
                         };
 
-                    // Watchdog: pause if memory is tight before the embed call.
-                    run_watchdog_check(&mut wdog, &spec, headroom, handle, "deep").await;
+                    // Watchdog: pause if memory is tight before the embed call. On a Critical
+                    // pause we unload the embedder (and the contextual-retrieval LLM, if
+                    // enabled) so their RAM frees and the recovery check can resume us.
+                    run_watchdog_check(
+                        &mut wdog,
+                        &spec,
+                        headroom,
+                        handle,
+                        "deep",
+                        Some(state.embedder.as_ref()),
+                        ctx_llm.as_ref().map(|l| l as &dyn Generator),
+                    )
+                    .await;
 
                     let embedding = match state.embedder.embed(&embed_text).await {
                         Ok(v) => Some(v),
@@ -589,7 +624,8 @@ pub(crate) async fn run_summarize_phase(
     let embedder = state.embedder.clone();
     let root = std::path::PathBuf::from(path);
     let base_url = OllamaLlm::resolve_base_url(Some(&cfg.base_url));
-    let describer = OllamaLlm::new_with_dir_model(&base_url, &cfg.file_model, &cfg.dir_model);
+    let describer = OllamaLlm::new_with_dir_model(&base_url, &cfg.file_model, &cfg.dir_model)
+        .with_num_ctx(cfg.num_ctx);
 
     // Memory watchdog: checked before each LLM summarization call.
     let mut wdog = WatchdogState::new();
@@ -657,8 +693,18 @@ pub(crate) async fn run_summarize_phase(
         };
         let item_path = item.path.clone();
 
-        // Watchdog: pause if memory is tight before the LLM summarization call.
-        run_watchdog_check(&mut wdog, &spec, headroom, handle, "summarize").await;
+        // Watchdog: pause if memory is tight before the LLM summarization call. On a Critical
+        // pause we unload the describer LLM and embedder so their RAM frees and we can resume.
+        run_watchdog_check(
+            &mut wdog,
+            &spec,
+            headroom,
+            handle,
+            "summarize",
+            Some(embedder.as_ref()),
+            Some(&describer as &dyn Generator),
+        )
+        .await;
 
         let llm_start = std::time::Instant::now();
 

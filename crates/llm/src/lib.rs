@@ -97,6 +97,11 @@ pub trait Generator: Send + Sync {
         on_fragment(full.clone());
         Ok(full)
     }
+
+    /// Best-effort: free any resident model so RAM can recover during a memory-pressure
+    /// pause. The default is a no-op (cloud adapters hold no local memory); Ollama
+    /// overrides this to unload its loaded model(s).
+    async fn unload(&self) {}
 }
 
 /// A child entry fed into a directory roll-up summary prompt.
@@ -159,6 +164,12 @@ pub trait Describer: Send + Sync {
         on_fragment(full.clone());
         Ok(full)
     }
+
+    /// Best-effort: free any resident model so RAM can recover during a memory-pressure
+    /// pause. The default is a no-op (cloud adapters hold no local memory); Ollama overrides
+    /// it to unload its loaded model(s). Mirrors [`Generator::unload`] for callers that hold
+    /// a `dyn Describer` (e.g. the CLI summary worker).
+    async fn unload(&self) {}
 }
 
 /// Build a `Generator` from config values, optionally setting `keep_alive` on Ollama adapters.
@@ -173,6 +184,7 @@ pub fn from_config_with_keep_alive(
     openai_key: Option<&str>,
     anthropic_key: Option<&str>,
     keep_alive: Option<i64>,
+    num_ctx: u32,
 ) -> anyhow::Result<Box<dyn Generator + Send + Sync>> {
     let base = if base_url.is_empty() {
         None
@@ -185,7 +197,8 @@ pub fn from_config_with_keep_alive(
             let llm = match keep_alive {
                 Some(ka) => OllamaLlm::new_with_keep_alive(url, model, None, ka),
                 None => OllamaLlm::new(url, model),
-            };
+            }
+            .with_num_ctx(num_ctx);
             Ok(Box::new(llm))
         }
         "openai" => Ok(Box::new(OpenAICompatLlm::from_env_or_config(

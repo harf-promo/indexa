@@ -86,6 +86,11 @@ pub(crate) async fn send_with_retry(
 pub trait Embedder: Send + Sync {
     async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>>;
     fn dim(&self) -> usize;
+
+    /// Best-effort: free any resident model so RAM can recover during a memory-pressure
+    /// pause. The default is a no-op (cloud adapters hold no local memory); Ollama
+    /// overrides this to unload its loaded model.
+    async fn unload(&self) {}
 }
 
 /// Build an `Embedder` from config values, optionally setting `keep_alive` on Ollama adapters.
@@ -93,6 +98,9 @@ pub trait Embedder: Send + Sync {
 /// `openai_key` / `google_key` are used as fallbacks when the corresponding
 /// environment variables (`OPENAI_API_KEY`, `GOOGLE_API_KEY`) are not set.
 /// Pass `None` to require the env var.
+// One factory that fans config fields out to the right provider constructor; grouping these
+// into a struct would just move the same fields around without improving clarity.
+#[allow(clippy::too_many_arguments)]
 pub fn from_config_with_keep_alive(
     provider: &str,
     model: &str,
@@ -101,6 +109,7 @@ pub fn from_config_with_keep_alive(
     openai_key: Option<&str>,
     google_key: Option<&str>,
     keep_alive: Option<i64>,
+    num_ctx: u32,
 ) -> anyhow::Result<Box<dyn Embedder + Send + Sync>> {
     let base = if base_url.is_empty() {
         None
@@ -113,7 +122,8 @@ pub fn from_config_with_keep_alive(
             let embedder = match keep_alive {
                 Some(ka) => OllamaEmbedder::new_with_keep_alive(url, model, dim, ka),
                 None => OllamaEmbedder::new(url, model, dim),
-            };
+            }
+            .with_num_ctx(num_ctx);
             Ok(Box::new(embedder))
         }
         "openai" => Ok(Box::new(OpenAIEmbedder::from_env_or_config(
