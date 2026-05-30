@@ -21,20 +21,20 @@ use indexa_llm::Generator;
 /// result may be partial, duplicated, or out-of-range — [`apply_rerank`]
 /// sanitizes it, so implementations can return raw model output.
 #[async_trait::async_trait]
-pub trait CrossEncoder: Send + Sync {
+pub(crate) trait CrossEncoder: Send + Sync {
     async fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<usize>>;
 }
 
 /// Listwise reranker backed by the local generation model. One LLM call ranks
 /// all candidates at once.
-pub struct LlmReranker<'a> {
+pub(crate) struct LlmReranker<'a> {
     llm: &'a dyn Generator,
     /// Per-candidate snippet cap (chars) so the rerank prompt can't balloon.
     snippet_cap: usize,
 }
 
 impl<'a> LlmReranker<'a> {
-    pub fn new(llm: &'a dyn Generator) -> Self {
+    pub(crate) fn new(llm: &'a dyn Generator) -> Self {
         Self {
             llm,
             snippet_cap: 300,
@@ -102,7 +102,7 @@ fn parse_ranking(response: &str, n: usize) -> Vec<usize> {
 /// result, the original order is returned unchanged. The sanitized index order
 /// is completed with any hits the reranker omitted (appended in original order),
 /// so no candidate is ever lost.
-pub async fn apply_rerank(
+pub(crate) async fn apply_rerank(
     reranker: &dyn CrossEncoder,
     query: &str,
     hits: Vec<SearchHit>,

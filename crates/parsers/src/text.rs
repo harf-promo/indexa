@@ -89,15 +89,6 @@ impl MarkdownParser {
     pub fn new(chunk_size: usize) -> Self {
         Self { chunk_size }
     }
-
-    fn heading_text(level: HeadingLevel) -> &'static str {
-        match level {
-            HeadingLevel::H1 => "H1",
-            HeadingLevel::H2 => "H2",
-            HeadingLevel::H3 => "H3",
-            _ => "H4+",
-        }
-    }
 }
 
 impl Parser for MarkdownParser {
@@ -137,7 +128,6 @@ impl Parser for MarkdownParser {
                         _ => 3,
                     };
                     current_heading.truncate(depth);
-                    let _ = Self::heading_text(level); // suppress unused warning
                 }
                 Event::End(TagEnd::Heading(_)) => {
                     in_heading = false;

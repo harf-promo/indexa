@@ -116,28 +116,7 @@ fn word_window_chunks(
     seq: &mut usize,
     chunks: &mut Vec<Chunk>,
 ) {
-    let words: Vec<&str> = text.split_whitespace().collect();
-    if words.is_empty() {
-        return;
-    }
-    let size = 800usize;
-    let overlap = 100usize;
-    let mut start = 0;
-    loop {
-        let end = (start + size).min(words.len());
-        chunks.push(Chunk {
-            source: path.to_path_buf(),
-            seq: *seq,
-            heading: heading.to_owned(),
-            text: words[start..end].join(" "),
-            language: None,
-        });
-        *seq += 1;
-        if end == words.len() {
-            break;
-        }
-        start += size - overlap;
-    }
+    crate::types::chunk_words(path, text, heading, None, 800, 100, seq, chunks);
 }
 
 #[cfg(test)]

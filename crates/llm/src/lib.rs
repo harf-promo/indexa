@@ -109,22 +109,11 @@ pub trait Describer: Send + Sync {
     }
 }
 
-/// Build a `Generator` from config values.
+/// Build a `Generator` from config values, optionally setting `keep_alive` on Ollama adapters.
 ///
 /// `openai_key` / `anthropic_key` are used as fallbacks when the corresponding
 /// environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) are not set.
 /// Pass `None` to require the env var.
-pub fn from_config(
-    provider: &str,
-    model: &str,
-    base_url: &str,
-    openai_key: Option<&str>,
-    anthropic_key: Option<&str>,
-) -> anyhow::Result<Box<dyn Generator + Send + Sync>> {
-    from_config_with_keep_alive(provider, model, base_url, openai_key, anthropic_key, None)
-}
-
-/// Like `from_config` but also sets `keep_alive` on Ollama adapters.
 pub fn from_config_with_keep_alive(
     provider: &str,
     model: &str,
