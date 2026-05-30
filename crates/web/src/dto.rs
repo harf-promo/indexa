@@ -6,6 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use indexa_core::resource::{assess, compute_budget, CpuSample, MachineSpec, MemSample, Pressure};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -196,6 +197,127 @@ pub(crate) struct JobListEntry {
     pub(crate) path: String,
     pub(crate) status: JobStatus,
     pub(crate) started_at: i64,
+}
+
+// ── Machine telemetry (always-on resource feed) ────────────────────────────────
+//
+// Powers the Engine status bar's live CPU/RAM/pressure gauges. Sampled on its own
+// low-frequency task (see `serve()`), independent of any job, so the gauges are
+// live even when idle. `pressure`/`budget_bytes`/`in_headroom_band` are derived
+// with the SAME core functions the watchdog uses, so the gauge and the watchdog
+// always agree on "do we have room".
+
+#[derive(Serialize, Clone)]
+pub(crate) struct CpuDto {
+    pub(crate) global_percent: f32,
+    pub(crate) per_core: Vec<f32>,
+}
+
+#[derive(Serialize, Clone, Default)]
+pub(crate) struct RamDto {
+    pub(crate) total_bytes: u64,
+    pub(crate) used_bytes: u64,
+    pub(crate) used_percent: f32,
+}
+
+#[derive(Serialize, Clone, Default)]
+pub(crate) struct SwapDto {
+    pub(crate) used_bytes: u64,
+    pub(crate) total_bytes: u64,
+    pub(crate) used_percent: f32,
+}
+
+#[derive(Serialize, Clone, Default)]
+pub(crate) struct MachineDto {
+    pub(crate) total_ram_bytes: u64,
+    pub(crate) physical_cores: usize,
+    pub(crate) logical_cores: usize,
+    pub(crate) is_apple_silicon: bool,
+    pub(crate) gpu_wired_limit_bytes: u64,
+}
+
+#[derive(Serialize, Clone)]
+pub(crate) struct ActiveJobDto {
+    pub(crate) job_id: Uuid,
+    pub(crate) kind: String,
+    pub(crate) path: String,
+}
+
+/// One snapshot of machine telemetry, broadcast over `/api/telemetry`.
+#[derive(Serialize, Clone, Default)]
+pub(crate) struct TelemetrySample {
+    /// Unix seconds when sampled.
+    pub(crate) ts: u64,
+    /// `None` on the first tick (CPU usage needs two refreshes to prime).
+    pub(crate) cpu: Option<CpuDto>,
+    pub(crate) ram: RamDto,
+    pub(crate) swap: SwapDto,
+    /// "ok" | "throttle" | "critical" — from `assess()`.
+    pub(crate) pressure: String,
+    /// `compute_budget()`: free RAM for a new model load, minus headroom.
+    pub(crate) budget_bytes: i64,
+    pub(crate) headroom_bytes: u64,
+    /// `budget_bytes <= 0` — the RAM bar has entered the keep-free band.
+    pub(crate) in_headroom_band: bool,
+    pub(crate) machine: MachineDto,
+    /// The currently-running job, if any (lets the bar say "watching while building").
+    pub(crate) active_job: Option<ActiveJobDto>,
+}
+
+impl TelemetrySample {
+    /// Compose a sample from a CPU+memory reading plus machine/job context.
+    /// Reuses `compute_budget`/`assess` so the gauge matches the watchdog exactly.
+    pub(crate) fn build(
+        spec: &MachineSpec,
+        mem: &MemSample,
+        cpu: Option<CpuSample>,
+        headroom_bytes: u64,
+        active_job: Option<ActiveJobDto>,
+        ts: u64,
+    ) -> Self {
+        let budget_bytes = compute_budget(spec, mem, headroom_bytes);
+        let pressure = match assess(mem, spec, headroom_bytes) {
+            Pressure::Ok => "ok",
+            Pressure::Throttle => "throttle",
+            Pressure::Critical => "critical",
+        };
+        let pct = |num: u64, den: u64| -> f32 {
+            if den > 0 {
+                (num as f64 / den as f64 * 100.0) as f32
+            } else {
+                0.0
+            }
+        };
+        Self {
+            ts,
+            cpu: cpu.map(|c| CpuDto {
+                global_percent: c.global_percent,
+                per_core: c.per_core,
+            }),
+            ram: RamDto {
+                total_bytes: spec.total_ram_bytes,
+                used_bytes: mem.used_bytes,
+                used_percent: pct(mem.used_bytes, spec.total_ram_bytes),
+            },
+            swap: SwapDto {
+                used_bytes: mem.swap_used_bytes,
+                total_bytes: mem.swap_total_bytes,
+                used_percent: pct(mem.swap_used_bytes, mem.swap_total_bytes),
+            },
+            pressure: pressure.to_owned(),
+            budget_bytes,
+            headroom_bytes,
+            in_headroom_band: budget_bytes <= 0,
+            machine: MachineDto {
+                total_ram_bytes: spec.total_ram_bytes,
+                physical_cores: spec.physical_cores,
+                logical_cores: spec.logical_cores,
+                is_apple_silicon: spec.is_apple_silicon,
+                gpu_wired_limit_bytes: spec.gpu_wired_limit_bytes,
+            },
+            active_job,
+        }
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
