@@ -3,7 +3,7 @@
 use crate::summarize::process_queue_item;
 use indexa_core::{
     config::DescriberConfig,
-    resource::{assess, detect_machine, Pressure, WatchdogState},
+    resource::{assess, detect_machine, pause_decision, PauseAction, Pressure, WatchdogState},
     store::Store,
 };
 use indexa_embed::Embedder;
@@ -61,29 +61,33 @@ pub async fn run_worker(
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
             Some(item) => {
-                // Watchdog: check memory pressure before the LLM call.
-                // Hard timeout: max 100 × 3 s = ~5 min to avoid infinite pause.
+                // Watchdog: check memory pressure before the LLM call. The pause loop
+                // re-samples each tick (check-then-sleep) and caps total wait at
+                // resource::MAX_PAUSE_SECS, sharing the decision logic with the web path.
                 let sample = wdog.sample();
-                let pressure = assess(&sample, &spec, headroom);
-                if pressure != Pressure::Ok {
+                if assess(&sample, &spec, headroom) != Pressure::Ok {
                     let avail_gb = sample.available_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
                     let swap_gb = sample.swap_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
                     tracing::warn!(
                         "worker: memory pressure — pausing \
                          (available: {avail_gb:.1} GB, swap: {swap_gb:.1} GB)"
                     );
-                    let mut ticks = 0u32;
+                    let mut elapsed = 0u64;
                     loop {
-                        tokio::time::sleep(Duration::from_secs(3)).await;
-                        ticks += 1;
-                        if assess(&wdog.sample(), &spec, headroom) == Pressure::Ok {
-                            break;
-                        }
-                        if ticks >= 100 {
-                            tracing::warn!(
-                                "worker: memory pressure did not clear after 5 min — proceeding"
-                            );
-                            break;
+                        let current = assess(&wdog.sample(), &spec, headroom);
+                        match pause_decision(current, elapsed) {
+                            PauseAction::Resume => break,
+                            PauseAction::Proceed => {
+                                tracing::warn!(
+                                    "worker: memory pressure did not clear after {}s — proceeding",
+                                    indexa_core::resource::MAX_PAUSE_SECS
+                                );
+                                break;
+                            }
+                            PauseAction::Sleep(secs) => {
+                                tokio::time::sleep(Duration::from_secs(secs)).await;
+                                elapsed += secs;
+                            }
                         }
                     }
                 }

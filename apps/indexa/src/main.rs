@@ -849,6 +849,17 @@ async fn cmd_worker(concurrency: usize, cfg: &Config) -> Result<()> {
 
     let store = Arc::new(tokio::sync::Mutex::new(Store::open(&db_path)?));
 
+    // Startup sweep before any worker claims: reset items left `in_flight` by a prior
+    // crash/kill back to `pending` (failing those past the attempt cap), so they aren't
+    // stranded. Must run before the worker tasks spawn.
+    match store.lock().await.requeue_stale_in_flight(3) {
+        Ok((requeued, failed)) if requeued > 0 || failed > 0 => println!(
+            "Requeued {requeued} stale in-flight item(s) from a previous run ({failed} failed over the attempt cap)."
+        ),
+        Ok(_) => {}
+        Err(e) => eprintln!("Warning: could not sweep stale in-flight items: {e}"),
+    }
+
     let stats = store.lock().await.queue_stats()?;
     println!(
         "Summary worker starting ({concurrency} concurrent). Queue: {} pending, {} done, {} failed.",
