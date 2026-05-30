@@ -15,6 +15,10 @@ Toward **v0.6**.
 - `indexa deep` shows live in-place progress (files done / total + current file) on a terminal, auto-hidden when stderr is redirected (#15). Hand-rolled (no new dependency).
 - `indexa map` colorizes its output by category when stdout is a terminal; piped/redirected output stays plain (#14).
 
+### Changed
+
+- Surface scan recognizes the Linux XDG base dirs (`~/.local/share`, `~/.local/state`, `~/.local/bin`) (#25), and classifies more file types (web/markup, more languages, tabular/scientific data, logs) so fewer files land in the `unknown` category (#21).
+
 ## [0.5.1] — 2026-05-30
 
 A "correctness & hardening" pass over the shipped v0.5.0 engine (found by a full code review),

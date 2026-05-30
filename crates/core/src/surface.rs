@@ -140,6 +140,31 @@ static HINTS: &[(Predicate, PathHint)] = &[
             deep_scan: DeepScanPolicy::StructureOnly,
         },
     ),
+    // ── Linux XDG base dirs (XDG_DATA_HOME / STATE_HOME / user bin) ─────────
+    (
+        |p| home_subdir(p, ".local/share"),
+        PathHint {
+            label: "User data (XDG_DATA_HOME)",
+            category: "data",
+            deep_scan: DeepScanPolicy::StructureOnly,
+        },
+    ),
+    (
+        |p| home_subdir(p, ".local/state"),
+        PathHint {
+            label: "App state (XDG_STATE_HOME)",
+            category: "cache",
+            deep_scan: DeepScanPolicy::Skip,
+        },
+    ),
+    (
+        |p| home_subdir(p, ".local/bin"),
+        PathHint {
+            label: "User binaries",
+            category: "applications",
+            deep_scan: DeepScanPolicy::StructureOnly,
+        },
+    ),
     // ── macOS system data ──────────────────────────────────────────────────
     (
         |p| path_contains(p, "Library/Caches"),
@@ -348,6 +373,19 @@ pub fn classify_file_by_extension(path: &Path) -> Option<PathHint> {
             // Scripts (broad)
             "sh" | "bash" | "zsh" | "fish" | "ksh" | "csh" | "tcsh" | "ps1" | "psm1" | "psd1"
             | "bat" | "cmd" | "vbs" => Some("code"),
+            // Web + markup + schema (mime_guess misses many of these)
+            "html" | "htm" | "css" | "scss" | "sass" | "less" | "vue" | "svelte" | "astro"
+            | "graphql" | "gql" | "proto" | "json5" | "jsonc" => Some("code"),
+            // Languages mime_guess/Linguist commonly misclassify as octet-stream
+            "sol" | "jl" | "lua" | "clj" | "cljs" | "edn" | "ex" | "exs" | "erl" | "hrl" | "hs"
+            | "ml" | "mli" | "scala" | "kt" | "kts" | "swift" | "dart" | "nim" | "zig" | "rmd" => {
+                Some("code")
+            }
+            // Tabular / scientific data
+            "csv" | "tsv" | "jsonl" | "ndjson" | "avro" | "orc" | "feather" | "npy" | "npz"
+            | "h5" | "hdf5" | "pkl" | "pickle" | "dta" | "sav" => Some("data"),
+            // Logs
+            "log" => Some("logs"),
             _ => None,
         };
         if let Some(c) = cat {
@@ -621,5 +659,22 @@ mod tests {
     fn unknown_extension_returns_none() {
         let p = PathBuf::from("/home/user/mystery.xyzabc123");
         assert!(classify_file_by_extension(&p).is_none());
+    }
+
+    #[test]
+    fn extended_extensions_reduce_unknown_bucket() {
+        // Extensions added to shrink the "unknown" category (#21).
+        for (name, want) in [
+            ("app/style.scss", "code"),
+            ("api/schema.graphql", "code"),
+            ("src/main.zig", "code"),
+            ("data/export.csv", "data"),
+            ("ml/model.h5", "data"),
+            ("var/server.log", "logs"),
+        ] {
+            let h = classify_file_by_extension(&PathBuf::from(name))
+                .unwrap_or_else(|| panic!("{name} should classify"));
+            assert_eq!(h.category, want, "{name}");
+        }
     }
 }
