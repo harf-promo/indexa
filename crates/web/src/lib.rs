@@ -142,6 +142,10 @@ pub async fn serve(
         .route("/api/queue/retry", post(api_queue_retry))
         .route("/api/config", get(api_config_get))
         .route("/api/config/passes", post(api_config_passes))
+        .route(
+            "/api/config/resource",
+            get(api_config_resource_get).post(api_config_resource_set),
+        )
         .route("/api/models/installed", get(api_models_installed))
         .route("/api/models/pull", post(api_models_pull))
         .route("/api/keys", get(api_keys_get).post(api_keys_set))

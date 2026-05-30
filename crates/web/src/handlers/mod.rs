@@ -16,7 +16,9 @@ mod tree;
 mod ui;
 
 pub(crate) use ask::api_ask;
-pub(crate) use config::{api_config_get, api_config_passes};
+pub(crate) use config::{
+    api_config_get, api_config_passes, api_config_resource_get, api_config_resource_set,
+};
 pub(crate) use fs::api_fs_ls;
 pub(crate) use jobs::{
     api_job_deep, api_job_delete, api_job_get, api_job_index, api_job_scan, api_job_summarize,

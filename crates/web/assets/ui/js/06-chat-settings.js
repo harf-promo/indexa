@@ -63,6 +63,7 @@ async function loadSettings() {
   loadModels();
   loadKeys();
   loadPasses();
+  loadResource();
 }
 async function loadPasses() {
   try {
@@ -82,6 +83,36 @@ async function savePasses() {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({passes_first: first, passes_refresh: refresh})
+    });
+    const d = await r.json();
+    if (d.error) { status.style.color = 'var(--red)'; status.textContent = d.error; return; }
+    status.style.color = 'var(--green)';
+    status.textContent = 'Saved';
+    setTimeout(function() { status.textContent = ''; }, 3000);
+  } catch(e) {
+    status.style.color = 'var(--red)';
+    status.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function loadResource() {
+  try {
+    const r = await fetch('/api/config/resource');
+    if (!r.ok) return;
+    const d = await r.json();
+    document.getElementById('resource-profile').value = d.profile || 'balanced';
+    document.getElementById('resource-headroom').value = d.headroom_gb || 0;
+  } catch(_) {}
+}
+async function saveResource() {
+  const profile = document.getElementById('resource-profile').value;
+  const headroom = parseFloat(document.getElementById('resource-headroom').value) || 0;
+  const status = document.getElementById('resource-status');
+  try {
+    const r = await fetch('/api/config/resource', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({profile: profile, headroom_gb: headroom})
     });
     const d = await r.json();
     if (d.error) { status.style.color = 'var(--red)'; status.textContent = d.error; return; }

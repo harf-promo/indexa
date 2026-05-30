@@ -142,6 +142,24 @@ pub(crate) struct ConfigResponse {
     pub(crate) max_children_per_summary: usize,
 }
 
+/// Current resource/workload settings returned to the Settings UI.
+/// `profile` is the lowercase enum name ("conservative" | "balanced" | "performance").
+#[derive(Serialize)]
+pub(crate) struct ResourceResponse {
+    pub(crate) profile: String,
+    pub(crate) headroom_gb: f32,
+}
+
+/// Inbound resource/workload update from the Settings UI.
+/// Deliberately holds ONLY profile + headroom — no key material, no other config
+/// sections — so the (ungated) write path cannot touch secrets. See
+/// `api_config_resource_set` for the full rationale.
+#[derive(Deserialize)]
+pub(crate) struct ResourceRequest {
+    pub(crate) profile: String,
+    pub(crate) headroom_gb: f32,
+}
+
 #[derive(Deserialize)]
 pub(crate) struct AskRequest {
     pub(crate) question: String,
