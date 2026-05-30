@@ -34,6 +34,7 @@ fn delete_path_artifacts_exact(tx: &Transaction, path: &str) -> rusqlite::Result
     tx.execute("DELETE FROM chunks WHERE entry_path = ?1", params![path])?;
     tx.execute("DELETE FROM summaries WHERE path = ?1", params![path])?;
     tx.execute("DELETE FROM summary_queue WHERE path = ?1", params![path])?;
+    tx.execute("DELETE FROM classifications WHERE path = ?1", params![path])?;
     tx.execute("DELETE FROM entries WHERE path = ?1", params![path])
 }
 
@@ -110,6 +111,7 @@ impl Store {
         // `entries_for_summarization` filters on, permanently blocking re-summarization.
         tx.execute("DELETE FROM summaries WHERE path = ?1", params![path])?;
         tx.execute("DELETE FROM summary_queue WHERE path = ?1", params![path])?;
+        tx.execute("DELETE FROM classifications WHERE path = ?1", params![path])?;
         let n = tx.execute("DELETE FROM entries WHERE path = ?1", params![path])?;
         tx.commit()?;
         Ok(n)
@@ -165,6 +167,10 @@ impl Store {
         )?;
         tx.execute(
             "DELETE FROM summary_queue WHERE path LIKE ?1 ESCAPE '\\'",
+            params![pattern],
+        )?;
+        tx.execute(
+            "DELETE FROM classifications WHERE path LIKE ?1 ESCAPE '\\'",
             params![pattern],
         )?;
         let n = tx.execute(

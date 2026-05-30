@@ -88,6 +88,25 @@ impl Store {
                 error       TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_summary_queue_state ON summary_queue(state);
+
+            -- Smart (semantic) classification — a SECOND axis over the technical
+            -- hint_cat. One row per classified path (directories for now). Kept off
+            -- the `entries` table on purpose: `entries` is INSERT OR REPLACE'd on every
+            -- rescan, which would wipe a user's confirmed labels. `source` distinguishes
+            -- an auto suggestion from a user decision; 'ignored' is a sticky tombstone so
+            -- a dismissed suggestion is not re-proposed on the next classify run.
+            CREATE TABLE IF NOT EXISTS classifications (
+                path         TEXT PRIMARY KEY,
+                kind         TEXT NOT NULL CHECK(kind IN ('file','dir')),
+                category     TEXT NOT NULL,
+                confidence   REAL NOT NULL DEFAULT 1.0,
+                source       TEXT NOT NULL DEFAULT 'auto'
+                                  CHECK(source IN ('auto','user','ignored')),
+                confirmed_at INTEGER,
+                created_at   INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE INDEX IF NOT EXISTS idx_classifications_source   ON classifications(source);
+            CREATE INDEX IF NOT EXISTS idx_classifications_category ON classifications(category);
             ",
         )?;
 

@@ -8,6 +8,7 @@
 //! - [`search`] — hybrid/cosine search and the FTS/embedding helpers.
 //! - [`summaries`] — hierarchical summary reads/writes and tree shaping.
 //! - [`queue`] — the background summarization queue.
+//! - [`classify`] — semantic-classification reads/writes (Smart classification).
 //! - [`types`] — the public record structs.
 
 use anyhow::{Context, Result};
@@ -15,6 +16,7 @@ use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
 mod chunks;
+mod classify;
 mod entries;
 mod queue;
 mod schema;
@@ -28,8 +30,8 @@ mod tests;
 // Re-export every public record type so external paths (`indexa_core::store::*`)
 // are unchanged by the split.
 pub use types::{
-    ChunkRecord, FailedQueueItem, QueueItem, QueueStats, RegionSummary, SearchHit, SummaryRecord,
-    TreeNode,
+    ChunkRecord, ClassificationRecord, FailedQueueItem, QueueItem, QueueStats, RegionSummary,
+    SearchHit, SummaryRecord, TreeNode,
 };
 
 // `abstract_from` is part of the public surface (used by `indexa_core::store::abstract_from`).

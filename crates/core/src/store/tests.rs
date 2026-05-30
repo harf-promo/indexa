@@ -502,3 +502,79 @@ fn summary_cosine_search_returns_boosted_results() {
     // Root (depth=0) should score higher than leaf (depth=2) due to depth boost
     assert_eq!(results[0].0, "/");
 }
+
+#[test]
+fn classification_roundtrip_and_source_guard() {
+    let mut store = Store::open_in_memory().unwrap();
+
+    // Auto suggestion.
+    store
+        .upsert_auto_classifications(&[("/proj".into(), "dir".into(), "code".into(), 0.9)])
+        .unwrap();
+    let rec = store.classification_for("/proj").unwrap().unwrap();
+    assert_eq!(rec.category, "code");
+    assert_eq!(rec.source, "auto");
+    assert!((rec.confidence - 0.9).abs() < 1e-6);
+
+    // User confirms a correction → 'user', full confidence, timestamped.
+    store.confirm_classification("/proj", "work").unwrap();
+    let rec = store.classification_for("/proj").unwrap().unwrap();
+    assert_eq!(rec.category, "work");
+    assert_eq!(rec.source, "user");
+    assert!(rec.confirmed_at.is_some());
+
+    // A later auto pass must NOT overwrite the user's decision.
+    store
+        .upsert_auto_classifications(&[("/proj".into(), "dir".into(), "code".into(), 0.9)])
+        .unwrap();
+    let rec = store.classification_for("/proj").unwrap().unwrap();
+    assert_eq!(rec.category, "work");
+    assert_eq!(rec.source, "user");
+
+    // Ignore is a sticky tombstone; auto does not resurrect it.
+    store.ignore_classification("/proj").unwrap();
+    store
+        .upsert_auto_classifications(&[("/proj".into(), "dir".into(), "code".into(), 0.9)])
+        .unwrap();
+    assert_eq!(
+        store.classification_for("/proj").unwrap().unwrap().source,
+        "ignored"
+    );
+
+    // The tombstone is excluded from the 'auto' suggestion queue.
+    let autos = store.list_classifications(Some("auto"), 0).unwrap();
+    assert!(autos.iter().all(|c| c.path != "/proj"));
+}
+
+#[test]
+fn deleting_an_entry_removes_its_classification() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[dummy_entry("/a/proj", EntryKind::Dir, 0)])
+        .unwrap();
+    store
+        .upsert_auto_classifications(&[("/a/proj".into(), "dir".into(), "code".into(), 0.9)])
+        .unwrap();
+    assert_eq!(store.classification_count().unwrap(), 1);
+
+    store.delete_entry("/a/proj").unwrap();
+    assert_eq!(store.classification_count().unwrap(), 0);
+}
+
+#[test]
+fn deleting_a_subtree_removes_classifications_under_it() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_auto_classifications(&[
+            ("/root".into(), "dir".into(), "code".into(), 0.9),
+            ("/root/sub".into(), "dir".into(), "media".into(), 0.8),
+            ("/other".into(), "dir".into(), "system".into(), 0.9),
+        ])
+        .unwrap();
+    assert_eq!(store.classification_count().unwrap(), 3);
+
+    store.delete_subtree("/root").unwrap();
+    assert!(store.classification_for("/root").unwrap().is_none());
+    assert!(store.classification_for("/root/sub").unwrap().is_none());
+    assert!(store.classification_for("/other").unwrap().is_some());
+}

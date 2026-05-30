@@ -275,6 +275,25 @@ pub enum Commands {
         #[arg(long)]
         paths: bool,
     },
+
+    /// Suggest a semantic category (work/personal/archive/media/code/system) for
+    /// each folder in the index — content-free, from surface hints (Tier 0).
+    ///
+    /// Suggestions are saved so you can confirm, correct, or ignore them in the
+    /// web UI. Folders that need content to tell work from personal are left as
+    /// "pending" until deeper inference lands.
+    #[command(after_help = "Examples:
+  indexa classify
+  indexa classify --category code --paths")]
+    Classify {
+        /// Show the matching folder paths under each category.
+        #[arg(long)]
+        paths: bool,
+
+        /// Only show folders classified as this category.
+        #[arg(long)]
+        category: Option<String>,
+    },
 }
 
 #[cfg(test)]
