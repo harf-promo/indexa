@@ -170,6 +170,35 @@ mod tests {
     }
 
     #[test]
+    fn prunes_cargo_target_without_cachedir_tag() {
+        // A Cargo `target/` whose `CACHEDIR.TAG` is absent (test fixtures, partial builds, copied
+        // trees) must still be pruned — recognized by a sibling `Cargo.toml`. Regression for the
+        // bug where 100k+ `.o`/`.bin` build artifacts were indexed and queued for summarization.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"").unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn main() {}").unwrap();
+        let tgt = dir.path().join("target").join("debug");
+        std::fs::create_dir_all(&tgt).unwrap();
+        std::fs::write(tgt.join("foo.o"), "binary").unwrap();
+        std::fs::write(tgt.join("app.bin"), "binary").unwrap();
+        // No CACHEDIR.TAG is written.
+
+        let entries = walk(dir.path(), &WalkConfig::default()).unwrap();
+        assert!(
+            !entries.iter().any(|e| e.path.ends_with("foo.o")),
+            "target/ build artifacts must not be indexed (no CACHEDIR.TAG, sibling Cargo.toml)"
+        );
+        assert!(
+            !entries.iter().any(|e| e.path.ends_with("app.bin")),
+            "target/ build artifacts must not be indexed"
+        );
+        assert!(
+            entries.iter().any(|e| e.path.ends_with("lib.rs")),
+            "real source files must still be indexed"
+        );
+    }
+
+    #[test]
     fn respects_max_depth() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();

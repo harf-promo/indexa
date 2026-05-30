@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`target/` build directories are no longer indexed or summarized when Cargo's `CACHEDIR.TAG` marker is absent** (test fixtures, partial builds, copied trees). The skip rule now also recognizes a `target/` sitting next to a `Cargo.toml`. Previously such trees leaked tens of thousands of `.o`/`.bin` build artifacts into the index and the summary queue — making `summarize` appear to run forever, regenerating summaries of build junk.
+
 ## [0.6.0] — 2026-05-30
 
 The **Fingerprints** release — detect installed software and project types by file-pattern signatures — plus a web Settings **workload control**, a **memory-pressure fix** so a local-AI index right-sizes its model context and recovers gracefully instead of stalling, and a large internal cleanup (no behavior change). Positioning now leads with the dual cloud/local context angle.
