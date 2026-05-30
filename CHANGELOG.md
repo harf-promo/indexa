@@ -11,7 +11,7 @@ Toward **v0.6**.
 
 ### Added
 
-- `indexa deep` shows a live [indicatif](https://crates.io/crates/indicatif) progress bar (files done / total, current file), auto-hidden when stderr isn't a terminal (#15).
+- `indexa deep` shows live in-place progress (files done / total + current file) on a terminal, auto-hidden when stderr is redirected (#15). Hand-rolled (no new dependency).
 - `indexa map` colorizes its output by category when stdout is a terminal; piped/redirected output stays plain (#14).
 
 ## [0.5.1] — 2026-05-30

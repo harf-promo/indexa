@@ -18,8 +18,7 @@ use indexa_query::{
     answer, build_tree, enqueue_subtree, render_json, render_markdown, render_xml,
     summarize_subtree_sync, QaConfig,
 };
-use indicatif::{ProgressBar, ProgressStyle};
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::prelude::*;
@@ -266,18 +265,21 @@ async fn cmd_deep(
         let mut total_chunks = 0usize;
         let mut skipped = 0usize;
 
-        // Live progress bar (auto-hidden when stderr isn't a terminal, e.g. piped/CI).
-        let pb = ProgressBar::new(files.len() as u64);
-        pb.set_style(
-            ProgressStyle::with_template("  [{bar:40.cyan/blue}] {pos}/{len} files · {msg}")
-                .expect("valid progress template")
-                .progress_chars("=>-"),
-        );
+        // Lightweight in-place progress on stderr (carriage-return rewrite), shown only when
+        // stderr is a terminal so piped/CI output stays clean. Hand-rolled to avoid pulling in
+        // indicatif, whose transitive `number_prefix` dep is flagged unmaintained (RUSTSEC-2025-0119).
+        let show_progress = std::io::stderr().is_terminal();
+        let total_files = files.len();
 
-        for entry in &files {
-            pb.inc(1);
-            if let Some(name) = entry.path.file_name().and_then(|n| n.to_str()) {
-                pb.set_message(name.to_owned());
+        for (i, entry) in files.iter().enumerate() {
+            if show_progress {
+                let name = entry
+                    .path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                eprint!("\r\x1b[K  [{}/{total_files}] {:.50}", i + 1, name);
+                let _ = std::io::stderr().flush();
             }
             let path_str = entry.path.to_string_lossy().into_owned();
 
@@ -318,7 +320,10 @@ async fn cmd_deep(
             total_chunks += chunk_records.len();
         }
 
-        pb.finish_and_clear();
+        if show_progress {
+            eprint!("\r\x1b[K"); // clear the progress line
+            let _ = std::io::stderr().flush();
+        }
         if skipped > 0 {
             println!("  skipped {skipped}/{} files (unchanged)", files.len());
         }

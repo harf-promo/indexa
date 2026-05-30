@@ -20,7 +20,6 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 directories = { workspace = true }
 shellexpand = "3"
-indicatif = "0.17"
 indexa-cli = { path = "../../crates/cli" }
 indexa-core = { path = "../../crates/core" }
 indexa-parsers = { path = "../../crates/parsers" }
