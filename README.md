@@ -160,6 +160,7 @@ Indexa is being built in the open. Here is what comes next, in rough order — n
 - **Importance weighting** — tell Indexa which parts of your context store matter most; it adjusts retrieval ranking accordingly
 - **Context Packs** — auto-detect files and folders scattered across your disk that all belong to one subject ("Auth", "Tax 2025", "Client X"), bundle them into a named context, and export it as a single portable file (XML/Markdown) to hand to any AI tool — or a teammate
 - **Insights** — duplicate file clusters, stale projects, weekly change reports
+- **Desktop app** — a native, installable build (Tauri) that runs as a background service with menu-bar control and a signed installer — no terminal left open
 - **Mobile** — read-only companion app to query your context store from a phone
 - **Plugin SDK** — extend Indexa with custom parsers, AI adapters, and context modules
 

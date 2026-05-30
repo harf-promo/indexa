@@ -126,7 +126,19 @@ Analytical reports over your context store.
 
 ---
 
-## v0.11 — Mobile read-only
+## v0.11 — Desktop app (Tauri)
+
+A native, installable desktop app — so Indexa runs as a proper background service, not a terminal window you have to leave open.
+
+- **Menu-bar control** — start/pause indexing, switch resource profile, and see live status from the menu bar; one click to ease off when your machine is busy
+- **Real background daemon** — replaces leaving `indexa serve` / `indexa worker` running in a terminal; launches at login (opt-in)
+- **Signed & notarized installer** — a proper `.dmg` / `.msi` instead of `curl` + a Gatekeeper-quarantine bypass
+- **Native notifications** — "deep context ready", "low on memory — easing off" — outside the browser
+- Wraps the existing web UI (already a self-contained SPA served by a thin Axum layer), so the workspace is unchanged. **Note:** this is a packaging / daemon-UX upgrade — memory-pressure handling itself lives in the engine, not the shell.
+
+---
+
+## v0.12 — Mobile read-only
 
 Query your desktop context store from your phone.
 
@@ -136,7 +148,7 @@ Query your desktop context store from your phone.
 
 ---
 
-## v0.12 — Plugin SDK
+## v0.13 — Plugin SDK
 
 Open the platform to third-party extensions.
 
@@ -146,4 +158,4 @@ Open the platform to third-party extensions.
 
 ---
 
-Beyond v0.12, ideas live in [Discussions](../../discussions/categories/ideas).
+Beyond v0.13, ideas live in [Discussions](../../discussions/categories/ideas).
