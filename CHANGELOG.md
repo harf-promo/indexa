@@ -7,19 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Toward **v0.6**.
+## [0.6.0] — 2026-05-30
+
+The **Fingerprints** release — detect installed software and project types by file-pattern signatures — plus a web Settings **workload control**, a **memory-pressure fix** so a local-AI index right-sizes its model context and recovers gracefully instead of stalling, and a large internal cleanup (no behavior change). Positioning now leads with the dual cloud/local context angle.
 
 ### Added
 
 - **`indexa fingerprint`** — detects software and project types (Rust crates, Node/Next.js apps, Docker Compose stacks, Helm charts, …) across indexed folders by file-pattern signatures, without reading file contents. Built-in JSON pattern library extendable via a user `fingerprints.json`; `--paths` lists matching directories. See [docs/fingerprints.md](docs/fingerprints.md).
 - `indexa deep` shows live in-place progress (files done / total + current file) on a terminal, auto-hidden when stderr is redirected (#15). Hand-rolled (no new dependency).
 - `indexa map` colorizes its output by category when stdout is a terminal; piped/redirected output stays plain (#14).
+- **Settings → Resource Profile** — the web Settings tab now exposes a workload control (Conservative / Balanced / Performance, plus a RAM-headroom override), persisted to `[resource]` in `config.toml`. Dial Indexa's intensity down when your machine is busy (applies to the next job). (#71)
+- `[describer] num_ctx` config option (default 4096) — the context window Indexa requests from Ollama.
 
 ### Changed
 
 - Cloud embedding/LLM adapters (OpenAI, Google, Anthropic, OpenAI-compat) now retry non-streaming requests on transient failures — retryable HTTP statuses (408/425/429/5xx) and connection/timeout errors — with bounded exponential backoff that honors `Retry-After`. A 429/503 during a bulk index no longer permanently fails that item.
 - Surface scan recognizes the Linux XDG base dirs (`~/.local/share`, `~/.local/state`, `~/.local/bin`) (#25), and classifies more file types (web/markup, more languages, tabular/scientific data, logs) so fewer files land in the `unknown` category (#21).
-- Documentation: positioning now leads with the dual angle — Indexa saves **cloud** AI tools their token budget *and* gives **local** models the context they can't hold in a small window (new README section + a "why this helps local models" rationale in `docs/methodology.md`). Added the **Context Packs** roadmap milestone (subject-scoped, portable context bundles).
+- Documentation: positioning now leads with the dual angle — Indexa saves **cloud** AI tools their token budget *and* gives **local** models the context they can't hold in a small window (new README section + a "why this helps local models" rationale in `docs/methodology.md`). Added the **Context Packs** (v0.9) and **Desktop app / Tauri** (v0.11) roadmap milestones.
+
+### Fixed
+
+- **Memory-pressure handling no longer stalls or over-allocates** (#72). Two root-cause fixes: (1) Indexa now sends `num_ctx` (default 4096) to Ollama, so models load at the budgeted context instead of their 32,768-token default — roughly **8× less KV-cache**, and the resource budget finally matches what's actually loaded. (2) The memory-pressure pause now **resumes as soon as free RAM recovers** (`compute_budget > 0`) instead of waiting on macOS's *sticky* swap level (which never drained, stalling jobs for minutes), and it **unloads the resident model while paused** so RAM can actually free. The watchdog warnings are calmer and point to Settings → Resource Profile.
+
+### Internal
+
+- Large source files split for maintainability with **no behavior change**: `main.rs` → `commands/` (#66), `store.rs` → `store/` submodules (public API byte-identical) (#67), `web/lib.rs` → `dto` / `handlers` / `jobs_exec` (#68), and `app.js` / `app.css` → source fragments concatenated server-side into byte-identical assets (#69).
 
 ## [0.5.1] — 2026-05-30
 
