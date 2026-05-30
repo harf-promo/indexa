@@ -418,6 +418,153 @@ pub fn check_models_fit(
     Ok(())
 }
 
+// ── Model-fit report (pre-flight "ask me first") ──────────────────────────────
+
+/// The fall-back model used when a configured summarization model is too big to
+/// fit the current memory budget. The recommendation ladder swaps the heavy
+/// dir-roll-up model down to this floor; the embedder is never downgraded.
+pub const FIT_FLOOR_MODEL: &str = "gemma3:4b";
+
+/// One concrete summarization model set and whether it fits the budget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelFit {
+    pub file_model: String,
+    pub dir_model: String,
+    pub num_ctx: u32,
+    /// Combined resident footprint — the sum of the **distinct** file + dir model
+    /// peaks (they can be co-resident under `keep_alive`; identical names count
+    /// once). Excludes the embedder (~0.35 GB), a small known under-count. See
+    /// [`resident_peak`].
+    pub peak_bytes: u64,
+    pub fits: bool,
+}
+
+/// A pre-flight model-fit *report* — it reports, it does NOT decide. The caller
+/// chooses: the web path surfaces the choice ("ask me first"); the CLI applies
+/// `recommended` non-interactively when `auto_select_model` is on.
+#[derive(Debug, Clone)]
+pub struct FitReport {
+    /// `compute_budget` at sample time (may be negative).
+    pub budget_bytes: i64,
+    /// What the user's config would load.
+    pub configured: ModelFit,
+    /// A *lighter* set than `configured`, offered when `configured` doesn't fit.
+    /// Its own [`ModelFit::fits`] says whether even this lighter set fits — it is
+    /// offered even when it doesn't, because a smaller model always reduces the
+    /// overcommit (the runtime watchdog covers the rest). `None` only when already
+    /// on the lightest models, or when `configured` fits.
+    pub recommended: Option<ModelFit>,
+    /// Calm UI/CLI text describing the substitution, when one is offered.
+    pub reason: Option<String>,
+}
+
+fn model_peak(name: &str, num_ctx: u32) -> u64 {
+    // Unknown models have no footprint → treat as 0 (skip the fit check) rather
+    // than block, matching `check_models_fit`.
+    lookup_footprint(name).map_or(0, |fp| fp.peak_bytes(num_ctx))
+}
+
+/// Combined resident footprint of the summarization models: the sum of the
+/// **distinct** model peaks among {file_model, dir_model}. Ollama keeps each
+/// distinct model warm under `keep_alive`, so during summarize the file and dir
+/// models can be **co-resident** (`ollama ps` confirms this) — hence we sum rather
+/// than take the max. Identical model names count once. (The embedder, ~0.35 GB,
+/// can also be warm during summarize; it is intentionally not summed here — a
+/// small, known under-count, since the embedder is never downgraded.)
+fn resident_peak(file_model: &str, dir_model: &str, num_ctx: u32) -> u64 {
+    let file_peak = model_peak(file_model, num_ctx);
+    if file_model == dir_model {
+        file_peak
+    } else {
+        file_peak + model_peak(dir_model, num_ctx)
+    }
+}
+
+/// Report whether the configured summarization models fit the current budget, and
+/// if not, a lighter set that would. Pure (no I/O) so it is unit-testable and so
+/// the web estimate/popover and the CLI agree by construction. Reuses
+/// `compute_budget` + `lookup_footprint` — no new memory math.
+pub fn fit_report(
+    file_model: &str,
+    dir_model: &str,
+    num_ctx: u32,
+    spec: &MachineSpec,
+    sample: &MemSample,
+    headroom: u64,
+) -> FitReport {
+    let budget = compute_budget(spec, sample, headroom);
+    let configured_peak = resident_peak(file_model, dir_model, num_ctx);
+    let configured = ModelFit {
+        file_model: file_model.to_owned(),
+        dir_model: dir_model.to_owned(),
+        num_ctx,
+        peak_bytes: configured_peak,
+        fits: configured_peak as i64 <= budget,
+    };
+    if configured.fits {
+        return FitReport {
+            budget_bytes: budget,
+            configured,
+            recommended: None,
+            reason: None,
+        };
+    }
+
+    // Doesn't fit — drop the dir model to the floor, and the file model too only
+    // if it is heavier than the floor (never upgrade either).
+    let rec_dir = FIT_FLOOR_MODEL;
+    let rec_file = if model_peak(file_model, num_ctx) > model_peak(FIT_FLOOR_MODEL, num_ctx) {
+        FIT_FLOOR_MODEL
+    } else {
+        file_model
+    };
+    if rec_dir == dir_model && rec_file == file_model {
+        // Already on the lightest models and they still don't fit — nothing to offer.
+        return FitReport {
+            budget_bytes: budget,
+            configured,
+            recommended: None,
+            reason: None,
+        };
+    }
+
+    // A lighter set exists. Offer it even if it *also* exceeds the budget: a smaller
+    // model always shrinks the overcommit (and the runtime watchdog covers the rest).
+    // This is a deliberate choice — it trades the configured model's summary quality
+    // for less memory pressure when nothing fits, prioritizing the anti-freeze goal.
+    // It is gated by `auto_select_model`, which the user can disable to keep their model.
+    const GB: f64 = (1024 * 1024 * 1024) as f64;
+    let rec_peak = resident_peak(rec_file, rec_dir, num_ctx);
+    let rec_fits = rec_peak as i64 <= budget;
+    let reason = if rec_fits {
+        format!(
+            "{dir_model} needs ~{:.1} GB but only {:.1} GB is budgeted — using {rec_dir} (~{:.1} GB) instead",
+            configured_peak as f64 / GB,
+            budget.max(0) as f64 / GB,
+            rec_peak as f64 / GB,
+        )
+    } else {
+        format!(
+            "{dir_model} (~{:.1} GB) far exceeds the {:.1} GB budget — using the lightest model {rec_dir} (~{:.1} GB, still tight); the watchdog will pause if needed",
+            configured_peak as f64 / GB,
+            budget.max(0) as f64 / GB,
+            rec_peak as f64 / GB,
+        )
+    };
+    FitReport {
+        budget_bytes: budget,
+        configured,
+        recommended: Some(ModelFit {
+            file_model: rec_file.to_owned(),
+            dir_model: rec_dir.to_owned(),
+            num_ctx,
+            peak_bytes: rec_peak,
+            fits: rec_fits,
+        }),
+        reason: Some(reason),
+    }
+}
+
 // ── Memory pressure / watchdog ────────────────────────────────────────────────
 
 /// Current memory pressure level.
@@ -699,6 +846,82 @@ mod tests {
         let headroom = ResourceProfile::Balanced.headroom_bytes();
         let result = check_models_fit(&["gemma3:12b"], &spec, &sample, headroom);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn fit_report_fits_when_budget_is_roomy() {
+        let spec = fake_spec(36, true);
+        let headroom = ResourceProfile::Balanced.headroom_bytes();
+        let sample = fake_sample_with_used(0, 15, 0, 2048); // budget ≈ 16 GB
+        let p4 = lookup_footprint("gemma3:4b").unwrap().peak_bytes(4096) as i64;
+        let p12 = lookup_footprint("gemma3:12b").unwrap().peak_bytes(4096) as i64;
+        let budget = compute_budget(&spec, &sample, headroom);
+        // Roomy = even the co-resident sum of 4b + 12b fits.
+        assert!(
+            p4 + p12 <= budget,
+            "test budget must accommodate 4b + 12b co-resident"
+        );
+        let r = fit_report("gemma3:4b", "gemma3:12b", 4096, &spec, &sample, headroom);
+        assert!(r.configured.fits);
+        assert!(r.recommended.is_none());
+        assert!(r.reason.is_none());
+    }
+
+    #[test]
+    fn fit_report_recommends_floor_when_dir_model_too_big() {
+        let spec = fake_spec(36, true);
+        let headroom = ResourceProfile::Balanced.headroom_bytes();
+        let sample = fake_sample_with_used(0, 25, 0, 2048); // budget ≈ 6 GB
+        let p4 = lookup_footprint("gemma3:4b").unwrap().peak_bytes(4096) as i64;
+        let p12 = lookup_footprint("gemma3:12b").unwrap().peak_bytes(4096) as i64;
+        let budget = compute_budget(&spec, &sample, headroom);
+        // The 4b floor fits, but the co-resident 4b + 12b sum does not.
+        assert!(
+            p4 <= budget && budget < p4 + p12,
+            "test budget must sit between the floor and the 4b+12b co-resident sum"
+        );
+        let r = fit_report("gemma3:4b", "gemma3:12b", 4096, &spec, &sample, headroom);
+        assert!(!r.configured.fits);
+        let rec = r.recommended.expect("should recommend a fitting set");
+        assert_eq!(rec.dir_model, "gemma3:4b");
+        assert!(rec.fits);
+        assert!(r.reason.is_some());
+    }
+
+    #[test]
+    fn fit_report_offers_lightest_even_when_it_does_not_fit() {
+        // Budget ≈ 2 GB: even the floor (4b) exceeds it. But 4b is lighter than the
+        // configured 12b, so it's still offered (least-bad) with fits=false — the CLI
+        // loads 4b instead of 12b and minimizes the overcommit.
+        let spec = fake_spec(36, true);
+        let headroom = ResourceProfile::Balanced.headroom_bytes();
+        let sample = fake_sample_with_used(0, 29, 0, 2048);
+        let p4 = lookup_footprint("gemma3:4b").unwrap().peak_bytes(4096) as i64;
+        let budget = compute_budget(&spec, &sample, headroom);
+        assert!(
+            budget < p4,
+            "test budget must be below even the floor model"
+        );
+        let r = fit_report("gemma3:4b", "gemma3:12b", 4096, &spec, &sample, headroom);
+        assert!(!r.configured.fits);
+        let rec = r
+            .recommended
+            .expect("offers the lightest set even when it doesn't fit");
+        assert_eq!(rec.dir_model, "gemma3:4b");
+        assert!(!rec.fits, "the floor itself is over budget here");
+        assert!(r.reason.is_some());
+    }
+
+    #[test]
+    fn fit_report_no_downgrade_when_already_on_floor() {
+        let spec = fake_spec(36, true);
+        let headroom = ResourceProfile::Balanced.headroom_bytes();
+        // budget ≈ 2 GB so even the floor doesn't fit, AND the dir model is already
+        // the floor → there is nothing lighter to offer.
+        let sample = fake_sample_with_used(0, 29, 0, 2048);
+        let r = fit_report("gemma3:4b", "gemma3:4b", 4096, &spec, &sample, headroom);
+        assert!(!r.configured.fits);
+        assert!(r.recommended.is_none());
     }
 
     #[test]
