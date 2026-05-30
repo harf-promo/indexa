@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`indexa classify`** — the first step of **Smart classification** (v0.7 milestone). Suggests a semantic category (work / personal / archive / media / code / system) for each indexed folder — a second axis over the technical file-type classification. This Tier 0 pass is **deterministic and content-free**: it derives the code/media/system/archive categories from existing surface hints (a folder's own hint, e.g. `node_modules` → code, or the dominant category among its direct files). Folders whose work-vs-personal nature needs file *content* are left **pending** for a later content-inference pass — never guessed. Inspect with `--paths` and `--category`. Suggestions are saved; confirming/correcting them (web UI + CLI) arrives in a following release.
+- **Web "ask me first" model-fit popover.** When you start a **summarize** or **build/index** job in the web UI and the configured model wouldn't fit the live memory budget, Indexa now pauses and lets you choose — *use the model that fits* (e.g. `gemma3:4b`), *build anyway* with the configured model, or *cancel* — instead of silently loading a ~9 GB model that thrashes the machine. Backed by a new `GET /api/jobs/estimate` (reuses the shared `fit_report`); job-start endpoints accept an optional model override so your choice is honored. Jobs that load no heavy model (scan/deep) are unaffected.
 
 ### Changed
 

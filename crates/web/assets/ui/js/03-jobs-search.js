@@ -1,6 +1,15 @@
 /* ── Job helpers ── */
 async function fireJob(kind, path) {
-  const r = await fetch('/api/jobs/' + kind + '?path=' + encodeURIComponent(path), { method: 'POST' });
+  // Pre-flight memory-fit gate for the model-loading kinds ("ask me first"):
+  // summarize loads the dir-roll-up model; index runs deep + summarize. scan/deep
+  // load no heavy model, so they skip the gate.
+  let modelParams = '';
+  if (kind === 'summarize' || kind === 'index') {
+    const choice = await modelFitGate(path);
+    if (choice === null) return; // user cancelled the build
+    modelParams = choice; // '' (configured) or a recommended-model override
+  }
+  const r = await fetch('/api/jobs/' + kind + '?path=' + encodeURIComponent(path) + modelParams, { method: 'POST' });
   const d = await r.json();
   subscribeJob(d.job_id, path, kind);
   // Switch to jobs tab so user can watch progress
