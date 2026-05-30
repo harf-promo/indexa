@@ -1,0 +1,89 @@
+/* ── Topbar ── */
+.app-topbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  z-index: 10;
+}
+.app-logo {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: -0.3px;
+  white-space: nowrap;
+}
+.app-version {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  opacity: 0.8;
+}
+.app-stats {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.app-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+/* ── Icon button ── */
+.icon-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 4px 7px;
+  line-height: 1.4;
+  transition: background 120ms, border-color 120ms, color 120ms;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.icon-btn:hover { background: var(--surface-2); border-color: var(--border); color: var(--text); }
+.icon-btn.sm { padding: 2px 5px; font-size: 12px; }
+.icon-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+.icon-btn.primary:hover { opacity: 0.88; }
+
+/* ── Tabs ── */
+.app-tabs { display: flex; gap: 2px; margin: 0 8px; }
+.tab {
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  padding: 5px 12px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms, color 120ms;
+  position: relative;
+}
+.tab::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 8px; right: 8px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 2px 2px 0 0;
+  opacity: 0;
+  transition: opacity 150ms;
+}
+.tab.active { color: var(--text); }
+.tab.active::after { opacity: 1; }
+.tab:hover:not(.active) { background: var(--surface-2); color: var(--text); }
+
