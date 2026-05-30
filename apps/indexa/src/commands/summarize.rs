@@ -25,7 +25,8 @@ pub(crate) async fn cmd_summarize(
         &base_url,
         &cfg.describer.file_model,
         &cfg.describer.dir_model,
-    );
+    )
+    .with_num_ctx(cfg.describer.num_ctx);
     let embed_base = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
     let embedder = OllamaEmbedder::new(&embed_base, &cfg.embedding.model, cfg.embedding.dim);
 

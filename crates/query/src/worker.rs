@@ -3,7 +3,7 @@
 use crate::summarize::process_queue_item;
 use indexa_core::{
     config::DescriberConfig,
-    resource::{assess, detect_machine, pause_decision, PauseAction, Pressure, WatchdogState},
+    resource::{assess, detect_machine, pause_step, PauseAction, Pressure, WatchdogState},
     store::Store,
 };
 use indexa_embed::Embedder;
@@ -61,25 +61,37 @@ pub async fn run_worker(
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
             Some(item) => {
-                // Watchdog: check memory pressure before the LLM call. The pause loop
-                // re-samples each tick (check-then-sleep) and caps total wait at
-                // resource::MAX_PAUSE_SECS, sharing the decision logic with the web path.
+                // Watchdog: check memory pressure before the LLM call. The pause loop uses
+                // the shared, recover-aware `pause_step` so it agrees with the web path: it
+                // resumes the moment free RAM climbs back above headroom (macOS swap is sticky
+                // and never drains on its own), capped at resource::MAX_PAUSE_SECS.
+                // Gate entry on the same recover-aware predicate as resume, not raw `assess()`:
+                // macOS swap is sticky, so `assess()` reports Critical for the rest of the job
+                // once it crosses the threshold even after RAM recovers — which would re-pause
+                // (and reload the model) on every item. `pause_step(.., 0) != Resume` means RAM
+                // is genuinely low.
                 let sample = wdog.sample();
-                if assess(&sample, &spec, headroom) != Pressure::Ok {
+                if pause_step(&spec, &sample, headroom, 0) != PauseAction::Resume {
+                    let pressure = assess(&sample, &spec, headroom);
                     let avail_gb = sample.available_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
                     let swap_gb = sample.swap_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
                     tracing::warn!(
-                        "worker: memory pressure — pausing \
+                        "worker: low on memory — easing off and freeing the model \
                          (available: {avail_gb:.1} GB, swap: {swap_gb:.1} GB)"
                     );
+                    // On a Critical entry, unload the resident models once so their wired RAM
+                    // frees and the recovery check can resume us.
+                    if pressure == Pressure::Critical {
+                        embedder.unload().await;
+                        describer.unload().await;
+                    }
                     let mut elapsed = 0u64;
                     loop {
-                        let current = assess(&wdog.sample(), &spec, headroom);
-                        match pause_decision(current, elapsed) {
+                        match pause_step(&spec, &wdog.sample(), headroom, elapsed) {
                             PauseAction::Resume => break,
                             PauseAction::Proceed => {
                                 tracing::warn!(
-                                    "worker: memory pressure did not clear after {}s — proceeding",
+                                    "worker: memory didn't recover after {}s — continuing gently",
                                     indexa_core::resource::MAX_PAUSE_SECS
                                 );
                                 break;

@@ -11,6 +11,14 @@ pub const DEFAULT_FILE_MODEL: &str = "gemma3:4b";
 
 const DEFAULT_BASE: &str = "http://localhost:11434";
 
+/// Default context window sent to Ollama as `num_ctx`.
+///
+/// Ollama loads models at a 32,768-token default when `num_ctx` is omitted, which
+/// makes the KV-cache ~8× larger than the resource engine budgets for (the budget
+/// assumes 4096 — see `ModelFootprint.default_num_ctx`). That mismatch is what
+/// drives swap blowout and the freeze. Pinning 4096 keeps reality == budget.
+pub const DEFAULT_NUM_CTX: u32 = 4096;
+
 /// Timeout for LLM generate requests.
 /// 3 minutes is generous even for a slow local model on a large file.
 const LLM_TIMEOUT_SECS: u64 = 180;
@@ -28,6 +36,10 @@ pub struct OllamaLlm {
     /// keep_alive value to send with every request (seconds).
     /// 0 = unload immediately; -1 = keep forever; None = server default.
     pub(crate) keep_alive: Option<i64>,
+    /// Context window sent to Ollama as `num_ctx`. Defaults to [`DEFAULT_NUM_CTX`]
+    /// (4096) so the KV-cache matches what the resource budget assumes; override
+    /// via [`OllamaLlm::with_num_ctx`].
+    pub(crate) num_ctx: u32,
 }
 
 impl OllamaLlm {
@@ -38,7 +50,15 @@ impl OllamaLlm {
             dir_model: None,
             client: ollama_client(),
             keep_alive: None,
+            num_ctx: DEFAULT_NUM_CTX,
         }
+    }
+
+    /// Override the context window sent to Ollama as `num_ctx`. Builders thread the
+    /// `[describer] num_ctx` config value through here; the default is 4096.
+    pub fn with_num_ctx(mut self, num_ctx: u32) -> Self {
+        self.num_ctx = num_ctx;
+        self
     }
 
     /// Construct with separate models for file descriptions and directory roll-ups.
@@ -53,6 +73,7 @@ impl OllamaLlm {
             dir_model: Some(dir_model.into()),
             client: ollama_client(),
             keep_alive: None,
+            num_ctx: DEFAULT_NUM_CTX,
         }
     }
 
@@ -69,6 +90,7 @@ impl OllamaLlm {
             dir_model,
             client: ollama_client(),
             keep_alive: Some(keep_alive),
+            num_ctx: DEFAULT_NUM_CTX,
         }
     }
 
@@ -102,7 +124,10 @@ impl OllamaLlm {
             prompt,
             stream: true,
             keep_alive: self.keep_alive,
-            options: Some(GenOptions { num_parallel: 1 }),
+            options: Some(GenOptions {
+                num_parallel: 1,
+                num_ctx: self.num_ctx,
+            }),
         };
         let resp = self
             .client
@@ -179,6 +204,9 @@ impl OllamaLlm {
 struct GenOptions {
     /// Lock to 1 parallel slot to prevent KV-cache size multiplication.
     num_parallel: u32,
+    /// Context window. Pinned (default 4096) so Ollama doesn't fall back to its
+    /// 32,768-token default and balloon the KV-cache past the budgeted footprint.
+    num_ctx: u32,
 }
 
 #[derive(Serialize)]
@@ -226,7 +254,10 @@ impl Generator for OllamaLlm {
             prompt,
             stream: false,
             keep_alive: self.keep_alive,
-            options: Some(GenOptions { num_parallel: 1 }),
+            options: Some(GenOptions {
+                num_parallel: 1,
+                num_ctx: self.num_ctx,
+            }),
         };
 
         let resp = self
@@ -266,7 +297,10 @@ impl Generator for OllamaLlm {
             prompt,
             stream: true,
             keep_alive: self.keep_alive,
-            options: Some(GenOptions { num_parallel: 1 }),
+            options: Some(GenOptions {
+                num_parallel: 1,
+                num_ctx: self.num_ctx,
+            }),
         };
 
         let resp = self
@@ -315,6 +349,12 @@ impl Generator for OllamaLlm {
         }
 
         anyhow::bail!("Ollama stream ended without completion (done=true never received)")
+    }
+
+    /// Free the resident model(s) so RAM recovers during a memory-pressure pause.
+    /// Delegates to the inherent best-effort [`OllamaLlm::unload_all`].
+    async fn unload(&self) {
+        self.unload_all().await;
     }
 }
 
@@ -466,7 +506,10 @@ impl Describer for OllamaLlm {
             prompt: &prompt,
             stream: false,
             keep_alive: self.keep_alive,
-            options: Some(GenOptions { num_parallel: 1 }),
+            options: Some(GenOptions {
+                num_parallel: 1,
+                num_ctx: self.num_ctx,
+            }),
         };
         let resp = self
             .client
@@ -489,6 +532,12 @@ impl Describer for OllamaLlm {
         }
         Ok(parsed.response)
     }
+
+    /// Free the resident model(s) so RAM recovers during a memory-pressure pause.
+    /// Delegates to the inherent best-effort [`OllamaLlm::unload_all`].
+    async fn unload(&self) {
+        self.unload_all().await;
+    }
 }
 
 #[cfg(test)]
@@ -510,6 +559,29 @@ mod tests {
         let ok: Resp = serde_json::from_str(r#"{"response":"hello"}"#).unwrap();
         assert!(ok.error.is_none());
         assert_eq!(ok.response, "hello");
+    }
+
+    #[test]
+    fn gen_options_serializes_num_ctx() {
+        // Ollama must receive num_ctx, otherwise it loads the model at its 32,768-token
+        // default and the KV-cache blows past the budgeted footprint.
+        let opts = GenOptions {
+            num_parallel: 1,
+            num_ctx: DEFAULT_NUM_CTX,
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        assert!(json.contains("\"num_ctx\":4096"), "got: {json}");
+        assert!(json.contains("\"num_parallel\":1"), "got: {json}");
+    }
+
+    #[test]
+    fn default_num_ctx_is_4096() {
+        let llm = OllamaLlm::new(DEFAULT_BASE, DEFAULT_MODEL);
+        assert_eq!(llm.num_ctx, DEFAULT_NUM_CTX);
+        assert_eq!(DEFAULT_NUM_CTX, 4096);
+        // Setter overrides but default stays 4096.
+        let llm = llm.with_num_ctx(8192);
+        assert_eq!(llm.num_ctx, 8192);
     }
 
     #[test]

@@ -180,6 +180,11 @@ pub struct DescriberConfig {
     pub file_model: String,
     /// Model for directory roll-up summaries (stronger model recommended).
     pub dir_model: String,
+    /// Context window sent to Ollama as `num_ctx` for every summarization/Q&A call.
+    /// Defaults to 4096 so the KV-cache matches what the resource budget assumes —
+    /// omitting it lets Ollama load the model at its 32,768-token default and balloon
+    /// the KV-cache ~8× past the budgeted footprint, driving swap blowout and freezes.
+    pub num_ctx: u32,
     /// Storage mode for summaries.
     pub mode: SummaryMode,
     /// Concurrent summary worker tasks.
@@ -203,6 +208,7 @@ impl Default for DescriberConfig {
             contextual_retrieval: false,
             file_model: "gemma3:4b".into(),
             dir_model: "gemma3:12b".into(),
+            num_ctx: 4096,
             mode: SummaryMode::Augment,
             queue_concurrency: 2,
             max_children_per_summary: 30,

@@ -12,12 +12,14 @@ pub(crate) async fn cmd_worker(concurrency: usize, cfg: &Config) -> Result<()> {
     };
 
     let base_url = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
-    let describer: Arc<dyn indexa_llm::Describer + Send + Sync> =
-        Arc::new(OllamaLlm::new_with_dir_model(
+    let describer: Arc<dyn indexa_llm::Describer + Send + Sync> = Arc::new(
+        OllamaLlm::new_with_dir_model(
             &base_url,
             &cfg.describer.file_model,
             &cfg.describer.dir_model,
-        ));
+        )
+        .with_num_ctx(cfg.describer.num_ctx),
+    );
     let embed_base = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
     let embedder: Arc<dyn indexa_embed::Embedder + Send + Sync> = Arc::new(OllamaEmbedder::new(
         &embed_base,
