@@ -4,6 +4,10 @@ Milestones ship when they're ready — no dates. Order is directional. Each mile
 
 Vote on upcoming features and suggest new ones in [Discussions → Ideas](../../discussions/categories/ideas).
 
+> **Note on version numbers:** v0.3–v0.5 shipped as the platform releases below (web UI, resource
+> engine, MCP + reranking) rather than the feature themes originally sketched here. The upcoming
+> feature milestones have been renumbered to v0.6+ to match what actually shipped.
+
 ---
 
 ## v0.1 — Index + Ask  *(shipped)*
@@ -13,7 +17,7 @@ The first publicly usable release. Build a context map of any folder or your who
 - **Two-phase scan**: surface scan (fast, zero AI calls, builds a disk map) → deep scan (parses content, generates descriptions, computes embeddings)
 - **Flexible scope**: `indexa scan <path>` for a folder, `indexa scan --all` for the whole computer
 - `indexa ask "<question>"` — hybrid semantic + full-text search with LLM-synthesized answer
-- `indexa watch` / `indexa daemon` — background daemon keeps the index current via filesystem events
+- `indexa watch` — background watcher keeps the index current via filesystem events
 - `indexa serve` — local web UI: folder map, file detail view, chat, search
 - `indexa map` — CLI summary of what Indexa found and how regions were classified
 - File parsers: plain text, Markdown, source code (tree-sitter), PDF, images (EXIF), audio/video metadata (ffprobe)
@@ -36,7 +40,39 @@ Every file and folder gets a summary. Bottom-up roll-up gives the entire disk a 
 
 ---
 
-## v0.2.x — Fingerprints *(next)*
+## v0.3 — Web UI redesign *(shipped)*
+
+A full web workspace, not just a viewer.
+
+- Live SSE jobs panel, search, add-root, and folder map
+- Per-row tree actions, version display, in-app confirm modals, toast + sound notifications
+- `indexa doctor` — detected specs, per-model memory table, ETA estimates, Ollama env-var checks
+
+---
+
+## v0.4 — Resource-aware indexing + tiered summaries *(shipped)*
+
+A local-AI index that no longer freezes the machine.
+
+- **Resource engine** — detects RAM / P-E cores / unified-memory limits; a memory watchdog pauses LLM/embedding work under swap pressure and resumes automatically. Three profiles (Conservative / Balanced / Performance).
+- **Ollama discipline** — `keep_alive` + single-model residency so models unload promptly and KV-caches don't multiply (the core of the freeze fix).
+- **Dedicated Jobs workspace** with live "what the AI is doing now" streaming, filter pills, and warnings.
+- **Tiered summaries (L0/L1/L2)** — every node carries a one-line abstract (L0) for agent-facing progressive disclosure.
+- Build-artifact pruning, debounced watcher, calibrated ETA.
+
+---
+
+## v0.5 — Agent-addressable *(shipped)*
+
+The local context engine is now reachable by AI agents and ranks its own retrieval.
+
+- **MCP server** — `indexa mcp` runs a stdio [Model Context Protocol](https://modelcontextprotocol.io) server (pure-Rust `rmcp`). Six tools: `search`, `browse_tree`, `get_summary` (L0/L1/L2 tiers), `read_file`, `ask`, `get_stats`.
+- **Cross-encoder reranking** — optional `[retrieval] rerank` listwise reorder pass; off by default, fails open.
+- **Unified Send-safe `query::answer()`** — CLI, web, and MCP all share one retrieval pipeline.
+
+---
+
+## v0.6 — Fingerprints  *(next)*
 
 Detect installed software and project types by file-pattern signatures — without reading file content.
 
@@ -46,17 +82,17 @@ Detect installed software and project types by file-pattern signatures — witho
 
 ---
 
-## v0.3 — Smart classification
+## v0.7 — Smart classification
 
 Indexa suggests how to categorize regions of your disk. You confirm, correct, or ignore.
 
 - Automatic "work / personal / archive / media / code / system" tagging at the folder level, inferred from file contents and well-known path patterns
 - Suggestions surfaced in the web UI and via `indexa classify`
-- Saved classifications feed into v0.4 importance weighting
+- Saved classifications feed into importance weighting
 
 ---
 
-## v0.4 — Importance weighting
+## v0.8 — Importance weighting
 
 Tell Indexa which parts of your disk matter most. It adjusts everything accordingly.
 
@@ -67,7 +103,7 @@ Tell Indexa which parts of your disk matter most. It adjusts everything accordin
 
 ---
 
-## v0.5 — Insights
+## v0.9 — Insights
 
 Analytical reports over your context store.
 
@@ -78,7 +114,7 @@ Analytical reports over your context store.
 
 ---
 
-## v0.6 — Mobile read-only
+## v0.10 — Mobile read-only
 
 Query your desktop context store from your phone.
 
@@ -88,7 +124,7 @@ Query your desktop context store from your phone.
 
 ---
 
-## v0.7 — Plugin SDK
+## v0.11 — Plugin SDK
 
 Open the platform to third-party extensions.
 
@@ -98,4 +134,4 @@ Open the platform to third-party extensions.
 
 ---
 
-Beyond v0.7, ideas live in [Discussions](../../discussions/categories/ideas).
+Beyond v0.11, ideas live in [Discussions](../../discussions/categories/ideas).

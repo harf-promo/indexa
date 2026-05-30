@@ -10,15 +10,20 @@ A map of how Indexa is structured — crates, data flows, and key design decisio
 apps/indexa          — CLI binary (main entry point)
 │
 ├── crates/cli        — clap command definitions (Commands enum, arg types)
-├── crates/core       — Config, Store (SQLite+FTS5+embeddings), surface scan, watcher
+├── crates/core       — Config, Store (SQLite+FTS5+embeddings), surface scan, watcher, resource engine
 ├── crates/parsers    — File type parsers (text, Markdown, code, PDF, EPUB, Org, office, image, media)
 ├── crates/embed      — Embedding adapter trait + Ollama/OpenAI/Google/llama.cpp impls
 ├── crates/llm        — LLM adapter trait + Ollama/OpenAI/Anthropic/llama.cpp impls
-├── crates/query      — Hybrid search (FTS5 + vector) and RAG answer synthesis
-└── crates/web        — Axum HTTP server + embedded single-page UI
+├── crates/query      — Hybrid search (FTS5 + vector), reranking, and the unified RAG answer() pipeline
+├── crates/web        — Axum HTTP server + embedded single-page UI (live SSE jobs)
+└── crates/mcp        — stdio Model Context Protocol server (`indexa mcp`) exposing the index to AI agents
 ```
 
-Dependency direction: `apps/indexa` depends on all crates. `crates/query` depends on `core`, `embed`, and `llm`. `crates/web` depends on `core`, `embed`, `llm`, and `query`. No circular dependencies.
+Dependency direction: `apps/indexa` depends on all crates. `crates/query` depends on `core`, `embed`, and `llm`. `crates/web` and `crates/mcp` depend on `core`, `embed`, `llm`, and `query`. No circular dependencies.
+
+All three query surfaces — CLI `ask`, web `/api/ask`, and the MCP `ask` tool — call the single
+Send-safe `query::answer(db_path, …)` entry point, so retrieval, optional reranking, and the
+empty-result short-circuit behave identically everywhere.
 
 ---
 
@@ -26,7 +31,8 @@ Dependency direction: `apps/indexa` depends on all crates. `crates/query` depend
 
 ```
 1. Walk          apps/indexa::cmd_deep
-                 └─ walkdir over target path, respecting surface hints (Skip/StructureOnly)
+                 └─ parallel jwalk over target path; Skip-classified dirs (target/, node_modules/,
+                    .git/, caches) are pruned at read-dir time and never descended into
 
 2. Parse         crates/parsers::registry::parse(path)
                  └─ dispatches by extension → correct Parser impl
@@ -51,26 +57,35 @@ Files: [`apps/indexa/src/main.rs`](../apps/indexa/src/main.rs) · [`crates/parse
 
 ## Data flow — `indexa ask`
 
+The entry point is `crates/query::answer(db_path, embedder, llm, question, &cfg)`. It is
+**Send-safe**: the `&Store` is opened in a synchronous inner scope and dropped before any `.await`,
+so the future is `Send` (required by the axum web server and the rmcp MCP server).
+
 ```
-1. Embed query   crates/embed::Embedder::embed(question)
+1. Embed query   crates/embed::Embedder::embed(question)        [skipped for sparse-only mode]
                  → query_vec: Vec<f32>
 
-2. Hybrid search crates/core::store::Store::hybrid_search(
-                     query_text, Some(&query_vec),
-                     mode (Rrf|Sparse|Dense), scope, top_k, rrf_k
-                 )
-                 ┌─ Sparse branch: FTS5 BM25 query  → ranked by BM25 score
-                 ├─ Dense branch:  brute-force cosine scan → ranked by similarity
-                 └─ RRF fusion: score = Σ 1/(k + rank_i), k=60 default
-                 → Vec<SearchHit> { chunk_id, entry_path, heading, snippet, score }
+2. Retrieve      crates/query::retrieve(&store, …)  (sync scope — store dropped before any await)
+                 └─ Store::hybrid_search(query_text, Some(&query_vec), mode (Rrf|Sparse|Dense), scope, top_k, rrf_k)
+                    ┌─ Sparse branch: FTS5 BM25 query  → ranked by BM25 score
+                    ├─ Dense branch:  brute-force cosine scan → ranked by similarity
+                    └─ RRF fusion: score = Σ 1/(k + rank_i), k=60 default
+                    + optional parent-summary boost (summary_weight)
+                 → Vec<SearchHit> { chunk_id, entry_path, heading, text, rrf_score }
 
-3. Synthesize    crates/query::synthesize_from_hits(hits, llm, question, &qa_cfg)
-                 └─ builds a context window from top chunks (budget: ~4000 words)
-                    sends to LLM (Ollama gemma2:9b default, or configured model)
+   (empty hits → short-circuit with a "run `indexa deep`/`summarize` first" message — no LLM call)
+
+3. Rerank        crates/query::apply_rerank(LlmReranker, …)     [only if cfg.rerank = true]
+                 └─ one listwise local-model call reorders candidates; FAILS OPEN (any error/empty
+                    /unparseable output → original order, so it can never make `ask` worse)
+
+4. Synthesize    crates/query::synthesize_from_hits(hits, llm, question, &cfg)
+                 └─ builds a context window from top chunks (default budget: 4000 chars)
+                    sends to the LLM (Ollama gemma3:12b default, or configured model)
                  → Answer { answer: String, sources: Vec<SourceCitation> }
 ```
 
-Files: [`crates/query/src/qa.rs`](../crates/query/src/qa.rs) · [`crates/core/src/store.rs`](../crates/core/src/store.rs) · [`crates/llm/src/lib.rs`](../crates/llm/src/lib.rs)
+Files: [`crates/query/src/qa.rs`](../crates/query/src/qa.rs) · [`crates/query/src/rerank.rs`](../crates/query/src/rerank.rs) · [`crates/core/src/store.rs`](../crates/core/src/store.rs) · [`crates/llm/src/lib.rs`](../crates/llm/src/lib.rs)
 
 ---
 
@@ -80,14 +95,16 @@ Single-file SQLite at the platform data directory:
 
 | Platform | Path |
 |---|---|
-| macOS | `~/Library/Application Support/indexa/index.db` |
+| macOS | `~/Library/Application Support/dev.indexa.Indexa/index.db` |
 | Linux | `~/.local/share/indexa/index.db` (XDG) |
-| Windows | `%APPDATA%\indexa\index.db` |
+| Windows | `%LOCALAPPDATA%\indexa\Indexa\data\index.db` |
 
-Three tables:
+Core tables:
 - **`entries`** — one row per file: `path`, `size`, `mtime`, `mime`, `category`
 - **`chunks`** — one row per chunk: `entry_path` FK, `seq`, `heading`, `text`, `language`, `embedding` BLOB
 - **`chunks_fts`** — FTS5 virtual table over `chunks(text, heading)` for BM25 full-text search
+- **`summaries`** — hierarchical per-node summaries with tiered L0 (abstract) / L1 (full) text and an optional summary embedding
+- **`summary_queue`** — background summarization work queue (`pending` / `in_flight` / `done` / `failed`)
 
 Vector search is brute-force cosine scan over the `embedding` BLOBs — fast enough for <300K chunks (typically under 200ms on a laptop).
 
@@ -108,7 +125,7 @@ Vector search is brute-force cosine scan over the `embedding` BLOBs — fast eno
 
 | Provider key | Struct | Env var | Default model |
 |---|---|---|---|
-| `ollama` | `OllamaLlm` | `OLLAMA_HOST` | `gemma2:9b` |
+| `ollama` | `OllamaLlm` | `OLLAMA_HOST` | `gemma3:12b` |
 | `openai` | `OpenAILlm` | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | `gpt-4o-mini` |
 | `anthropic` | `AnthropicLlm` | `ANTHROPIC_API_KEY` | `claude-haiku-4-5-20251001` |
 | `llamacpp` | `OpenAILlm` (compat) | `OPENAI_BASE_URL` | configurable |
@@ -131,6 +148,6 @@ Source: [`crates/core/src/surface.rs`](../crates/core/src/surface.rs)
 
 ## File watcher
 
-`indexa watch <path>` uses `notify` (cross-platform inotify/FSEvents/ReadDirectoryChanges) to detect `Create` / `Modify` / `Remove` events. On each event the affected file is re-parsed and re-embedded; removed files are deleted from the store. The watcher uses a 500ms debounce window to coalesce rapid saves.
+`indexa watch <path>` uses `notify-debouncer-full` (over cross-platform `notify` — inotify/FSEvents/ReadDirectoryChanges) to detect `Create` / `Modify` / `Remove` events. The debouncer coalesces editor save bursts into a single re-index. On each event the affected file is re-parsed and re-embedded; removed files are deleted from the store.
 
 Source: [`crates/core/src/watcher.rs`](../crates/core/src/watcher.rs)

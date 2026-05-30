@@ -5,6 +5,20 @@ All notable changes to Indexa will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Toward **v0.5.1** — a "correctness & hardening" pass over the shipped v0.5.0 engine, plus a docs
+refresh. (Further entries land as the fix PRs merge.)
+
+### Documentation
+
+- README no longer says "pre-alpha"; documents the MCP server (`indexa mcp`) and optional cross-encoder reranking; "What's coming" now lists what already shipped (web UI, MCP, reranking, tiered summaries, resource-aware indexing).
+- `ROADMAP.md` renumbered so feature milestones (Fingerprints → Plugin SDK) map to v0.6+; the consumed v0.3/0.4/0.5 slots are documented as the platform releases that actually shipped. Removed the nonexistent `indexa daemon` command.
+- `docs/quickstart.md` pulls the correct default models (`gemma3:4b` + `gemma3:12b`, not `gemma2:9b`) and the right Rust version.
+- `docs/config.md` corrects the macOS config path (`dev.indexa.Indexa`), the describer default (`gemma3:12b`), and documents the `[resource]` section, the `passes_*` summarization fields, `summary_weight`/`summary_depth_alpha`, and the real PDF engine (`pdf-extract`).
+- `docs/architecture.md` adds `crates/mcp`, rewrites the `ask` flow around the unified `query::answer()` pipeline (retrieve → optional rerank → synthesize), and fixes the storage paths, walk (jwalk + pruning), and watcher (`notify-debouncer-full`).
+- Archived `docs/known-issues-v0.2.2.md` (all resolved in v0.2.3).
+
 ## [0.5.0] — 2026-05-30
 
 The "agent-addressable" release: the local context engine is now reachable by AI
