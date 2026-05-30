@@ -33,7 +33,18 @@ pub(crate) async fn api_config_passes(
     let refresh = body.passes_refresh.min(cap).max(1);
 
     let cfg_path = config::default_config_path();
-    let mut cfg = config::load(&cfg_path).unwrap_or_default();
+    // A missing file loads as Config::default(); an Err here means the file EXISTS but
+    // failed to parse — never overwrite (and silently wipe [api_keys]) a malformed config
+    // the user can still fix by hand. (Previously `.unwrap_or_default()` clobbered it.)
+    let mut cfg = match config::load(&cfg_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("config exists but failed to parse; refusing to overwrite it: {e:#}"),
+            )
+        }
+    };
     cfg.describer.passes_first = first;
     cfg.describer.passes_refresh = refresh;
 
@@ -84,10 +95,28 @@ pub(crate) async fn api_config_resource_set(Json(body): Json<ResourceRequest>) -
     };
 
     let cfg_path = config::default_config_path();
-    let mut cfg = config::load(&cfg_path).unwrap_or_default();
+    // A missing file loads as Config::default(); an Err here means the file EXISTS but
+    // failed to parse — never overwrite (and silently wipe [api_keys]) a malformed config
+    // the user can still fix by hand. (Previously `.unwrap_or_default()` clobbered it.)
+    let mut cfg = match config::load(&cfg_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("config exists but failed to parse; refusing to overwrite it: {e:#}"),
+            )
+        }
+    };
     // Scope the write strictly to the two resource fields — see the ungated rationale above.
     cfg.resource.profile = profile;
-    cfg.resource.headroom_gb = body.headroom_gb.max(0.0);
+    // Reject non-finite input (NaN / ±inf) → 0.0 ("use the profile's built-in headroom"); clamp
+    // finite values to [0, 4096] GB. An unbounded headroom would saturate
+    // effective_headroom_bytes() to u64::MAX and wedge the watchdog (no free RAM would ever suffice).
+    cfg.resource.headroom_gb = if body.headroom_gb.is_finite() {
+        body.headroom_gb.clamp(0.0, 4096.0)
+    } else {
+        0.0
+    };
 
     match config::save(&cfg, &cfg_path) {
         Ok(_) => Json(serde_json::json!({ "saved": true })).into_response(),
