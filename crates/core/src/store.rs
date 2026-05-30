@@ -703,12 +703,6 @@ impl Store {
         Ok(text)
     }
 
-    /// Expose the raw rusqlite connection for use in helper modules that need
-    /// to run queries not covered by the public API (e.g. summarize.rs).
-    pub fn connection(&self) -> &Connection {
-        &self.conn
-    }
-
     /// All (path, kind) entries under `root` that are not yet in summary_queue
     /// and whose deep_policy is not 'Skip'.
     pub fn entries_for_summarization(&self, root: &str) -> Result<Vec<(String, String)>> {

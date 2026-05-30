@@ -60,7 +60,8 @@ impl Parser for OrgParser {
                     if end == words.len() {
                         break;
                     }
-                    start += self.chunk_size - 100;
+                    // saturating + min(1) so a chunk_size <= 100 can't underflow or stall.
+                    start += self.chunk_size.saturating_sub(100).max(1);
                 }
             }
         }

@@ -62,7 +62,7 @@ impl Default for QaConfig {
 /// async orchestrator ([`answer`]) can scope the `&Store` borrow to a block that
 /// never spans an `.await` — keeping the resulting future `Send` (required by the
 /// axum web server and the rmcp MCP server). `query_vec` is `None` for sparse-only.
-pub fn retrieve(
+pub(crate) fn retrieve(
     store: &Store,
     question: &str,
     query_vec: Option<&[f32]>,
@@ -138,10 +138,9 @@ pub async fn answer(
     synthesize_from_hits(hits, llm, question, cfg).await
 }
 
-/// Synthesise an answer from pre-retrieved hits (no store access).
-/// Use this when the caller already has hits and wants to avoid holding
-/// a non-Sync store lock across async boundaries.
-pub async fn synthesize_from_hits(
+/// Synthesise an answer from pre-retrieved hits (no store access). Internal helper for
+/// [`answer`]; kept separate so the `&Store` borrow in `answer` never crosses an `.await`.
+pub(crate) async fn synthesize_from_hits(
     hits: Vec<SearchHit>,
     llm: &dyn Generator,
     question: &str,

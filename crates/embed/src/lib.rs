@@ -36,23 +36,11 @@ pub trait Embedder: Send + Sync {
     fn dim(&self) -> usize;
 }
 
-/// Build an `Embedder` from config values.
+/// Build an `Embedder` from config values, optionally setting `keep_alive` on Ollama adapters.
 ///
 /// `openai_key` / `google_key` are used as fallbacks when the corresponding
 /// environment variables (`OPENAI_API_KEY`, `GOOGLE_API_KEY`) are not set.
 /// Pass `None` to require the env var.
-pub fn from_config(
-    provider: &str,
-    model: &str,
-    dim: usize,
-    base_url: &str,
-    openai_key: Option<&str>,
-    google_key: Option<&str>,
-) -> anyhow::Result<Box<dyn Embedder + Send + Sync>> {
-    from_config_with_keep_alive(provider, model, dim, base_url, openai_key, google_key, None)
-}
-
-/// Like `from_config` but also sets `keep_alive` on Ollama adapters.
 pub fn from_config_with_keep_alive(
     provider: &str,
     model: &str,

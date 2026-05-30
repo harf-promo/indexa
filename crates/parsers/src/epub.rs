@@ -90,25 +90,7 @@ impl Parser for EpubParser {
                 .trim_end_matches(".html")
                 .to_string();
 
-            let words: Vec<&str> = text.split_whitespace().collect();
-            let chunk_size = 800usize;
-            let overlap = 100usize;
-            let mut start = 0;
-            loop {
-                let end = (start + chunk_size).min(words.len());
-                chunks.push(Chunk {
-                    source: path.to_path_buf(),
-                    seq,
-                    heading: heading.clone(),
-                    text: words[start..end].join(" "),
-                    language: None,
-                });
-                seq += 1;
-                if end == words.len() {
-                    break;
-                }
-                start += chunk_size - overlap;
-            }
+            crate::types::chunk_words(path, &text, &heading, None, 800, 100, &mut seq, &mut chunks);
         }
 
         if chunks.is_empty() {
