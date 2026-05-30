@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-05-30
+
+A patch fixing a build-artifact indexing bug that could make `summarize` appear to run forever.
+
 ### Fixed
 
 - **`target/` build directories are no longer indexed or summarized when Cargo's `CACHEDIR.TAG` marker is absent** (test fixtures, partial builds, copied trees). The skip rule now also recognizes a `target/` sitting next to a `Cargo.toml`. Previously such trees leaked tens of thousands of `.o`/`.bin` build artifacts into the index and the summary queue — making `summarize` appear to run forever, regenerating summaries of build junk.
