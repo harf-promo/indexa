@@ -25,7 +25,7 @@ impl AnthropicLlm {
             model: model.into(),
             api_key: api_key.into(),
             max_tokens: 2048,
-            client: reqwest::Client::new(),
+            client: crate::http_client(180),
         }
     }
 

@@ -36,7 +36,7 @@ impl OpenAIEmbedder {
             model: model.into(),
             dim,
             api_key: api_key.into(),
-            client: reqwest::Client::new(),
+            client: crate::http_client(30),
         }
     }
 
@@ -51,20 +51,22 @@ impl OpenAIEmbedder {
     /// Create using `OPENAI_API_KEY` from the environment.
     /// Falls back to `config_key` when the env var is absent (e.g. key saved via web Settings).
     pub fn from_env(model: impl Into<String>, dim: usize) -> Result<Self> {
-        Self::from_env_or_config(model, dim, None)
+        Self::from_env_or_config(model, dim, None, None)
     }
 
-    /// Like `from_env` but also accepts a config-file fallback key.
+    /// Like `from_env` but also accepts a config-file fallback key and an optional base URL
+    /// (so a configured OpenAI-compatible gateway is honoured, not silently dropped).
     pub fn from_env_or_config(
         model: impl Into<String>,
         dim: usize,
         config_key: Option<&str>,
+        base_url: Option<&str>,
     ) -> Result<Self> {
         let api_key = std::env::var("OPENAI_API_KEY")
             .ok()
             .or_else(|| config_key.map(|s| s.to_string()))
             .context("OPENAI_API_KEY not set — required for OpenAI embeddings")?;
-        let base_url = Self::resolve_base_url(None);
+        let base_url = Self::resolve_base_url(base_url);
         Ok(Self::new(base_url, model, dim, api_key))
     }
 

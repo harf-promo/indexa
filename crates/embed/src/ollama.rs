@@ -28,10 +28,7 @@ impl OllamaEmbedder {
             base_url: base_url.into(),
             model: model.into(),
             dim,
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(EMBED_TIMEOUT_SECS))
-                .build()
-                .unwrap_or_default(),
+            client: crate::http_client(EMBED_TIMEOUT_SECS),
             keep_alive: None,
         }
     }
@@ -48,10 +45,7 @@ impl OllamaEmbedder {
             base_url: base_url.into(),
             model: model.into(),
             dim,
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(EMBED_TIMEOUT_SECS))
-                .build()
-                .unwrap_or_default(),
+            client: crate::http_client(EMBED_TIMEOUT_SECS),
             keep_alive: Some(keep_alive),
         }
     }
