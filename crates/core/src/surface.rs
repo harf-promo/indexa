@@ -40,7 +40,15 @@ static HINTS: &[(Predicate, PathHint)] = &[
         },
     ),
     (
-        |p| ends_with(p, "target") && p.join("CACHEDIR.TAG").exists(),
+        // A Cargo build dir: marked by Cargo's own `CACHEDIR.TAG`, OR simply named `target`
+        // next to a `Cargo.toml` (the tag is absent in many real cases — partial builds, test
+        // fixtures, copied trees — and missing it indexed 100k+ `.o` files in the wild).
+        |p| {
+            ends_with(p, "target")
+                && (p.join("CACHEDIR.TAG").exists()
+                    || p.parent()
+                        .is_some_and(|par| par.join("Cargo.toml").exists()))
+        },
         PathHint {
             label: "Rust build output",
             category: "build-artifact",
