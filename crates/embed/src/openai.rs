@@ -105,15 +105,18 @@ impl Embedder for OpenAIEmbedder {
             input: text,
         };
 
-        let mut builder = self.client.post(&url).json(&body);
-        if !self.api_key.is_empty() {
-            builder = builder.bearer_auth(&self.api_key);
-        }
-
-        let resp = builder
-            .send()
-            .await
-            .with_context(|| format!("OpenAI embeddings request to {url}"))?;
+        let resp = crate::send_with_retry(
+            || {
+                let mut b = self.client.post(&url).json(&body);
+                if !self.api_key.is_empty() {
+                    b = b.bearer_auth(&self.api_key);
+                }
+                b
+            },
+            2,
+        )
+        .await
+        .with_context(|| format!("OpenAI embeddings request to {url}"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();

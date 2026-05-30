@@ -89,16 +89,19 @@ impl Generator for AnthropicLlm {
             }],
         };
 
-        let resp = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("Anthropic Messages request to {url}"))?;
+        let resp = crate::send_with_retry(
+            || {
+                self.client
+                    .post(&url)
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", API_VERSION)
+                    .header("content-type", "application/json")
+                    .json(&body)
+            },
+            2,
+        )
+        .await
+        .with_context(|| format!("Anthropic Messages request to {url}"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();

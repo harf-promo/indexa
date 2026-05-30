@@ -17,6 +17,7 @@ Toward **v0.6**.
 
 ### Changed
 
+- Cloud embedding/LLM adapters (OpenAI, Google, Anthropic, OpenAI-compat) now retry non-streaming requests on transient failures — retryable HTTP statuses (408/425/429/5xx) and connection/timeout errors — with bounded exponential backoff that honors `Retry-After`. A 429/503 during a bulk index no longer permanently fails that item.
 - Surface scan recognizes the Linux XDG base dirs (`~/.local/share`, `~/.local/state`, `~/.local/bin`) (#25), and classifies more file types (web/markup, more languages, tabular/scientific data, logs) so fewer files land in the `unknown` category (#21).
 
 ## [0.5.1] — 2026-05-30
