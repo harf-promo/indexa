@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-05-30
+
+An **instrument-first** release: Indexa now shows you what the engine is doing in real time, idle or busy — the foundation of the web-UI redesign — plus an accessibility pass.
+
+### Added
+
+- **Always-on Engine status bar** — a bottom bar in the web UI shows live **CPU**, **RAM** (with the keep-free headroom band drawn in), and **memory pressure**, visible whether the engine is idle or building (#77). The RAM meter draws the used fill over a hatched keep-free band, and RAM-fit (budget/headroom) and swap-pressure are shown as two honest, separate signals — so the gauge can never silently disagree with the watchdog (both derive from the same `assess()` / `compute_budget()`).
+- **Live telemetry API** — `GET /api/telemetry` (one-shot) and `GET /api/telemetry/stream` (SSE) expose per-core CPU, RAM, swap, memory pressure, and the compute budget, published from a low-frequency background sampler that runs even when idle (#77). A dedicated `TelemetrySampler` owns its own long-lived `sysinfo` handle, kept out of the per-file memory watchdog's hot loop.
+
+### Changed
+
+- The per-folder "pending" badge no longer pulses during a summarize/index job (#76). An animated ⏳ on every pending folder at once read as a loading spinner near every row; folder state is still conveyed by colour, with calmer aggregate progress to follow.
+
+### Fixed
+
+- **Accessibility:** a global `prefers-reduced-motion` guard now disables every animation and transition (pulse, fade-in, slide-up, tab fades, running indicators) for users who opt out, closing an a11y gap (#76).
+
 ## [0.6.1] — 2026-05-30
 
 A patch fixing a build-artifact indexing bug that could make `summarize` appear to run forever.
