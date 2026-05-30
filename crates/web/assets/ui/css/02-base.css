@@ -32,3 +32,15 @@ code, kbd, pre, .mono { font-family: var(--font-mono); }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes slideUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 
+/* ── Motion safety ──
+   Honour the OS "reduce motion" setting: disable every animation/transition
+   (pulse, fadeIn, slideUp, tab fades, running indicators) for users who opt out. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
