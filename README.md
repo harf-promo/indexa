@@ -2,7 +2,7 @@
 
 **The local context engine for AI.**
 
-*Indexa reads your code or your disk once, builds a hierarchical context graph, and serves it to AI tools without burning their token budgets. Local-first, model-agnostic, fully open.*
+*Indexa reads your code or your disk once, builds a hierarchical context graph, and serves any AI tool a small, relevant slice on demand — without burning a cloud model's token budget or a local model's context window. Local-first, model-agnostic, fully open.*
 
 > Status: **v0.5.0**, pre-1.0 and actively developed. The scan → summarize → export → ask flow works today, plus a local web UI and an MCP server for AI agents. Expect rough edges on large / whole-disk indexes. Watch this repo or join [Discussions](../../discussions) to follow along.
 
@@ -22,6 +22,21 @@ claude "given @.context.xml, find the auth flow and add MFA"
 The paid model spends its budget on *the change you actually want* — not on re-reading your folder tree. **Zero tokens leave your machine during indexing.** You control exactly what gets handed to the cloud model.
 
 Or skip the file hand-off entirely: run `indexa mcp` and your agent (Claude Desktop, Cursor, any [MCP](https://modelcontextprotocol.io) client) queries the live index over six tools — `search`, `browse_tree`, `get_summary` (with L0/L1/L2 progressive disclosure), `read_file`, `ask`, and `get_stats`.
+
+---
+
+## Punch above your local model's context window
+
+Running a small model locally with Ollama or llama.cpp? Context is your scarcest resource. Every token you stuff into the window inflates the KV-cache that competes with the model's own weights for VRAM — a long prompt is slow to start and can push an 8 GB machine into swap. Most local models ship a 4–8K-token window; paste in a whole repo and there's no room left to think.
+
+Indexa separates your **working context** (what's in the model's window right now) from your **searchable context** (the persistent index on disk). Your model only ever sees a small, ranked slice of what's actually relevant:
+
+- **Bounded memory** — retrieve ~2–4K characters instead of a 600 MB repo, so the KV-cache stays small and predictable, sized by *your* choice, not your codebase.
+- **Break the window ceiling** — a 4K-window model can reason over a 100 MB project, because it only loads the slice that matters.
+- **Fast, even on CPU** — small context means fast prefill and a snappy time-to-first-token.
+- **Agents that don't forget** — over MCP, a local agent pulls `get_summary("auth")` on demand instead of pre-loading everything, staying coherent across long multi-step tasks without hitting the memory cliff.
+
+Same engine, two wins: it saves **cloud** tools your paid tokens, and gives **local** models the context they can't hold themselves. *(How retrieval keeps that slice relevant — hybrid search, reranking, and the honest trade-offs — is in [docs/methodology.md](docs/methodology.md).)*
 
 ---
 
@@ -143,6 +158,7 @@ Indexa is being built in the open. Here is what comes next, in rough order — n
 - **Software fingerprinting** — detect installed apps, frameworks, and project types by file patterns; surface them as context metadata
 - **Smart context tagging** — automatically classify regions as "active work / archive / media / code / system"; you confirm or correct
 - **Importance weighting** — tell Indexa which parts of your context store matter most; it adjusts retrieval ranking accordingly
+- **Context Packs** — auto-detect files and folders scattered across your disk that all belong to one subject ("Auth", "Tax 2025", "Client X"), bundle them into a named context, and export it as a single portable file (XML/Markdown) to hand to any AI tool — or a teammate
 - **Insights** — duplicate file clusters, stale projects, weekly change reports
 - **Mobile** — read-only companion app to query your context store from a phone
 - **Plugin SDK** — extend Indexa with custom parsers, AI adapters, and context modules

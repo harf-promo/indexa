@@ -14,7 +14,7 @@ Vote on upcoming features and suggest new ones in [Discussions → Ideas](../../
 
 The first publicly usable release. Build a context map of any folder or your whole disk; ask grounded questions in plain language; keep context current via filesystem events.
 
-- **Two-phase scan**: surface scan (fast, zero AI calls, builds a disk map) → deep scan (parses content, generates descriptions, computes embeddings)
+- **Two-phase scan**: surface scan (fast, zero AI calls, builds a context map) → deep scan (parses content, generates descriptions, computes embeddings)
 - **Flexible scope**: `indexa scan <path>` for a folder, `indexa scan --all` for the whole computer
 - `indexa ask "<question>"` — hybrid semantic + full-text search with LLM-synthesized answer
 - `indexa watch` — background watcher keeps the index current via filesystem events
@@ -103,7 +103,19 @@ Tell Indexa which parts of your disk matter most. It adjusts everything accordin
 
 ---
 
-## v0.9 — Insights
+## v0.9 — Context Packs
+
+Your context, sliced by subject — not by folder. Indexa detects that files and folders scattered across your disk all belong to one topic, bundles them into a named **Context Pack**, and lets you export it as a single portable file for any AI tool or teammate.
+
+- **Cross-directory clustering** — semantic grouping finds everything about "Auth", "Tax 2025", or "Client X" no matter where it lives (`~/Projects/…`, `~/Documents/…`, `~/Notes/…`)
+- **Suggest, don't impose** — Indexa proposes packs; you confirm, rename, merge, or correct
+- `indexa pack create "Auth" --auto` · `indexa pack list` · `indexa pack export "Auth" --format xml`
+- **Portable export** — one self-contained context file (XML primary, Markdown alternate — the formats Anthropic's docs recommend for LLM context windows) you can hand to Claude, Cursor, or a colleague
+- Builds on Smart classification (v0.7) and Importance weighting (v0.8); reuses the `indexa export` renderers
+
+---
+
+## v0.10 — Insights
 
 Analytical reports over your context store.
 
@@ -114,7 +126,7 @@ Analytical reports over your context store.
 
 ---
 
-## v0.10 — Mobile read-only
+## v0.11 — Mobile read-only
 
 Query your desktop context store from your phone.
 
@@ -124,7 +136,7 @@ Query your desktop context store from your phone.
 
 ---
 
-## v0.11 — Plugin SDK
+## v0.12 — Plugin SDK
 
 Open the platform to third-party extensions.
 
@@ -134,4 +146,4 @@ Open the platform to third-party extensions.
 
 ---
 
-Beyond v0.11, ideas live in [Discussions](../../discussions/categories/ideas).
+Beyond v0.12, ideas live in [Discussions](../../discussions/categories/ideas).
