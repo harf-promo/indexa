@@ -1,4 +1,8 @@
-# Known issues — v0.2.2
+# Known issues — v0.2.2  *(ARCHIVED — historical)*
+
+> **This document is archived and no longer current.** Every issue listed here was resolved in
+> **v0.2.3**; the project is now at v0.5.0. Kept for reference only — do not treat as a live
+> known-issues list.
 
 Observed during end-to-end testing on 2026-05-28.  
 All issues below were fixed in **v0.2.3** (branch `feat/v0.2.3-context-quality`).  

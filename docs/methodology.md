@@ -119,9 +119,15 @@ score(d) = 1/(k + rank_sparse(d)) + 1/(k + rank_dense(d))
 
 with the default `k=60` (matches Elasticsearch, Weaviate, Vespa defaults). RRF needs no score calibration across the two systems and is robust across query types.
 
-### Why not re-ranking?
+### Re-ranking (opt-in)
 
-Cross-encoder re-rankers (e.g. BGE-reranker-v2-m3) add 100–500ms per query and require a second model. They improve recall at higher `top_k` values but are not worth the latency for `top_k=8`. Available as opt-in via `rerank = true`.
+A dedicated cross-encoder (e.g. BGE-reranker-v2-m3) would add 100–500ms per query and require a
+second model — overkill for the default `top_k=8`, so it is **off by default**. When `rerank = true`,
+Indexa instead runs a lightweight **listwise re-ranker that reuses the local generation model** in a
+single extra call (no second model, no new native dependency). It **fails open**: any model error,
+empty, or unparseable output falls back to the original retrieval order, so re-ranking can never make
+`ask` worse. A future ONNX/`fastembed` cross-encoder can slot in behind the same `CrossEncoder` trait
+via a Cargo feature.
 
 ---
 
@@ -153,7 +159,7 @@ Chunks are included in ranked order until the character budget is exhausted. The
 | **Whisper transcription** (audio) | Requires a ~150MB model + compute | `[parsers.audio] transcribe = true` |
 | **Vision captioning** (images) | Requires a vision model | `[parsers.image] caption = true` |
 | **OCR** (scanned PDFs) | Requires Marker or Tesseract CLI | `[parsers.pdf] backend = "marker"` |
-| **Re-ranking** | Adds latency, requires second model | `[retrieval] rerank = true` |
+| **Re-ranking** | Adds one extra local-model call per query (fails open) | `[retrieval] rerank = true` |
 | **Contextual retrieval** | LLM call per chunk at index time (expensive) | `[describer] contextual_retrieval = true` |
 | **Cloud embeddings** | Requires API key, costs money | `[embedding] provider = "openai"` |
 | **Cloud LLM** | Requires API key | `[describer] provider = "anthropic"` |

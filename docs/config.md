@@ -4,9 +4,11 @@ Indexa reads its configuration from a TOML file. The default path is:
 
 | Platform | Default path |
 |---|---|
-| macOS | `~/Library/Application Support/indexa/indexa/config.toml` |
+| macOS | `~/Library/Application Support/dev.indexa.Indexa/config.toml` |
 | Linux | `~/.config/indexa/config.toml` (XDG) |
-| Windows | `%APPDATA%\indexa\indexa\config.toml` |
+| Windows | `%APPDATA%\indexa\Indexa\config.toml` |
+
+(If the platform config directory can't be resolved, Indexa falls back to `~/.indexa/config.toml`.)
 
 You can override the path with the `--config` flag:
 
@@ -78,11 +80,17 @@ Controls how search results are ranked and how many are returned.
 
 ```toml
 [retrieval]
-hybrid = "rrf"   # rrf | sparse | dense | weighted
-rrf_k  = 60      # RRF rank constant (higher = less weight to top ranks)
-top_k  = 8       # results to retrieve before reranking
-rerank = false   # enable cross-encoder reranking (adds ~200ms)
+hybrid               = "rrf"  # rrf | sparse | dense  (weighted is reserved, see below)
+rrf_k                = 60     # RRF rank constant (higher = less weight to top ranks)
+top_k                = 8      # results to retrieve before reranking
+rerank               = false  # enable cross-encoder reranking (one extra local-model call; fails open)
+summary_weight       = 0.0    # 0.0 disables the parent-summary boost; >0 blends folder-summary similarity into ranking
+summary_depth_alpha  = 0.15   # depth-boost coefficient for summary-aware retrieval
 ```
+
+> `hybrid = "weighted"` is currently reserved — selecting it errors (`weighted mode not yet
+> implemented; use rrf`). Use `rrf`, `sparse`, or `dense`. The summary-boost (`summary_weight`)
+> only takes effect for dense/RRF modes and is off (0.0) by default.
 
 ### Hybrid modes
 
@@ -101,11 +109,23 @@ Controls the LLM used to generate answers in `indexa ask` and the web UI.
 
 ```toml
 [describer]
-provider              = "ollama"
-model                 = "gemma2:9b"   # default: Google gemma2:9b (Apache-2.0)
-base_url              = "http://localhost:11434"
-contextual_retrieval  = false   # Anthropic-style per-chunk prefix at index time
+provider                 = "ollama"
+model                    = "gemma3:12b"   # Q&A answer synthesis (Google gemma3:12b, Apache-2.0)
+file_model               = "gemma3:4b"    # per-file summaries (smaller/faster)
+dir_model                = "gemma3:12b"   # directory roll-up summaries (stronger model)
+base_url                 = "http://localhost:11434"
+contextual_retrieval     = false          # Anthropic-style per-chunk prefix at index time
+mode                     = "augment"      # augment | compress | summaries-only
+queue_concurrency        = 2              # concurrent summary worker tasks
+max_children_per_summary = 30             # max child summaries fed into one directory roll-up
+passes_first             = 2              # refinement passes when no prior summary exists
+passes_refresh           = 1              # refinement passes when refreshing an existing summary
+passes_cap               = 3              # hard ceiling on the `--passes` flag (values above are clamped)
 ```
+
+`passes_*` implement multi-pass Self-Refine summarization: a first-time build runs `passes_first`
+passes, a refresh runs `passes_refresh`, and any explicit `--passes` is clamped to `passes_cap`
+(gains saturate after pass 2–3).
 
 ### Providers
 
@@ -118,20 +138,43 @@ contextual_retrieval  = false   # Anthropic-style per-chunk prefix at index time
 
 ---
 
+## Resource awareness
+
+Controls how aggressively Indexa uses system memory during AI jobs. Indexa reads machine RAM and
+swap pressure before and during `deep`/`summarize` and pauses work when the machine is under
+memory pressure (the core of the macOS whole-machine-freeze fix). Run `indexa doctor` to see the
+detected specs, per-model memory table, and ETA estimates.
+
+```toml
+[resource]
+profile         = "balanced"   # conservative | balanced | performance
+headroom_gb     = 0.0          # 0.0 = use the profile's built-in headroom; >0 overrides it (GB to keep free)
+keep_alive_secs = 0            # 0 = use the profile default; how long Ollama keeps a model resident
+```
+
+| Profile | Behaviour |
+|---|---|
+| `conservative` | Largest memory headroom, shortest keep-alive — best on low-RAM machines. |
+| `balanced` | **Default.** Sensible headroom and keep-alive for typical laptops. |
+| `performance` | Smallest headroom, longest keep-alive — fastest on high-RAM machines. |
+
+---
+
 ## Parser overrides
 
 Fine-tune how specific file types are handled.
 
 ```toml
-[parsers.pdf]
-backend = "pdfium"  # pdfium (default, pure Rust) | marker (scanned PDFs, requires Marker CLI)
-
 [parsers.image]
 caption = false  # set true to enable vision-model captioning (future)
 
 [parsers.audio]
 transcribe = false  # set true to enable whisper.cpp transcription (future)
 ```
+
+> **PDF:** text extraction currently uses the pure-Rust [`pdf-extract`](https://crates.io/crates/pdf-extract)
+> crate (no native dependency). OCR for scanned / image-only PDFs is planned but not yet wired, so
+> image-only PDFs currently yield little or no text.
 
 ---
 
@@ -184,9 +227,12 @@ rrf_k  = 60
 top_k  = 10
 rerank = false
 
+[resource]
+profile = "balanced"   # conservative | balanced | performance
+
 [describer]
 provider = "ollama"
-model    = "gemma2:9b"
+model    = "gemma3:12b"
 
 [[region]]
 path = "~/Documents/Voice Memos"

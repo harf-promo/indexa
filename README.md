@@ -4,7 +4,7 @@
 
 *Indexa reads your code or your disk once, builds a hierarchical context graph, and serves it to AI tools without burning their token budgets. Local-first, model-agnostic, fully open.*
 
-> Status: **pre-alpha** — foundations being built. Watch this repo or join [Discussions](../../discussions) to follow along.
+> Status: **v0.5.0**, pre-1.0 and actively developed. The scan → summarize → export → ask flow works today, plus a local web UI and an MCP server for AI agents. Expect rough edges on large / whole-disk indexes. Watch this repo or join [Discussions](../../discussions) to follow along.
 
 ---
 
@@ -20,6 +20,8 @@ claude "given @.context.xml, find the auth flow and add MFA"
 ```
 
 The paid model spends its budget on *the change you actually want* — not on re-reading your folder tree. **Zero tokens leave your machine during indexing.** You control exactly what gets handed to the cloud model.
+
+Or skip the file hand-off entirely: run `indexa mcp` and your agent (Claude Desktop, Cursor, any [MCP](https://modelcontextprotocol.io) client) queries the live index over six tools — `search`, `browse_tree`, `get_summary` (with L0/L1/L2 progressive disclosure), `read_file`, `ask`, and `get_stats`.
 
 ---
 
@@ -95,6 +97,8 @@ Bring your own model. No model is bundled — Indexa works with whatever you alr
 
 Default models: `nomic-embed-text` (embedding, Ollama) · `gemma3:12b` (answers + dir context, Ollama, Google/Apache-2.0) · `gemma3:4b` (file context summaries).
 
+**Optional reranking.** Set `rerank = true` under `[retrieval]` to add a cross-encoder pass that reorders retrieved candidates with one local-model call before the answer is synthesized. It's off by default and *fails open* — any model hiccup falls back to the original order, so it can never make `ask` worse.
+
 ---
 
 ## Installation
@@ -132,7 +136,9 @@ cargo build --release
 
 ## What's coming
 
-Indexa is being built in the open. Here is what comes after the initial release, in rough order — no dates, ships when it's ready:
+**Already shipped** (v0.2–v0.5): hierarchical summarization with tiered L0/L1/L2 abstracts, the local web UI, resource-aware indexing (won't freeze your machine), an MCP server for AI agents, and optional cross-encoder reranking.
+
+Indexa is being built in the open. Here is what comes next, in rough order — no dates, ships when it's ready:
 
 - **Software fingerprinting** — detect installed apps, frameworks, and project types by file patterns; surface them as context metadata
 - **Smart context tagging** — automatically classify regions as "active work / archive / media / code / system"; you confirm or correct

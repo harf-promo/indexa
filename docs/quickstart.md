@@ -4,7 +4,7 @@ Get Indexa running in under 5 minutes.
 
 ## Prerequisites
 
-- **Rust** 1.75+ — [install via rustup](https://rustup.rs)
+- **Rust** 1.82+ (stable) — [install via rustup](https://rustup.rs)
 - **Ollama** — [install from ollama.com](https://ollama.com) (for local AI; skip if using OpenAI/Anthropic)
 - **ffprobe** — for audio/video metadata (`brew install ffmpeg` on macOS, `apt install ffmpeg` on Linux)
 
@@ -24,10 +24,11 @@ cp target/release/indexa /usr/local/bin/indexa
 
 ```bash
 ollama pull nomic-embed-text   # embedding model (~270MB, Apache-2.0)
-ollama pull gemma2:9b          # answer model (~5GB, Google, Apache-2.0)
+ollama pull gemma3:4b          # file summaries (~2.5GB, Google)
+ollama pull gemma3:12b         # answers + directory roll-ups (~8GB, Google)
 ```
 
-Both run entirely locally — your data never leaves your machine.
+All three run entirely locally — your data never leaves your machine. (`gemma3:4b` alone is enough to get started; `gemma3:12b` is used for answers and directory roll-up summaries.)
 
 ## Index a folder
 
