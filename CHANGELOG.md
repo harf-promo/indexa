@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Toward **v0.6**.
+
+### Added
+
+- `indexa deep` shows a live [indicatif](https://crates.io/crates/indicatif) progress bar (files done / total, current file), auto-hidden when stderr isn't a terminal (#15).
+- `indexa map` colorizes its output by category when stdout is a terminal; piped/redirected output stays plain (#14).
+
 ## [0.5.1] — 2026-05-30
 
 A "correctness & hardening" pass over the shipped v0.5.0 engine (found by a full code review),
