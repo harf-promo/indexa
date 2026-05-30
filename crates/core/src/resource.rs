@@ -11,11 +11,13 @@
 //! budget is `min(free_ram, 0.75 * total_ram) - headroom`.  This is `cfg`-gated;
 //! non-Apple platforms use plain available-RAM headroom.
 //!
-//! # macOS `available_memory` caveat
-//! `sysinfo::System::available_memory()` on macOS over-counts file cache as
-//! "used" and therefore under-reports true free RAM.  The reliable freeze
-//! predictor is *swap growth* + *low free pages*, so `assess()` triggers on
-//! those signals rather than "available memory."
+//! # macOS memory-signal caveat
+//! `sysinfo::System::available_memory()` on macOS returns 0, and `free_memory`
+//! is near-permanently low because the OS fills free RAM with reclaimable file
+//! cache. The reliable signal is `compute_budget` = `total − used_bytes − headroom`
+//! (`used_bytes` = active + wired pages, which excludes that cache), so `assess()`
+//! judges pressure from the *budget*, not from swap fraction — which on macOS is
+//! sticky (grows dynamically, never drains) and produced false positives.
 
 use sysinfo::System;
 
@@ -423,45 +425,46 @@ pub fn check_models_fit(
 pub enum Pressure {
     /// Enough headroom — proceed with the next Ollama call.
     Ok,
-    /// Headroom is tightening — unload idle models and pause briefly.
+    /// Headroom is tightening (free RAM has dipped into the headroom margin) —
+    /// unload idle models and pause briefly.
     Throttle,
-    /// Critical — swap is growing or free pages are very low; pause longer.
+    /// Critical — truly-free RAM has fallen below half the headroom floor
+    /// (genuine exhaustion); pause longer and unload the resident model.
     Critical,
 }
 
 /// Assess current memory pressure for the watchdog.
 ///
-/// **The only reliable freeze signal on macOS is swap usage.**
+/// **Pressure is judged by genuinely-free RAM versus the headroom floor, via
+/// [`compute_budget`] — not by swap fraction.** `compute_budget` keys off
+/// `used_bytes` (active + wired pages), so it already excludes the reclaimable
+/// macOS file cache that makes raw *free-page* checks misfire — the original
+/// reason this function avoided a budget check does not apply to `compute_budget`.
 ///
-/// On macOS, `free_memory` is near-permanently low (0.3–2.5 GB) because the
-/// OS fills all free RAM with reclaimable file cache — this is by design and
-/// does NOT indicate pressure. Budget checks using free pages cause false
-/// positives that stall jobs on perfectly healthy machines. Only swap growth
-/// means the OS genuinely cannot satisfy allocations without thrashing.
+/// Sticky macOS swap *fraction* is deliberately NOT a trigger: macOS grows its
+/// swap file dynamically and never drains stale pages, so the fraction stays high
+/// long after RAM frees. Keying on it produced spurious Critical/Throttle —
+/// verified live, pressure read `critical` at swap ~88 % while +5 GB was genuinely
+/// free with no job running. Swap *growth* (active paging right now) would be a
+/// real signal, but it needs cross-sample deltas this pure single-sample function
+/// can't see; the budget captures the same danger, since active swapping drives
+/// `used_bytes` up and the budget down.
 ///
-/// `spec` and `headroom` are accepted for API compatibility but not used here;
-/// use `compute_budget` for model-fit pre-flight checks instead.
-pub fn assess(sample: &MemSample, _spec: &MachineSpec, _headroom: u64) -> Pressure {
-    // Swap in use is the primary (and on macOS, only reliable) freeze signal.
-    let swap_fraction = if sample.swap_total_bytes > 0 {
-        sample.swap_used_bytes as f64 / sample.swap_total_bytes as f64
+/// Ladder (`H` = `headroom`): `budget > 0` → `Ok`; `-H/2 < budget ≤ 0` → `Throttle`
+/// (eating into the safety margin); `budget ≤ -H/2` → `Critical` (truly-free RAM has
+/// fallen below half the headroom floor — genuine exhaustion).
+pub fn assess(sample: &MemSample, spec: &MachineSpec, headroom: u64) -> Pressure {
+    let budget = compute_budget(spec, sample, headroom);
+    if budget > 0 {
+        return Pressure::Ok;
+    }
+    // Free RAM is at/below the headroom floor. How far below splits Throttle from
+    // Critical: once truly-available RAM is under half the floor, treat as Critical.
+    if budget <= -((headroom / 2) as i64) {
+        Pressure::Critical
     } else {
-        // No swap configured — treat any non-zero swap used as pressure.
-        if sample.swap_used_bytes > 0 {
-            1.0
-        } else {
-            0.0
-        }
-    };
-
-    if swap_fraction > 0.5 {
-        return Pressure::Critical;
+        Pressure::Throttle
     }
-    if swap_fraction > 0.2 {
-        return Pressure::Throttle;
-    }
-
-    Pressure::Ok
 }
 
 /// Maximum total time a memory-pressure pause may last before the job proceeds
@@ -497,24 +500,20 @@ pub fn pause_decision(current: Pressure, elapsed_secs: u64) -> PauseAction {
 }
 
 /// Decide the next pause action from a fresh memory sample, resuming the moment memory has
-/// **actually recovered** rather than waiting for sticky swap to drain.
+/// **actually recovered** (free RAM back above the headroom floor).
 ///
-/// # Why this exists (the freeze bug)
-/// `assess()` keys off the *absolute* swap fraction, which on macOS is sticky: once the OS
-/// has swapped, `swap_used` does **not** fall when RAM frees. A loop that gates resume on
-/// `assess() == Ok` therefore never resumes after a Critical pause — it just waits out
-/// `MAX_PAUSE_SECS` every time. The real recovery signal is *free RAM returning*, which
-/// [`compute_budget`] measures (`total - used - headroom`). When unloading the resident model
-/// frees its wired pages, `used_bytes` drops and `compute_budget` climbs back above 0 even
-/// while swap stays high — that is the moment to resume.
+/// # Why this gates on the budget directly
+/// The real recovery signal is *free RAM returning*, which [`compute_budget`] measures
+/// (`total - used - headroom`): when unloading the resident model frees its wired pages,
+/// `used_bytes` drops and the budget climbs back above 0 — that is the moment to resume.
+/// (Historically this mattered because `assess()` keyed off the *sticky* macOS swap fraction
+/// and so never cleared after a Critical pause; `assess()` is now budget-aware too (Branch S),
+/// so the explicit budget check below and `assess()` agree — the check is the clear,
+/// load-bearing recovery signal and stays as defense-in-depth.)
 ///
-/// Resume when **either**:
-///   - `compute_budget(spec, sample, headroom) > 0` — truly-available RAM exceeds headroom
-///     (recovered), *or*
-///   - the entry pressure signal has cleared (`assess(sample) == Ok`).
-///
-/// Otherwise it delegates to [`pause_decision`] for the unchanged 5 s (Critical) / 2 s
-/// (Throttle) tick cadence and the [`MAX_PAUSE_SECS`] → `Proceed` backstop. Pure and
+/// Resume when `compute_budget(spec, sample, headroom) > 0` (truly-available RAM exceeds
+/// headroom). Otherwise it delegates to [`pause_decision`] for the unchanged 5 s (Critical) /
+/// 2 s (Throttle) tick cadence and the [`MAX_PAUSE_SECS`] → `Proceed` backstop. Pure and
 /// sleep-free so it is unit-testable; both the web loop and the CLI worker call it so the
 /// two pause paths agree.
 pub fn pause_step(
@@ -712,12 +711,40 @@ mod tests {
     }
 
     #[test]
-    fn heavy_swap_triggers_critical() {
+    fn sticky_swap_with_free_ram_is_ok() {
+        // THE BRANCH-S FIX: macOS swap is sticky and stays high long after RAM frees.
+        // A high swap fraction with genuinely-free RAM (budget > 0) must NOT read as
+        // pressure — this is the exact false positive that fired "critical" at swap
+        // ~88 % while RAM was free, with no job running.
         let spec = fake_spec(36, true);
-        let sample = fake_sample(2, 1500, 2048); // >50 % swap used
         let headroom = ResourceProfile::Balanced.headroom_bytes();
-        let pressure = assess(&sample, &spec, headroom);
-        assert_eq!(pressure, Pressure::Critical);
+        let sample = fake_sample_with_used(0, 10, 1800, 2048); // swap ~88 %, only 10 GB used
+        assert!(compute_budget(&spec, &sample, headroom) > 0);
+        assert_eq!(assess(&sample, &spec, headroom), Pressure::Ok);
+    }
+
+    #[test]
+    fn genuinely_low_free_ram_triggers_critical() {
+        // Real exhaustion drives the trigger now, NOT swap: 34 GB of 36 GB actively used
+        // → ~2 GB truly free → budget = -3 GB, below -headroom/2 → Critical. Swap is 0 here
+        // to prove the signal is the budget, not the swap fraction.
+        let spec = fake_spec(36, true);
+        let headroom = ResourceProfile::Balanced.headroom_bytes();
+        let sample = fake_sample_with_used(0, 34, 0, 2048);
+        assert!(compute_budget(&spec, &sample, headroom) <= -(headroom as i64 / 2));
+        assert_eq!(assess(&sample, &spec, headroom), Pressure::Critical);
+    }
+
+    #[test]
+    fn mild_tightening_into_headroom_is_throttle() {
+        // Free RAM dips into the headroom margin but not critically: 32 GB used → ~4 GB
+        // truly free → budget = -1 GB, in (-headroom/2, 0] → Throttle, not Critical.
+        let spec = fake_spec(36, true);
+        let headroom = ResourceProfile::Balanced.headroom_bytes(); // 5 GB
+        let sample = fake_sample_with_used(0, 32, 0, 2048);
+        let budget = compute_budget(&spec, &sample, headroom);
+        assert!(budget <= 0 && budget > -(headroom as i64 / 2));
+        assert_eq!(assess(&sample, &spec, headroom), Pressure::Throttle);
     }
 
     #[test]
@@ -763,14 +790,15 @@ mod tests {
 
     #[test]
     fn pause_step_resumes_on_recovery_despite_sticky_swap() {
-        // Sticky swap pinned at 100% (assess() would say Critical forever), BUT only 10 GB
-        // of 36 GB is actively used → compute_budget ≈ 21 GB > 0 (RAM recovered, e.g. after
-        // unloading the model). Must resume even though swap never drained.
+        // Sticky swap pinned at 100%, BUT only 10 GB of 36 GB is actively used →
+        // compute_budget ≈ 21 GB > 0 (RAM recovered, e.g. after unloading the model).
+        // Post Branch-S, assess() is budget-aware so it agrees this is Ok; pause_step
+        // resumes regardless of the sticky swap.
         let spec = fake_spec(36, true);
         let headroom = ResourceProfile::Balanced.headroom_bytes();
         let sample = fake_sample_with_used(0, 10, 2048, 2048); // swap 100%, used 10 GB
-        assert_eq!(assess(&sample, &spec, headroom), Pressure::Critical); // entry signal still hot
         assert!(compute_budget(&spec, &sample, headroom) > 0);
+        assert_eq!(assess(&sample, &spec, headroom), Pressure::Ok); // budget healthy → not pressure
         assert_eq!(
             pause_step(&spec, &sample, headroom, 0),
             PauseAction::Resume,
@@ -780,15 +808,14 @@ mod tests {
 
     #[test]
     fn entry_gate_skips_pause_on_sticky_swap_after_recovery() {
-        // The watchdog gates *entry* into a pause on `pause_step(.., 0) == Resume` (skip),
-        // NOT on raw `assess()`. After the first pressure event macOS swap stays sticky-high,
-        // so `assess()` would report Critical for the rest of the job and re-enter the pause
-        // (warn + unload + reload the model) on every file. This asserts the entry gate skips
-        // once RAM has recovered, even while `assess()` is still Critical.
+        // The watchdog gates *entry* into a pause on `pause_step(.., 0) == Resume` (skip).
+        // With sticky swap pinned at 100% but only 12 GB used, budget ≈ 19 GB > 0, so both
+        // the budget-aware `assess()` and pause_step agree there is no pressure — the gate
+        // skips and there is no per-file warn/unload/reload thrash.
         let spec = fake_spec(36, true);
         let headroom = ResourceProfile::Balanced.headroom_bytes();
         let sample = fake_sample_with_used(0, 12, 2048, 2048); // swap 100%, used 12 GB → budget > 0
-        assert_eq!(assess(&sample, &spec, headroom), Pressure::Critical); // sticky entry signal
+        assert_eq!(assess(&sample, &spec, headroom), Pressure::Ok); // budget healthy despite sticky swap
         assert_eq!(
             pause_step(&spec, &sample, headroom, 0),
             PauseAction::Resume,

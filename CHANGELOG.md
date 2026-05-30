@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`indexa classify`** — the first step of **Smart classification** (v0.7 milestone). Suggests a semantic category (work / personal / archive / media / code / system) for each indexed folder — a second axis over the technical file-type classification. This Tier 0 pass is **deterministic and content-free**: it derives the code/media/system/archive categories from existing surface hints (a folder's own hint, e.g. `node_modules` → code, or the dominant category among its direct files). Folders whose work-vs-personal nature needs file *content* are left **pending** for a later content-inference pass — never guessed. Inspect with `--paths` and `--category`. Suggestions are saved; confirming/correcting them (web UI + CLI) arrives in a following release.
 
+### Fixed
+
+- **The memory-pressure signal no longer misfires on sticky macOS swap.** The watchdog now reads pressure from the real memory **budget** (`total − active/wired − headroom`, which excludes reclaimable macOS file cache) instead of the swap **fraction**. macOS grows its swap file dynamically and never drains stale pages, so the fraction stays high long after RAM frees — which made the always-on Engine status-bar pressure indicator read amber/red (and drove extra model unloads) even with several GB genuinely free and no job running. Pressure now reads `ok` whenever the budget is positive, escalating to throttle/critical only as truly-free RAM falls into and below the headroom floor. The job-entry pause/warning was already budget-gated; genuine low-memory protection is unchanged.
+
 ## [0.7.0] — 2026-05-30
 
 An **instrument-first** release: Indexa now shows you what the engine is doing in real time, idle or busy — the foundation of the web-UI redesign — plus an accessibility pass.
