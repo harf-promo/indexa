@@ -18,6 +18,7 @@ use indexa_query::{
     answer, build_tree, enqueue_subtree, render_json, render_markdown, render_xml,
     summarize_subtree_sync, QaConfig,
 };
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::prelude::*;
@@ -264,7 +265,22 @@ async fn cmd_deep(
         let mut total_chunks = 0usize;
         let mut skipped = 0usize;
 
-        for entry in &files {
+        // Lightweight in-place progress on stderr (carriage-return rewrite), shown only when
+        // stderr is a terminal so piped/CI output stays clean. Hand-rolled to avoid pulling in
+        // indicatif, whose transitive `number_prefix` dep is flagged unmaintained (RUSTSEC-2025-0119).
+        let show_progress = std::io::stderr().is_terminal();
+        let total_files = files.len();
+
+        for (i, entry) in files.iter().enumerate() {
+            if show_progress {
+                let name = entry
+                    .path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                eprint!("\r\x1b[K  [{}/{total_files}] {:.50}", i + 1, name);
+                let _ = std::io::stderr().flush();
+            }
             let path_str = entry.path.to_string_lossy().into_owned();
 
             // Skip-if-unchanged: re-embedding is expensive; skip files whose chunks
@@ -304,6 +320,10 @@ async fn cmd_deep(
             total_chunks += chunk_records.len();
         }
 
+        if show_progress {
+            eprint!("\r\x1b[K"); // clear the progress line
+            let _ = std::io::stderr().flush();
+        }
         if skipped > 0 {
             println!("  skipped {skipped}/{} files (unchanged)", files.len());
         }
@@ -337,18 +357,55 @@ async fn cmd_map(depth: usize) -> Result<()> {
     let chunks = store.chunk_count()?;
     let summary = store.region_summary()?;
 
-    println!("Indexa map — {total} entries, {chunks} deep-scanned chunks (depth ≤{depth})\n");
-    println!("{:<20} {:>10} {:>14}", "Category", "Files", "Size");
-    println!("{}", "-".repeat(46));
+    // Only emit ANSI escapes when stdout is a terminal, so piping/redirecting stays clean.
+    let color = std::io::stdout().is_terminal();
+    let sgr = |code: &str, s: &str| {
+        if color {
+            format!("\x1b[{code}m{s}\x1b[0m")
+        } else {
+            s.to_owned()
+        }
+    };
+
+    println!(
+        "{}",
+        sgr(
+            "1",
+            &format!("Indexa map — {total} entries, {chunks} deep-scanned chunks (depth ≤{depth})")
+        )
+    );
+    println!();
+    println!(
+        "{}",
+        sgr(
+            "1",
+            &format!("{:<20} {:>10} {:>14}", "Category", "Files", "Size")
+        )
+    );
+    println!("{}", sgr("2", &"-".repeat(46)));
     for r in summary {
+        // Pad first (ANSI codes don't count toward display width), then colorize.
+        let cat = sgr(category_color(&r.category), &format!("{:<20}", r.category));
         println!(
-            "{:<20} {:>10} {:>14}",
-            r.category,
+            "{cat} {:>10} {:>14}",
             r.entry_count,
             format_size(r.total_size)
         );
     }
     Ok(())
+}
+
+/// ANSI SGR color code for a surface-scan category (used by `indexa map`).
+fn category_color(category: &str) -> &'static str {
+    match category {
+        "code" => "36",            // cyan
+        "documents" => "34",       // blue
+        "media" => "35",           // magenta
+        "cache" | "build" => "33", // yellow
+        "system" => "90",          // bright black
+        "unknown" => "37",         // white
+        _ => "32",                 // green
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
