@@ -7,9 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Toward **v0.5.1** — a "correctness & hardening" pass over the shipped v0.5.0 engine (found by a
-full code review), plus a docs refresh. No new features; existing behavior is unchanged except
-where noted as a bug fix.
+## [0.5.1] — 2026-05-30
+
+A "correctness & hardening" pass over the shipped v0.5.0 engine (found by a full code review),
+plus a docs refresh. No new features; existing behavior is unchanged except where noted as a bug fix.
 
 ### Fixed
 
