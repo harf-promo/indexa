@@ -179,6 +179,7 @@ async fn cmd_deep(
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };
+    let max_parse_bytes = cfg.parsers.max_file_mb.saturating_mul(1024 * 1024);
 
     let embed_model = embed_model_flag
         .as_deref()
@@ -200,7 +201,11 @@ async fn cmd_deep(
                 .collect();
             total_files += files.len();
             for entry in files {
-                if let Ok(ex) = indexa_parsers::registry::parse(&entry.path) {
+                if let Ok(ex) = indexa_parsers::registry::parse_guarded(
+                    &entry.path,
+                    entry.size,
+                    max_parse_bytes,
+                ) {
                     total_chunks += ex.chunks.len();
                     let family = ex.mime.split('/').next().unwrap_or("other").to_owned();
                     *by_mime.entry(family).or_default() += 1;
@@ -269,7 +274,11 @@ async fn cmd_deep(
                 continue;
             }
 
-            let extracted = match indexa_parsers::registry::parse(&entry.path) {
+            let extracted = match indexa_parsers::registry::parse_guarded(
+                &entry.path,
+                entry.size,
+                max_parse_bytes,
+            ) {
                 Ok(e) => e,
                 Err(_) => continue,
             };
@@ -448,6 +457,7 @@ async fn cmd_watch(
     let session = watcher::watch(&roots, &WatcherConfig::default())?;
 
     let db_path_clone = db_path.clone();
+    let max_parse_bytes = cfg.parsers.max_file_mb.saturating_mul(1024 * 1024);
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Handle::current();
 
@@ -477,7 +487,12 @@ async fn cmd_watch(
                     }
                 }
                 ChangeKind::Upsert => {
-                    let extracted = match indexa_parsers::registry::parse(path) {
+                    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                    let extracted = match indexa_parsers::registry::parse_guarded(
+                        path,
+                        size,
+                        max_parse_bytes,
+                    ) {
                         Ok(e) => e,
                         Err(_) => return,
                     };

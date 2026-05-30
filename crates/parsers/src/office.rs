@@ -290,4 +290,16 @@ mod tests {
         let result = strip_xml_tags(xml);
         assert!(result.contains('"'), "quote not decoded: {result}");
     }
+
+    #[test]
+    fn office_parser_handles_corrupt_gracefully() {
+        // .docx / .xlsx are ZIP containers; feeding non-ZIP bytes must not panic.
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["bad.docx", "bad.xlsx"] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, b"this is definitely not a zip container").unwrap();
+            // Must return (Err or a graceful fallback), never panic.
+            let _ = OfficeParser.parse(&p);
+        }
+    }
 }

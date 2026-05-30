@@ -399,4 +399,13 @@ mod tests {
         assert!(result.contains("world"), "{result}");
         assert!(!result.contains('<'), "{result}");
     }
+
+    #[test]
+    fn epub_parser_handles_corrupt_gracefully() {
+        // An EPUB is a ZIP of XHTML; feeding truncated/non-ZIP bytes must not panic.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("bad.epub");
+        std::fs::write(&p, b"PK\x03\x04 truncated not-a-real-epub").unwrap();
+        let _ = EpubParser.parse(&p);
+    }
 }

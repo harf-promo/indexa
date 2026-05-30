@@ -48,3 +48,46 @@ pub fn parse(path: &Path) -> Result<Extracted> {
 
     bail!("no parser for: {} (MIME: {mime})", path.display());
 }
+
+/// Parse a file with two safety guards, returning `Err` (never panicking, never
+/// reading an oversized file) so one bad file can't abort a whole scan:
+///
+/// 1. **Size cap** — files larger than `max_bytes` are skipped (`max_bytes == 0`
+///    disables the cap). Every content parser reads the whole file into memory, so
+///    an accidental multi-GB log/CSV/binary misclassified as text would otherwise
+///    exhaust RAM mid-scan.
+/// 2. **Panic isolation** — third-party parser internals (e.g. `pdf-extract`/`lopdf`
+///    on a malformed PDF) can panic on adversarial input. `catch_unwind` converts a
+///    panic into an `Err` so the caller can log it and move to the next file.
+pub fn parse_guarded(path: &Path, size_bytes: u64, max_bytes: u64) -> Result<Extracted> {
+    if max_bytes > 0 && size_bytes > max_bytes {
+        bail!(
+            "skipping {} for parsing: {size_bytes} bytes exceeds the {max_bytes}-byte cap",
+            path.display()
+        );
+    }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse(path))) {
+        Ok(result) => result,
+        Err(_) => bail!("parser panicked on {}", path.display()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_guarded_skips_oversized_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("note.txt");
+        std::fs::write(&p, "small but real content").unwrap();
+        let size = std::fs::metadata(&p).unwrap().len();
+
+        // A cap below the file size → skipped (Err), file never read.
+        assert!(parse_guarded(&p, size, 1).is_err());
+        // 0 disables the cap → parses fine.
+        assert!(parse_guarded(&p, size, 0).is_ok());
+        // A generous cap → parses fine.
+        assert!(parse_guarded(&p, size, 10_000_000).is_ok());
+    }
+}
