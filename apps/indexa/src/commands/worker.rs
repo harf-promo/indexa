@@ -4,21 +4,20 @@ use indexa_embed::OllamaEmbedder;
 use indexa_llm::OllamaLlm;
 use std::sync::Arc;
 
-use super::helpers::require_index_db;
+use super::helpers::{require_index_db, select_summary_models};
 
 pub(crate) async fn cmd_worker(concurrency: usize, cfg: &Config) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };
 
+    // Pre-flight: downgrade the dir roll-up model to one that fits the budget
+    // (non-interactive CLI "ask me first") before loading anything heavy.
+    let (file_model, dir_model) = select_summary_models(cfg);
     let base_url = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
     let describer: Arc<dyn indexa_llm::Describer + Send + Sync> = Arc::new(
-        OllamaLlm::new_with_dir_model(
-            &base_url,
-            &cfg.describer.file_model,
-            &cfg.describer.dir_model,
-        )
-        .with_num_ctx(cfg.describer.num_ctx),
+        OllamaLlm::new_with_dir_model(&base_url, &file_model, &dir_model)
+            .with_num_ctx(cfg.describer.num_ctx),
     );
     let embed_base = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
     let embedder: Arc<dyn indexa_embed::Embedder + Send + Sync> = Arc::new(OllamaEmbedder::new(

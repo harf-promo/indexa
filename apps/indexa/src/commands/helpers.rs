@@ -1,6 +1,7 @@
 use anyhow::Result;
 use directories::BaseDirs;
 use indexa_core::config::{self, Config, SummaryMode};
+use indexa_core::resource;
 use std::path::PathBuf;
 
 /// Return the index DB path if it exists, or `None` after printing the standard
@@ -57,6 +58,52 @@ pub(crate) fn build_llm(
         Some(keep_alive),
         cfg.describer.num_ctx,
     )
+}
+
+/// Pick the summarization `(file_model, dir_model)`, downgrading the heavy dir
+/// roll-up model to one that fits the live memory budget when `[resource]
+/// auto_select_model` is on (the default — the non-interactive CLI behavior).
+///
+/// This is the CLI side of "ask me first": the CLI can't prompt, so it applies
+/// the fitting model and prints a calm notice. The web path surfaces the choice
+/// interactively (a separate change). Without this, `summarize`/`worker` load
+/// `gemma3:12b` (~9 GB) unconditionally, which on a tight machine thrashes/freezes.
+pub(crate) fn select_summary_models(cfg: &Config) -> (String, String) {
+    let file_model = cfg.describer.file_model.clone();
+    let dir_model = cfg.describer.dir_model.clone();
+    if !cfg.resource.auto_select_model {
+        return (file_model, dir_model);
+    }
+
+    let spec = resource::detect_machine();
+    let sample = resource::sample_memory_once();
+    let headroom = cfg.resource.effective_headroom_bytes();
+    let report = resource::fit_report(
+        &file_model,
+        &dir_model,
+        cfg.describer.num_ctx,
+        &spec,
+        &sample,
+        headroom,
+    );
+
+    if let (Some(rec), Some(reason)) = (report.recommended.as_ref(), report.reason.as_ref()) {
+        println!("⚠ Memory: {reason}.");
+        println!("  (Set [resource] auto_select_model = false in config.toml to keep your configured models.)");
+        return (rec.file_model.clone(), rec.dir_model.clone());
+    }
+    if !report.configured.fits {
+        // recommended is None here → already on the smallest model and it still
+        // doesn't fit; warn and let the runtime watchdog handle the pressure.
+        let to_gb = |b: f64| b / (1024.0 * 1024.0 * 1024.0);
+        println!(
+            "⚠ Memory: {dir_model} (~{:.1} GB) exceeds the {:.1} GB budget and it's already the \
+smallest model. Free some RAM or lower the resource profile; the memory watchdog will pause under pressure.",
+            to_gb(report.configured.peak_bytes as f64),
+            to_gb(report.budget_bytes as f64),
+        );
+    }
+    (file_model, dir_model)
 }
 
 pub(crate) fn resolve_roots(paths: Vec<String>, all: bool) -> Result<Vec<PathBuf>> {

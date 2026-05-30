@@ -4,7 +4,7 @@ use indexa_embed::OllamaEmbedder;
 use indexa_llm::OllamaLlm;
 use indexa_query::summarize_subtree_sync;
 
-use super::helpers::{parse_summary_mode, require_index_db, resolve_roots};
+use super::helpers::{parse_summary_mode, require_index_db, resolve_roots, select_summary_models};
 
 pub(crate) async fn cmd_summarize(
     paths: Vec<String>,
@@ -20,13 +20,12 @@ pub(crate) async fn cmd_summarize(
     let mut summary_cfg = cfg.describer.clone();
     summary_cfg.mode = parse_summary_mode(&mode)?;
 
+    // Pre-flight: downgrade the dir roll-up model to one that fits the budget
+    // (non-interactive CLI "ask me first") before loading anything heavy.
+    let (file_model, dir_model) = select_summary_models(cfg);
     let base_url = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
-    let describer = OllamaLlm::new_with_dir_model(
-        &base_url,
-        &cfg.describer.file_model,
-        &cfg.describer.dir_model,
-    )
-    .with_num_ctx(cfg.describer.num_ctx);
+    let describer = OllamaLlm::new_with_dir_model(&base_url, &file_model, &dir_model)
+        .with_num_ctx(cfg.describer.num_ctx);
     let embed_base = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
     let embedder = OllamaEmbedder::new(&embed_base, &cfg.embedding.model, cfg.embedding.dim);
 
