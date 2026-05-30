@@ -76,7 +76,10 @@
 .tree-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .tree-badge { font-size: 10px; flex-shrink: 0; }
 .tree-badge.done { color: var(--green); }
-.tree-badge.pending { color: var(--orange); animation: pulse 2s ease-in-out infinite; }
+/* No per-row animation: a pulsing badge on every pending folder reads as a
+   "loading icon near every folder". State is conveyed by colour alone here;
+   PR-2 replaces this with calm coverage glyphs + an aggregate subtree indicator. */
+.tree-badge.pending { color: var(--orange); }
 .tree-badge.failed { color: var(--red); }
 .tree-children { padding-left: 14px; }
 .tree-row-actions { display: none; gap: 1px; margin-left: auto; flex-shrink: 0; }
