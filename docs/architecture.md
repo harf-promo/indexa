@@ -25,6 +25,10 @@ All three query surfaces — CLI `ask`, web `/api/ask`, and the MCP `ask` tool �
 Send-safe `query::answer(db_path, …)` entry point, so retrieval, optional reranking, and the
 empty-result short-circuit behave identically everywhere.
 
+Because the MCP server returns a small retrieved slice on demand, a **local** agent can offload its
+context to disk — querying `get_summary` / `search` instead of holding the whole repo in its
+window. See [Why an external context store helps local models](methodology.md#why-an-external-context-store-helps-local-models).
+
 ---
 
 ## Data flow — `indexa deep`

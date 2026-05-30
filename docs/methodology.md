@@ -20,6 +20,21 @@ Phase 2 — Deep scan (per-region, background or on-demand):
 
 ---
 
+## Why an external context store helps local models
+
+Local models (Ollama, llama.cpp) live under a hard context budget: the attention KV-cache grows with every token in the window and competes with the model's weights for VRAM, native context windows are small (often 4–8K tokens), and prefill cost scales roughly quadratically with context length. Stuffing a whole repo into the prompt is therefore slow, memory-hungry, and frequently impossible on consumer hardware.
+
+Indexa shifts that burden off the model. The hierarchical context graph lives on disk; at query time, retrieval hands the model only a small, ranked slice (default ~4000-char budget — see [Answer synthesis](#answer-synthesis-rag)). The model can reason over a 4K window even when the underlying store covers hundreds of gigabytes.
+
+**Honest trade-offs:**
+
+- Indexa **sidesteps** the KV-cache problem by feeding small slices; it does **not** compress or quantize the cache itself — that optimization (PagedAttention, KV quantization) happens inside the inference engine independently.
+- Retrieval can **miss** context if ranking is poor. Hybrid search (BM25 + vector) and optional reranking mitigate this, but it is not zero-risk: a model can only reason over what retrieval surfaces.
+- The trade is **memory for latency** — you swap a large KV-cache for an embedding search plus a synthesis round-trip (typically 100–500 ms). Worth it for large stores, roughly neutral for a single small file.
+- It helps only agents that **use** retrieval. An agent hard-coded to read whole files into its window gains nothing from an external store.
+
+---
+
 ## File parsing
 
 Each file type has a dedicated parser. Parsers are tried in order:

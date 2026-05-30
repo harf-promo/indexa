@@ -20,7 +20,7 @@ license = "Apache-2.0"
 repository = "https://github.com/harf-promo/indexa"
 homepage = "https://github.com/harf-promo/indexa"
 readme = "README.md"
-description = "Local context engine for AI — hierarchical summarization and retrieval over your disk."
+description = "The local context engine for AI — index your disk once, serve grounded context to any cloud or local model without burning its context window."
 
 [workspace.dependencies]
 # Async runtime
