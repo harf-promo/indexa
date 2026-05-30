@@ -404,13 +404,31 @@ pub fn save(cfg: &Config, path: &Path) -> Result<()> {
     }
     let text =
         toml::to_string_pretty(cfg).with_context(|| "serialising config to TOML".to_owned())?;
-    std::fs::write(path, &text).with_context(|| format!("writing config: {}", path.display()))?;
+
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, perms)
+        // Create the (API-key-bearing) file with 0600 from the start so it is never briefly
+        // world/group-readable between write and chmod — the old write-then-set_permissions
+        // had a TOCTOU window. `mode()` only applies on creation, so also tighten an existing
+        // file's perms afterward.
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("writing config: {}", path.display()))?;
+        f.write_all(text.as_bytes())
+            .with_context(|| format!("writing config: {}", path.display()))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("setting permissions on {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, &text)
+            .with_context(|| format!("writing config: {}", path.display()))?;
     }
     Ok(())
 }
