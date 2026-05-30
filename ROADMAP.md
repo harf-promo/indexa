@@ -4,9 +4,13 @@ Milestones ship when they're ready — no dates. Order is directional. Each mile
 
 Vote on upcoming features and suggest new ones in [Discussions → Ideas](../../discussions/categories/ideas).
 
-> **Note on version numbers:** v0.3–v0.5 shipped as the platform releases below (web UI, resource
-> engine, MCP + reranking) rather than the feature themes originally sketched here. The upcoming
-> feature milestones have been renumbered to v0.6+ to match what actually shipped.
+> **Note on version numbers:** the milestone numbers below are **feature-theme labels**, not release
+> versions — actual releases track their own line and can run ahead. v0.3–v0.5 shipped as platform
+> releases (web UI, resource engine, MCP + reranking) rather than the themes once sketched here.
+> **Fingerprints (v0.6) shipped in the `v0.6.0` release.** The `v0.7.0` release then shipped the
+> instrument-first foundation of the web-UI redesign — an always-on Engine status bar plus a live
+> telemetry API — a platform release ahead of the **Smart classification** theme below, which is the
+> next feature milestone. The theme numbers (through Context Packs at v0.9) are directional and stay put.
 
 ---
 
@@ -72,7 +76,7 @@ The local context engine is now reachable by AI agents and ranks its own retriev
 
 ---
 
-## v0.6 — Fingerprints  *(next)*
+## v0.6 — Fingerprints  *(shipped)*
 
 Detect installed software and project types by file-pattern signatures — without reading file content.
 
@@ -82,7 +86,7 @@ Detect installed software and project types by file-pattern signatures — witho
 
 ---
 
-## v0.7 — Smart classification
+## v0.7 — Smart classification  *(next)*
 
 Indexa suggests how to categorize regions of your disk. You confirm, correct, or ignore.
 
