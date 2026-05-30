@@ -261,6 +261,20 @@ pub enum Commands {
         #[arg(long)]
         chunks: Option<usize>,
     },
+
+    /// Detect software and project types in the index by file-pattern signatures.
+    ///
+    /// Reports things like Rust crates, Node/Next.js apps, Docker Compose stacks, and
+    /// Helm charts found across your indexed folders — without reading file contents.
+    /// Extend the catalog with a `fingerprints.json` next to your config (see docs).
+    #[command(after_help = "Examples:
+  indexa fingerprint
+  indexa fingerprint --paths   # also list the matching directories")]
+    Fingerprint {
+        /// List the matching directory paths under each detected type.
+        #[arg(long)]
+        paths: bool,
+    },
 }
 
 #[cfg(test)]

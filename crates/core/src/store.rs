@@ -825,6 +825,14 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// All indexed entry paths (files and directories). Used by fingerprint detection,
+    /// which builds a directory → direct-children map from them.
+    pub fn all_entry_paths(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT path FROM entries")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Search entries whose path contains `query` (case-insensitive LIKE).
     pub fn search_paths(&self, query: &str, limit: usize) -> Result<Vec<TreeNode>> {
         let pattern = format!("%{query}%");

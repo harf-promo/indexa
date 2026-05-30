@@ -11,6 +11,7 @@ Toward **v0.6**.
 
 ### Added
 
+- **`indexa fingerprint`** — detects software and project types (Rust crates, Node/Next.js apps, Docker Compose stacks, Helm charts, …) across indexed folders by file-pattern signatures, without reading file contents. Built-in JSON pattern library extendable via a user `fingerprints.json`; `--paths` lists matching directories. See [docs/fingerprints.md](docs/fingerprints.md).
 - `indexa deep` shows live in-place progress (files done / total + current file) on a terminal, auto-hidden when stderr is redirected (#15). Hand-rolled (no new dependency).
 - `indexa map` colorizes its output by category when stdout is a terminal; piped/redirected output stays plain (#14).
 
