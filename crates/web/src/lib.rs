@@ -1302,6 +1302,7 @@ async fn run_deep_phase(
     let mut samples: std::collections::VecDeque<(std::time::Instant, u64)> =
         std::collections::VecDeque::with_capacity(16);
     samples.push_back((std::time::Instant::now(), 0));
+    let max_parse_bytes = state.config.parsers.max_file_mb.saturating_mul(1024 * 1024);
 
     for entry in &files {
         // Honor cancellation requested via DELETE /api/jobs/:id.
@@ -1321,38 +1322,40 @@ async fn run_deep_phase(
             done += 1;
         } else {
             let ep = entry.path.clone();
-            let extracted =
-                match tokio::task::spawn_blocking(move || indexa_parsers::registry::parse(&ep))
-                    .await
-                {
-                    Ok(Ok(e)) => e,
-                    Ok(Err(e)) => {
-                        push(
-                            handle,
-                            JobEvent::Warning {
-                                stage: "deep".to_owned(),
-                                item_path: Some(path_str.clone()),
-                                message: format!("{e:#}"),
-                            },
-                        );
-                        hard_errors += 1;
-                        done += 1;
-                        continue;
-                    }
-                    Err(e) => {
-                        push(
-                            handle,
-                            JobEvent::Warning {
-                                stage: "deep".to_owned(),
-                                item_path: Some(path_str.clone()),
-                                message: format!("parse task panicked: {e}"),
-                            },
-                        );
-                        hard_errors += 1;
-                        done += 1;
-                        continue;
-                    }
-                };
+            let sz = entry.size;
+            let extracted = match tokio::task::spawn_blocking(move || {
+                indexa_parsers::registry::parse_guarded(&ep, sz, max_parse_bytes)
+            })
+            .await
+            {
+                Ok(Ok(e)) => e,
+                Ok(Err(e)) => {
+                    push(
+                        handle,
+                        JobEvent::Warning {
+                            stage: "deep".to_owned(),
+                            item_path: Some(path_str.clone()),
+                            message: format!("{e:#}"),
+                        },
+                    );
+                    hard_errors += 1;
+                    done += 1;
+                    continue;
+                }
+                Err(e) => {
+                    push(
+                        handle,
+                        JobEvent::Warning {
+                            stage: "deep".to_owned(),
+                            item_path: Some(path_str.clone()),
+                            message: format!("parse task panicked: {e}"),
+                        },
+                    );
+                    hard_errors += 1;
+                    done += 1;
+                    continue;
+                }
+            };
 
             if !extracted.chunks.is_empty() {
                 // Build a document-level context string for contextual retrieval.

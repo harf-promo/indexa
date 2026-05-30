@@ -340,4 +340,18 @@ impl Greeter {
         assert!(!parser.accepts_path(Path::new("file.txt")));
         assert!(!parser.accepts_path(Path::new("file.md")));
     }
+
+    #[test]
+    fn code_parser_handles_broken_source_gracefully() {
+        // Syntactically broken source makes tree-sitter emit ERROR nodes; it must
+        // not panic, and should still return without aborting (chunks or empty).
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("broken.rs");
+        std::fs::write(&p, "fn ( { unclosed <<<>>> ??? impl for 123").unwrap();
+        let extracted = CodeParser
+            .parse(&p)
+            .expect("must not panic on broken source");
+        // Behaviour is best-effort; we only require it returned cleanly.
+        let _ = extracted.chunks;
+    }
 }

@@ -214,12 +214,32 @@ impl Default for DescriberConfig {
 
 // ── Parser overrides ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+fn default_max_file_mb() -> u64 {
+    100
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ParsersConfig {
     pub pdf: PdfParserConfig,
     pub image: ImageParserConfig,
     pub audio: AudioParserConfig,
+    /// Maximum file size (MB) to attempt content parsing. Larger files are skipped to
+    /// avoid reading huge files (logs, misclassified binaries) fully into memory.
+    /// `0` disables the cap.
+    #[serde(default = "default_max_file_mb")]
+    pub max_file_mb: u64,
+}
+
+impl Default for ParsersConfig {
+    fn default() -> Self {
+        Self {
+            pdf: PdfParserConfig::default(),
+            image: ImageParserConfig::default(),
+            audio: AudioParserConfig::default(),
+            max_file_mb: default_max_file_mb(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
