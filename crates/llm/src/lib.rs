@@ -14,6 +14,19 @@ pub use anthropic::AnthropicLlm;
 pub use ollama::OllamaLlm;
 pub use openai_compat::OpenAICompatLlm;
 
+/// Build a reqwest client with a finite request + connect timeout, shared by every LLM
+/// adapter. Without a timeout a stalled cloud endpoint hangs `generate()` indefinitely, and
+/// these run inside the indexing worker and web/MCP request paths. `expect` is appropriate:
+/// `build()` only fails on unrecoverable rustls TLS init, and never silently yields a
+/// no-timeout client (unlike the old `.unwrap_or_default()`).
+pub(crate) fn http_client(timeout_secs: u64) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("building reqwest client (rustls TLS init)")
+}
+
 /// Generates text from a prompt.
 /// Implemented by all concrete LLM adapters.
 #[async_trait::async_trait]

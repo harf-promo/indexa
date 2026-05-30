@@ -14,6 +14,20 @@ pub use google::GoogleEmbedder;
 pub use ollama::OllamaEmbedder;
 pub use openai::OpenAIEmbedder;
 
+/// Build a reqwest client with a finite request + connect timeout, shared by every
+/// embedding adapter. Without this a stalled cloud endpoint (no FIN, no bytes) would hang
+/// `embed()` forever — and these run inside the indexing worker and web/MCP request paths.
+/// `expect` is appropriate: `build()` only fails if the rustls TLS backend can't initialize,
+/// which is unrecoverable at startup (and never silently yields a no-timeout client, unlike
+/// the old `.unwrap_or_default()`).
+pub(crate) fn http_client(timeout_secs: u64) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("building reqwest client (rustls TLS init)")
+}
+
 /// Produces a vector embedding for a piece of text.
 /// `dim()` reports the vector length so callers can allocate the right buffer.
 #[async_trait::async_trait]
@@ -63,7 +77,7 @@ pub fn from_config_with_keep_alive(
             Ok(Box::new(embedder))
         }
         "openai" => Ok(Box::new(OpenAIEmbedder::from_env_or_config(
-            model, dim, openai_key,
+            model, dim, openai_key, base,
         )?)),
         "llamacpp" => Ok(Box::new(OpenAIEmbedder::local_llamacpp(
             OpenAIEmbedder::resolve_base_url(base),
@@ -71,7 +85,7 @@ pub fn from_config_with_keep_alive(
             dim,
         ))),
         "google" => Ok(Box::new(GoogleEmbedder::from_env_or_config(
-            model, dim, google_key,
+            model, dim, google_key, base,
         )?)),
         other => anyhow::bail!("unknown embedding provider: {other}"),
     }

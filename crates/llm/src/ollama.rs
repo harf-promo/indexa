@@ -16,10 +16,7 @@ const DEFAULT_BASE: &str = "http://localhost:11434";
 const LLM_TIMEOUT_SECS: u64 = 180;
 
 fn ollama_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(LLM_TIMEOUT_SECS))
-        .build()
-        .unwrap_or_default()
+    crate::http_client(LLM_TIMEOUT_SECS)
 }
 
 pub struct OllamaLlm {
@@ -133,6 +130,9 @@ impl OllamaLlm {
                     continue;
                 }
                 if let Ok(sc) = serde_json::from_str::<StreamChunk>(line) {
+                    if let Some(err) = sc.error {
+                        anyhow::bail!("Ollama stream error: {err}");
+                    }
                     if !sc.response.is_empty() {
                         full.push_str(&sc.response);
                         on_fragment(sc.response);
@@ -143,7 +143,9 @@ impl OllamaLlm {
                 }
             }
         }
-        Ok(full)
+        // The stream closed without a final `done: true` — treat the partial buffer as a
+        // truncated/incomplete response rather than reporting it as a successful answer.
+        anyhow::bail!("Ollama stream ended without completion (done=true never received)")
     }
 
     /// Explicitly unload a model from Ollama by sending keep_alive=0.
@@ -194,15 +196,24 @@ struct Req<'a> {
 
 #[derive(Deserialize)]
 struct Resp {
+    #[serde(default)]
     response: String,
+    /// Ollama can return HTTP 200 with an `error` field (e.g. "model requires more system
+    /// memory…"); surfacing it prevents reporting an empty answer as success.
+    #[serde(default)]
+    error: Option<String>,
 }
 
 /// One NDJSON line from Ollama's streaming `/api/generate` response.
 #[derive(Deserialize)]
 struct StreamChunk {
+    #[serde(default)]
     response: String,
     #[serde(default)]
     done: bool,
+    /// Mid-stream error line (HTTP 200, then an `{"error": …}` object).
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -236,6 +247,9 @@ impl Generator for OllamaLlm {
             .json()
             .await
             .context("parsing Ollama generate response")?;
+        if let Some(err) = parsed.error {
+            anyhow::bail!("Ollama returned an error: {err}");
+        }
         Ok(parsed.response)
     }
 
@@ -286,6 +300,9 @@ impl Generator for OllamaLlm {
                     continue;
                 }
                 if let Ok(sc) = serde_json::from_str::<StreamChunk>(line) {
+                    if let Some(err) = sc.error {
+                        anyhow::bail!("Ollama stream error: {err}");
+                    }
                     if !sc.response.is_empty() {
                         full.push_str(&sc.response);
                         on_fragment(sc.response); // pass owned fragment
@@ -297,7 +314,7 @@ impl Generator for OllamaLlm {
             }
         }
 
-        Ok(full)
+        anyhow::bail!("Ollama stream ended without completion (done=true never received)")
     }
 }
 
@@ -467,6 +484,41 @@ impl Describer for OllamaLlm {
             .json()
             .await
             .context("parsing Ollama generate response")?;
+        if let Some(err) = parsed.error {
+            anyhow::bail!("Ollama returned an error: {err}");
+        }
         Ok(parsed.response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resp_captures_error_field() {
+        // Ollama can return HTTP 200 with an error body (e.g. OOM). The wire struct must
+        // surface it so generate() can bail instead of returning an empty success.
+        let r: Resp =
+            serde_json::from_str(r#"{"error":"model requires more system memory"}"#).unwrap();
+        assert_eq!(
+            r.error.as_deref(),
+            Some("model requires more system memory")
+        );
+        assert!(r.response.is_empty());
+
+        let ok: Resp = serde_json::from_str(r#"{"response":"hello"}"#).unwrap();
+        assert!(ok.error.is_none());
+        assert_eq!(ok.response, "hello");
+    }
+
+    #[test]
+    fn stream_chunk_captures_error_and_done() {
+        let err: StreamChunk = serde_json::from_str(r#"{"error":"boom"}"#).unwrap();
+        assert_eq!(err.error.as_deref(), Some("boom"));
+
+        let done: StreamChunk = serde_json::from_str(r#"{"response":"x","done":true}"#).unwrap();
+        assert!(done.error.is_none());
+        assert!(done.done);
     }
 }
