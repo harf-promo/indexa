@@ -149,6 +149,29 @@
           </div>
           <p class="settings-note">More passes = higher context quality at the cost of LLM calls. Cap is 3 (Self-Refine research: quality degrades above 3 passes).</p>
         </div>
+        <div class="settings-section">
+          <h2>Resource Profile / Workload</h2>
+          <div class="key-rows">
+            <div class="key-row">
+              <span class="key-label">Profile</span>
+              <select class="key-input" id="resource-profile" aria-label="Resource profile">
+                <option value="conservative">Conservative &#x2014; gentlest, keeps the most RAM free</option>
+                <option value="balanced">Balanced &#x2014; default</option>
+                <option value="performance">Performance &#x2014; fastest, heaviest</option>
+              </select>
+            </div>
+            <div class="key-row">
+              <span class="key-label">Headroom (GB)</span>
+              <input type="number" class="key-input" id="resource-headroom" min="0" step="0.5" value="0" style="width:80px" aria-label="RAM headroom in GB, 0 = profile default">
+              <span class="key-set-badge" style="color:var(--muted);font-size:11px">0 = profile default</span>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+            <button class="btn-sm" onclick="saveResource()">Save profile</button>
+            <span id="resource-status" style="font-size:12px;color:var(--muted)"></span>
+          </div>
+          <p class="settings-note">Governs how much RAM Indexa keeps free and how hard it pushes the machine. Applies to the next job.</p>
+        </div>
       </div>
     </div>
 
