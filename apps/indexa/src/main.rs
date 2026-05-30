@@ -119,5 +119,6 @@ async fn main() -> Result<()> {
             chunks,
         } => commands::cmd_doctor(profile, files, chunks).await,
         Commands::Fingerprint { paths } => commands::cmd_fingerprint(paths).await,
+        Commands::Classify { paths, category } => commands::cmd_classify(paths, category).await,
     }
 }

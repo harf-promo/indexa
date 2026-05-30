@@ -81,3 +81,20 @@ pub struct QueueItem {
     pub kind: String,
     pub depth: i64,
 }
+
+/// A semantic classification of one path (the Smart-classification axis).
+///
+/// `source`:
+/// - `auto` — an Indexa suggestion the user has not acted on yet.
+/// - `user` — confirmed or corrected by the user; never overwritten by auto passes.
+/// - `ignored` — a sticky tombstone for a dismissed suggestion; not re-proposed.
+#[derive(Debug, Clone)]
+pub struct ClassificationRecord {
+    pub path: String,
+    pub kind: String,
+    pub category: String,
+    pub confidence: f32,
+    pub source: String,
+    pub confirmed_at: Option<i64>,
+    pub created_at: i64,
+}

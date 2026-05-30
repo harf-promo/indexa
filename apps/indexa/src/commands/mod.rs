@@ -1,4 +1,5 @@
 mod ask;
+mod classify;
 mod deep;
 mod describe;
 mod doctor;
@@ -16,6 +17,7 @@ mod watch;
 mod worker;
 
 pub(crate) use ask::cmd_ask;
+pub(crate) use classify::cmd_classify;
 pub(crate) use deep::cmd_deep;
 pub(crate) use describe::cmd_describe;
 pub(crate) use doctor::cmd_doctor;
