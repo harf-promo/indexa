@@ -12,6 +12,7 @@ mod models;
 mod queue;
 mod stats;
 mod summary;
+mod telemetry;
 mod tree;
 mod ui;
 
@@ -30,5 +31,6 @@ pub(crate) use models::{api_models_installed, api_models_pull};
 pub(crate) use queue::{api_queue_failed, api_queue_retry, api_queue_stats};
 pub(crate) use stats::{api_map, api_roots, api_search, api_stats};
 pub(crate) use summary::{api_summarize_enqueue, api_summary};
+pub(crate) use telemetry::{api_telemetry, api_telemetry_stream};
 pub(crate) use tree::api_tree;
 pub(crate) use ui::{serve_ui, serve_ui_css, serve_ui_js};

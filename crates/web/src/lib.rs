@@ -22,12 +22,12 @@ use axum::{
 };
 use indexa_core::{
     config::Config,
-    resource::{detect_machine, MachineSpec},
+    resource::{detect_machine, MachineSpec, TelemetrySampler},
     store::Store,
 };
 use indexa_embed::Embedder;
 use indexa_llm::Generator;
-use jobs::Jobs;
+use jobs::{JobStatus, Jobs};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
@@ -49,6 +49,9 @@ pub struct AppState {
     pub(crate) walk_semaphore: Arc<tokio::sync::Semaphore>,
     /// Detected machine spec (RAM, cores, Apple Silicon flag) — used by the watchdog.
     pub(crate) machine_spec: Arc<MachineSpec>,
+    /// Latest machine telemetry (CPU/RAM/swap/pressure), refreshed ~1.5 s by a
+    /// background sampler. Read by the `/api/telemetry` endpoints.
+    pub(crate) telemetry: tokio::sync::watch::Receiver<dto::TelemetrySample>,
 }
 
 // ── Embedded UI (split into asset files, included at compile time) ──────────
@@ -67,6 +70,7 @@ pub(crate) const UI_CSS: &str = concat!(
     include_str!("../assets/ui/css/05-views.css"),
     include_str!("../assets/ui/css/06-overlays.css"),
     include_str!("../assets/ui/css/07-jobs.css"),
+    include_str!("../assets/ui/css/08-engine.css"),
 );
 pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/01-state-theme-tabs.js"),
@@ -77,6 +81,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/06-chat-settings.js"),
     include_str!("../assets/ui/js/07-map.js"),
     include_str!("../assets/ui/js/08-util-palette-init.js"),
+    include_str!("../assets/ui/js/09-engine.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -106,16 +111,59 @@ pub async fn serve(
         Err(e) => tracing::warn!("startup: failed to sweep stale in-flight queue items: {e}"),
     }
 
+    let config = Arc::new(config);
+    let machine_spec = Arc::new(detect_machine());
+    let jobs: Jobs = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+
+    // Always-on machine telemetry: sample CPU + memory every ~1.5 s (even when
+    // idle) and publish to a watch channel the /api/telemetry endpoints read.
+    // Runs on its OWN low-frequency task — never in the per-file job hot loop —
+    // so the gauges are never blank and the extra refresh_cpu() cost stays cheap.
+    let (telemetry_tx, telemetry_rx) = tokio::sync::watch::channel(dto::TelemetrySample::default());
+    {
+        let spec = machine_spec.clone();
+        let cfg = config.clone();
+        let jobs = jobs.clone();
+        tokio::spawn(async move {
+            let mut sampler = TelemetrySampler::new();
+            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(1500));
+            loop {
+                ticker.tick().await;
+                let (cpu, mem) = sampler.sample();
+                let headroom = cfg.resource.effective_headroom_bytes();
+                let active_job = {
+                    let map = jobs.read().await;
+                    map.values()
+                        .find(|h| *h.status.lock().unwrap() == JobStatus::Running)
+                        .map(|h| dto::ActiveJobDto {
+                            job_id: h.id,
+                            kind: h.kind.clone(),
+                            path: h.path.clone(),
+                        })
+                };
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let sample =
+                    dto::TelemetrySample::build(&spec, &mem, cpu, headroom, active_job, ts);
+                // Ignored: `send` only fails once every receiver has dropped (shutdown).
+                let _ = telemetry_tx.send(sample);
+            }
+        });
+    }
+
     let state = AppState {
         store: Arc::new(Mutex::new(store)),
         embedder,
         llm,
-        config: Arc::new(config),
-        jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        config,
+        jobs,
         db_path,
         log_dir,
         walk_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
-        machine_spec: Arc::new(detect_machine()),
+        machine_spec,
+        telemetry: telemetry_rx,
     };
 
     // Restrict CORS to localhost only — prevents drive-by sites from reading the
@@ -146,6 +194,8 @@ pub async fn serve(
             "/api/config/resource",
             get(api_config_resource_get).post(api_config_resource_set),
         )
+        .route("/api/telemetry", get(api_telemetry))
+        .route("/api/telemetry/stream", get(api_telemetry_stream))
         .route("/api/models/installed", get(api_models_installed))
         .route("/api/models/pull", post(api_models_pull))
         .route("/api/keys", get(api_keys_get).post(api_keys_set))

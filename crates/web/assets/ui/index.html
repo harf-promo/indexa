@@ -264,6 +264,33 @@
   </main>
 </div>
 
+<!-- Engine status bar — always-on machine telemetry (CPU / RAM / memory pressure) -->
+<footer class="engine-bar" id="engine-bar" aria-label="Engine status">
+  <span class="engine-state">
+    <span class="engine-gear" aria-hidden="true">&#x2699;</span>
+    <span class="engine-state-word" id="engine-state-word">Engine</span>
+  </span>
+  <span class="engine-metric" title="CPU usage">
+    <span class="engine-label">CPU</span>
+    <span class="engine-spark" id="engine-cpu-spark" aria-hidden="true"></span>
+    <span class="engine-val" id="engine-cpu-val">&#x2014;</span>
+  </span>
+  <span class="engine-metric" title="RAM used / total &#x2014; the hatched band is the keep-free headroom">
+    <span class="engine-label">RAM</span>
+    <span class="ram-meter" id="engine-ram-meter" aria-hidden="true">
+      <span class="ram-meter-band" id="engine-ram-band"></span>
+      <span class="ram-meter-used" id="engine-ram-used"></span>
+    </span>
+    <span class="engine-val" id="engine-ram-val">&#x2014;</span>
+  </span>
+  <span class="engine-metric" title="Memory pressure">
+    <span class="pressure-pip" id="engine-pressure-pip" aria-hidden="true"></span>
+    <span class="engine-val" id="engine-pressure-val">&#x2014;</span>
+  </span>
+  <span class="engine-spacer"></span>
+  <span class="engine-machine" id="engine-machine"></span>
+</footer>
+
 <!-- Jobs mini pill — ambient indicator when tab not active -->
 <button class="jobs-pill" id="jobs-pill" hidden onclick="switchTab('jobs')" aria-label="View active jobs">
   <span class="jobs-pill-dot" id="jobs-pill-dot"></span>

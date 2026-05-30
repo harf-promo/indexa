@@ -143,6 +143,68 @@ impl Default for WatchdogState {
     }
 }
 
+// ── Live CPU sample + combined telemetry sampler ──────────────────────────────
+
+/// A snapshot of CPU utilisation, 0–100 % across all logical cores.
+///
+/// CPU usage is a *delta* measurement: `sysinfo` computes it from the difference
+/// between two refreshes, so the very first refresh after construction yields no
+/// meaningful value (see [`TelemetrySampler`], which discards it).
+#[derive(Debug, Clone, Default)]
+pub struct CpuSample {
+    /// System-wide CPU usage, 0–100 %.
+    pub global_percent: f32,
+    /// Per-logical-core usage, 0–100 %.
+    pub per_core: Vec<f32>,
+}
+
+/// A long-lived sampler for the always-on machine telemetry feed (CPU + memory).
+///
+/// Unlike [`WatchdogState`] — which deliberately samples *memory only* to stay
+/// cheap inside the per-file job hot loop — this sampler also calls the more
+/// expensive `refresh_cpu()`. It is meant to run on its **own** low-frequency
+/// task (~1–2 s cadence), never in a hot loop, so the cost is negligible.
+///
+/// Because CPU usage needs two refreshes spaced apart, the first call to
+/// [`sample`](Self::sample) returns `cpu = None` (priming); every subsequent call
+/// returns a real reading.
+pub struct TelemetrySampler {
+    sys: System,
+    primed: bool,
+}
+
+impl TelemetrySampler {
+    pub fn new() -> Self {
+        Self {
+            sys: System::new(),
+            primed: false,
+        }
+    }
+
+    /// Refresh CPU + memory and return `(cpu, mem)`. `cpu` is `None` on the first
+    /// call (priming the delta) and `Some` thereafter.
+    pub fn sample(&mut self) -> (Option<CpuSample>, MemSample) {
+        self.sys.refresh_cpu();
+        let cpu = if self.primed {
+            Some(CpuSample {
+                global_percent: self.sys.global_cpu_info().cpu_usage(),
+                per_core: self.sys.cpus().iter().map(|c| c.cpu_usage()).collect(),
+            })
+        } else {
+            self.primed = true;
+            None
+        };
+        let mem = sample_memory(&mut self.sys);
+        (cpu, mem)
+    }
+}
+
+impl Default for TelemetrySampler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── Model footprint table ─────────────────────────────────────────────────────
 
 /// Memory footprint estimate for a single Ollama model.

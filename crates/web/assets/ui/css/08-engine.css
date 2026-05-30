@@ -1,0 +1,115 @@
+/* ── Engine status bar ──────────────────────────────────────────────────────
+   Always-on bottom strip: live CPU / RAM / memory-pressure from /api/telemetry.
+   Calm by default; the RAM meter draws the keep-free headroom band so pressure
+   is self-explanatory (the used fill visibly enters the hatched band). */
+.engine-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 34px;
+  flex-shrink: 0;
+  padding: 0 14px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--muted);
+  user-select: none;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.engine-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--text);
+  flex-shrink: 0;
+}
+.engine-gear { font-size: 12px; color: var(--muted); }
+.engine-state-word { letter-spacing: 0.3px; }
+.engine-bar.state-throttle .engine-state-word,
+.engine-bar.state-critical .engine-state-word { color: var(--orange); }
+
+.engine-metric { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.engine-label {
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.4px;
+  font-size: 10.5px;
+}
+.engine-val {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.engine-spacer { flex: 1 1 auto; min-width: 8px; }
+.engine-machine { color: var(--muted); font-size: 11px; flex-shrink: 0; }
+
+/* CPU sparkline — a row of thin bars, height = recent CPU %. */
+.engine-spark {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 14px;
+  width: 50px;
+}
+.engine-spark i {
+  flex: 1;
+  min-width: 1px;
+  height: 2px;
+  background: var(--accent);
+  opacity: 0.85;
+  border-radius: 0.5px;
+}
+
+/* RAM meter: dark used-fill over a hatched keep-free headroom band at the right. */
+.ram-meter {
+  position: relative;
+  width: 132px;
+  height: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.ram-meter-band {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  background: repeating-linear-gradient(
+    -45deg,
+    rgba(210, 153, 34, 0.32) 0, rgba(210, 153, 34, 0.32) 3px,
+    transparent 3px, transparent 6px
+  );
+}
+.ram-meter-used {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  background: var(--accent);
+  transition: width 600ms ease, background-color 200ms ease;
+}
+/* Used fill has eaten into the keep-free band → recolour so it reads as pressure. */
+.ram-meter.in-band .ram-meter-used { background: var(--orange); }
+
+/* Memory-pressure pip. */
+.pressure-pip {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+.pressure-pip.p-ok { background: var(--green); }
+.pressure-pip.p-throttle { background: var(--orange); }
+.pressure-pip.p-critical { background: var(--red); }
+
+/* Keep the floating jobs pill clear of the new bottom bar. */
+.jobs-pill { bottom: 44px; }
