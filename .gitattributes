@@ -1,0 +1,6 @@
+# UI asset source fragments are UTF-8 text (they contain box-drawing banner
+# comments and a few emoji/glyphs that trip git's binary-detection heuristic).
+# Force text + LF so diffs, blame, and merges work normally. These files are
+# reassembled byte-for-byte into the served app.css/app.js via concat!(include_str!).
+crates/web/assets/ui/js/*.js text eol=lf
+crates/web/assets/ui/css/*.css text eol=lf

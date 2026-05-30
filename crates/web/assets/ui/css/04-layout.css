@@ -1,0 +1,107 @@
+/* ── Layout ── */
+.app-body {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) 1fr;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ── Sidebar ── */
+.app-sidebar {
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.sidebar-header {
+  padding: 10px 14px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 4px;
+}
+.sidebar-title { flex: 1; }
+
+/* ── Tree search ── */
+.tree-search {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  display: flex;
+  gap: 4px;
+}
+.tree-search input {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  padding: 5px 9px;
+  outline: none;
+  transition: border-color 120ms;
+}
+.tree-search input:focus { border-color: var(--accent); }
+.tree-search input::placeholder { color: var(--muted); }
+.tree-search button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 2px 5px; border-radius: var(--radius-sm); }
+.tree-search button:hover { color: var(--text); background: var(--surface-2); }
+
+/* ── Tree nodes ── */
+.tree-list { flex: 1; overflow-y: auto; }
+.tree-node { padding: 2px 0; cursor: pointer; user-select: none; }
+.tree-node-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 12px;
+  border-radius: var(--radius-sm);
+  margin: 0 4px;
+  transition: background 100ms;
+}
+.tree-node-row:hover { background: rgba(88,166,255,0.07); }
+[data-theme="light"] .tree-node-row:hover { background: rgba(9,105,218,0.06); }
+.tree-node-row.selected { background: rgba(88,166,255,0.13); }
+[data-theme="light"] .tree-node-row.selected { background: rgba(9,105,218,0.1); }
+.tree-toggle { width: 14px; text-align: center; color: var(--muted); font-size: 10px; flex-shrink: 0; }
+.tree-icon { flex-shrink: 0; font-size: 13px; }
+.tree-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.tree-badge { font-size: 10px; flex-shrink: 0; }
+.tree-badge.done { color: var(--green); }
+.tree-badge.pending { color: var(--orange); animation: pulse 2s ease-in-out infinite; }
+.tree-badge.failed { color: var(--red); }
+.tree-children { padding-left: 14px; }
+.tree-row-actions { display: none; gap: 1px; margin-left: auto; flex-shrink: 0; }
+.tree-node-row:hover .tree-row-actions { display: flex; }
+.tree-row-actions button {
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 11px; padding: 1px 4px; border-radius: var(--radius-sm); line-height: 1.5;
+  transition: background 100ms, color 100ms;
+}
+.tree-row-actions button:hover { background: rgba(88,166,255,0.15); color: var(--accent); }
+.tree-row-actions button[data-act="remove"]:hover { background: rgba(248,81,73,0.12); color: var(--red); }
+[data-theme="light"] .tree-row-actions button:hover { background: rgba(9,105,218,0.1); }
+
+/* Empty state */
+.empty-state { padding: 28px 18px; text-align: center; color: var(--muted); font-size: 13px; line-height: 1.8; }
+.empty-state .cta-link { color: var(--accent); cursor: pointer; font-weight: 500; }
+.empty-state .cta-link:hover { text-decoration: underline; }
+
+/* ── Main content ── */
+.app-main { display: flex; flex-direction: column; overflow: hidden; }
+
+/* ── Tab panels (CSS fade animation) ── */
+.tab-panel { display: none; flex: 1; overflow: hidden; flex-direction: column; }
+.tab-panel.active {
+  display: flex;
+  animation: fadeIn 160ms ease-out;
+}
+

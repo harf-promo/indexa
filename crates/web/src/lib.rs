@@ -54,8 +54,30 @@ pub struct AppState {
 // ── Embedded UI (split into asset files, included at compile time) ──────────
 
 pub(crate) const UI_HTML: &str = include_str!("../assets/ui/index.html");
-pub(crate) const UI_CSS: &str = include_str!("../assets/ui/app.css");
-pub(crate) const UI_JS: &str = include_str!("../assets/ui/app.js");
+
+// app.css and app.js are split into ordered source fragments for maintainability
+// and reassembled here at compile time. The concat! order below is the canonical
+// on-disk order (zero-padded prefixes); the served bytes are byte-identical to the
+// pre-split single files. Do not reorder without re-verifying byte-for-byte.
+pub(crate) const UI_CSS: &str = concat!(
+    include_str!("../assets/ui/css/01-tokens.css"),
+    include_str!("../assets/ui/css/02-base.css"),
+    include_str!("../assets/ui/css/03-topbar.css"),
+    include_str!("../assets/ui/css/04-layout.css"),
+    include_str!("../assets/ui/css/05-views.css"),
+    include_str!("../assets/ui/css/06-overlays.css"),
+    include_str!("../assets/ui/css/07-jobs.css"),
+);
+pub(crate) const UI_JS: &str = concat!(
+    include_str!("../assets/ui/js/01-state-theme-tabs.js"),
+    include_str!("../assets/ui/js/02-stats-tree.js"),
+    include_str!("../assets/ui/js/03-jobs-search.js"),
+    include_str!("../assets/ui/js/04-jobs-views.js"),
+    include_str!("../assets/ui/js/05-summary.js"),
+    include_str!("../assets/ui/js/06-chat-settings.js"),
+    include_str!("../assets/ui/js/07-map.js"),
+    include_str!("../assets/ui/js/08-util-palette-init.js"),
+);
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
