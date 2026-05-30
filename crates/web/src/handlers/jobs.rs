@@ -13,13 +13,24 @@ use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
-use crate::dto::{err_json, JobListEntry, JobPathQuery, JobStartResponse};
+use crate::dto::{err_json, EstimateResponse, JobListEntry, JobPathQuery, JobStartResponse};
 use crate::jobs::{JobEvent, JobHandle, JobStatus, Jobs};
 use crate::jobs_exec::{
     run_deep_phase_standalone, run_index_job, run_scan_phase_standalone, run_summarize_phase,
     schedule_cleanup,
 };
 use crate::AppState;
+use indexa_core::resource::{estimate_eta, fit_report, sample_memory_once};
+
+/// Build a `(file_model, dir_model, num_ctx)` override from job-start query params,
+/// when the user picked a model in the "ask me first" popover. Defaults the file
+/// model and `num_ctx` so a bare `dir_model=…` is enough.
+fn model_override_from(q: &JobPathQuery, default_num_ctx: u32) -> Option<(String, String, u32)> {
+    q.dir_model.as_ref().map(|dir| {
+        let file = q.file_model.clone().unwrap_or_else(|| dir.clone());
+        (file, dir.clone(), q.num_ctx.unwrap_or(default_num_ctx))
+    })
+}
 
 /// Register a new job in the shared registry and return its handle + id.
 pub(crate) async fn register_job(jobs: &Jobs, kind: &str, path: String) -> (Uuid, Arc<JobHandle>) {
@@ -60,9 +71,10 @@ pub(crate) async fn api_job_summarize(
     State(s): State<AppState>,
 ) -> impl IntoResponse {
     let (id, handle) = register_job(&s.jobs, "summarize", q.path.clone()).await;
+    let model_override = model_override_from(&q, s.config.describer.num_ctx);
     let state = s.clone();
     tokio::spawn(async move {
-        run_summarize_phase(&state, &q.path, q.passes, &handle).await;
+        run_summarize_phase(&state, &q.path, q.passes, &handle, model_override).await;
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
     Json(JobStartResponse { job_id: id })
@@ -73,13 +85,72 @@ pub(crate) async fn api_job_index(
     State(s): State<AppState>,
 ) -> impl IntoResponse {
     let (id, handle) = register_job(&s.jobs, "index", q.path.clone()).await;
+    let model_override = model_override_from(&q, s.config.describer.num_ctx);
     let state = s.clone();
     tokio::spawn(async move {
         let id = handle.id;
-        run_index_job(state.clone(), q.path, handle).await;
+        run_index_job(state.clone(), q.path, handle, model_override).await;
         schedule_cleanup(state.jobs.clone(), id);
     });
     Json(JobStartResponse { job_id: id })
+}
+
+/// `GET /api/jobs/estimate?path=…` — the pre-flight memory-fit estimate behind the
+/// "ask me first" popover. Pure of any filesystem walk: counts come from the store.
+pub(crate) async fn api_job_estimate(
+    Query(q): Query<JobPathQuery>,
+    State(s): State<AppState>,
+) -> impl IntoResponse {
+    let cfg = &s.config.describer;
+    let headroom = s.config.resource.effective_headroom_bytes();
+    let sample = sample_memory_once();
+    let report = fit_report(
+        &cfg.file_model,
+        &cfg.dir_model,
+        cfg.num_ctx,
+        &s.machine_spec,
+        &sample,
+        headroom,
+    );
+
+    // Approximate counts (global, not scoped to `q.path`) for a rough ETA.
+    let (entry_count, chunk_count, queue_pending) = {
+        let store = s.store.lock().await;
+        (
+            store.entry_count().unwrap_or(0),
+            store.chunk_count().unwrap_or(0),
+            store.queue_stats().map(|qs| qs.pending).unwrap_or(0),
+        )
+    };
+    let passes = q.passes.unwrap_or(2);
+    let eta = estimate_eta(
+        &cfg.dir_model,
+        entry_count as usize,
+        chunk_count as usize,
+        500, // rough average file token count
+        passes,
+        s.machine_spec.is_apple_silicon,
+    );
+
+    let rec = report.recommended.as_ref();
+    Json(EstimateResponse {
+        budget_bytes: report.budget_bytes,
+        configured_file_model: report.configured.file_model.clone(),
+        configured_dir_model: report.configured.dir_model.clone(),
+        configured_peak_bytes: report.configured.peak_bytes,
+        configured_fits: report.configured.fits,
+        recommended_file_model: rec.map(|r| r.file_model.clone()),
+        recommended_dir_model: rec.map(|r| r.dir_model.clone()),
+        recommended_peak_bytes: rec.map(|r| r.peak_bytes),
+        recommended_fits: rec.map(|r| r.fits),
+        num_ctx: cfg.num_ctx,
+        reason: report.reason.clone(),
+        eta_display: eta.display,
+        eta_secs: eta.total_secs as u64,
+        entry_count,
+        chunk_count,
+        queue_pending,
+    })
 }
 
 pub(crate) async fn api_jobs_list(State(s): State<AppState>) -> impl IntoResponse {

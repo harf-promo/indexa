@@ -206,7 +206,12 @@ async fn walk_for_job(
     }
 }
 
-pub(crate) async fn run_index_job(state: AppState, path: String, handle: Arc<JobHandle>) {
+pub(crate) async fn run_index_job(
+    state: AppState,
+    path: String,
+    handle: Arc<JobHandle>,
+    model_override: Option<(String, String, u32)>,
+) {
     // Phase 1: scan
     let Some(entries) = walk_for_job(&path, &handle, &state.walk_semaphore).await else {
         return;
@@ -232,7 +237,7 @@ pub(crate) async fn run_index_job(state: AppState, path: String, handle: Arc<Job
     }
 
     // Phase 3: summarize
-    run_summarize_phase(&state, &path, None, &handle).await;
+    run_summarize_phase(&state, &path, None, &handle, model_override).await;
 }
 
 /// Standalone scan: walks, scans, then finalises the job as done.
@@ -606,6 +611,9 @@ pub(crate) async fn run_summarize_phase(
     path: &str,
     passes_override: Option<u32>,
     handle: &Arc<JobHandle>,
+    // Optional (file_model, dir_model, num_ctx) from the "ask me first" popover;
+    // when None, the configured describer models are used.
+    model_override: Option<(String, String, u32)>,
 ) {
     push(
         handle,
@@ -624,8 +632,12 @@ pub(crate) async fn run_summarize_phase(
     let embedder = state.embedder.clone();
     let root = std::path::PathBuf::from(path);
     let base_url = OllamaLlm::resolve_base_url(Some(&cfg.base_url));
-    let describer = OllamaLlm::new_with_dir_model(&base_url, &cfg.file_model, &cfg.dir_model)
-        .with_num_ctx(cfg.num_ctx);
+    let (file_model, dir_model, num_ctx) = match &model_override {
+        Some((f, d, n)) => (f.as_str(), d.as_str(), *n),
+        None => (cfg.file_model.as_str(), cfg.dir_model.as_str(), cfg.num_ctx),
+    };
+    let describer =
+        OllamaLlm::new_with_dir_model(&base_url, file_model, dir_model).with_num_ctx(num_ctx);
 
     // Memory watchdog: checked before each LLM summarization call.
     let mut wdog = WatchdogState::new();

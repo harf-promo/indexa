@@ -71,6 +71,7 @@ pub(crate) const UI_CSS: &str = concat!(
     include_str!("../assets/ui/css/06-overlays.css"),
     include_str!("../assets/ui/css/07-jobs.css"),
     include_str!("../assets/ui/css/08-engine.css"),
+    include_str!("../assets/ui/css/09-model-fit-popover.css"),
 );
 pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/01-state-theme-tabs.js"),
@@ -82,6 +83,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/07-map.js"),
     include_str!("../assets/ui/js/08-util-palette-init.js"),
     include_str!("../assets/ui/js/09-engine.js"),
+    include_str!("../assets/ui/js/10-model-fit-popover.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -204,6 +206,7 @@ pub async fn serve(
         .route("/api/jobs/deep", post(api_job_deep))
         .route("/api/jobs/summarize", post(api_job_summarize))
         .route("/api/jobs/index", post(api_job_index))
+        .route("/api/jobs/estimate", get(api_job_estimate))
         .route("/api/jobs/:id/events", get(api_jobs_events))
         .route("/api/jobs/:id", get(api_job_get).delete(api_job_delete))
         .route("/api/entry", delete(api_delete_entry))

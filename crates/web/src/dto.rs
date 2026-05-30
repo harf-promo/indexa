@@ -183,11 +183,40 @@ pub(crate) struct AskSource {
 pub(crate) struct JobPathQuery {
     pub(crate) path: String,
     pub(crate) passes: Option<u32>,
+    /// Optional summarization model override (the "ask me first" choice). When
+    /// `dir_model` is set, the job loads these instead of the configured models.
+    pub(crate) file_model: Option<String>,
+    pub(crate) dir_model: Option<String>,
+    pub(crate) num_ctx: Option<u32>,
 }
 
 #[derive(Serialize)]
 pub(crate) struct JobStartResponse {
     pub(crate) job_id: Uuid,
+}
+
+/// Pre-flight memory-fit estimate for a summarize/build job — the data behind the
+/// "ask me first" popover. Mapped by hand from `resource::fit_report` (whose core
+/// types stay non-Serialize). Counts are global, so the ETA is approximate.
+#[derive(Serialize)]
+pub(crate) struct EstimateResponse {
+    pub(crate) budget_bytes: i64,
+    pub(crate) configured_file_model: String,
+    pub(crate) configured_dir_model: String,
+    pub(crate) configured_peak_bytes: u64,
+    pub(crate) configured_fits: bool,
+    pub(crate) recommended_file_model: Option<String>,
+    pub(crate) recommended_dir_model: Option<String>,
+    pub(crate) recommended_peak_bytes: Option<u64>,
+    pub(crate) recommended_fits: Option<bool>,
+    pub(crate) num_ctx: u32,
+    pub(crate) reason: Option<String>,
+    pub(crate) eta_display: String,
+    pub(crate) eta_secs: u64,
+    /// Approximate — these counts are global, not scoped to `path`.
+    pub(crate) entry_count: u64,
+    pub(crate) chunk_count: u64,
+    pub(crate) queue_pending: i64,
 }
 
 #[derive(Serialize)]
