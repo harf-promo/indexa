@@ -656,6 +656,8 @@ async fn api_map(State(state): State<AppState>) -> Json<Vec<MapRow>> {
 async fn api_ask(State(state): State<AppState>, Json(body): Json<AskRequest>) -> Response {
     let qa_cfg = QaConfig {
         top_k: state.config.retrieval.top_k,
+        mode: state.config.retrieval.hybrid.clone(),
+        context_budget: state.config.retrieval.context_budget,
         rrf_k: state.config.retrieval.rrf_k as f32,
         summary_weight: state.config.retrieval.summary_weight,
         summary_depth_alpha: state.config.retrieval.summary_depth_alpha,

@@ -241,4 +241,135 @@ mod tests {
         assert!(prompt.contains("what is 2+2?"));
         assert!(prompt.contains("some context"));
     }
+
+    // ── answer() unified-pipeline tests (CLI/web/MCP all call this) ────────────
+    use indexa_core::store::ChunkRecord;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// Embedder that counts calls — lets us assert Sparse mode never embeds.
+    struct CountingEmbedder {
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl Embedder for CountingEmbedder {
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![0.1, 0.2, 0.3])
+        }
+        fn dim(&self) -> usize {
+            3
+        }
+    }
+
+    /// Generator that counts calls and returns a fixed reply.
+    struct CountingGen {
+        calls: Arc<AtomicUsize>,
+        reply: String,
+    }
+    #[async_trait::async_trait]
+    impl Generator for CountingGen {
+        async fn generate(&self, _prompt: &str) -> Result<String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.reply.clone())
+        }
+    }
+
+    fn temp_index_with_chunk(text: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        let mut store = Store::open(&path).unwrap();
+        store
+            .upsert_chunks(&[ChunkRecord {
+                entry_path: "/doc.md".to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: text.to_owned(),
+                language: None,
+                embedding: None,
+                embed_model: None,
+            }])
+            .unwrap();
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn answer_empty_hits_short_circuits_without_calling_llm() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        Store::open(&path).unwrap(); // empty index, no chunks
+
+        let gen_calls = Arc::new(AtomicUsize::new(0));
+        let embedder = CountingEmbedder {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let llm = CountingGen {
+            calls: gen_calls.clone(),
+            reply: "should never be used".to_owned(),
+        };
+        let cfg = QaConfig {
+            mode: HybridMode::Sparse,
+            ..QaConfig::default()
+        };
+
+        let ans = answer(&path, &embedder, &llm, "anything", &cfg)
+            .await
+            .unwrap();
+        assert!(ans.answer.contains("indexa deep"));
+        assert!(ans.sources.is_empty());
+        assert_eq!(
+            gen_calls.load(Ordering::SeqCst),
+            0,
+            "empty hits must short-circuit before any LLM call"
+        );
+    }
+
+    #[tokio::test]
+    async fn answer_sparse_mode_skips_embedding() {
+        let (_dir, path) = temp_index_with_chunk("rustacean ferris crab content");
+        let embed_calls = Arc::new(AtomicUsize::new(0));
+        let embedder = CountingEmbedder {
+            calls: embed_calls.clone(),
+        };
+        let llm = CountingGen {
+            calls: Arc::new(AtomicUsize::new(0)),
+            reply: "answer".to_owned(),
+        };
+        let cfg = QaConfig {
+            mode: HybridMode::Sparse,
+            ..QaConfig::default()
+        };
+
+        let ans = answer(&path, &embedder, &llm, "ferris", &cfg)
+            .await
+            .unwrap();
+        assert_eq!(
+            embed_calls.load(Ordering::SeqCst),
+            0,
+            "Sparse mode must not embed the query"
+        );
+        assert_eq!(ans.answer, "answer");
+    }
+
+    #[tokio::test]
+    async fn answer_synthesizes_from_hits() {
+        let (_dir, path) = temp_index_with_chunk("the quick brown fox jumps over");
+        let gen_calls = Arc::new(AtomicUsize::new(0));
+        let embedder = CountingEmbedder {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let llm = CountingGen {
+            calls: gen_calls.clone(),
+            reply: "a synthesized answer".to_owned(),
+        };
+        let cfg = QaConfig {
+            mode: HybridMode::Sparse,
+            ..QaConfig::default()
+        };
+
+        let ans = answer(&path, &embedder, &llm, "fox", &cfg).await.unwrap();
+        assert_eq!(ans.answer, "a synthesized answer");
+        assert!(!ans.sources.is_empty());
+        assert_eq!(gen_calls.load(Ordering::SeqCst), 1);
+    }
 }

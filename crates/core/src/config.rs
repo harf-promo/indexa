@@ -118,8 +118,6 @@ pub enum HybridMode {
     Sparse,
     /// Dense results only (cosine similarity).
     Dense,
-    /// Weighted linear combination.
-    Weighted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +134,8 @@ pub struct RetrievalConfig {
     pub summary_weight: f32,
     /// Depth-boost coefficient α: parent summaries score 1 + α*(max_depth - depth) higher.
     pub summary_depth_alpha: f32,
+    /// Max characters of retrieved context packed into the answer-synthesis prompt.
+    pub context_budget: usize,
 }
 
 impl Default for RetrievalConfig {
@@ -147,6 +147,7 @@ impl Default for RetrievalConfig {
             rerank: false,
             summary_weight: 0.0,
             summary_depth_alpha: 0.15,
+            context_budget: 4000,
         }
     }
 }
