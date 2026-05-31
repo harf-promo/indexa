@@ -35,6 +35,11 @@ pub(crate) struct TreeNodeResponse {
     pub(crate) summary_state: Option<String>,
     pub(crate) file_count: i64,
     pub(crate) chunk_count: i64,
+    /// Subtree context-coverage rollup (directory summaries). `total` = dirs in the subtree,
+    /// `covered` = built (`done`), `partial` = queued. All 0 for file nodes.
+    pub(crate) covered: i64,
+    pub(crate) partial: i64,
+    pub(crate) total: i64,
 }
 
 #[derive(Serialize)]
@@ -385,6 +390,9 @@ impl From<indexa_core::store::TreeNode> for TreeNodeResponse {
             summary_state: n.summary_state,
             file_count: n.file_count,
             chunk_count: n.chunk_count,
+            covered: n.covered,
+            partial: n.partial,
+            total: n.total,
         }
     }
 }

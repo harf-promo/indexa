@@ -59,6 +59,15 @@ pub struct TreeNode {
     pub file_count: i64,
     /// Total chunk count for all entries under this path (0 for files).
     pub chunk_count: i64,
+    /// Subtree context-coverage rollup (directory summaries only). For a dir node these count
+    /// the directories at-or-under this path; for a file node all three are 0.
+    /// `total` = directories in the subtree; `covered` = those whose summary is built (`done`);
+    /// `partial` = those still queued (`pending`/`in_flight`). Drives the calm per-row coverage
+    /// glyph (●/◐/○) and the determinate "covered/total" subtree count, replacing the old
+    /// per-row pending strobe.
+    pub covered: i64,
+    pub partial: i64,
+    pub total: i64,
 }
 
 #[derive(Debug, Clone, Default)]

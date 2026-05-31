@@ -74,9 +74,18 @@ function renderSummary(d) {
   }
 
   const ts = d.generated_at ? new Date(d.generated_at * 1000).toLocaleDateString() : '';
+  // Subtree context-coverage chip, from the rollup stashed when the tree row was built.
+  // Absent for paths never rendered in the tree (e.g. deep breadcrumb nav) — graceful.
+  const cov = coverageByPath[d.path];
+  let covChip = '';
+  if (cov && cov.total > 0) {
+    const pct = Math.round(100 * cov.covered / cov.total);
+    covChip = '<span class="cov-chip" title="' + cov.covered + ' of ' + cov.total +
+      ' folders in this subtree have context built">context: ' + pct + '%</span>';
+  }
   return crumbHtml +
     '<div class="summary-header"><span style="font-size:22px">' + icon + '</span>' +
-    '<span class="summary-title">' + escapeHtml(name) + '</span></div>' +
+    '<span class="summary-title">' + escapeHtml(name) + '</span>' + covChip + '</div>' +
     '<div class="summary-meta">Model: ' + escapeHtml(d.model) + (ts ? ' \xb7 ' + ts : '') + '</div>' +
     '<div class="summary-text">' + escapeHtml(d.summary) + '</div>' +
     childrenHtml;

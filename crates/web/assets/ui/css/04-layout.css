@@ -74,13 +74,25 @@
 .tree-toggle { width: 14px; text-align: center; color: var(--muted); font-size: 10px; flex-shrink: 0; }
 .tree-icon { flex-shrink: 0; font-size: 13px; }
 .tree-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.tree-badge { font-size: 10px; flex-shrink: 0; }
-.tree-badge.done { color: var(--green); }
-/* No per-row animation: a pulsing badge on every pending folder reads as a
-   "loading icon near every folder". State is conveyed by colour alone here;
-   PR-2 replaces this with calm coverage glyphs + an aggregate subtree indicator. */
-.tree-badge.pending { color: var(--orange); }
-.tree-badge.failed { color: var(--red); }
+/* Calm, STATIC per-row context-coverage glyph (PR-2): ● built · ◐ partly · ○ none · ✗ failed.
+   Colour conveys state; there is deliberately no animation — the old pulsing ⏳ on every
+   pending folder read as a "loading icon near every folder". The global
+   prefers-reduced-motion guard remains the safety net for any future motion. */
+.cov-glyph { font-size: 10px; flex-shrink: 0; }
+.cov-glyph.cov-full { color: var(--green); }
+.cov-glyph.cov-partial { color: var(--orange); }
+.cov-glyph.cov-none { color: var(--muted); }
+.cov-glyph.cov-failed { color: var(--red); }
+/* One determinate "covered/total" count per ACTIVE subtree (something still queued),
+   replacing N pulsing children with a single quiet number. */
+.cov-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  margin-left: 4px;
+}
 .tree-children { padding-left: 14px; }
 .tree-row-actions { display: none; gap: 1px; margin-left: auto; flex-shrink: 0; }
 .tree-node-row:hover .tree-row-actions { display: flex; }

@@ -56,7 +56,8 @@ pub(super) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 /// Map a row from the `entries` + `summary_queue` join (used by `search_paths`
 /// and `tree_level`) into a `TreeNode`.
-/// Column order: path, kind, size, file_count, chunk_count, summary_state
+/// Column order: path, kind, size, file_count, chunk_count, summary_state,
+/// subtree_covered, subtree_partial, subtree_total
 fn row_to_tree_node(r: &Row) -> rusqlite::Result<TreeNode> {
     let full_path: String = r.get(0)?;
     let name = std::path::Path::new(&full_path)
@@ -72,6 +73,9 @@ fn row_to_tree_node(r: &Row) -> rusqlite::Result<TreeNode> {
         chunk_count: r.get::<_, i64>(4).unwrap_or(0),
         child_count: 0,
         summary_state: r.get(5)?,
+        covered: r.get::<_, i64>(6).unwrap_or(0),
+        partial: r.get::<_, i64>(7).unwrap_or(0),
+        total: r.get::<_, i64>(8).unwrap_or(0),
     })
 }
 
@@ -213,7 +217,16 @@ impl Store {
                      WHERE c.parent_path = e.path AND c.kind = 'file') AS file_count,
                     (SELECT COUNT(*) FROM chunks
                      WHERE entry_path LIKE e.path || '/%') AS chunk_count,
-                    sq.state AS summary_state
+                    sq.state AS summary_state,
+                    (SELECT COUNT(*) FROM summary_queue q
+                     WHERE q.kind = 'dir' AND q.state = 'done'
+                       AND (q.path = e.path OR q.path LIKE e.path || '/%')) AS subtree_covered,
+                    (SELECT COUNT(*) FROM summary_queue q
+                     WHERE q.kind = 'dir' AND q.state IN ('pending','in_flight')
+                       AND (q.path = e.path OR q.path LIKE e.path || '/%')) AS subtree_partial,
+                    (SELECT COUNT(*) FROM entries d
+                     WHERE d.kind = 'dir'
+                       AND (d.path = e.path OR d.path LIKE e.path || '/%')) AS subtree_total
                FROM entries e
                LEFT JOIN summary_queue sq ON sq.path = e.path
               WHERE e.path LIKE ?1
@@ -232,7 +245,16 @@ impl Store {
                      WHERE c.parent_path = e.path AND c.kind = 'file') AS file_count,
                     (SELECT COUNT(*) FROM chunks
                      WHERE entry_path LIKE e.path || '/%') AS chunk_count,
-                    sq.state AS summary_state
+                    sq.state AS summary_state,
+                    (SELECT COUNT(*) FROM summary_queue q
+                     WHERE q.kind = 'dir' AND q.state = 'done'
+                       AND (q.path = e.path OR q.path LIKE e.path || '/%')) AS subtree_covered,
+                    (SELECT COUNT(*) FROM summary_queue q
+                     WHERE q.kind = 'dir' AND q.state IN ('pending','in_flight')
+                       AND (q.path = e.path OR q.path LIKE e.path || '/%')) AS subtree_partial,
+                    (SELECT COUNT(*) FROM entries d
+                     WHERE d.kind = 'dir'
+                       AND (d.path = e.path OR d.path LIKE e.path || '/%')) AS subtree_total
              FROM entries e
              LEFT JOIN summary_queue sq ON sq.path = e.path
              WHERE e.parent_path = ?1
