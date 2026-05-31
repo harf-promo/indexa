@@ -787,7 +787,7 @@ pub(crate) async fn run_summarize_phase(
             };
             process_queue_item_with_passes(
                 &mut job_store,
-                &describer,
+                describer.as_ref(),
                 embedder.as_ref(),
                 &item,
                 &cfg,
@@ -798,7 +798,7 @@ pub(crate) async fn run_summarize_phase(
         } else {
             process_queue_item_with_passes(
                 &mut job_store,
-                &describer,
+                describer.as_ref(),
                 embedder.as_ref(),
                 &item,
                 &cfg,
