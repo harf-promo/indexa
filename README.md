@@ -4,7 +4,7 @@
 
 *Indexa reads your code or your disk once, builds a hierarchical context graph, and serves any AI tool a small, relevant slice on demand — without burning a cloud model's token budget or a local model's context window. Local-first, model-agnostic, fully open.*
 
-> Status: **v0.5.0**, pre-1.0 and actively developed. The scan → summarize → export → ask flow works today, plus a local web UI and an MCP server for AI agents. Expect rough edges on large / whole-disk indexes. Watch this repo or join [Discussions](../../discussions) to follow along.
+> Status: **v0.8.0**, pre-1.0 and actively developed. The scan → summarize → export → ask flow works today, plus a redesigned local web workspace (one Context view with a live Engine status bar) and an MCP server for AI agents. Expect rough edges on large / whole-disk indexes. New here? Start with the **[Usage Guide](USAGE.md)**. Watch this repo or join [Discussions](../../discussions) to follow along.
 
 ---
 
@@ -50,6 +50,20 @@ AnythingLLM, PrivateGPT, and similar tools require you to explicitly drop folder
 
 **Your data stays on your hardware.**
 Indexa runs fully offline with Ollama. It is fully open source, runs on macOS, Linux, and Windows, and never sends your data anywhere unless you explicitly point it at a cloud model.
+
+### How Indexa compares
+
+| | Local / offline | Whole-disk + code | Persistent index + retrieval | CLI · Web · MCP |
+|---|---|---|---|---|
+| **Indexa** | ✅ | ✅ | ✅ | ✅ |
+| Repomix / gitingest (repo→prompt) | ✅ | repo only | ❌ one-shot | CLI |
+| AnythingLLM / Khoj (local doc-chat) | ✅ | manual docs | ✅ | desktop/web |
+| Continue / Cursor / Cody (IDE) | ✅/cloud | repo | partial | IDE |
+| Codebase-graph skills (graphify, etc.) | cloud LLM | folder | regenerated per run | skill/plugin |
+
+No tool occupies all four columns at once. That intersection — plus a memory watchdog that won't freeze
+your machine, and value for **both** cloud and local models — is where Indexa lives. Full breakdown in
+[docs/COMPETITIVE.md](docs/COMPETITIVE.md).
 
 ---
 
@@ -151,7 +165,7 @@ cargo build --release
 
 ## What's coming
 
-**Already shipped** (v0.2–v0.5): hierarchical summarization with tiered L0/L1/L2 abstracts, the local web UI, resource-aware indexing (won't freeze your machine), an MCP server for AI agents, and optional cross-encoder reranking.
+**Already shipped** (v0.2–v0.8): hierarchical summarization with tiered L0/L1/L2 abstracts, the local web workspace (a single Context view with an always-on Engine status bar and live build progress), resource-aware indexing (won't freeze your machine), an MCP server for AI agents, optional cross-encoder reranking, and software fingerprinting.
 
 Indexa is being built in the open. Here is what comes next, in rough order — no dates, ships when it's ready:
 

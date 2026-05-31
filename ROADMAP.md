@@ -12,6 +12,12 @@ Vote on upcoming features and suggest new ones in [Discussions → Ideas](../../
 > telemetry API — a platform release ahead of the **Smart classification** theme below, which is the
 > next feature milestone. The theme numbers (through Context Packs at v0.9) are directional and stay put.
 
+> **Two headline differentiators** (added 2026-05; priority is high, exact slotting flexible — see the
+> dedicated sections near the end): **local multimodal understanding** (make images / audio / video
+> *content* searchable, fully offline) and a **code-relationship graph** (calls / imports / blast-radius,
+> in local SQLite behind MCP). Together they widen the moat against cloud-only, repo-only, and
+> assistant-plugin tools. See [docs/COMPETITIVE.md](docs/COMPETITIVE.md).
+
 ---
 
 ## v0.1 — Index + Ask  *(shipped)*
@@ -159,6 +165,31 @@ Open the platform to third-party extensions.
 - Stable plugin API for custom parsers, AI adapters, and insight modules
 - Plugin manifest format and discovery
 - First-party plugin: browser history indexer (opt-in)
+
+---
+
+## Local multimodal understanding  *(headline differentiator)*
+
+Today Indexa stores **metadata** for images, audio, and video (EXIF, ffprobe). This milestone makes their
+**content** searchable — fully offline, via local vision/audio models. Competing graph/RAG tools that
+"understand" media call a cloud API; Indexa does it on your machine.
+
+- **Images** — caption with a local vision model (Ollama); the caption becomes a searchable chunk
+- **Audio** — local transcription → searchable chunks
+- **Video** — sample frames → caption; optional transcript
+- Opt-in per region; goes through the same parse → embed → store pipeline and the resource watchdog
+- Default vision/audio models follow the project's model policy (non-Chinese defaults; user-configurable)
+
+## Code-relationship graph  *(headline differentiator)*
+
+Indexa already extracts code **symbols** via tree-sitter. This milestone adds the **edges** — a real code
+graph for structural questions — kept in the existing **local SQLite** store (no Neo4j, no cloud), and
+exposed over MCP so agents can traverse it.
+
+- **Phase 1** — imports / defines edges (file-level): "what does this import", "who imports this"; a new
+  MCP `dependencies` tool; surfaced in the folder context summary
+- **Phase 2** — call edges with cross-file resolution: `who_calls` / blast-radius via SQLite recursive
+  CTEs; optional PageRank-style ranking to improve code retrieval (à la aider's repo-map)
 
 ---
 
