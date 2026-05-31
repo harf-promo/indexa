@@ -58,6 +58,15 @@ pub enum JobEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         item_path: Option<String>,
         message: String,
+        /// Structured memory-pressure context, present only on the watchdog's
+        /// "easing off" warnings. Lets the UI correlate the warning with the live
+        /// RAM gauge instead of parsing the prose. `None` for all other warnings.
+        ///
+        /// This is an added FIELD, not a new variant, on purpose: the frontend
+        /// dispatches on `ev.type`, so a new variant would be silently dropped,
+        /// whereas an extra optional field is ignored by older clients.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pressure: Option<PressureInfo>,
     },
     /// A fragment of LLM output streamed in real time.
     /// NOT stored in job history — broadcast-only to avoid unbounded memory growth.
@@ -67,6 +76,24 @@ pub enum JobEvent {
         stage: String,
         fragment: String,
     },
+}
+
+/// Machine-memory snapshot attached to a watchdog "easing off" warning, so the UI
+/// can show *why* a build paused (and line it up with the live Engine-bar gauge)
+/// rather than scraping the message text. Every value is already computed in the
+/// watchdog when the warning fires.
+#[derive(Debug, Clone, Serialize)]
+pub struct PressureInfo {
+    /// "throttle" | "critical" — the `assess()` level at the moment of the warning.
+    pub level: String,
+    /// Swap used as a percent of total swap (0–100).
+    pub swap_percent: u64,
+    /// Active+wired bytes in use (cache-excluded), the budget's `used` term.
+    pub used_bytes: u64,
+    /// `compute_budget` = free RAM for a model load, minus headroom. Negative = over budget.
+    pub budget_bytes: i64,
+    /// The configured keep-free margin the budget subtracts.
+    pub headroom_bytes: u64,
 }
 
 pub struct JobHandle {

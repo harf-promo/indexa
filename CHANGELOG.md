@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`serve` web UI — memory-pressure warnings are now self-explanatory.** The watchdog's "easing off" warnings carry a structured pressure snapshot (level, swap %, used bytes, compute budget, headroom), rendered as a compact `throttle/critical · budget ±N MB` chip on the warning row so you can correlate a pause with the live Engine-bar RAM gauge instead of parsing the message text. Delivered as an added optional field on the existing warning event (not a new event type), so older clients are unaffected.
+
 - **`serve` web UI — the Engine status bar now narrates the build.** While a summarize/index/deep job runs, the always-on bottom bar shows a live determinate progress bar with the running count, throughput (files/s), ETA, the current file, and the active model — fused client-side from the job's existing event stream, so the bar tells the build story instead of only machine stats. The state word still reads `Building` (or `Easing off` under memory pressure).
 
 - **`serve` web UI — calmer folder tree.** Each directory now shows a static context-coverage glyph (● built · ◐ partly built · ○ none · ✗ failed) plus one determinate `covered/total` count per actively-building subtree, replacing the old pulsing pending icon that appeared on every row during a build. Each folder's summary header gains a `context: N%` chip. Backed by a `{covered, partial, total}` directory-summary rollup carried on every tree node.
