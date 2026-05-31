@@ -47,6 +47,59 @@
 .engine-spacer { flex: 1 1 auto; min-width: 8px; }
 .engine-machine { color: var(--muted); font-size: 11px; flex-shrink: 0; }
 
+/* Live build progress — appears only while a job runs. One determinate bar + a
+   compact count / rate / current-file / model readout, fed from the per-job SSE
+   the UI already holds (activeJobs[*].lastProgress). Calm: no animation here; the
+   state word ("Building" / "Easing off") carries the status. */
+.engine-job {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0; /* allow the file name to ellipsis instead of overflowing the bar */
+  color: var(--muted);
+}
+.engine-job-sep { color: var(--border); flex-shrink: 0; }
+.engine-job-count {
+  flex-shrink: 0;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+.engine-job-bar {
+  position: relative;
+  width: 60px;
+  height: 4px;
+  flex-shrink: 0;
+  background: var(--surface-2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.engine-job-fill {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 0;
+  background: var(--accent);
+  transition: width 400ms ease;
+}
+.engine-bar.state-throttle .engine-job-fill,
+.engine-bar.state-critical .engine-job-fill { background: var(--orange); }
+.engine-job-rate {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+.engine-job-file {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.engine-job-model { flex-shrink: 0; color: var(--accent); font-size: 11px; }
+
 /* CPU sparkline — a row of thin bars, height = recent CPU %. */
 .engine-spark {
   display: inline-flex;
