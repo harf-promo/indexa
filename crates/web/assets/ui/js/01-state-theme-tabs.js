@@ -1,7 +1,11 @@
 'use strict';
 
 /* ── State ── */
-let currentTab = 'chat';
+// currentTab tracks the logically-active surface for legacy callers (jobs rendering
+// guards on currentTab === 'jobs'). currentView is the workspace view (tree|chat|map);
+// Settings + Activity are drawers that open OVER the workspace without changing the view.
+let currentTab = 'tree';
+let currentView = 'tree';
 let selectedPath = null;
 const expandedPaths = new Set();
 /* Per-path subtree context-coverage rollup ({covered, partial, total}), stashed as
@@ -27,22 +31,58 @@ function toggleTheme() {
   if (btn) btn.textContent = next === 'light' ? '🌙' : '🌗';
 }
 
-/* ── Tab switching ── */
+/* ── Navigation ──
+   'tree' | 'chat' | 'map'  → workspace views (in-place toggle)
+   'settings' | 'jobs'      → drawers opened over the workspace
+   Single entry point so every existing caller (showSummary→'tree', doAsk→'chat',
+   fireJob→'jobs', the pill, the gear) keeps working. */
 function switchTab(tab) {
+  if (tab === 'settings' || tab === 'jobs') { openDrawer(tab); return; }
+
+  currentView = tab;
   currentTab = tab;
-  ['tree','chat','map','settings','jobs'].forEach(function(t) {
-    const btn = document.getElementById('tab-' + t);
+  ['tree','chat','map'].forEach(function(t) {
+    const btn = document.getElementById('view-' + t);
     if (btn) btn.classList.toggle('active', t === tab);
     const panel = document.getElementById('panel-' + t);
     if (panel) panel.classList.toggle('active', t === tab);
   });
   const sv = document.getElementById('summary-view');
   if (sv) sv.style.display = (tab === 'tree' && selectedPath !== null) ? 'block' : '';
-  if (tab === 'settings') loadSettings();
   if (tab === 'map') loadMap();
-  if (tab === 'jobs') renderJobsPage();
-  // Hide the pill when the jobs tab is active
-  const pill = document.getElementById('jobs-pill');
-  if (pill) pill.hidden = (tab === 'jobs');
 }
+
+/* Open a drawer overlay (Settings or Activity) over the workspace. */
+function openDrawer(name) {
+  const drawer = document.getElementById('panel-' + name);
+  if (!drawer) return;
+  drawer.classList.add('open');
+  if (name === 'settings') loadSettings();
+  if (name === 'jobs') {
+    // Legacy job rendering guards on currentTab === 'jobs'; set it while open.
+    currentTab = 'jobs';
+    renderJobsPage();
+    const pill = document.getElementById('jobs-pill');
+    if (pill) pill.hidden = true;
+  }
+}
+
+/* Close a drawer; restore the logical tab to the underlying workspace view. */
+function closeDrawer(name) {
+  const drawer = document.getElementById('panel-' + name);
+  if (drawer) drawer.classList.remove('open');
+  if (name === 'jobs') {
+    currentTab = currentView; // stop renderJobsPage from re-running
+    if (typeof updateJobsPill === 'function') updateJobsPill();
+  }
+}
+
+/* Esc closes whichever drawer is open. */
+document.addEventListener('keydown', function(e) {
+  if (e.key !== 'Escape') return;
+  ['settings','jobs'].forEach(function(name) {
+    const d = document.getElementById('panel-' + name);
+    if (d && d.classList.contains('open')) closeDrawer(name);
+  });
+});
 

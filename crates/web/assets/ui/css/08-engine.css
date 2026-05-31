@@ -47,6 +47,27 @@
 .engine-spacer { flex: 1 1 auto; min-width: 8px; }
 .engine-machine { color: var(--muted); font-size: 11px; flex-shrink: 0; }
 
+/* Activity control — opens the Jobs/warnings drawer (replaces the old Jobs tab). */
+.engine-activity {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  padding: 2px 8px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  transition: background 120ms, border-color 120ms, color 120ms;
+}
+.engine-activity:hover { background: var(--surface-2); border-color: var(--border); color: var(--text); }
+.engine-activity-badge {
+  display: inline-block; background: var(--accent); color: var(--bg);
+  border-radius: 8px; padding: 0 5px; font-size: 9px; font-weight: 700;
+  margin-left: 2px; vertical-align: middle;
+}
+
 /* Live build progress — appears only while a job runs. One determinate bar + a
    compact count / rate / current-file / model readout, fed from the per-job SSE
    the UI already holds (activeJobs[*].lastProgress). Calm: no animation here; the

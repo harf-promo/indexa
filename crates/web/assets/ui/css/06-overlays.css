@@ -48,6 +48,32 @@
 .modal-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
 .modal-btn:hover:not(.primary) { border-color: var(--accent); color: var(--accent); }
 
+/* ── Drawers (Settings, Activity) — full-height overlay cards opened over the
+   Context workspace, reusing the modal backdrop pattern. ── */
+.drawer-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  z-index: 150; display: none; align-items: center; justify-content: center;
+  backdrop-filter: blur(2px);
+}
+.drawer-overlay.open { display: flex; }
+.drawer {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: calc(var(--radius) * 1.5);
+  width: 640px; max-width: 96vw; height: 86vh; max-height: 86vh;
+  display: flex; flex-direction: column; overflow: hidden;
+  box-shadow: var(--shadow-lg); animation: slideUp 180ms ease-out;
+}
+.drawer-wide { width: 1000px; }
+.drawer-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.drawer-title { font-size: 15px; font-weight: 600; color: var(--text); }
+/* The drawer body fills the remaining height; the existing settings-view /
+   jobs-page layouts handle their own internal scrolling. */
+.drawer > .settings-view,
+.drawer > .jobs-page { flex: 1; min-height: 0; }
+
 /* ── Toast ── */
 #toast {
   position: fixed; top: 60px; left: 50%; transform: translateX(-50%);

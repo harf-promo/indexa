@@ -28,6 +28,14 @@
   color: var(--muted);
   white-space: nowrap;
 }
+/* Positioning tagline in the topbar — "context is the product". */
+.app-tagline {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  margin-left: 4px;
+}
+@media (max-width: 720px) { .app-tagline { display: none; } }
 .app-topbar-actions {
   display: flex;
   align-items: center;
