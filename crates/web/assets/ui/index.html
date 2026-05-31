@@ -287,6 +287,15 @@
     <span class="pressure-pip" id="engine-pressure-pip" aria-hidden="true"></span>
     <span class="engine-val" id="engine-pressure-val">&#x2014;</span>
   </span>
+  <!-- Live build progress — shown only while a job is running (fed from the job SSE the UI already opens) -->
+  <span class="engine-job" id="engine-job" title="Current build" hidden>
+    <span class="engine-job-sep" aria-hidden="true">&#x2502;</span>
+    <span class="engine-job-count" id="engine-job-count"></span>
+    <span class="engine-job-bar" id="engine-job-bar" aria-hidden="true"><span class="engine-job-fill" id="engine-job-fill"></span></span>
+    <span class="engine-job-rate" id="engine-job-rate"></span>
+    <span class="engine-job-file" id="engine-job-file"></span>
+    <span class="engine-job-model" id="engine-job-model"></span>
+  </span>
   <span class="engine-spacer"></span>
   <span class="engine-machine" id="engine-machine"></span>
 </footer>

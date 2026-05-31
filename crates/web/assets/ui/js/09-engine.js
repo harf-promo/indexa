@@ -17,6 +17,60 @@
 
   function clampPct(n) { return Math.max(0, Math.min(100, n || 0)); }
 
+  function fmtEta(secs) {
+    if (!secs || secs <= 0) return '';
+    return secs < 60 ? Math.round(secs) + 's' : Math.round(secs / 60) + 'm';
+  }
+
+  // Live build readout: the telemetry frame only carries the active job's identity
+  // (id/kind/path); the per-file progress lives in the job-events SSE the UI already
+  // opens (activeJobs[id].lastProgress / .llm). Fuse them here — no extra request,
+  // no backend change. Degrades gracefully if the job stream hasn't delivered yet.
+  function renderJob(s) {
+    var box = el('engine-job');
+    if (!box) return;
+    var aj = s.active_job;
+    // `activeJobs` is the global job store declared in 03-jobs-search.js (concatenated
+    // before this file). Guard in case the ordering ever changes.
+    var job = (aj && typeof activeJobs !== 'undefined') ? activeJobs[aj.job_id] : null;
+    var lp = job && job.lastProgress;
+    if (!aj || !lp || !(lp.total > 0)) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+
+    var countEl = el('engine-job-count');
+    if (countEl) countEl.textContent = lp.current + '/' + lp.total;
+
+    var fill = el('engine-job-fill');
+    if (fill) fill.style.width = clampPct(lp.current / lp.total * 100) + '%';
+
+    var rateEl = el('engine-job-rate');
+    if (rateEl) {
+      var parts = [];
+      if (lp.items_per_sec && lp.items_per_sec > 0) parts.push(lp.items_per_sec.toFixed(1) + '/s');
+      var eta = fmtEta(lp.eta_secs);
+      if (eta) parts.push('ETA ' + eta);
+      rateEl.textContent = parts.join(' \xb7 ');
+    }
+
+    var fileEl = el('engine-job-file');
+    if (fileEl) {
+      var cp = lp.current_path || '';
+      var short = cp ? cp.split('/').slice(-1)[0] : '';
+      fileEl.textContent = short;
+      fileEl.title = cp;
+    }
+
+    var modelEl = el('engine-job-model');
+    if (modelEl) {
+      // job.llm.label is "model · stage" while tokens stream; show just the model.
+      var label = (job.llm && job.llm.label) ? job.llm.label.split(' \xb7 ')[0] : '';
+      modelEl.textContent = label;
+    }
+  }
+
   function renderSpark(values) {
     var spark = el('engine-cpu-spark');
     if (!spark) return;
@@ -73,6 +127,9 @@
       pv.textContent = pressure === 'critical' ? 'high swap'
         : (pressure === 'throttle' ? 'elevated swap' : 'no pressure');
     }
+
+    // Live build progress (fused from the per-job SSE the UI already holds).
+    renderJob(s);
 
     // Machine summary
     var m = el('engine-machine');
