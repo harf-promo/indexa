@@ -4,6 +4,11 @@
 let currentTab = 'chat';
 let selectedPath = null;
 const expandedPaths = new Set();
+/* Per-path subtree context-coverage rollup ({covered, partial, total}), stashed as
+   tree/search/child rows are built so the summary header can show a "context: N%" chip
+   without an extra round-trip. Keyed by entry path; stale entries are harmless (lookups
+   are by current path only). */
+const coverageByPath = {};
 
 /* ── Theme ── */
 (function initTheme() {

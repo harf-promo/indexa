@@ -16,11 +16,24 @@ async function fireJob(kind, path) {
   switchTab('jobs');
 }
 
-function badgeFor(state) {
-  if (!state) return '';
-  if (state === 'done') return '<span class="tree-badge done" title="Summarized">✓</span>';
-  if (state === 'failed') return '<span class="tree-badge failed" title="Summary failed">✗</span>';
-  return '<span class="tree-badge pending" title="Summary pending">⏳</span>';
+/* Calm, STATIC per-row context-coverage glyph. Replaces the old per-row pending
+   strobe: instead of a pulsing ⏳ on every folder during a subtree build, each dir
+   shows where its subtree stands — ● built · ◐ partly built · ○ none · ✗ failed.
+   Files (total === 0) and un-rolled-up roots carry no glyph. No animation. */
+function coverageGlyph(node) {
+  if (node.summary_state === 'failed') {
+    return '<span class="cov-glyph cov-failed" title="Summary failed">✗</span>';
+  }
+  const total = node.total || 0;
+  if (total <= 0) return '';
+  const covered = node.covered || 0;
+  if (covered >= total) {
+    return '<span class="cov-glyph cov-full" title="Context built (' + covered + '/' + total + ')">●</span>';
+  }
+  if (covered > 0) {
+    return '<span class="cov-glyph cov-partial" title="Partly built (' + covered + '/' + total + ')">◐</span>';
+  }
+  return '<span class="cov-glyph cov-none" title="No context yet (0/' + total + ')">○</span>';
 }
 
 function buildTreeNode(node) {
@@ -30,7 +43,16 @@ function buildTreeNode(node) {
 
   const isDir = node.kind === 'dir';
   const icon = isDir ? '📁' : '📄';
-  const badge = badgeFor(node.summary_state);
+  // Stash the subtree coverage rollup so the summary header can show a "context: N%"
+  // chip for this path without a second request (see coverageByPath / renderSummary).
+  coverageByPath[node.path] = { covered: node.covered || 0, partial: node.partial || 0, total: node.total || 0 };
+  const badge = coverageGlyph(node);
+  // One calm, determinate count per ACTIVE subtree (something still queued), instead of
+  // N pulsing children. Static until the next tree refresh — live updates arrive in PR-4.
+  const coverageCount = (isDir && node.partial > 0 && node.total > 0)
+    ? '<span class="cov-count" title="Folders with context built in this subtree">' +
+        (node.covered || 0) + '/' + node.total + '</span>'
+    : '';
   const toggle = isDir ? '<span class="tree-toggle">▸</span>' : '<span class="tree-toggle"></span>';
 
   const countSuffix = (isDir && (node.file_count > 0 || node.chunk_count > 0))
@@ -46,6 +68,7 @@ function buildTreeNode(node) {
   row.innerHTML = toggle + '<span class="tree-icon">' + icon + '</span>' +
     '<span class="tree-label" title="' + escapeAttr(node.path) + '">' + escapeHtml(node.name) + '</span>' +
     countSuffix +
+    coverageCount +
     badge +
     '<span class="tree-row-actions">' +
     '<button data-act="scan" title="Re-scan">&#x21BB;</button>' +

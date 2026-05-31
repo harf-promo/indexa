@@ -578,3 +578,74 @@ fn deleting_a_subtree_removes_classifications_under_it() {
     assert!(store.classification_for("/root/sub").unwrap().is_none());
     assert!(store.classification_for("/other").unwrap().is_some());
 }
+
+#[test]
+fn tree_level_rolls_up_subtree_coverage() {
+    // PR-2: each tree node carries a {covered, partial, total} directory-summary rollup
+    // for its subtree, so the UI can show a calm static glyph + determinate count instead
+    // of a per-row pending strobe.
+    //
+    // /root
+    //   ├─ a        (dir, summary done)      ┐ subtree {a, a/b} → total 2,
+    //   │   └─ b    (dir, summary pending)   ┘                    covered 1, partial 1
+    //   ├─ empty    (dir, never enqueued)     → total 1, covered 0, partial 0
+    //   ├─ full     (dir, summary done)       → total 1, covered 1, partial 0
+    //   └─ file.txt (file)                    → total 0 (files carry no rollup)
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            dummy_entry("/root", EntryKind::Dir, 0),
+            dummy_entry("/root/a", EntryKind::Dir, 0),
+            dummy_entry("/root/a/b", EntryKind::Dir, 0),
+            dummy_entry("/root/empty", EntryKind::Dir, 0),
+            dummy_entry("/root/full", EntryKind::Dir, 0),
+            dummy_entry("/root/file.txt", EntryKind::File, 10),
+        ])
+        .unwrap();
+    store
+        .enqueue_summary_items(&[
+            ("/root/a".to_owned(), "dir".to_owned(), 1),
+            ("/root/a/b".to_owned(), "dir".to_owned(), 2),
+            ("/root/full".to_owned(), "dir".to_owned(), 1),
+        ])
+        .unwrap();
+    store.mark_queue_state("/root/a", "done", None).unwrap();
+    store.mark_queue_state("/root/full", "done", None).unwrap();
+    // /root/a/b stays pending.
+
+    let nodes = store.tree_level("/root").unwrap();
+    let by = |p: &str| {
+        nodes
+            .iter()
+            .find(|n| n.path == p)
+            .unwrap_or_else(|| panic!("missing node {p}"))
+    };
+
+    let a = by("/root/a");
+    assert_eq!(
+        (a.covered, a.partial, a.total),
+        (1, 1, 2),
+        "partial subtree"
+    );
+
+    let empty = by("/root/empty");
+    assert_eq!(
+        (empty.covered, empty.partial, empty.total),
+        (0, 0, 1),
+        "no context yet"
+    );
+
+    let full = by("/root/full");
+    assert_eq!(
+        (full.covered, full.partial, full.total),
+        (1, 0, 1),
+        "fully built"
+    );
+
+    let file = by("/root/file.txt");
+    assert_eq!(
+        (file.covered, file.partial, file.total),
+        (0, 0, 0),
+        "files carry no rollup"
+    );
+}
