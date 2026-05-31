@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-05-31
+
 ### Added
 
 - **`indexa classify`** — the first step of **Smart classification** (v0.7 milestone). Suggests a semantic category (work / personal / archive / media / code / system) for each indexed folder — a second axis over the technical file-type classification. This Tier 0 pass is **deterministic and content-free**: it derives the code/media/system/archive categories from existing surface hints (a folder's own hint, e.g. `node_modules` → code, or the dominant category among its direct files). Folders whose work-vs-personal nature needs file *content* are left **pending** for a later content-inference pass — never guessed. Inspect with `--paths` and `--category`. Suggestions are saved; confirming/correcting them (web UI + CLI) arrives in a following release.
@@ -25,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`indexa summarize` / `indexa worker` now pre-flight the model fit and pick a lighter model when the configured one won't fit.** A new pure `fit_report` reports whether the configured summarization models fit the live memory budget, and the lighter set to use if not. When `[resource] auto_select_model` is on (the default), the CLI downgrades the directory roll-up model (e.g. `gemma3:12b` → `gemma3:4b`) whenever the heavy one wouldn't fit — loading the lightest model rather than a ~9 GB one that thrashes/freezes a tight machine — and prints a calm notice. (Previously `auto_select_model` was a dead flag, honored nowhere.) Set it to `false` to keep your configured models. The interactive web "ask me first" picker reuses the same `fit_report` and lands separately.
 
 ### Fixed
+
+- **Add-root folder browser no longer errors.** Browsing for a folder in the web UI's "Add Root" dialog failed with `(d.entries || []).forEach is not a function` — the client read `d.entries` from a response that is a bare JSON array (so `d.entries` resolved to `Array.prototype.entries`, the built-in method). The browser now consumes the array directly (each entry is a directory; the parent folder is the leading `..` entry).
 
 - **The memory-pressure signal no longer misfires on sticky macOS swap.** The watchdog now reads pressure from the real memory **budget** (`total − active/wired − headroom`, which excludes reclaimable macOS file cache) instead of the swap **fraction**. macOS grows its swap file dynamically and never drains stale pages, so the fraction stays high long after RAM frees — which made the always-on Engine status-bar pressure indicator read amber/red (and drove extra model unloads) even with several GB genuinely free and no job running. Pressure now reads `ok` whenever the budget is positive, escalating to throttle/critical only as truly-free RAM falls into and below the headroom floor. The job-entry pause/warning was already budget-gated; genuine low-memory protection is unchanged.
 
