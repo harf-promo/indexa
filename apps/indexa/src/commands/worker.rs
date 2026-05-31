@@ -1,7 +1,6 @@
 use anyhow::Result;
 use indexa_core::{config::Config, store::Store};
 use indexa_embed::OllamaEmbedder;
-use indexa_llm::OllamaLlm;
 use std::sync::Arc;
 
 use super::helpers::{require_index_db, select_summary_models};
@@ -11,14 +10,27 @@ pub(crate) async fn cmd_worker(concurrency: usize, cfg: &Config) -> Result<()> {
         return Ok(());
     };
 
-    // Pre-flight: downgrade the dir roll-up model to one that fits the budget
-    // (non-interactive CLI "ask me first") before loading anything heavy.
-    let (file_model, dir_model) = select_summary_models(cfg);
-    let base_url = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
-    let describer: Arc<dyn indexa_llm::Describer + Send + Sync> = Arc::new(
-        OllamaLlm::new_with_dir_model(&base_url, &file_model, &dir_model)
-            .with_num_ctx(cfg.describer.num_ctx),
-    );
+    // Pre-flight: for local Ollama, downgrade the dir roll-up model to one that fits
+    // the budget (non-interactive CLI "ask me first"). For claude-code the models run
+    // on the user's subscription (no local RAM to fit), so use them as configured.
+    let (file_model, dir_model) = if cfg.describer.provider == "claude-code" {
+        (
+            cfg.describer.file_model.clone(),
+            cfg.describer.dir_model.clone(),
+        )
+    } else {
+        select_summary_models(cfg)
+    };
+    // Route through the factory so `provider = "claude-code"` is honored, not just Ollama.
+    let describer: Arc<dyn indexa_llm::Describer + Send + Sync> =
+        Arc::from(indexa_llm::describer_from_config(
+            &cfg.describer.provider,
+            &file_model,
+            &dir_model,
+            &cfg.describer.base_url,
+            cfg.describer.num_ctx,
+            &cfg.describer.claude_bin,
+        )?);
     let embed_base = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
     let embedder: Arc<dyn indexa_embed::Embedder + Send + Sync> = Arc::new(OllamaEmbedder::new(
         &embed_base,

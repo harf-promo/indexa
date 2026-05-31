@@ -197,6 +197,10 @@ pub struct DescriberConfig {
     pub passes_refresh: u32,
     /// Hard ceiling on `--passes` flag; values above this are clamped.
     pub passes_cap: u32,
+    /// Path to the `claude` CLI, used when `provider = "claude-code"` (runs
+    /// summaries/answers on the user's Claude subscription instead of the metered
+    /// API). Empty → resolved as "claude" on PATH.
+    pub claude_bin: String,
 }
 
 impl Default for DescriberConfig {
@@ -215,6 +219,7 @@ impl Default for DescriberConfig {
             passes_first: 2,
             passes_refresh: 1,
             passes_cap: 3,
+            claude_bin: "claude".into(),
         }
     }
 }

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`claude-code` LLM provider — use your Claude Pro/Max subscription.** Set `[describer] provider = "claude-code"` (with `model`/`file_model`/`dir_model` = e.g. `"sonnet"`) and Indexa runs answer synthesis and file/directory summaries on your Claude **subscription** via the local `claude` CLI in headless mode — no API key, no per-token billing. As long as you're logged into Claude Code on the machine, it just works (`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` is the headless-server fallback). Embeddings always stay local (Ollama). Each call spawns a short-lived `claude` process, so a built-in concurrency cap keeps bulk summarization from forking too many at once; for whole-disk bulk, local Ollama is still faster. The new `describer_from_config` factory routes the CLI `summarize`/`worker` and the web summarize job through the same provider switch.
+
 ## [0.8.0] — 2026-05-31
 
 ### Added

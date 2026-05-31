@@ -12,7 +12,7 @@ use indexa_core::{
     walker::{walk, EntryKind, WalkConfig},
 };
 use indexa_embed::Embedder;
-use indexa_llm::{Generator, OllamaLlm};
+use indexa_llm::{Describer, Generator, OllamaLlm};
 use indexa_query::{enqueue_subtree, process_queue_item_with_passes};
 use std::sync::Arc;
 
@@ -98,7 +98,10 @@ async fn run_watchdog_check(
     handle: &Arc<JobHandle>,
     stage: &str,
     embedder: Option<&dyn Embedder>,
-    llm: Option<&dyn Generator>,
+    // Unload target on a Critical pause. Typed `Describer` (not `Generator`): both the
+    // summarize describer and the deep-phase context LLM implement Describer, and only
+    // `unload()` — shared by both traits — is used here.
+    llm: Option<&(dyn Describer + Send + Sync)>,
 ) {
     let sample = wdog.sample();
     // Gate entry on the SAME recover-aware predicate as resume, not raw `assess()`. macOS swap
@@ -520,7 +523,9 @@ async fn run_deep_phase(
                         handle,
                         "deep",
                         Some(state.embedder.as_ref()),
-                        ctx_llm.as_ref().map(|l| l as &dyn Generator),
+                        ctx_llm
+                            .as_ref()
+                            .map(|l| l as &(dyn Describer + Send + Sync)),
                     )
                     .await;
 
@@ -652,13 +657,26 @@ pub(crate) async fn run_summarize_phase(
     let headroom = resource_cfg.effective_headroom_bytes();
     let embedder = state.embedder.clone();
     let root = std::path::PathBuf::from(path);
-    let base_url = OllamaLlm::resolve_base_url(Some(&cfg.base_url));
     let (file_model, dir_model, num_ctx) = match &model_override {
         Some((f, d, n)) => (f.as_str(), d.as_str(), *n),
         None => (cfg.file_model.as_str(), cfg.dir_model.as_str(), cfg.num_ctx),
     };
-    let describer =
-        OllamaLlm::new_with_dir_model(&base_url, file_model, dir_model).with_num_ctx(num_ctx);
+    // Route through the factory so `provider = "claude-code"` (the user's Claude
+    // subscription) is honored here too, not just on the CLI summarize path.
+    let describer = match indexa_llm::describer_from_config(
+        &cfg.provider,
+        file_model,
+        dir_model,
+        &cfg.base_url,
+        num_ctx,
+        &cfg.claude_bin,
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            finalize_failed(handle, "summarize", &e);
+            return;
+        }
+    };
 
     // Memory watchdog: checked before each LLM summarization call.
     let mut wdog = WatchdogState::new();
@@ -735,7 +753,7 @@ pub(crate) async fn run_summarize_phase(
             handle,
             "summarize",
             Some(embedder.as_ref()),
-            Some(&describer as &dyn Generator),
+            Some(&*describer),
         )
         .await;
 
