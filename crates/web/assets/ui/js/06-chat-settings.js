@@ -62,6 +62,7 @@ async function loadSettings() {
   settingsLoaded = true;
   loadModels();
   loadKeys();
+  loadProviderStatus();
   loadPasses();
   loadResource();
 }

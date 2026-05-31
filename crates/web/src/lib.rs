@@ -201,6 +201,7 @@ pub async fn serve(
         .route("/api/models/installed", get(api_models_installed))
         .route("/api/models/pull", post(api_models_pull))
         .route("/api/keys", get(api_keys_get).post(api_keys_set))
+        .route("/api/providers/status", get(api_providers_status))
         .route("/api/jobs", get(api_jobs_list))
         .route("/api/jobs/scan", post(api_job_scan))
         .route("/api/jobs/deep", post(api_job_deep))

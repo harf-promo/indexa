@@ -14,7 +14,7 @@ pub mod ollama;
 pub mod openai_compat;
 
 pub use anthropic::AnthropicLlm;
-pub use claude_code::ClaudeCodeLlm;
+pub use claude_code::{claude_status, ClaudeCodeLlm, ClaudeStatus};
 pub use ollama::OllamaLlm;
 pub use openai_compat::OpenAICompatLlm;
 

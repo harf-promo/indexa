@@ -97,6 +97,25 @@ pub(crate) struct KeysStatus {
     pub(crate) google_set: bool,
 }
 
+/// Status of the `claude-code` (Claude subscription) provider, surfaced in the
+/// Settings UI and `doctor`. All fields come from token-free local probes; `email`
+/// from `claude auth status` is deliberately NOT forwarded (PII, no UI need).
+#[derive(Serialize)]
+pub(crate) struct ProviderStatus {
+    /// The active `[describer] provider` (e.g. `"ollama"` or `"claude-code"`).
+    pub(crate) describer_provider: String,
+    /// `claude` CLI resolved and responded to `--version`.
+    pub(crate) claude_cli_present: bool,
+    /// Version string from `claude --version` (e.g. `"2.1.158"`).
+    pub(crate) claude_cli_version: Option<String>,
+    /// `claude auth status` reports a logged-in subscription session.
+    pub(crate) claude_logged_in: bool,
+    /// Auth method, e.g. `"claude.ai"`.
+    pub(crate) claude_auth_method: Option<String>,
+    /// Subscription tier, e.g. `"max"` / `"pro"`.
+    pub(crate) claude_subscription: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub(crate) struct PathQuery {
     pub(crate) path: Option<String>,

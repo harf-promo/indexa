@@ -101,6 +101,46 @@ pub(crate) async fn cmd_doctor(
     println!("    # then quit and relaunch Ollama.app");
     println!();
 
+    // ── Claude subscription provider (provider = "claude-code") ──
+    // All checks here are token-free local probes — no model is invoked.
+    let cfg =
+        indexa_core::config::load(&indexa_core::config::default_config_path()).unwrap_or_default();
+    let claude = indexa_llm::claude_status(&cfg.describer.claude_bin).await;
+    println!("Claude subscription provider  (set [describer] provider = \"claude-code\")");
+    if claude.cli_present {
+        let ver = claude
+            .cli_version
+            .as_deref()
+            .map(|v| format!(" (v{v})"))
+            .unwrap_or_default();
+        println!("  ✅  claude CLI found{ver}");
+        if claude.logged_in {
+            let plan = claude
+                .subscription_type
+                .as_deref()
+                .unwrap_or("subscription");
+            println!(
+                "  ✅  signed in — {plan} plan; summaries/answers can run on your subscription"
+            );
+        } else {
+            println!("  ⚠️   not signed in — run `claude login` to use the subscription provider");
+        }
+    } else {
+        println!("  ⚠️   claude CLI not found on PATH — install Claude Code to use provider=\"claude-code\"");
+    }
+    if cfg.describer.provider == "claude-code" {
+        println!(
+            "  ℹ️   ACTIVE — [describer] provider = \"claude-code\", model = \"{}\"",
+            cfg.describer.model
+        );
+    } else {
+        println!(
+            "  ℹ️   currently provider = \"{}\" (local) — embeddings always stay local either way",
+            cfg.describer.provider
+        );
+    }
+    println!();
+
     // ── Per-model memory table ──
     println!("Model memory estimates  (num_ctx=4096, num_parallel=1)");
     println!(
