@@ -8,7 +8,7 @@ async function loadMap() {
     const r = await fetch('/api/map');
     const d = await r.json();
     if (!d.length) {
-      table.innerHTML = '<tr><td style="color:var(--muted);padding:12px 10px">No data yet. Run <code>indexa deep &lt;path&gt;</code> first.</td></tr>';
+      table.innerHTML = '<tr><td style="color:var(--muted);padding:12px 10px">No context yet. Run <code>indexa deep &lt;path&gt;</code> first.</td></tr>';
       return;
     }
     table.innerHTML = '<thead><tr><th>Category</th><th>Files</th><th>Size</th></tr></thead>';

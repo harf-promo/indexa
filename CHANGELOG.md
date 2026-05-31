@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`serve` web UI — vocabulary aligned to the context framing.** User-facing labels now say "context", not "index": "Index this folder" → **Build context**, "Index map" → **Context map**, "Deep index" → **Build deep context**, "Re-index all roots" → **Rebuild context for all roots**, "Remove from index" → **Remove from context**, and the empty/loading states read "No context yet / No context roots yet". `indexa scan` / `indexa deep` command names in help text are unchanged.
+
 - **`serve` web UI — memory-pressure warnings are now self-explanatory.** The watchdog's "easing off" warnings carry a structured pressure snapshot (level, swap %, used bytes, compute budget, headroom), rendered as a compact `throttle/critical · budget ±N MB` chip on the warning row so you can correlate a pause with the live Engine-bar RAM gauge instead of parsing the message text. Delivered as an added optional field on the existing warning event (not a new event type), so older clients are unaffected.
 
 - **`serve` web UI — the Engine status bar now narrates the build.** While a summarize/index/deep job runs, the always-on bottom bar shows a live determinate progress bar with the running count, throughput (files/s), ETA, the current file, and the active model — fused client-side from the job's existing event stream, so the bar tells the build story instead of only machine stats. The state word still reads `Building` (or `Easing off` under memory pressure).

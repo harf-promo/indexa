@@ -36,7 +36,7 @@
   <aside class="app-sidebar" id="tree-pane">
     <div class="sidebar-header">
       <span class="sidebar-title">Folders</span>
-      <button class="icon-btn sm" onclick="reindexAll()" title="Re-index all roots" aria-label="Re-index all">&#x21BB;</button>
+      <button class="icon-btn sm" onclick="reindexAll()" title="Rebuild context for all roots" aria-label="Rebuild context for all roots">&#x21BB;</button>
       <button class="icon-btn sm" onclick="openAddRoot()" title="Add root folder" aria-label="Add root folder">+</button>
     </div>
     <div class="tree-search">
@@ -53,7 +53,7 @@
         <div class="welcome" id="browse-welcome">
           <h2>Browse your context</h2>
           <p>Click any folder in the sidebar to read its AI-generated summary and contents.<br><br>
-          Use the row actions to <strong>&#x21BB; scan</strong>, <strong>&#x26A1; deep-index</strong>, or <strong>&#x1F4DD; summarize</strong> a folder.</p>
+          Use the row actions to <strong>&#x21BB; scan</strong>, <strong>&#x26A1; build deep context</strong>, or <strong>&#x1F4DD; summarize</strong> a folder.</p>
         </div>
       </div>
     </div>
@@ -75,7 +75,7 @@
     </div>
     <div class="tab-panel" id="panel-map">
       <div class="map-view" id="map-view">
-        <h2 class="panel-heading">Index map</h2>
+        <h2 class="panel-heading">Context map</h2>
         <table id="map-table"></table>
       </div>
     </div>
@@ -318,7 +318,7 @@
     <div class="fs-browser" id="fs-browser"><div class="fs-entry" style="color:var(--muted)">Loading&#x2026;</div></div>
     <div class="modal-actions">
       <button class="modal-btn" onclick="closeAddRoot()">Cancel</button>
-      <button class="modal-btn primary" onclick="startIndexRoot()">Index this folder</button>
+      <button class="modal-btn primary" onclick="startIndexRoot()">Build context</button>
     </div>
   </div>
 </div>

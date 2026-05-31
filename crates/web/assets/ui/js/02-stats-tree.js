@@ -5,7 +5,7 @@ async function loadStats() {
     const d = await r.json();
     document.getElementById('stats').textContent =
       d.entries.toLocaleString() + ' files \xb7 ' + d.chunks.toLocaleString() + ' chunks';
-  } catch(e) { document.getElementById('stats').textContent = 'No index yet'; }
+  } catch(e) { document.getElementById('stats').textContent = 'No context yet'; }
 }
 
 /* ── Tree ── */
