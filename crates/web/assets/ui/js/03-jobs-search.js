@@ -83,7 +83,7 @@ function buildTreeNode(node) {
       const act = btn.dataset.act;
       if (act === 'remove') {
         const label = node.path.split('/').pop() || node.path;
-        if (!(await confirmModal('Remove ‹' + label + '› from the index?\nFiles on disk are not deleted.', 'Remove'))) return;
+        if (!(await confirmModal('Remove ‹' + label + '› from your context?\nFiles on disk are not deleted.', 'Remove'))) return;
         try {
           await fetch('/api/entry?path=' + encodeURIComponent(node.path), { method: 'DELETE' });
           expandedPaths.delete(node.path);
@@ -149,7 +149,7 @@ async function initTree() {
     const r = await fetch('/api/roots');
     const roots = await r.json();
     if (!roots.length) {
-      list.innerHTML = '<div class="empty-state">No indexed roots yet.<br><span class="cta-link" onclick="openAddRoot()">+ Add Root</span> to get started, or run <code>indexa scan &lt;path&gt;</code> in your terminal.</div>';
+      list.innerHTML = '<div class="empty-state">No context roots yet.<br><span class="cta-link" onclick="openAddRoot()">+ Add Root</span> to get started, or run <code>indexa scan &lt;path&gt;</code> in your terminal.</div>';
       return;
     }
     list.innerHTML = '';
