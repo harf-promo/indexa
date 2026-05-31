@@ -5,12 +5,16 @@
 //! - `openai`   — OpenAI chat completions API (requires `OPENAI_API_KEY`)
 //! - `anthropic`— Anthropic Messages API (requires `ANTHROPIC_API_KEY`)
 //! - `llamacpp` — llama.cpp HTTP server (OpenAI-compatible `/v1/chat/completions`)
+//! - `claude-code` — the user's Claude Pro/Max **subscription**, via the local
+//!   `claude` CLI in headless print mode (no API key, no token billing)
 
 pub mod anthropic;
+pub mod claude_code;
 pub mod ollama;
 pub mod openai_compat;
 
 pub use anthropic::AnthropicLlm;
+pub use claude_code::ClaudeCodeLlm;
 pub use ollama::OllamaLlm;
 pub use openai_compat::OpenAICompatLlm;
 
@@ -212,6 +216,45 @@ pub fn from_config_with_keep_alive(
             OpenAICompatLlm::resolve_base_url(base),
             model,
         ))),
+        "claude-code" => Ok(Box::new(ClaudeCodeLlm::single(model, None))),
         other => anyhow::bail!("unknown LLM provider: {other}"),
+    }
+}
+
+/// Build a `Describer` (file + directory summaries) from config.
+///
+/// Unifies the previously-hardcoded `OllamaLlm::new_with_dir_model` construction
+/// at the summarize/worker/web call sites so a non-Ollama provider (e.g.
+/// `claude-code`, which runs summaries on the user's Claude subscription) is
+/// honored everywhere. `base_url` / `num_ctx` apply to Ollama only.
+pub fn describer_from_config(
+    provider: &str,
+    file_model: &str,
+    dir_model: &str,
+    base_url: &str,
+    num_ctx: u32,
+    claude_bin: &str,
+) -> anyhow::Result<Box<dyn Describer + Send + Sync>> {
+    match provider {
+        "ollama" => {
+            let url = OllamaLlm::resolve_base_url(if base_url.is_empty() {
+                None
+            } else {
+                Some(base_url)
+            });
+            Ok(Box::new(
+                OllamaLlm::new_with_dir_model(url, file_model, dir_model).with_num_ctx(num_ctx),
+            ))
+        }
+        "claude-code" => Ok(Box::new(ClaudeCodeLlm::new(
+            file_model,
+            file_model,
+            dir_model,
+            Some(claude_bin),
+        ))),
+        other => anyhow::bail!(
+            "provider '{other}' has no summarization (Describer) support; \
+             use 'ollama' or 'claude-code'"
+        ),
     }
 }
