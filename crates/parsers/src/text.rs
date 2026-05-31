@@ -1,4 +1,4 @@
-use crate::types::{Chunk, Extracted, Parser};
+use crate::types::{split_char_budget, Chunk, Extracted, Parser, MAX_CHUNK_CHARS};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser as MdParser, Tag, TagEnd};
 use std::path::Path;
 
@@ -37,15 +37,20 @@ impl TextParser {
         while start < words.len() {
             let end = (start + self.chunk_size).min(words.len());
             let chunk_text = words[start..end].join(" ");
-            if !chunk_text.trim().is_empty() {
-                chunks.push(Chunk {
-                    source: source.to_path_buf(),
-                    seq,
-                    heading: String::new(),
-                    text: chunk_text,
-                    language: None,
-                });
-                seq += 1;
+            // Cap each window at MAX_CHUNK_CHARS so a file with few whitespace-separated
+            // "words" (minified CSS/HTML, long lines) can't emit a chunk that overflows
+            // the embedder's context window. Splits oversized windows into pieces.
+            for piece in split_char_budget(&chunk_text, MAX_CHUNK_CHARS) {
+                if !piece.trim().is_empty() {
+                    chunks.push(Chunk {
+                        source: source.to_path_buf(),
+                        seq,
+                        heading: String::new(),
+                        text: piece.to_owned(),
+                        language: None,
+                    });
+                    seq += 1;
+                }
             }
             if end == words.len() {
                 break;
@@ -161,26 +166,32 @@ impl Parser for MarkdownParser {
         for (heading, text) in sections {
             let words: Vec<&str> = text.split_whitespace().collect();
             if words.len() <= self.chunk_size {
-                chunks.push(Chunk {
-                    source: path.to_path_buf(),
-                    seq,
-                    heading: heading.clone(),
-                    text,
-                    language: None,
-                });
-                seq += 1;
-            } else {
-                let mut start = 0;
-                while start < words.len() {
-                    let end = (start + self.chunk_size).min(words.len());
+                // Even a short-word section can be char-huge; cap it.
+                for piece in split_char_budget(&text, MAX_CHUNK_CHARS) {
                     chunks.push(Chunk {
                         source: path.to_path_buf(),
                         seq,
                         heading: heading.clone(),
-                        text: words[start..end].join(" "),
+                        text: piece.to_owned(),
                         language: None,
                     });
                     seq += 1;
+                }
+            } else {
+                let mut start = 0;
+                while start < words.len() {
+                    let end = (start + self.chunk_size).min(words.len());
+                    let window = words[start..end].join(" ");
+                    for piece in split_char_budget(&window, MAX_CHUNK_CHARS) {
+                        chunks.push(Chunk {
+                            source: path.to_path_buf(),
+                            seq,
+                            heading: heading.clone(),
+                            text: piece.to_owned(),
+                            language: None,
+                        });
+                        seq += 1;
+                    }
                     if end == words.len() {
                         break;
                     }

@@ -13,6 +13,14 @@ pub const DEFAULT_DIM: usize = 768;
 /// request body consistent with what the resource engine budgets.
 pub const DEFAULT_NUM_CTX: u32 = 4096;
 
+/// Hard backstop on embed input length in **chars**. The parser layer already caps
+/// chunks (`indexa_parsers::MAX_CHUNK_CHARS`, ~4000), but if any future parser emits
+/// an oversized chunk we truncate here rather than let Ollama 500 with "the input
+/// length exceeds the context length". ~8000 chars ≈ ~2000 tokens, under nomic's
+/// 2048-token window. NOTE: Ollama does **not** silently truncate over-long input on
+/// this version — it errors — so the guard must live client-side.
+const EMBED_MAX_CHARS: usize = 8000;
+
 /// Timeout for embedding requests. Embeddings are fast; 30 s is generous.
 const EMBED_TIMEOUT_SECS: u64 = 30;
 
@@ -124,9 +132,24 @@ struct EmbedResponse {
 impl Embedder for OllamaEmbedder {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let url = format!("{}/api/embeddings", self.base_url);
+        // Backstop: truncate over-long input on a UTF-8 boundary so Ollama can't 500.
+        let prompt: &str = if text.chars().count() > EMBED_MAX_CHARS {
+            let cut = text
+                .char_indices()
+                .nth(EMBED_MAX_CHARS)
+                .map(|(i, _)| i)
+                .unwrap_or(text.len());
+            tracing::debug!(
+                "embed input truncated to {EMBED_MAX_CHARS} chars (was {})",
+                text.chars().count()
+            );
+            &text[..cut]
+        } else {
+            text
+        };
         let body = EmbedRequest {
             model: &self.model,
-            prompt: text,
+            prompt,
             keep_alive: self.keep_alive,
             options: Some(EmbedOptions {
                 num_parallel: 1,
