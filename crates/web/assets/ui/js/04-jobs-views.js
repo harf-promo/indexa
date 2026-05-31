@@ -491,10 +491,21 @@ function applyWarnFilter() {
 
   list.innerHTML = filtered.slice(0, 500).map(function(w) {
     const basename = w.item_path ? w.item_path.split('/').pop() : '';
-    return '<div class="warn-row" onclick="this.classList.toggle(\'expanded\')">' +
+    // Memory-pressure warnings carry a structured snapshot (level + budget); show it as
+    // a compact chip so the user can correlate with the Engine bar's RAM gauge.
+    let pressureChip = '';
+    if (w.pressure) {
+      const p = w.pressure;
+      const budgetMb = Math.round((p.budget_bytes || 0) / 1048576);
+      const sign = budgetMb >= 0 ? '+' : '';
+      pressureChip = '<span class="warn-pressure warn-pressure-' + escapeAttr(p.level) +
+        '" title="budget ' + sign + budgetMb + ' MB · swap ' + p.swap_percent + '%">' +
+        escapeHtml(p.level) + ' · budget ' + sign + budgetMb + ' MB</span>';
+    }
+    return '<div class="warn-row' + (w.pressure ? ' warn-row-pressure' : '') + '" onclick="this.classList.toggle(\'expanded\')">' +
       '<span class="warn-stage">' + escapeHtml(w.stage) + '</span>' +
       (basename ? '<span class="warn-path" title="' + escapeAttr(w.item_path) + '">' + escapeHtml(basename) + '</span>' : '') +
-      '<span class="warn-msg">' + escapeHtml(w.message) + '</span>' +
+      '<span class="warn-msg">' + escapeHtml(w.message) + pressureChip + '</span>' +
       (w.item_path ? '<div class="warn-full-path">' + escapeHtml(w.item_path) + '</div>' : '') +
       '</div>';
   }).join('');

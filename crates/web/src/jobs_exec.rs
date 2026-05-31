@@ -2,7 +2,7 @@
 //! plus their finalization and watchdog helpers. Spawned by the `api_job_*`
 //! handlers; no axum routing lives here.
 
-use crate::jobs::{broadcast_only, push, JobEvent, JobHandle, JobStatus, Jobs};
+use crate::jobs::{broadcast_only, push, JobEvent, JobHandle, JobStatus, Jobs, PressureInfo};
 use crate::AppState;
 use indexa_core::{
     resource::{
@@ -124,6 +124,19 @@ async fn run_watchdog_check(
                  machine responsive — this resumes automatically. \
                  Tip: lower the workload in Settings → Resource Profile."
             ),
+            // Structured snapshot so the UI can line the warning up with the live RAM gauge
+            // instead of parsing the prose. Every value is already in hand here.
+            pressure: Some(PressureInfo {
+                level: match pressure {
+                    Pressure::Critical => "critical",
+                    _ => "throttle",
+                }
+                .to_owned(),
+                swap_percent: pct,
+                used_bytes: sample.used_bytes,
+                budget_bytes: indexa_core::resource::compute_budget(spec, &sample, headroom),
+                headroom_bytes: headroom,
+            }),
         },
     );
 
@@ -159,6 +172,7 @@ async fn run_watchdog_check(
                             "Memory didn't recover within {MAX_PAUSE_SECS}s — continuing gently. \
                              If this repeats, lower the workload in Settings → Resource Profile."
                         ),
+                        pressure: None,
                     },
                 );
                 break;
@@ -174,6 +188,7 @@ async fn run_watchdog_check(
                             message: format!(
                                 "Still easing off while memory recovers … ({elapsed}s)"
                             ),
+                            pressure: None,
                         },
                     );
                     next_status_at += 30;
@@ -303,6 +318,7 @@ async fn run_scan_phase_with_entries(
                 stage: "scan".to_owned(),
                 item_path: None,
                 message: format!("{e:#}"),
+                pressure: None,
             },
         );
     }
@@ -412,6 +428,7 @@ async fn run_deep_phase(
                             stage: "deep".to_owned(),
                             item_path: Some(path_str.clone()),
                             message: format!("{e:#}"),
+                            pressure: None,
                         },
                     );
                     hard_errors += 1;
@@ -425,6 +442,7 @@ async fn run_deep_phase(
                             stage: "deep".to_owned(),
                             item_path: Some(path_str.clone()),
                             message: format!("parse task panicked: {e}"),
+                            pressure: None,
                         },
                     );
                     hard_errors += 1;
@@ -482,6 +500,7 @@ async fn run_deep_phase(
                                             stage: "deep".to_owned(),
                                             item_path: Some(path_str.clone()),
                                             message: format!("context blurb failed: {e:#}"),
+                                            pressure: None,
                                         },
                                     );
                                     chunk.text.clone()
@@ -514,6 +533,7 @@ async fn run_deep_phase(
                                     stage: "deep".to_owned(),
                                     item_path: Some(path_str.clone()),
                                     message: format!("embed failed: {e:#}"),
+                                    pressure: None,
                                 },
                             );
                             None
@@ -539,6 +559,7 @@ async fn run_deep_phase(
                                 stage: "deep".to_owned(),
                                 item_path: Some(path_str.clone()),
                                 message: format!("upsert_chunks failed: {e:#}"),
+                                pressure: None,
                             },
                         );
                         hard_errors += 1;

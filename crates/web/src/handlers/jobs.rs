@@ -228,6 +228,7 @@ pub(crate) async fn api_jobs_events(
                         stage: "sse".into(),
                         item_path: None,
                         message: format!("dropped {n} events — resyncing"),
+                        pressure: None,
                     });
                     // A terminal event may have been among the dropped ones. Re-deliver
                     // it from history so the client always learns the job finished.
