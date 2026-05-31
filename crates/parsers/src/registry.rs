@@ -46,7 +46,42 @@ pub fn parse(path: &Path) -> Result<Extracted> {
         return TextParser::default().parse(path);
     }
 
+    // Many text files have no extension, or a name `mime_guess` maps to
+    // octet-stream (LICENSE, NOTICE, Cargo.lock, .gitignore, …). Sniff the first
+    // bytes: if it looks like UTF-8 text with no NUL byte, index it as plain text
+    // instead of warning "no parser".
+    if looks_like_text(path) {
+        return TextParser::default().parse(path);
+    }
+
     bail!("no parser for: {} (MIME: {mime})", path.display());
+}
+
+/// Cheap heuristic: read the first ~8 KB and decide whether the file is text.
+/// True when there is no NUL byte and the bytes are valid UTF-8 (allowing only a
+/// final multi-byte char to be cut off by the 8 KB read). Genuinely binary files
+/// (NUL bytes, non-UTF-8) return false so they still `bail!` upstream.
+fn looks_like_text(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 8192];
+    let Ok(n) = f.read(&mut buf) else {
+        return false;
+    };
+    if n == 0 {
+        return true; // empty file: harmless to treat as (empty) text
+    }
+    let slice = &buf[..n];
+    if slice.contains(&0) {
+        return false; // NUL byte → binary
+    }
+    match std::str::from_utf8(slice) {
+        Ok(_) => true,
+        // Tolerate only a trailing partial char clipped by the 8 KB window.
+        Err(e) => e.valid_up_to() >= n.saturating_sub(4),
+    }
 }
 
 /// Parse a file with two safety guards, returning `Err` (never panicking, never
@@ -75,6 +110,33 @@ pub fn parse_guarded(path: &Path, size_bytes: u64, max_bytes: u64) -> Result<Ext
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn looks_like_text_accepts_extensionless_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("LICENSE");
+        std::fs::write(&p, "MIT License\n\nPermission is hereby granted...").unwrap();
+        assert!(looks_like_text(&p));
+    }
+
+    #[test]
+    fn looks_like_text_rejects_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("blob.bin");
+        std::fs::write(&p, [0u8, 1, 2, 0, 255, 254]).unwrap();
+        assert!(!looks_like_text(&p));
+    }
+
+    #[test]
+    fn parse_indexes_extensionless_text_via_sniff() {
+        // LICENSE/NOTICE/Cargo.lock map to octet-stream in mime_guess; the sniff
+        // fallback must parse them as text rather than bail "no parser".
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("NOTICE");
+        std::fs::write(&p, "This product includes software developed by Indexa.").unwrap();
+        let ex = parse(&p).expect("extension-less text file should parse via sniff");
+        assert!(!ex.chunks.is_empty());
+    }
 
     #[test]
     fn parse_guarded_skips_oversized_files() {
