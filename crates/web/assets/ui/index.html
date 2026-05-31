@@ -146,6 +146,24 @@
         <p class="settings-note">Keys are saved to your config file with 0600 permissions (run <code>indexa status</code> for its path). Restart <code>indexa serve</code> after saving to apply.</p>
       </div>
       <div class="settings-section">
+        <h2>Claude subscription</h2>
+        <div class="key-rows">
+          <div class="key-row">
+            <span class="key-label">Claude CLI</span>
+            <span class="key-set-badge" id="badge-claude-cli">&#x2026;</span>
+          </div>
+          <div class="key-row">
+            <span class="key-label">Signed in</span>
+            <span class="key-set-badge" id="badge-claude-auth">&#x2026;</span>
+          </div>
+          <div class="key-row">
+            <span class="key-label">Active provider</span>
+            <span class="key-set-badge" id="badge-claude-active">&#x2026;</span>
+          </div>
+        </div>
+        <p class="settings-note">Run summaries and answers on your Claude Pro/Max plan &mdash; no API key, no per-token billing. Set <code>[describer] provider = "claude-code"</code> with <code>model = "sonnet"</code> in your config file, then sign in with <code>claude login</code>. Embeddings always stay local.</p>
+      </div>
+      <div class="settings-section">
         <h2>Refinement Passes</h2>
         <div class="key-rows">
           <div class="key-row">

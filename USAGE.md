@@ -235,12 +235,38 @@ Bring your own model — none is bundled.
 |---|---|---|
 | **Ollama** | Local, offline | Default. `OLLAMA_HOST` to point elsewhere. |
 | **llama.cpp** | Local | Via its OpenAI-compatible HTTP server. |
+| **Claude subscription** | Cloud (your plan) | `provider = "claude-code"` — runs on your Claude Pro/Max plan via the local `claude` CLI, no API key. |
 | **Google Gemini** | Cloud | Embeddings (`text-embedding-004`) match local quality. |
 | **OpenAI** | Cloud | Data leaves your device. |
 | **Anthropic** | Cloud | Data leaves your device (answers/summaries). |
 
 **Optional reranking** — set `[retrieval] rerank = true` to add a cross-encoder reorder pass before the
 answer. Off by default and *fails open*: any model hiccup falls back to the original order.
+
+### Use your Claude Pro/Max subscription (no API key)
+
+If you subscribe to Claude Pro or Max, Indexa can run summaries and answers on your **subscription** via
+the local `claude` CLI — no API key, no per-token billing:
+
+```toml
+# config.toml
+[describer]
+provider = "claude-code"
+model = "sonnet"        # answers (the `ask` path)
+file_model = "sonnet"   # per-file summaries
+dir_model = "sonnet"    # directory roll-ups
+```
+
+**Auth.** Just be logged into Claude Code on the machine (`claude login`). Indexa shells out to
+`claude -p … --output-format json`, which reuses that session and draws from your plan, not the metered
+API. For a headless server, mint a token with `claude setup-token` (sets `CLAUDE_CODE_OAUTH_TOKEN`).
+
+**Caveats.** Each call spawns a short-lived `claude` process (~1–3 s startup), so for whole-disk **bulk**
+summarization local Ollama is faster; `claude-code` shines for `ask` and targeted summaries. **Embeddings
+always stay local** (Ollama `nomic-embed-text`) — the `claude` CLI has no embedding endpoint.
+
+Check it anytime: `indexa doctor` prints a Claude-provider block (CLI present? signed in? which plan?), and
+the web Settings panel shows the same under **Claude subscription**.
 
 ---
 
@@ -268,6 +294,20 @@ Six tools are exposed: `search` (find paths), `browse_tree` (one directory level
 
 A local agent pulls `get_summary("auth")` on demand instead of pre-loading the repo — staying coherent
 across long tasks without hitting the context-window cliff.
+
+### Install Indexa into Claude Code
+
+To let Claude Code (your Sonnet-backed agent) query your indexed context live, register Indexa's MCP
+server once:
+
+```bash
+claude mcp add -s user indexa -- indexa mcp   # register the stdio server (user scope)
+claude mcp list                               # verify: "indexa  - ✓ Connected"
+claude mcp get indexa                         # show the command/args
+```
+
+Any Claude Code session can then call Indexa's `search` / `ask` / `browse_tree` / `get_summary` /
+`read_file` / `get_stats` tools against your local index.
 
 ---
 

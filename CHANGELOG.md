@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`claude-code` LLM provider — use your Claude Pro/Max subscription.** Set `[describer] provider = "claude-code"` (with `model`/`file_model`/`dir_model` = e.g. `"sonnet"`) and Indexa runs answer synthesis and file/directory summaries on your Claude **subscription** via the local `claude` CLI in headless mode — no API key, no per-token billing. As long as you're logged into Claude Code on the machine, it just works (`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` is the headless-server fallback). Embeddings always stay local (Ollama). Each call spawns a short-lived `claude` process, so a built-in concurrency cap keeps bulk summarization from forking too many at once; for whole-disk bulk, local Ollama is still faster. The new `describer_from_config` factory routes the CLI `summarize`/`worker` and the web summarize job through the same provider switch.
+- **Claude subscription status — surfaced in `doctor` and the web UI.** `indexa doctor` now prints a *Claude subscription provider* block (CLI present? signed in? which plan? is `claude-code` the active provider?), and the web Settings panel gains a **Claude subscription** section showing the same. Backed by a new `GET /api/providers/status` and a token-free `indexa_llm::claude_status` probe (`claude --version` + `claude auth status --json` — no model is invoked, so it's safe to call on every Settings load). The user's email from `auth status` is deliberately not exposed.
 
 ## [0.8.0] — 2026-05-31
 

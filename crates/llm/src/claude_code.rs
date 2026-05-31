@@ -189,3 +189,104 @@ impl Describer for ClaudeCodeLlm {
     // describe_stream / summarize_dir_stream: default buffered fallback.
     // unload: default no-op.
 }
+
+// ── CLI status probe ────────────────────────────────────────────────────────────
+
+/// Result of probing the local `claude` CLI for presence + subscription login.
+///
+/// Both sub-checks are **token-free** — they never invoke a model: `--version`
+/// for presence and `auth status --json` for the logged-in session. Safe to call
+/// on a web request or in `doctor`. A missing binary yields `cli_present = false`
+/// with the rest left at their defaults.
+#[derive(Debug, Clone, Default)]
+pub struct ClaudeStatus {
+    /// The `claude` binary resolved and `--version` exited successfully.
+    pub cli_present: bool,
+    /// Leading version token from `claude --version` (e.g. `"2.1.158"`).
+    pub cli_version: Option<String>,
+    /// `claude auth status` reports a logged-in session.
+    pub logged_in: bool,
+    /// Auth method, e.g. `"claude.ai"` (subscription) — from `auth status`.
+    pub auth_method: Option<String>,
+    /// Subscription tier, e.g. `"max"` / `"pro"` — from `auth status`.
+    pub subscription_type: Option<String>,
+}
+
+/// Subset of `claude auth status --json` we read. Intentionally omits the CLI's
+/// `email` / `orgId` / `orgName` fields (PII) — serde drops un-named fields, so
+/// they never reach [`ClaudeStatus`] or the web DTO. Do NOT add them.
+#[derive(Deserialize)]
+struct ClaudeAuthStatus {
+    #[serde(default, rename = "loggedIn")]
+    logged_in: bool,
+    #[serde(default, rename = "authMethod")]
+    auth_method: Option<String>,
+    #[serde(default, rename = "subscriptionType")]
+    subscription_type: Option<String>,
+}
+
+/// Probe the `claude` CLI for presence and subscription login state.
+///
+/// Runs two local, token-free commands: `<bin> --version` and
+/// `<bin> auth status --json`. Never invokes a model, so it's cheap enough to
+/// call on every Settings load or `doctor` run. Returns whatever could be
+/// determined; if the binary is absent, auth is not probed.
+pub async fn claude_status(claude_bin: &str) -> ClaudeStatus {
+    let bin = if claude_bin.is_empty() {
+        "claude"
+    } else {
+        claude_bin
+    };
+    let mut status = ClaudeStatus::default();
+
+    // Hard cap each probe: `auth status` may touch the network to validate the
+    // OAuth token, and this runs on a web request (Settings load). A stalled CLI
+    // must degrade to "unknown", never hang the Axum worker.
+    let probe_timeout = std::time::Duration::from_secs(5);
+
+    // Presence: `claude --version` → e.g. "2.1.158 (Claude Code)".
+    let version = tokio::time::timeout(
+        probe_timeout,
+        Command::new(bin)
+            .arg("--version")
+            .env_remove("ANTHROPIC_API_KEY")
+            .output(),
+    )
+    .await;
+    if let Ok(Ok(out)) = version {
+        if out.status.success() {
+            status.cli_present = true;
+            let v = String::from_utf8_lossy(&out.stdout);
+            status.cli_version = v.split_whitespace().next().map(|s| s.to_owned());
+        }
+    }
+
+    // No binary → nothing more to learn.
+    if !status.cli_present {
+        return status;
+    }
+
+    // Login state: `claude auth status --json` →
+    // {"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max",...}.
+    // `--json` is the default but we pass it explicitly to be robust to changes.
+    let auth = tokio::time::timeout(
+        probe_timeout,
+        Command::new(bin)
+            .arg("auth")
+            .arg("status")
+            .arg("--json")
+            .env_remove("ANTHROPIC_API_KEY")
+            .output(),
+    )
+    .await;
+    if let Ok(Ok(out)) = auth {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if let Ok(parsed) = serde_json::from_str::<ClaudeAuthStatus>(&stdout) {
+            status.logged_in = parsed.logged_in;
+            status.auth_method = parsed.auth_method;
+            status.subscription_type = parsed.subscription_type;
+        }
+    }
+
+    status
+}

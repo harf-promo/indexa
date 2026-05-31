@@ -102,6 +102,30 @@ async function loadKeys() {
   } catch(_) {}
 }
 
+async function loadProviderStatus() {
+  try {
+    const r = await fetch('/api/providers/status');
+    if (!r.ok) return;
+    const d = await r.json();
+    const cli = document.getElementById('badge-claude-cli');
+    const auth = document.getElementById('badge-claude-auth');
+    const active = document.getElementById('badge-claude-active');
+    if (cli) cli.textContent = d.claude_cli_present
+      ? ('✓ ' + (d.claude_cli_version ? 'v' + d.claude_cli_version : 'found'))
+      : '✗ not found';
+    if (auth) {
+      if (d.claude_logged_in) {
+        auth.textContent = '✓ ' + (d.claude_subscription ? d.claude_subscription + ' plan' : 'signed in');
+      } else {
+        auth.textContent = d.claude_cli_present ? '✗ run: claude login' : '—';
+      }
+    }
+    if (active) active.textContent = d.describer_provider === 'claude-code'
+      ? '✓ claude-code'
+      : (d.describer_provider || '—');
+  } catch(_) {}
+}
+
 async function saveKey(provider) {
   const val = document.getElementById('key-' + provider).value.trim();
   if (!val) return clearKey(provider);
