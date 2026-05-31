@@ -16,22 +16,17 @@
 <header class="app-topbar">
   <h1 class="app-logo">&#x2B21; Indexa</h1>
   <span class="app-version" id="app-version"></span>
-  <button class="icon-btn" id="cmd-palette-btn" onclick="openCmdPalette()" title="Command palette (&#x2318;K)" aria-label="Open command palette">&#x2318;K</button>
-  <nav class="app-tabs">
-    <button class="tab" id="tab-tree" onclick="switchTab('tree')">Browse</button>
-    <button class="tab active" id="tab-chat" onclick="switchTab('chat')">Ask</button>
-    <button class="tab" id="tab-map" onclick="switchTab('map')">Map</button>
-    <button class="tab" id="tab-settings" onclick="switchTab('settings')">Settings</button>
-    <button class="tab" id="tab-jobs" onclick="switchTab('jobs')">Jobs <span class="tab-jobs-badge" id="jobs-tab-badge" hidden></span></button>
-  </nav>
+  <span class="app-tagline">the local context engine for AI</span>
   <div class="app-topbar-actions">
     <span class="app-stats" id="stats">Loading&#x2026;</span>
+    <button class="icon-btn" id="cmd-palette-btn" onclick="openCmdPalette()" title="Command palette (&#x2318;K)" aria-label="Open command palette">&#x2318;K</button>
+    <button class="icon-btn" id="settings-gear" onclick="switchTab('settings')" title="Settings" aria-label="Settings">&#x2699;</button>
     <button class="icon-btn" id="sound-toggle" onclick="toggleSound()" title="Toggle sound notifications" aria-label="Toggle sound">&#x1F514;</button>
     <button class="icon-btn" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" aria-label="Toggle theme">&#x1F317;</button>
   </div>
 </header>
 
-<!-- Main body: sidebar + content -->
+<!-- Main body: sidebar + Context workspace -->
 <div class="app-body">
   <aside class="app-sidebar" id="tree-pane">
     <div class="sidebar-header">
@@ -46,222 +41,248 @@
     <div class="tree-list" id="tree-list"></div>
   </aside>
 
-  <!-- Content panels — each tab gets its own panel with CSS fade -->
+  <!-- Context workspace — one panel with a Context | Map | Ask view toggle and an
+       always-docked Ask bar. Settings + Activity(Jobs) live in drawers (below). -->
   <main class="app-main">
-    <div class="tab-panel" id="panel-tree">
-      <div class="summary-view" id="summary-view">
-        <div class="welcome" id="browse-welcome">
-          <h2>Browse your context</h2>
-          <p>Click any folder in the sidebar to read its AI-generated summary and contents.<br><br>
-          Use the row actions to <strong>&#x21BB; scan</strong>, <strong>&#x26A1; build deep context</strong>, or <strong>&#x1F4DD; summarize</strong> a folder.</p>
-        </div>
+    <div class="workspace-toolbar">
+      <div class="view-toggle" role="tablist" aria-label="Workspace view">
+        <button class="view-tab active" id="view-tree" role="tab" onclick="switchTab('tree')">Context</button>
+        <button class="view-tab" id="view-map" role="tab" onclick="switchTab('map')">Map</button>
+        <button class="view-tab" id="view-chat" role="tab" onclick="switchTab('chat')">Ask</button>
       </div>
     </div>
-    <div class="tab-panel active" id="panel-chat">
-      <div class="chat-view" id="chat-view">
-        <div class="chat-area" id="chat">
-          <div class="welcome">
+
+    <div class="workspace-views" id="workspace-views">
+      <div class="tab-panel active" id="panel-tree">
+        <div class="summary-view" id="summary-view">
+          <div class="welcome" id="browse-welcome">
             <h2>Your local context, on tap</h2>
-            <p>Indexa has built context for your files. Ask, export to your AI tool, or browse the tree.<br><br>
-            <code>&#x201C;where are my tax documents?&#x201D;</code> &nbsp;&middot;&nbsp; <code>&#x201C;where is auth handled in this repo?&#x201D;</code><br><br>
-            Click any folder in the tree to explore its context summary.</p>
+            <p>Click any folder in the sidebar to read its context summary, switch to the <strong>Map</strong>, or <strong>Ask</strong> a question below.<br><br>
+            Use the row actions to <strong>&#x21BB; scan</strong>, <strong>&#x26A1; build deep context</strong>, or <strong>&#x1F4DD; summarize</strong> a folder.</p>
           </div>
-        </div>
-        <div class="input-bar">
-          <input type="text" id="q" placeholder="Ask your local context&#x2026;" autocomplete="off" aria-label="Ask a question">
-          <button id="send">Ask</button>
         </div>
       </div>
-    </div>
-    <div class="tab-panel" id="panel-map">
-      <div class="map-view" id="map-view">
-        <h2 class="panel-heading">Context map</h2>
-        <table id="map-table"></table>
+      <div class="tab-panel" id="panel-chat">
+        <div class="chat-view" id="chat-view">
+          <div class="chat-area" id="chat">
+            <div class="welcome">
+              <h2>Ask your local context</h2>
+              <p>Indexa has built context for your files. Ask a question, export to your AI tool, or browse the tree.<br><br>
+              <code>&#x201C;where are my tax documents?&#x201D;</code> &nbsp;&middot;&nbsp; <code>&#x201C;where is auth handled in this repo?&#x201D;</code></p>
+            </div>
+          </div>
+        </div>
       </div>
-    </div>
-    <div class="tab-panel" id="panel-settings">
-      <div class="settings-view" id="settings-view">
-        <div class="settings-section">
-          <h2>Local Models (Ollama)</h2>
-          <div id="models-list" class="model-list"><div style="color:var(--muted);font-size:13px">Loading&#x2026;</div></div>
-          <div class="pull-row">
-            <input type="text" id="pull-input" placeholder="Model name (e.g. gemma3:4b, nomic-embed-text)" autocomplete="off" list="model-suggestions" aria-label="Model name to pull">
-            <datalist id="model-suggestions">
-              <option value="gemma3:4b">
-              <option value="gemma3:12b">
-              <option value="gemma3:27b">
-              <option value="nomic-embed-text">
-              <option value="qwen2.5-coder:7b">
-              <option value="mistral:7b">
-            </datalist>
-            <button id="pull-btn" onclick="pullModel()">Pull</button>
-          </div>
-          <div id="pull-progress" class="pull-progress"></div>
-          <p class="settings-note">Models are stored by Ollama. After pulling, update <code>[describer] model</code> in your config file to use the new model. Run <code>indexa status</code> to see its exact path.</p>
-        </div>
-        <div class="settings-section">
-          <h2>Cloud Provider API Keys</h2>
-          <div id="key-gate-notice" class="key-gate-notice" style="display:none">
-            API key editing is disabled. To enable: <code>INDEXA_WEB_ALLOW_KEY_EDIT=1 indexa serve</code>
-          </div>
-          <div class="key-rows">
-            <div class="key-row">
-              <span class="key-label">OpenAI</span>
-              <input type="password" class="key-input" id="key-openai" placeholder="sk-&#x2026;" autocomplete="off" aria-label="OpenAI API key">
-              <span class="key-set-badge" id="badge-openai"></span>
-              <button class="btn-sm" onclick="saveKey('openai')">Save</button>
-              <button class="btn-sm" onclick="clearKey('openai')">Clear</button>
-            </div>
-            <div class="key-row">
-              <span class="key-label">Anthropic</span>
-              <input type="password" class="key-input" id="key-anthropic" placeholder="sk-ant-&#x2026;" autocomplete="off" aria-label="Anthropic API key">
-              <span class="key-set-badge" id="badge-anthropic"></span>
-              <button class="btn-sm" onclick="saveKey('anthropic')">Save</button>
-              <button class="btn-sm" onclick="clearKey('anthropic')">Clear</button>
-            </div>
-            <div class="key-row">
-              <span class="key-label">Google</span>
-              <input type="password" class="key-input" id="key-google" placeholder="AIza&#x2026;" autocomplete="off" aria-label="Google API key">
-              <span class="key-set-badge" id="badge-google"></span>
-              <button class="btn-sm" onclick="saveKey('google')">Save</button>
-              <button class="btn-sm" onclick="clearKey('google')">Clear</button>
-            </div>
-          </div>
-          <p class="settings-note">Keys are saved to your config file with 0600 permissions (run <code>indexa status</code> for its path). Restart <code>indexa serve</code> after saving to apply.</p>
-        </div>
-        <div class="settings-section">
-          <h2>Refinement Passes</h2>
-          <div class="key-rows">
-            <div class="key-row">
-              <span class="key-label">First-time</span>
-              <input type="number" class="key-input" id="passes-first" min="1" max="3" value="2" style="width:60px" aria-label="Passes for first-time build">
-              <span class="key-set-badge" style="color:var(--muted);font-size:11px">default 2</span>
-            </div>
-            <div class="key-row">
-              <span class="key-label">Refresh</span>
-              <input type="number" class="key-input" id="passes-refresh" min="1" max="3" value="1" style="width:60px" aria-label="Passes for refresh">
-              <span class="key-set-badge" style="color:var(--muted);font-size:11px">default 1</span>
-            </div>
-          </div>
-          <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
-            <button class="btn-sm" onclick="savePasses()">Save passes</button>
-            <span id="passes-status" style="font-size:12px;color:var(--muted)"></span>
-          </div>
-          <p class="settings-note">More passes = higher context quality at the cost of LLM calls. Cap is 3 (Self-Refine research: quality degrades above 3 passes).</p>
-        </div>
-        <div class="settings-section">
-          <h2>Resource Profile / Workload</h2>
-          <div class="key-rows">
-            <div class="key-row">
-              <span class="key-label">Profile</span>
-              <select class="key-input" id="resource-profile" aria-label="Resource profile">
-                <option value="conservative">Conservative &#x2014; gentlest, keeps the most RAM free</option>
-                <option value="balanced">Balanced &#x2014; default</option>
-                <option value="performance">Performance &#x2014; fastest, heaviest</option>
-              </select>
-            </div>
-            <div class="key-row">
-              <span class="key-label">Headroom (GB)</span>
-              <input type="number" class="key-input" id="resource-headroom" min="0" step="0.5" value="0" style="width:80px" aria-label="RAM headroom in GB, 0 = profile default">
-              <span class="key-set-badge" style="color:var(--muted);font-size:11px">0 = profile default</span>
-            </div>
-          </div>
-          <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
-            <button class="btn-sm" onclick="saveResource()">Save profile</button>
-            <span id="resource-status" style="font-size:12px;color:var(--muted)"></span>
-          </div>
-          <p class="settings-note">Governs how much RAM Indexa keeps free and how hard it pushes the machine. Applies to the next job.</p>
+      <div class="tab-panel" id="panel-map">
+        <div class="map-view" id="map-view">
+          <h2 class="panel-heading">Context map</h2>
+          <table id="map-table"></table>
         </div>
       </div>
     </div>
 
-    <!-- ── Jobs tab ── -->
-    <div class="tab-panel" id="panel-jobs">
-      <div class="jobs-page">
-        <!-- Master list -->
-        <aside class="jobs-master">
-          <div class="jobs-master-head">
-            <span class="jobs-master-title">Jobs</span>
-            <span class="jobs-queue-stats" id="jobs-queue-stats"></span>
-            <div class="jobs-filter-pills" id="jobs-filter-pills">
-              <button class="jobs-filter active" data-filter="all" onclick="setJobsFilter('all')">All</button>
-              <button class="jobs-filter" data-filter="running" onclick="setJobsFilter('running')">Running</button>
-              <button class="jobs-filter" data-filter="done" onclick="setJobsFilter('done')">Done</button>
-              <button class="jobs-filter" data-filter="failed" onclick="setJobsFilter('failed')">Failed</button>
-            </div>
-            <button class="btn-sm" onclick="clearFinishedJobs()" title="Remove all completed and failed jobs from list">Clear finished</button>
-          </div>
-          <div class="jobs-master-list" id="jobs-master-list">
-            <div class="jobs-empty" id="jobs-empty">No jobs yet. Start one from the Browse tab.</div>
-          </div>
-        </aside>
-
-        <!-- Detail pane -->
-        <section class="jobs-detail" id="jobs-detail">
-          <div class="jd-placeholder" id="jd-placeholder">
-            <span>Select a job to see details</span>
-          </div>
-          <div class="jd-content" id="jd-content" hidden>
-            <!-- Header -->
-            <div class="jd-header">
-              <span class="jd-kind-badge" id="jd-kind"></span>
-              <span class="jd-path" id="jd-path" title=""></span>
-              <span class="jd-status-chip" id="jd-status-chip"></span>
-              <span class="jd-elapsed" id="jd-elapsed"></span>
-              <div style="flex:1"></div>
-              <button class="jd-copy-btn" id="jd-copy-btn" title="Copy error report" style="display:none" onclick="copyJobReport()">&#x1F4CB;</button>
-              <button class="jd-dismiss-btn" id="jd-dismiss-btn" title="Dismiss this job" onclick="dismissSelectedJob()">&#xd7;</button>
-            </div>
-
-            <!-- Progress -->
-            <div class="jd-progress-row" id="jd-progress-row">
-              <progress class="jd-bar" id="jd-bar" value="0" max="100"></progress>
-              <div class="jd-progress-meta">
-                <span id="jd-count"></span>
-                <span id="jd-speed"></span>
-              </div>
-            </div>
-
-            <!-- Live AI output -->
-            <div class="jd-live" id="jd-live">
-              <div class="jd-live-header">
-                <span class="jd-live-label">Now</span>
-                <span class="jd-live-file" id="jd-live-file"></span>
-                <span class="jd-live-model" id="jd-live-model"></span>
-                <button class="jd-ai-toggle" id="jd-ai-toggle" title="Toggle AI output" onclick="toggleDetailAi()">&#x2728; AI output</button>
-              </div>
-              <pre class="jd-ai-pre" id="jd-ai-pre" hidden></pre>
-            </div>
-
-            <!-- Stats row -->
-            <div class="jd-stats-row" id="jd-stats-row">
-              <span id="jd-stats-files"></span>
-              <span id="jd-stats-bytes"></span>
-              <span id="jd-warn-summary"></span>
-            </div>
-
-            <!-- Warnings -->
-            <div class="jd-warnings-section" id="jd-warnings-section" hidden>
-              <div class="jd-warn-head">
-                <span class="jd-warn-title" id="jd-warn-title"></span>
-                <select class="jd-warn-filter" id="jd-warn-stage-filter" onchange="applyWarnFilter()">
-                  <option value="">All stages</option>
-                </select>
-                <input class="jd-warn-search" id="jd-warn-search" type="text" placeholder="Filter messages&#x2026;" oninput="applyWarnFilter()">
-              </div>
-              <div class="jd-warn-list" id="jd-warn-list"></div>
-            </div>
-
-            <!-- Failed error -->
-            <div class="jd-error-section" id="jd-error-section" hidden>
-              <div class="jd-error-msg" id="jd-error-msg"></div>
-              <div class="jd-error-chain" id="jd-error-chain"></div>
-            </div>
-          </div>
-        </section>
-      </div>
+    <!-- Always-docked Ask bar: submitting switches the workspace to the Ask view. -->
+    <div class="input-bar" id="ask-bar">
+      <input type="text" id="q" placeholder="Ask your local context&#x2026;" autocomplete="off" aria-label="Ask a question">
+      <button id="send">Ask</button>
     </div>
   </main>
+</div>
+
+<!-- Settings drawer — opened from the topbar gear (switchTab('settings')) -->
+<div class="drawer-overlay" id="panel-settings" onclick="if(event.target===this)closeDrawer('settings')" role="dialog" aria-modal="true" aria-label="Settings">
+  <div class="drawer">
+    <div class="drawer-head">
+      <span class="drawer-title">Settings</span>
+      <button class="icon-btn" onclick="closeDrawer('settings')" title="Close" aria-label="Close settings">&#x2715;</button>
+    </div>
+    <div class="settings-view" id="settings-view">
+      <div class="settings-section">
+        <h2>Local Models (Ollama)</h2>
+        <div id="models-list" class="model-list"><div style="color:var(--muted);font-size:13px">Loading&#x2026;</div></div>
+        <div class="pull-row">
+          <input type="text" id="pull-input" placeholder="Model name (e.g. gemma3:4b, nomic-embed-text)" autocomplete="off" list="model-suggestions" aria-label="Model name to pull">
+          <datalist id="model-suggestions">
+            <option value="gemma3:4b">
+            <option value="gemma3:12b">
+            <option value="gemma3:27b">
+            <option value="nomic-embed-text">
+            <option value="qwen2.5-coder:7b">
+            <option value="mistral:7b">
+          </datalist>
+          <button id="pull-btn" onclick="pullModel()">Pull</button>
+        </div>
+        <div id="pull-progress" class="pull-progress"></div>
+        <p class="settings-note">Models are stored by Ollama. After pulling, update <code>[describer] model</code> in your config file to use the new model. Run <code>indexa status</code> to see its exact path.</p>
+      </div>
+      <div class="settings-section">
+        <h2>Cloud Provider API Keys</h2>
+        <div id="key-gate-notice" class="key-gate-notice" style="display:none">
+          API key editing is disabled. To enable: <code>INDEXA_WEB_ALLOW_KEY_EDIT=1 indexa serve</code>
+        </div>
+        <div class="key-rows">
+          <div class="key-row">
+            <span class="key-label">OpenAI</span>
+            <input type="password" class="key-input" id="key-openai" placeholder="sk-&#x2026;" autocomplete="off" aria-label="OpenAI API key">
+            <span class="key-set-badge" id="badge-openai"></span>
+            <button class="btn-sm" onclick="saveKey('openai')">Save</button>
+            <button class="btn-sm" onclick="clearKey('openai')">Clear</button>
+          </div>
+          <div class="key-row">
+            <span class="key-label">Anthropic</span>
+            <input type="password" class="key-input" id="key-anthropic" placeholder="sk-ant-&#x2026;" autocomplete="off" aria-label="Anthropic API key">
+            <span class="key-set-badge" id="badge-anthropic"></span>
+            <button class="btn-sm" onclick="saveKey('anthropic')">Save</button>
+            <button class="btn-sm" onclick="clearKey('anthropic')">Clear</button>
+          </div>
+          <div class="key-row">
+            <span class="key-label">Google</span>
+            <input type="password" class="key-input" id="key-google" placeholder="AIza&#x2026;" autocomplete="off" aria-label="Google API key">
+            <span class="key-set-badge" id="badge-google"></span>
+            <button class="btn-sm" onclick="saveKey('google')">Save</button>
+            <button class="btn-sm" onclick="clearKey('google')">Clear</button>
+          </div>
+        </div>
+        <p class="settings-note">Keys are saved to your config file with 0600 permissions (run <code>indexa status</code> for its path). Restart <code>indexa serve</code> after saving to apply.</p>
+      </div>
+      <div class="settings-section">
+        <h2>Refinement Passes</h2>
+        <div class="key-rows">
+          <div class="key-row">
+            <span class="key-label">First-time</span>
+            <input type="number" class="key-input" id="passes-first" min="1" max="3" value="2" style="width:60px" aria-label="Passes for first-time build">
+            <span class="key-set-badge" style="color:var(--muted);font-size:11px">default 2</span>
+          </div>
+          <div class="key-row">
+            <span class="key-label">Refresh</span>
+            <input type="number" class="key-input" id="passes-refresh" min="1" max="3" value="1" style="width:60px" aria-label="Passes for refresh">
+            <span class="key-set-badge" style="color:var(--muted);font-size:11px">default 1</span>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+          <button class="btn-sm" onclick="savePasses()">Save passes</button>
+          <span id="passes-status" style="font-size:12px;color:var(--muted)"></span>
+        </div>
+        <p class="settings-note">More passes = higher context quality at the cost of LLM calls. Cap is 3 (Self-Refine research: quality degrades above 3 passes).</p>
+      </div>
+      <div class="settings-section">
+        <h2>Resource Profile / Workload</h2>
+        <div class="key-rows">
+          <div class="key-row">
+            <span class="key-label">Profile</span>
+            <select class="key-input" id="resource-profile" aria-label="Resource profile">
+              <option value="conservative">Conservative &#x2014; gentlest, keeps the most RAM free</option>
+              <option value="balanced">Balanced &#x2014; default</option>
+              <option value="performance">Performance &#x2014; fastest, heaviest</option>
+            </select>
+          </div>
+          <div class="key-row">
+            <span class="key-label">Headroom (GB)</span>
+            <input type="number" class="key-input" id="resource-headroom" min="0" step="0.5" value="0" style="width:80px" aria-label="RAM headroom in GB, 0 = profile default">
+            <span class="key-set-badge" style="color:var(--muted);font-size:11px">0 = profile default</span>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+          <button class="btn-sm" onclick="saveResource()">Save profile</button>
+          <span id="resource-status" style="font-size:12px;color:var(--muted)"></span>
+        </div>
+        <p class="settings-note">Governs how much RAM Indexa keeps free and how hard it pushes the machine. Applies to the next job.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Activity drawer — opened from the Engine bar; re-homes the old Jobs tab. -->
+<div class="drawer-overlay" id="panel-jobs" onclick="if(event.target===this)closeDrawer('jobs')" role="dialog" aria-modal="true" aria-label="Activity">
+  <div class="drawer drawer-wide">
+    <div class="drawer-head">
+      <span class="drawer-title">Activity</span>
+      <button class="icon-btn" onclick="closeDrawer('jobs')" title="Close" aria-label="Close activity">&#x2715;</button>
+    </div>
+    <div class="jobs-page">
+      <!-- Master list -->
+      <aside class="jobs-master">
+        <div class="jobs-master-head">
+          <span class="jobs-master-title">Jobs</span>
+          <span class="jobs-queue-stats" id="jobs-queue-stats"></span>
+          <div class="jobs-filter-pills" id="jobs-filter-pills">
+            <button class="jobs-filter active" data-filter="all" onclick="setJobsFilter('all')">All</button>
+            <button class="jobs-filter" data-filter="running" onclick="setJobsFilter('running')">Running</button>
+            <button class="jobs-filter" data-filter="done" onclick="setJobsFilter('done')">Done</button>
+            <button class="jobs-filter" data-filter="failed" onclick="setJobsFilter('failed')">Failed</button>
+          </div>
+          <button class="btn-sm" onclick="clearFinishedJobs()" title="Remove all completed and failed jobs from list">Clear finished</button>
+        </div>
+        <div class="jobs-master-list" id="jobs-master-list">
+          <div class="jobs-empty" id="jobs-empty">No jobs yet. Start one from the Context view.</div>
+        </div>
+      </aside>
+
+      <!-- Detail pane -->
+      <section class="jobs-detail" id="jobs-detail">
+        <div class="jd-placeholder" id="jd-placeholder">
+          <span>Select a job to see details</span>
+        </div>
+        <div class="jd-content" id="jd-content" hidden>
+          <!-- Header -->
+          <div class="jd-header">
+            <span class="jd-kind-badge" id="jd-kind"></span>
+            <span class="jd-path" id="jd-path" title=""></span>
+            <span class="jd-status-chip" id="jd-status-chip"></span>
+            <span class="jd-elapsed" id="jd-elapsed"></span>
+            <div style="flex:1"></div>
+            <button class="jd-copy-btn" id="jd-copy-btn" title="Copy error report" style="display:none" onclick="copyJobReport()">&#x1F4CB;</button>
+            <button class="jd-dismiss-btn" id="jd-dismiss-btn" title="Dismiss this job" onclick="dismissSelectedJob()">&#xd7;</button>
+          </div>
+
+          <!-- Progress -->
+          <div class="jd-progress-row" id="jd-progress-row">
+            <progress class="jd-bar" id="jd-bar" value="0" max="100"></progress>
+            <div class="jd-progress-meta">
+              <span id="jd-count"></span>
+              <span id="jd-speed"></span>
+            </div>
+          </div>
+
+          <!-- Live AI output -->
+          <div class="jd-live" id="jd-live">
+            <div class="jd-live-header">
+              <span class="jd-live-label">Now</span>
+              <span class="jd-live-file" id="jd-live-file"></span>
+              <span class="jd-live-model" id="jd-live-model"></span>
+              <button class="jd-ai-toggle" id="jd-ai-toggle" title="Toggle AI output" onclick="toggleDetailAi()">&#x2728; AI output</button>
+            </div>
+            <pre class="jd-ai-pre" id="jd-ai-pre" hidden></pre>
+          </div>
+
+          <!-- Stats row -->
+          <div class="jd-stats-row" id="jd-stats-row">
+            <span id="jd-stats-files"></span>
+            <span id="jd-stats-bytes"></span>
+            <span id="jd-warn-summary"></span>
+          </div>
+
+          <!-- Warnings -->
+          <div class="jd-warnings-section" id="jd-warnings-section" hidden>
+            <div class="jd-warn-head">
+              <span class="jd-warn-title" id="jd-warn-title"></span>
+              <select class="jd-warn-filter" id="jd-warn-stage-filter" onchange="applyWarnFilter()">
+                <option value="">All stages</option>
+              </select>
+              <input class="jd-warn-search" id="jd-warn-search" type="text" placeholder="Filter messages&#x2026;" oninput="applyWarnFilter()">
+            </div>
+            <div class="jd-warn-list" id="jd-warn-list"></div>
+          </div>
+
+          <!-- Failed error -->
+          <div class="jd-error-section" id="jd-error-section" hidden>
+            <div class="jd-error-msg" id="jd-error-msg"></div>
+            <div class="jd-error-chain" id="jd-error-chain"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
 </div>
 
 <!-- Engine status bar — always-on machine telemetry (CPU / RAM / memory pressure) -->
@@ -297,10 +318,13 @@
     <span class="engine-job-model" id="engine-job-model"></span>
   </span>
   <span class="engine-spacer"></span>
+  <button class="engine-activity" id="engine-activity" onclick="switchTab('jobs')" title="Activity — jobs &amp; warnings" aria-label="Open activity">
+    &#x25B8; Activity <span class="engine-activity-badge" id="engine-activity-badge" hidden></span>
+  </button>
   <span class="engine-machine" id="engine-machine"></span>
 </footer>
 
-<!-- Jobs mini pill — ambient indicator when tab not active -->
+<!-- Jobs mini pill — ambient indicator; opens the Activity drawer -->
 <button class="jobs-pill" id="jobs-pill" hidden onclick="switchTab('jobs')" aria-label="View active jobs">
   <span class="jobs-pill-dot" id="jobs-pill-dot"></span>
   <span id="jobs-pill-text"></span>

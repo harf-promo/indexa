@@ -587,7 +587,7 @@ function updateJobsPill() {
 }
 
 function updateJobsTabBadge() {
-  const badge = document.getElementById('jobs-tab-badge');
+  const badge = document.getElementById('engine-activity-badge');
   if (!badge) return;
   const running = Object.values(activeJobs).filter(function(j) {
     return j.status === 'running' || j.status === 'reconnecting';
