@@ -1,6 +1,6 @@
 //! Background summarization worker — drains the summary_queue table.
 
-use crate::summarize::process_queue_item;
+use crate::summarize::{process_queue_item, QueueOutcome};
 use indexa_core::{
     config::DescriberConfig,
     resource::{assess, detect_machine, pause_step, PauseAction, Pressure, WatchdogState},
@@ -8,9 +8,17 @@ use indexa_core::{
 };
 use indexa_embed::Embedder;
 use indexa_llm::Describer;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+
+/// Force a directory's roll-up after this many consecutive defers — a panic-level
+/// backstop so a child that never reaches a terminal state (e.g. a task panic that
+/// strands it `in_flight`) can't defer the parent forever. With the ~250 ms backoff this
+/// is ~5 min — far above the LLM request timeout that normally terminalizes a hung child
+/// — so normal summary latency never triggers a premature (incomplete) roll-up.
+const MAX_DIR_DEFERS: u32 = 1200;
 
 /// Run the background summarization worker until the channel is closed or the
 /// process exits. Items are processed one at a time per worker instance;
@@ -45,6 +53,10 @@ pub async fn run_worker(
             return;
         }
     };
+
+    // Per-loop count of how many times each directory has been deferred (children not
+    // yet summarized), to apply the force-rollup cap. Pruned on a terminal outcome.
+    let mut defers: HashMap<String, u32> = HashMap::new();
 
     loop {
         let item = match job_store.next_queue_item() {
@@ -104,25 +116,46 @@ pub async fn run_worker(
                     }
                 }
 
+                // Force the roll-up once this dir has been deferred too many times, so a
+                // stuck/hung child can't block it forever.
+                let force = item.kind == "dir"
+                    && defers.get(&item.path).copied().unwrap_or(0) >= MAX_DIR_DEFERS;
+
                 // Process against the worker's dedicated connection — the shared
                 // `store` mutex is never held across this await.
-                if let Err(e) = process_queue_item(
+                match process_queue_item(
                     &mut job_store,
                     describer.as_ref(),
                     embedder.as_ref(),
                     &item,
                     &cfg,
+                    force,
                 )
                 .await
                 {
-                    // `process_queue_item` only returns Err on an unexpected store error,
-                    // which leaves the claimed row `in_flight`. Terminalize it (best-effort)
-                    // so it can't get stuck blocking the queue until the next restart sweep.
-                    tracing::warn!("worker: process_queue_item error for {}: {e}", item.path);
-                    if let Err(e2) =
-                        job_store.mark_queue_state(&item.path, "failed", Some(&format!("{e:#}")))
-                    {
-                        tracing::warn!("worker: could not terminalize {}: {e2}", item.path);
+                    Ok(QueueOutcome::Deferred) => {
+                        // Children not summarized yet; the dir was re-enqueued `pending`.
+                        // Back off briefly so we don't hot-spin while a sibling worker
+                        // finishes them, then poll again.
+                        *defers.entry(item.path.clone()).or_insert(0) += 1;
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                    Ok(_) => {
+                        defers.remove(&item.path);
+                    }
+                    Err(e) => {
+                        // `process_queue_item` only returns Err on an unexpected store error,
+                        // which leaves the claimed row `in_flight`. Terminalize it (best-effort)
+                        // so it can't get stuck blocking the queue until the next restart sweep.
+                        defers.remove(&item.path);
+                        tracing::warn!("worker: process_queue_item error for {}: {e}", item.path);
+                        if let Err(e2) = job_store.mark_queue_state(
+                            &item.path,
+                            "failed",
+                            Some(&format!("{e:#}")),
+                        ) {
+                            tracing::warn!("worker: could not terminalize {}: {e2}", item.path);
+                        }
                     }
                 }
             }

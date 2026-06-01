@@ -12,8 +12,14 @@ use indexa_core::{
 };
 use indexa_embed::Embedder;
 use indexa_llm::{ChildSummary, Describer};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Force a directory's roll-up after this many consecutive defers — a panic-level
+/// backstop (~5 min at the ~250 ms backoff, far above the LLM request timeout) so a
+/// child stranded `in_flight` can't defer its parent forever.
+const MAX_DIR_DEFERS: u32 = 1200;
 
 fn now_secs() -> i64 {
     SystemTime::now()
@@ -318,17 +324,41 @@ pub async fn summarize_directory(
     Ok(true)
 }
 
+/// Outcome of processing one summary-queue item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueOutcome {
+    /// Summarized (or a no-op success) and marked `done`.
+    Completed,
+    /// Marked `failed` (summarization error).
+    Failed,
+    /// A directory whose subtree still has unfinished children — re-enqueued `pending`
+    /// to roll up once they're done. The caller should back off briefly before the next
+    /// claim (a deferred dir stays `pending`, so it is never lost). See
+    /// `process_queue_item_with_passes` and the drain loops.
+    Deferred,
+}
+
 /// Process one item from the summary queue (called by the background worker).
-/// Returns `Ok(true)` on success, `Ok(false)` if summarization failed (the item is
-/// recorded as `failed` in the queue), or `Err` only for an unexpected store error.
+/// `Err` is returned only for an unexpected store error (the caller terminalizes it).
 pub async fn process_queue_item(
     store: &mut Store,
     describer: &dyn Describer,
     embedder: &dyn Embedder,
     item: &QueueItem,
     cfg: &DescriberConfig,
-) -> Result<bool> {
-    process_queue_item_with_passes(store, describer, embedder, item, cfg, None, None).await
+    force_rollup: bool,
+) -> Result<QueueOutcome> {
+    process_queue_item_with_passes(
+        store,
+        describer,
+        embedder,
+        item,
+        cfg,
+        None,
+        None,
+        force_rollup,
+    )
+    .await
 }
 
 /// Like `process_queue_item` but accepts an explicit pass override and an optional
@@ -336,6 +366,13 @@ pub async fn process_queue_item(
 ///
 /// `on_fragment` receives each generated token as it arrives from the LLM.
 /// Pass `None` to use non-streaming (CLI path, background worker).
+///
+/// `force_rollup` summarizes a directory even when its subtree still has unfinished
+/// children. Drain loops set it after repeatedly deferring the same directory (a
+/// safety cap so a stuck/hung child can't block a job forever); the strictly-serial
+/// `summarize_subtree_sync` sets it always (deepest-first means a dir's children are
+/// already terminal when it is claimed).
+#[allow(clippy::too_many_arguments)] // all params are load-bearing for this processing entry point
 pub async fn process_queue_item_with_passes(
     store: &mut Store,
     describer: &dyn Describer,
@@ -344,7 +381,26 @@ pub async fn process_queue_item_with_passes(
     cfg: &DescriberConfig,
     passes_override: Option<u32>,
     on_fragment: Option<&mut (dyn FnMut(String) + Send)>,
-) -> Result<bool> {
+    force_rollup: bool,
+) -> Result<QueueOutcome> {
+    // Defer a directory roll-up until its subtree's children are summarized, so a
+    // concurrent worker can't roll up an incomplete (empty/stale) summary and mark it
+    // `done` — the root cause of the dir-rollup race. The atomic claim is untouched; a
+    // deferred dir simply goes back to `pending` and is rolled up on a later claim.
+    // A read error here degrades to "ready" (summarize now) rather than deferring forever.
+    if item.kind == "dir"
+        && !force_rollup
+        && store
+            .subtree_has_unfinished(&item.path, item.depth)
+            .unwrap_or(false)
+    {
+        // Re-enqueue `pending` and undo the claim's `attempts++` (a defer isn't a real
+        // attempt) so repeated defers can't trip `requeue_stale_in_flight` into failing
+        // the dir after a crash.
+        store.defer_queue_item(&item.path)?;
+        return Ok(QueueOutcome::Deferred);
+    }
+
     let passes = match passes_override {
         Some(n) => n.min(cfg.passes_cap),
         None => {
@@ -388,17 +444,15 @@ pub async fn process_queue_item_with_passes(
     match result {
         Ok(_) => {
             store.mark_queue_state(&item.path, "done", None)?;
-            Ok(true)
+            Ok(QueueOutcome::Completed)
         }
         Err(e) => {
-            // The item is recorded as `failed` (with the message) and we return Ok(false)
-            // rather than Ok(()) so callers can distinguish a real success from a failure
-            // — previously every outcome returned Ok(()), so `summarize` reported success
-            // even when the model was missing and every item failed.
+            // The item is recorded as `failed` (with the message); callers distinguish a
+            // real success from a failure rather than treating every outcome as success.
             let msg = format!("{e:#}");
             tracing::warn!("summarize failed for {}: {msg}", item.path);
             store.mark_queue_state(&item.path, "failed", Some(&msg))?;
-            Ok(false)
+            Ok(QueueOutcome::Failed)
         }
     }
 }
@@ -440,7 +494,14 @@ pub async fn summarize_subtree_sync(
     let mut done = 0usize;
     let mut errors = 0usize;
     let mut first_error: Option<String> = None;
+    // Per-dir defer count for the force-rollup cap. In a solo serial drain this never
+    // fills (deepest-first ⇒ a dir's children are terminal when it's claimed), but a
+    // worker daemon sharing the DB can hold a child `in_flight`, so we defer (not force)
+    // and let the cap backstop a genuinely-stuck child.
+    let mut defers: HashMap<String, u32> = HashMap::new();
     while let Some(item) = store.next_queue_item()? {
+        let force =
+            item.kind == "dir" && defers.get(&item.path).copied().unwrap_or(0) >= MAX_DIR_DEFERS;
         // CLI path: no streaming callback (None).
         let r = process_queue_item_with_passes(
             store,
@@ -450,12 +511,25 @@ pub async fn summarize_subtree_sync(
             cfg,
             passes_override,
             None,
+            force,
         )
         .await;
         match r {
-            Ok(true) => done += 1,
-            Ok(false) => errors += 1,
+            Ok(QueueOutcome::Completed) => {
+                defers.remove(&item.path);
+                done += 1;
+            }
+            Ok(QueueOutcome::Failed) => {
+                defers.remove(&item.path);
+                errors += 1;
+            }
+            Ok(QueueOutcome::Deferred) => {
+                *defers.entry(item.path.clone()).or_insert(0) += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                continue;
+            }
             Err(e) => {
+                defers.remove(&item.path);
                 errors += 1;
                 // A store error left the claimed row `in_flight`; terminalize it (best-effort)
                 // so it isn't stuck for the rest of this process (this CLI loop runs no startup
@@ -634,6 +708,147 @@ mod tests {
         assert_eq!(
             strip_summary_preamble("Sure, here's a summary of the file: It issues JWTs."),
             "It issues JWTs."
+        );
+    }
+}
+
+#[cfg(test)]
+mod scheduler_tests {
+    use super::{process_queue_item_with_passes, QueueOutcome};
+    use indexa_core::config::DescriberConfig;
+    use indexa_core::store::{QueueItem, Store, SummaryRecord};
+    use indexa_embed::Embedder;
+    use indexa_llm::{ChildSummary, Describer};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct StubEmbedder;
+    #[async_trait::async_trait]
+    impl Embedder for StubEmbedder {
+        async fn embed(&self, _t: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.1; 8])
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+
+    /// Describer that counts directory roll-up calls, so a test can assert the roll-up
+    /// was (not) attempted.
+    struct CountingDescriber {
+        dir_calls: Arc<AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl Describer for CountingDescriber {
+        async fn describe(
+            &self,
+            _p: &str,
+            _c: &[u8],
+            _prev: Option<&str>,
+        ) -> anyhow::Result<String> {
+            Ok("file summary".into())
+        }
+        async fn summarize_dir(
+            &self,
+            _d: &str,
+            _children: &[ChildSummary],
+            _prev: Option<&str>,
+        ) -> anyhow::Result<String> {
+            self.dir_calls.fetch_add(1, Ordering::SeqCst);
+            Ok("dir summary".into())
+        }
+    }
+
+    fn dir_item() -> QueueItem {
+        QueueItem {
+            path: "/d".into(),
+            kind: "dir".into(),
+            depth: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn dir_defers_while_a_child_is_pending() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .enqueue_summary_items(&[
+                ("/d".into(), "dir".into(), 1),
+                ("/d/f.txt".into(), "file".into(), 2),
+            ])
+            .unwrap();
+        let dir_calls = Arc::new(AtomicUsize::new(0));
+        let dsc = CountingDescriber {
+            dir_calls: dir_calls.clone(),
+        };
+        let out = process_queue_item_with_passes(
+            &mut store,
+            &dsc,
+            &StubEmbedder,
+            &dir_item(),
+            &DescriberConfig::default(),
+            None,
+            None,
+            false, // not forced
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, QueueOutcome::Deferred);
+        assert_eq!(
+            dir_calls.load(Ordering::SeqCst),
+            0,
+            "the roll-up must NOT run while a child is still pending"
+        );
+        // The dir was left/returned `pending`, not marked `done`.
+        assert_eq!(store.queue_stats().unwrap().done, 0);
+    }
+
+    #[tokio::test]
+    async fn force_rollup_summarizes_despite_a_pending_child() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .enqueue_summary_items(&[
+                ("/d".into(), "dir".into(), 1),
+                ("/d/f.txt".into(), "file".into(), 2),
+            ])
+            .unwrap();
+        // A child summary exists to roll up (the pending queue row remains, simulating a
+        // stuck sibling); force_rollup must summarize anyway and mark the dir done.
+        store
+            .upsert_summary(&SummaryRecord {
+                path: "/d/f.txt".into(),
+                kind: "file".into(),
+                parent_path: Some("/d".into()),
+                depth: 2,
+                summary: "child summary".into(),
+                summary_l0: None,
+                embedding: None,
+                child_count: 0,
+                byte_size: 0,
+                model: "stub".into(),
+                source_hash: String::new(),
+                generated_at: 0,
+            })
+            .unwrap();
+        let dir_calls = Arc::new(AtomicUsize::new(0));
+        let dsc = CountingDescriber {
+            dir_calls: dir_calls.clone(),
+        };
+        let out = process_queue_item_with_passes(
+            &mut store,
+            &dsc,
+            &StubEmbedder,
+            &dir_item(),
+            &DescriberConfig::default(),
+            None,
+            None,
+            true, // forced
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, QueueOutcome::Completed);
+        assert!(
+            dir_calls.load(Ordering::SeqCst) >= 1,
+            "force_rollup summarizes the dir despite the pending child"
         );
     }
 }

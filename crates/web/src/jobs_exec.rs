@@ -13,8 +13,15 @@ use indexa_core::{
 };
 use indexa_embed::Embedder;
 use indexa_llm::{Describer, Generator, OllamaLlm};
-use indexa_query::{enqueue_subtree, process_queue_item_with_passes};
+use indexa_query::{enqueue_subtree, process_queue_item_with_passes, QueueOutcome};
+use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Force a directory's roll-up after this many consecutive defers — a panic-level
+/// backstop (~5 min at the ~250 ms backoff) so a child stranded `in_flight` can't hang
+/// the job forever. Far above the LLM request timeout that normally terminalizes a hung
+/// child, so normal latency never forces a premature (incomplete) roll-up.
+const MAX_DIR_DEFERS: u32 = 1200;
 
 // ── Job runner ────────────────────────────────────────────────────────────────
 
@@ -740,6 +747,9 @@ pub(crate) async fn run_summarize_phase(
         std::collections::VecDeque::with_capacity(16);
     samples.push_back((std::time::Instant::now(), 0));
 
+    // Count per-directory defers (children not summarized yet) for the force-rollup cap.
+    let mut defers: HashMap<String, u32> = HashMap::new();
+
     loop {
         // Honor cancellation requested via DELETE /api/jobs/:id.
         if handle.is_cancelled() {
@@ -756,6 +766,9 @@ pub(crate) async fn run_summarize_phase(
             }
         };
         let item_path = item.path.clone();
+        // Force the roll-up after too many defers so a stuck child can't hang the job.
+        let force =
+            item.kind == "dir" && defers.get(&item.path).copied().unwrap_or(0) >= MAX_DIR_DEFERS;
 
         // Watchdog: pause if memory is tight before the LLM summarization call. On a Critical
         // pause we unload the describer LLM and embedder so their RAM frees and we can resume.
@@ -806,6 +819,7 @@ pub(crate) async fn run_summarize_phase(
                 &cfg,
                 passes_override,
                 Some(&mut on_frag),
+                force,
             )
             .await
         } else {
@@ -817,17 +831,31 @@ pub(crate) async fn run_summarize_phase(
                 &cfg,
                 passes_override,
                 None,
+                force,
             )
             .await
         };
         let llm_secs = llm_start.elapsed().as_secs_f64();
         match r {
-            Ok(true) => done += 1,
-            // Ok(false) = item already recorded `failed` in the queue.
-            Ok(false) => errors += 1,
+            Ok(QueueOutcome::Completed) => {
+                defers.remove(&item.path);
+                done += 1;
+            }
+            Ok(QueueOutcome::Failed) => {
+                defers.remove(&item.path);
+                errors += 1;
+            }
+            // Dir children not summarized yet; it was re-enqueued `pending`. Back off and
+            // poll again (a deferred dir stays pending, so `break`-on-None won't drop it).
+            Ok(QueueOutcome::Deferred) => {
+                *defers.entry(item.path.clone()).or_insert(0) += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                continue;
+            }
             // Err = unexpected store error that left the row `in_flight`. Terminalize it
             // (best-effort) so it can't get stuck blocking the queue.
             Err(e) => {
+                defers.remove(&item.path);
                 errors += 1;
                 let _ = job_store.mark_queue_state(&item.path, "failed", Some(&format!("{e:#}")));
             }
