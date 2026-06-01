@@ -649,3 +649,30 @@ fn tree_level_rolls_up_subtree_coverage() {
         "files carry no rollup"
     );
 }
+
+#[test]
+fn chunks_current_for_mtime_uses_fresh_mtime_not_stored() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_chunks(&[dummy_chunk("/a.txt", 0, "hello world")])
+        .unwrap();
+    // The chunk's indexed_at is "now" (SQLite unixepoch at insert).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    // File last modified well in the past → chunks are current → deep skips it.
+    assert!(store
+        .chunks_current_for_mtime("/a.txt", now - 3600)
+        .unwrap());
+    // File edited after indexing (mtime in the future) → NOT current → deep re-embeds.
+    // This is the bug being fixed: chunks_are_current (stored modified_s) would have
+    // wrongly reported current when deep runs without a fresh re-scan.
+    assert!(!store
+        .chunks_current_for_mtime("/a.txt", now + 3600)
+        .unwrap());
+    // A path with no chunks is never current.
+    assert!(!store
+        .chunks_current_for_mtime("/missing.txt", now - 3600)
+        .unwrap());
+}

@@ -127,7 +127,22 @@ pub(crate) async fn cmd_deep(
 
             // Skip-if-unchanged: re-embedding is expensive; skip files whose chunks
             // are already indexed at or after the file's last modification time.
-            if store.chunks_are_current(&path_str).unwrap_or(false) {
+            // Compare against the *fresh* on-disk mtime from this walk, not the DB's
+            // `modified_s` — `deep` can run without a preceding `scan`, so the stored
+            // mtime may be stale and would wrongly skip an edited file (the web
+            // pipeline avoids this by re-scanning first). Fall back to the stored
+            // check when the filesystem gives us no mtime.
+            let mtime_secs = entry
+                .modified
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64);
+            let is_current = match mtime_secs {
+                Some(m) => store
+                    .chunks_current_for_mtime(&path_str, m)
+                    .unwrap_or(false),
+                None => store.chunks_are_current(&path_str).unwrap_or(false),
+            };
+            if is_current {
                 skipped += 1;
                 continue;
             }

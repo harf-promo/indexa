@@ -408,9 +408,22 @@ async fn run_deep_phase(
 
         let path_str = entry.path.to_string_lossy().into_owned();
 
+        // Compare against the fresh on-disk mtime from this walk, not the DB's
+        // possibly-stale `modified_s`: the standalone Deep job (run_deep_phase_standalone)
+        // skips the scan stage, so an edited file would otherwise be wrongly skipped.
+        // Mirrors `cmd_deep`; falls back to the stored check when no mtime is available.
+        let mtime_secs = entry
+            .modified
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64);
         let is_current = {
             let store = state.store.lock().await;
-            store.chunks_are_current(&path_str).unwrap_or(false)
+            match mtime_secs {
+                Some(m) => store
+                    .chunks_current_for_mtime(&path_str, m)
+                    .unwrap_or(false),
+                None => store.chunks_are_current(&path_str).unwrap_or(false),
+            }
         };
         if is_current {
             skipped += 1;
