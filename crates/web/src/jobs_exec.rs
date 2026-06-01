@@ -8,7 +8,7 @@ use indexa_core::{
     resource::{
         assess, pause_step, MachineSpec, PauseAction, Pressure, WatchdogState, MAX_PAUSE_SECS,
     },
-    store::ChunkRecord,
+    store::{ChunkRecord, EdgeRecord},
     walker::{walk, EntryKind, WalkConfig},
 };
 use indexa_embed::Embedder;
@@ -611,6 +611,30 @@ async fn run_deep_phase(
                             },
                         );
                         hard_errors += 1;
+                    }
+                }
+                // Persist the file's code-graph edges (imports/defines), keyed on the same
+                // entry-path string as its chunks. Best-effort: a failure only warns.
+                if !extracted.edges.is_empty() {
+                    let edge_records: Vec<EdgeRecord> = extracted
+                        .edges
+                        .iter()
+                        .map(|e| EdgeRecord {
+                            from_path: path_str.clone(),
+                            kind: e.kind.to_owned(),
+                            to_ref: e.to.clone(),
+                        })
+                        .collect();
+                    if let Err(e) = store.upsert_edges(&edge_records) {
+                        push(
+                            handle,
+                            JobEvent::Warning {
+                                stage: "deep".to_owned(),
+                                item_path: Some(path_str.clone()),
+                                message: format!("upsert_edges failed: {e:#}"),
+                                pressure: None,
+                            },
+                        );
                     }
                 }
             }

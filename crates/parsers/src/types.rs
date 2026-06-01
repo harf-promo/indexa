@@ -16,12 +16,24 @@ pub struct Chunk {
     pub language: Option<String>,
 }
 
+/// A code-relationship-graph edge emitted by a parser (currently only the code parser):
+/// `from` imports a module / defines a symbol named `to`. `kind` is `"imports"` or
+/// `"defines"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edge {
+    pub from: PathBuf,
+    pub kind: &'static str,
+    pub to: String,
+}
+
 /// Output of a parser run on one file.
 #[derive(Debug, Clone)]
 pub struct Extracted {
     pub source: PathBuf,
     pub mime: String,
     pub chunks: Vec<Chunk>,
+    /// Code-graph edges (empty for non-code parsers).
+    pub edges: Vec<Edge>,
 }
 
 /// Hard ceiling on a single chunk's length in **chars**, independent of the word

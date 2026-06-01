@@ -107,6 +107,20 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_classifications_source   ON classifications(source);
             CREATE INDEX IF NOT EXISTS idx_classifications_category ON classifications(category);
+
+            -- Code-relationship graph (D1). One row per edge from a code file:
+            --   kind='imports' → to_ref is an imported module/path
+            --   kind='defines' → to_ref is a symbol defined in the file
+            -- Composite PK dedups identical edges; idx_edges_to powers reverse lookups
+            -- (who imports module X / who defines symbol Y). Re-deep of a file replaces
+            -- its rows (delete-by-from_path then insert), mirroring chunks.
+            CREATE TABLE IF NOT EXISTS edges (
+                from_path TEXT NOT NULL,
+                kind      TEXT NOT NULL CHECK(kind IN ('imports','defines')),
+                to_ref    TEXT NOT NULL,
+                PRIMARY KEY (from_path, kind, to_ref)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(kind, to_ref);
             ",
         )?;
 

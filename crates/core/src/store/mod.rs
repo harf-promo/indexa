@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 mod chunks;
 mod classify;
+mod edges;
 mod entries;
 mod queue;
 mod schema;
@@ -30,8 +31,8 @@ mod tests;
 // Re-export every public record type so external paths (`indexa_core::store::*`)
 // are unchanged by the split.
 pub use types::{
-    ChunkRecord, ClassificationRecord, FailedQueueItem, QueueItem, QueueStats, RegionSummary,
-    SearchHit, SummaryRecord, TreeNode,
+    ChunkRecord, ClassificationRecord, EdgeRecord, FailedQueueItem, QueueItem, QueueStats,
+    RegionSummary, SearchHit, SummaryRecord, TreeNode,
 };
 
 // `abstract_from` is part of the public surface (used by `indexa_core::store::abstract_from`).

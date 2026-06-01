@@ -70,6 +70,7 @@ impl Parser for OrgParser {
             source: path.to_path_buf(),
             mime: "text/x-org".into(),
             chunks,
+            edges: Vec::new(),
         })
     }
 }

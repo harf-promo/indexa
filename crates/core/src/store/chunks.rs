@@ -115,6 +115,11 @@ impl Store {
             "DELETE FROM chunks WHERE entry_path = ?1",
             rusqlite::params![entry_path],
         )?;
+        // Drop the file's code-graph edges too, so a removed file leaves no orphan edges.
+        self.conn.execute(
+            "DELETE FROM edges WHERE from_path = ?1",
+            rusqlite::params![entry_path],
+        )?;
         Ok(())
     }
 

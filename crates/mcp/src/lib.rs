@@ -80,6 +80,19 @@ pub struct AskParams {
     pub question: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DependenciesParams {
+    /// Absolute path of an indexed code file.
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WhoImportsParams {
+    /// Module/import path to find importers of, exactly as written in source
+    /// (e.g. `std::fs`, `os`, `./util`).
+    pub module: String,
+}
+
 fn mcp_err(e: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
 }
@@ -128,6 +141,99 @@ impl IndexaMcp {
             .collect::<Vec<_>>()
             .join("\n");
         Ok(ok_text(format!("{} result(s):\n{body}", hits.len())))
+    }
+
+    /// List a code file's dependencies from the code graph (imports + defined symbols).
+    #[tool(
+        description = "List a code file's dependencies from the code graph: the modules/paths it imports and the symbols (functions, types, classes) it defines. Requires an absolute path to a file indexed with `indexa deep`."
+    )]
+    async fn dependencies(
+        &self,
+        params: Parameters<DependenciesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let store = self.store()?;
+        let edges = store.edges_from(&params.0.path).map_err(mcp_err)?;
+        if edges.is_empty() {
+            return Ok(ok_text(format!(
+                "No code-graph edges for {}. Run `indexa deep` on a code file first.",
+                params.0.path
+            )));
+        }
+        let line = |prefix: &str, items: Vec<&str>| {
+            items
+                .iter()
+                .map(|s| format!("  {prefix} {s}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let imports: Vec<&str> = edges
+            .iter()
+            .filter(|e| e.kind == "imports")
+            .map(|e| e.to_ref.as_str())
+            .collect();
+        let defines: Vec<&str> = edges
+            .iter()
+            .filter(|e| e.kind == "defines")
+            .map(|e| e.to_ref.as_str())
+            .collect();
+        let mut out = String::new();
+        if !imports.is_empty() {
+            out.push_str(&format!(
+                "Imports ({}):\n{}\n",
+                imports.len(),
+                line("→", imports)
+            ));
+        }
+        if !defines.is_empty() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&format!(
+                "Defines ({}):\n{}",
+                defines.len(),
+                line("•", defines)
+            ));
+        }
+        Ok(ok_text(out))
+    }
+
+    /// Reverse dependency: which indexed files import a given module/path.
+    #[tool(
+        description = "Reverse dependency lookup over the code graph: which indexed files import a given module/path (as written in source). Use to find a module's dependents."
+    )]
+    async fn who_imports(
+        &self,
+        params: Parameters<WhoImportsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let store = self.store()?;
+        let files = store
+            .edges_to("imports", &params.0.module)
+            .map_err(mcp_err)?;
+        if files.is_empty() {
+            return Ok(ok_text(format!(
+                "No indexed file imports '{}'.",
+                params.0.module
+            )));
+        }
+        // Cap the listing so a ubiquitous module (imported everywhere) can't flood the
+        // client's context; report the true total and how many are shown.
+        const MAX_SHOWN: usize = 100;
+        let total = files.len();
+        let body = files
+            .iter()
+            .take(MAX_SHOWN)
+            .map(|p| format!("📄 {p}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let header = if total > MAX_SHOWN {
+            format!(
+                "{total} file(s) import '{}' (showing first {MAX_SHOWN}):",
+                params.0.module
+            )
+        } else {
+            format!("{total} file(s) import '{}':", params.0.module)
+        };
+        Ok(ok_text(format!("{header}\n{body}")))
     }
 
     /// List the direct children (with summary state) of a directory.

@@ -18,6 +18,10 @@ pub(super) fn delete_chunks_under_prefix(
         params![pattern],
     )?;
     tx.execute(
+        "DELETE FROM edges WHERE from_path LIKE ?1 ESCAPE '\\'",
+        params![pattern],
+    )?;
+    tx.execute(
         "DELETE FROM chunks WHERE entry_path LIKE ?1 ESCAPE '\\'",
         params![pattern],
     )
@@ -32,6 +36,7 @@ fn delete_path_artifacts_exact(tx: &Transaction, path: &str) -> rusqlite::Result
         params![path],
     )?;
     tx.execute("DELETE FROM chunks WHERE entry_path = ?1", params![path])?;
+    tx.execute("DELETE FROM edges WHERE from_path = ?1", params![path])?;
     tx.execute("DELETE FROM summaries WHERE path = ?1", params![path])?;
     tx.execute("DELETE FROM summary_queue WHERE path = ?1", params![path])?;
     tx.execute("DELETE FROM classifications WHERE path = ?1", params![path])?;
@@ -106,6 +111,9 @@ impl Store {
             params![path],
         )?;
         tx.execute("DELETE FROM chunks WHERE entry_path = ?1", params![path])?;
+        // Drop the file's code-graph edges too — else `who_imports`/`dependencies` keep
+        // listing a deleted file (this is the live watcher file-removal path).
+        tx.execute("DELETE FROM edges WHERE from_path = ?1", params![path])?;
         // Keep the summary tables symmetric with chunks/entries: leaving these behind
         // orphans summary rows and (worse) leaves a stale summary_queue row that
         // `entries_for_summarization` filters on, permanently blocking re-summarization.

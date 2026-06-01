@@ -88,6 +88,7 @@ impl Parser for OfficeParser {
             source: path.to_path_buf(),
             mime: mime.to_owned(),
             chunks,
+            edges: Vec::new(),
         })
     }
 }
