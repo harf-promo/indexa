@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-06-01
+
 ### Added
 
 - **Code-relationship graph (D1) + `dependencies` / `who_imports` MCP tools.** Deep-indexing a code file now records its graph edges in a new `edges` table: which modules/paths it **imports** and which symbols (functions, types, classes) it **defines**, across Rust, Python, JavaScript/TypeScript, Go, and Java. Two new MCP tools query it — `dependencies(path)` lists a file's imports + defined symbols, and `who_imports(module)` is the reverse lookup (which indexed files import a module). Edges are extracted on the existing tree-sitter parse (no extra pass), refreshed on re-`deep`, and cleaned up when a file is removed. Cross-file *call* edges (D2) are a planned follow-up.
@@ -17,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`deep` embeds in batched round-trips — materially faster on multi-chunk files.** The deep phase previously made one embedding HTTP call per chunk; it now sends up to 64 chunks per call via Ollama's `/api/embed` batch endpoint (CLI `deep` and the web Deep job alike), falling back per-chunk on any batch error, count mismatch, or older Ollama without the endpoint — so correctness never depends on the batch path. Order is preserved and the embedding dimension is unchanged. Search results are identical: `/api/embed` returns L2-normalized vectors and the legacy single endpoint raw ones, but the directions match exactly and Indexa ranks by scale-invariant cosine.
 - **Accessible Settings/Activity drawers.** Opening a drawer now traps focus inside it (the rest of the page is made `inert`) and restores focus to the opener on close; only one drawer can be open at a time. The workspace view tabs expose `aria-selected`/`aria-controls` and the panels are proper `tabpanel`s.
+
+### Fixed
+
+- **Directory summaries no longer go empty or stale under a multi-worker build.** With `worker --concurrency 2+`, a directory could be rolled up before its children's summaries existed and then marked done with an empty/stale summary that never self-healed. The worker now defers a directory's roll-up (re-enqueueing it) while any descendant is still pending or in-flight, so roll-ups always compose finished children. The atomic claim that prevents double-processing is unchanged.
+- **A failed summarization-queue item is terminalized instead of stranded.** An unexpected store error mid-process left the claimed item stuck `in_flight`, blocking the queue until the next restart sweep; such an item is now marked `failed`. Separately, `scan`/`deep`/`watch`/`rm` now agree on a canonical path form (e.g. a symlinked root like macOS `/tmp` → `/private/tmp`), so they operate on the same entries.
+
+## [0.9.0] — 2026-06-01
 
 A **model-intelligence + freshness** release: a hardware-aware Local-vs-Cloud model picker, a summary-quality fix, and live-freshness fixes across `deep` and `watch`.
 
