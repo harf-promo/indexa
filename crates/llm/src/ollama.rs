@@ -384,6 +384,7 @@ impl Describer for OllamaLlm {
                  If the context isn't useful, return the original summary."
             ),
         };
+        let prompt = format!("{prompt}\n\n{}", crate::SUMMARY_OUTPUT_RULE);
         Generator::generate(self, &prompt).await
     }
 
@@ -413,6 +414,7 @@ impl Describer for OllamaLlm {
                  If the context isn't useful, return the original summary."
             ),
         };
+        let prompt = format!("{prompt}\n\n{}", crate::SUMMARY_OUTPUT_RULE);
         Generator::generate_stream(self, &prompt, on_fragment).await
     }
 
@@ -455,6 +457,7 @@ impl Describer for OllamaLlm {
                  If the context isn't useful, return the original summary."
             ),
         };
+        let prompt = format!("{prompt}\n\n{}", crate::SUMMARY_OUTPUT_RULE);
         let model = self.effective_dir_model().to_owned();
         self.stream_with_model(&model, &prompt, on_fragment).await
     }
@@ -497,6 +500,7 @@ impl Describer for OllamaLlm {
                  If the context isn't useful, return the original summary."
             ),
         };
+        let prompt = format!("{prompt}\n\n{}", crate::SUMMARY_OUTPUT_RULE);
 
         // Use the dedicated dir model if configured
         let model = self.effective_dir_model().to_owned();

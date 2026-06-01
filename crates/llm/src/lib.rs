@@ -115,6 +115,15 @@ pub struct ChildSummary {
     pub summary: String,
 }
 
+/// Output constraint appended to every file/dir summary prompt. The LangChain-style
+/// "refine" wording ("refine the original summary…") otherwise invites a conversational
+/// preamble ("Here's a refined summary:") that pollutes both the stored L1 summary and
+/// the L0 abstract derived from it. Single-sourced so all providers stay consistent.
+/// (A defensive [`strip_summary_preamble`](../../query/src/summarize.rs) backstop in the
+/// summarize loop cleans anything that slips through.)
+pub(crate) const SUMMARY_OUTPUT_RULE: &str =
+    "Respond with the summary text only — no preamble, no \"Here is\"/\"Here's\", no lead-in, no closing remarks.";
+
 /// Generates natural-language descriptions for files and directory roll-ups.
 #[async_trait::async_trait]
 pub trait Describer: Send + Sync {
