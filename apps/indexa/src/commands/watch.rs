@@ -95,9 +95,22 @@ pub(crate) async fn cmd_watch(
                 ChangeKind::Remove => {
                     if let Ok(mut store) = Store::open(&db_path_clone) {
                         let path_str = path.to_string_lossy().into_owned();
-                        if let Err(e) = store.delete_chunks_for(&path_str) {
-                            tracing::warn!("failed to delete chunks for {path_str}: {e}");
+                        // Full removal — `delete_chunks_for` left the file's summary, queue,
+                        // and entry rows behind, so search/browse kept returning a file that
+                        // no longer exists. `delete_entry` clears chunks + FTS + summary +
+                        // queue + classification + entry in one transaction.
+                        if let Err(e) = store.delete_entry(&path_str) {
+                            tracing::warn!("failed to remove {path_str}: {e}");
                         } else {
+                            // The dead file's ancestor roll-ups must refresh without it.
+                            for dir in ancestor_dirs_to_root(path, &watch_roots) {
+                                let dir_str = dir.to_string_lossy().into_owned();
+                                if let Err(e) =
+                                    store.mark_for_resummary(&dir_str, "dir", path_depth(&dir_str))
+                                {
+                                    tracing::warn!("failed to re-queue roll-up for {dir_str}: {e}");
+                                }
+                            }
                             println!("  removed: {path_str}");
                         }
                     }
