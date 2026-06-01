@@ -159,9 +159,14 @@ pub(crate) async fn cmd_deep(
                 continue;
             }
 
+            // Embed all of a file's chunks in batched round-trips (≫ faster than one HTTP
+            // call per chunk), preserving order; per-chunk-resilient on a batch failure.
+            let texts: Vec<&str> = extracted.chunks.iter().map(|c| c.text.as_str()).collect();
+            let embeddings =
+                indexa_embed::embed_all(embedder.as_ref(), &texts, indexa_embed::EMBED_BATCH_SIZE)
+                    .await;
             let mut chunk_records = Vec::with_capacity(extracted.chunks.len());
-            for chunk in &extracted.chunks {
-                let embedding = embedder.embed(&chunk.text).await.ok();
+            for (chunk, embedding) in extracted.chunks.iter().zip(embeddings) {
                 chunk_records.push(ChunkRecord {
                     entry_path: path_str.clone(),
                     seq: chunk.seq,
