@@ -676,3 +676,69 @@ fn chunks_current_for_mtime_uses_fresh_mtime_not_stored() {
         .chunks_current_for_mtime("/missing.txt", now - 3600)
         .unwrap());
 }
+
+#[test]
+fn mark_for_resummary_inserts_when_absent() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.mark_for_resummary("/a.txt", "file", 1).unwrap();
+    let s = store.queue_stats().unwrap();
+    assert_eq!((s.pending, s.done, s.failed), (1, 0, 0));
+}
+
+#[test]
+fn mark_for_resummary_resets_done_and_failed_rows() {
+    let mut store = Store::open_in_memory().unwrap();
+    // A `done` row must flip back to pending (INSERT OR IGNORE could not).
+    store
+        .enqueue_summary_items(&[("/done.txt".into(), "file".into(), 1)])
+        .unwrap();
+    store.mark_queue_state("/done.txt", "done", None).unwrap();
+    // A `failed` row claimed once (attempts→1, error set) must flip back too,
+    // clearing attempts + error so it gets fresh retries.
+    store
+        .enqueue_summary_items(&[("/fail.txt".into(), "file".into(), 2)])
+        .unwrap();
+    let claimed = store.next_queue_item().unwrap().unwrap(); // deepest first → /fail.txt
+    assert_eq!(claimed.path, "/fail.txt");
+    store
+        .mark_queue_state("/fail.txt", "failed", Some("boom"))
+        .unwrap();
+
+    store.mark_for_resummary("/done.txt", "file", 1).unwrap();
+    store.mark_for_resummary("/fail.txt", "file", 2).unwrap();
+
+    let s = store.queue_stats().unwrap();
+    assert_eq!((s.pending, s.done, s.failed), (2, 0, 0));
+    let (attempts, error): (i64, Option<String>) = store
+        .conn
+        .query_row(
+            "SELECT attempts, error FROM summary_queue WHERE path='/fail.txt'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(attempts, 0, "attempts reset");
+    assert_eq!(error, None, "error cleared");
+}
+
+#[test]
+fn mark_for_resummary_does_not_reset_in_flight() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .enqueue_summary_items(&[("/busy.txt".into(), "file".into(), 1)])
+        .unwrap();
+    // A worker claims it → in_flight.
+    assert_eq!(store.next_queue_item().unwrap().unwrap().path, "/busy.txt");
+    // A concurrent edit must NOT reset it (that would let a second worker re-claim
+    // the path the first is mid-summary on — the double-claim next_queue_item prevents).
+    store.mark_for_resummary("/busy.txt", "file", 1).unwrap();
+    let state: String = store
+        .conn
+        .query_row(
+            "SELECT state FROM summary_queue WHERE path='/busy.txt'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "in_flight", "in_flight row left untouched");
+}

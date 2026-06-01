@@ -89,6 +89,35 @@ impl Store {
         Ok(())
     }
 
+    /// Enqueue a path for (re-)summarization, resetting an existing `pending`/`done`/
+    /// `failed` row back to `pending`.
+    ///
+    /// Neither existing primitive covers a *changed* file: [`enqueue_summary_items`]
+    /// uses `INSERT OR IGNORE` (can't reset a `done`/`failed` row) and
+    /// [`mark_queue_state`] no-ops when no row exists. This upsert does both — a new
+    /// path is inserted `pending`; an existing one is flipped back to `pending` with
+    /// `attempts`/`error` cleared so it gets fresh retries. Used by `indexa watch` to
+    /// re-queue an edited file and its ancestor directory roll-ups for the worker.
+    ///
+    /// An **`in_flight`** row is deliberately left untouched: resetting it would let a
+    /// second worker re-claim a path a first worker is already summarizing — exactly the
+    /// double-claim that [`next_queue_item`](Self::next_queue_item)'s atomic claim
+    /// prevents. (A crashed worker's stuck `in_flight` row is recovered separately by
+    /// [`requeue_stale_in_flight`](Self::requeue_stale_in_flight) at startup.) The cost:
+    /// an edit landing mid-summary isn't re-queued by *that* edit — the next edit, or a
+    /// later `deep`/`summarize`, picks it up.
+    pub fn mark_for_resummary(&mut self, path: &str, kind: &str, depth: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO summary_queue (path, kind, depth, state, attempts, error)
+             VALUES (?1, ?2, ?3, 'pending', 0, NULL)
+             ON CONFLICT(path) DO UPDATE SET
+                 state='pending', attempts=0, error=NULL, updated_at=unixepoch()
+                 WHERE summary_queue.state <> 'in_flight'",
+            params![path, kind, depth],
+        )?;
+        Ok(())
+    }
+
     /// Queue statistics for status display.
     pub fn queue_stats(&self) -> Result<QueueStats> {
         let mut stmt = self
