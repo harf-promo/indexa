@@ -7,10 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-06-01
+
+A **model-intelligence + freshness** release: a hardware-aware Local-vs-Cloud model picker, a summary-quality fix, and live-freshness fixes across `deep` and `watch`.
+
 ### Added
 
+- **Model intelligence — fit + ETA for *any* model, plus a curated download catalog.** A parameter-count footprint heuristic estimates any model's memory peak and per-job ETA — not just the handful in the built-in table — and installed models are enriched from Ollama `/api/show` (real parameter size + quantization level). A bundled, curated catalog of recommended local models ships in the binary, with an optional fail-open online refresh. A new unified **`GET /api/models`** returns every model (installed ∪ catalog), each annotated with real/estimated size, whether it fits the live memory budget, and an ETA for your index. Chinese-vendor models are listed but never selected as a default.
 - **`claude-code` LLM provider — use your Claude Pro/Max subscription.** Set `[describer] provider = "claude-code"` (with `model`/`file_model`/`dir_model` = e.g. `"sonnet"`) and Indexa runs answer synthesis and file/directory summaries on your Claude **subscription** via the local `claude` CLI in headless mode — no API key, no per-token billing. As long as you're logged into Claude Code on the machine, it just works (`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` is the headless-server fallback). Embeddings always stay local (Ollama). Each call spawns a short-lived `claude` process, so a built-in concurrency cap keeps bulk summarization from forking too many at once; for whole-disk bulk, local Ollama is still faster. The new `describer_from_config` factory routes the CLI `summarize`/`worker` and the web summarize job through the same provider switch.
 - **Claude subscription status — surfaced in `doctor` and the web UI.** `indexa doctor` now prints a *Claude subscription provider* block (CLI present? signed in? which plan? is `claude-code` the active provider?), and the web Settings panel gains a **Claude subscription** section showing the same. Backed by a new `GET /api/providers/status` and a token-free `indexa_llm::claude_status` probe (`claude --version` + `claude auth status --json` — no model is invoked, so it's safe to call on every Settings load). The user's email from `auth status` is deliberately not exposed.
+
+### Changed
+
+- **Settings — reorganized into a Local-vs-Cloud model picker.** The web Settings drawer is now split into **Local models (Ollama)** — installed and downloadable models shown as rich rows (size · params · a fit badge against your live RAM budget · ETA · role), one-click **Set file / Set dir** assignment, per-row **Pull** with streaming progress, an Ollama endpoint field, and a catalog refresh — and **Cloud providers** grouped by auth type (Claude subscription · API keys). Switching the embedding model asks for confirmation (it invalidates the existing index until a re-embed). Backed by a new gated `POST /api/config/provider`; `GET /api/config` now reports the active provider and per-role models. The model-fit "ask me first" popover now suggests the most capable *installed* model that fits, rather than a fixed floor.
+
+### Fixed
+
+- **Summaries no longer leak a "Here's a refined summary…" preamble.** Multi-pass refinement could prepend conversational meta-text that polluted both the stored summary (L1) and the one-line abstract derived from it (L0), and defeated the loop's no-change early-stop — so on `--passes 3` the preamble compounded. A prompt-level "output only the summary" constraint (both providers) plus a conservative post-processing backstop keep stored summaries clean, and the early-stop now fires correctly.
+- **`indexa deep` re-embeds edited files.** Deep compared a file's chunks against the modification time recorded by the last `scan`, so editing a file and re-running `deep` *without* re-scanning silently skipped it (stale chunks and search results). It now compares against the file's live on-disk mtime — in both the CLI and the web standalone Deep job.
+- **`indexa watch` keeps summaries fresh after edits.** Watch re-embedded a changed file's chunks but never re-queued its summary, so the summary (and every ancestor directory roll-up that composes it) silently went stale. Watch now re-queues the file and its ancestor roll-ups for the background worker to refresh (run `indexa worker` or `serve` to drain the queue).
+- **`indexa watch` fully removes deleted files.** A file deleted while watching had only its chunks removed — its summary, queue, and entry rows lingered, so search and the browse tree kept returning a file that no longer exists. Watch now removes the entry completely and refreshes the affected ancestor roll-ups.
+- **`indexa deep` stops 500-ing the embedder on long files, and indexes extension-less text.** An oversized chunk (a long-line or minified file collapsing into a single chunk) could exceed the embedder's context window and fail; chunking is now character-bounded with a client-side truncation backstop. Extension-less UTF-8 text files (LICENSE, NOTICE, Cargo.lock) are now content-sniffed and indexed instead of skipped.
 
 ## [0.8.0] — 2026-05-31
 
