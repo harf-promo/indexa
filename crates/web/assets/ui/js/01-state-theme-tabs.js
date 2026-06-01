@@ -43,7 +43,10 @@ function switchTab(tab) {
   currentTab = tab;
   ['tree','chat','map'].forEach(function(t) {
     const btn = document.getElementById('view-' + t);
-    if (btn) btn.classList.toggle('active', t === tab);
+    if (btn) {
+      btn.classList.toggle('active', t === tab);
+      btn.setAttribute('aria-selected', t === tab ? 'true' : 'false');
+    }
     const panel = document.getElementById('panel-' + t);
     if (panel) panel.classList.toggle('active', t === tab);
   });
@@ -52,10 +55,60 @@ function switchTab(tab) {
   if (tab === 'map') loadMap();
 }
 
-/* Open a drawer overlay (Settings or Activity) over the workspace. */
+/* The element focus returns to when the last open drawer closes (the gear/activity
+   button that opened it). */
+let lastDrawerOpener = null;
+
+/* Every top-level region BEHIND the drawer overlays. Each is a sibling of (not inside) the
+   drawers, so making them `inert` while a drawer is open removes them from the tab order,
+   hit-testing, and the accessibility tree — leaving the open drawer the only interactive
+   region (a complete focus trap). #toast is deliberately omitted: it's a non-focusable
+   aria-live status region that should keep announcing while a drawer is open. Keep this
+   list in sync with the top-level focusable siblings in index.html. */
+const DRAWER_BACKGROUND_REGIONS = ['.app-topbar', '.app-body', '#engine-bar', '#jobs-pill'];
+
+function setBackgroundInert(on) {
+  DRAWER_BACKGROUND_REGIONS.forEach(function(sel) {
+    const el = document.querySelector(sel);
+    if (el) el.inert = on;
+  });
+}
+
+function anyDrawerOpen() {
+  return ['settings', 'jobs'].some(function(n) {
+    const d = document.getElementById('panel-' + n);
+    return d && d.classList.contains('open');
+  });
+}
+
+/* First keyboard-focusable element inside a container (used to move focus into a drawer). */
+function firstFocusable(container) {
+  return container.querySelector(
+    'button:not([disabled]), [href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])'
+  );
+}
+
+/* Open a drawer overlay (Settings or Activity) over the workspace. Traps focus inside it by
+   making the background `inert`, so Tab cycles only within the drawer. Only one drawer is
+   ever open: any already-open sibling is hidden first (covers an in-flight job resolving
+   into switchTab('jobs') while Settings is open). Focus moves into the drawer on open and
+   is restored to the opener on close (see closeDrawer). */
 function openDrawer(name) {
   const drawer = document.getElementById('panel-' + name);
   if (!drawer) return;
+  // Capture "was a drawer already open" BEFORE we hide any sibling, so switching drawers
+  // keeps the original opener and doesn't re-inert (which is already on).
+  const wasOpen = anyDrawerOpen();
+  ['settings', 'jobs'].forEach(function(n) {
+    if (n !== name) {
+      const other = document.getElementById('panel-' + n);
+      if (other) other.classList.remove('open');
+    }
+  });
+  if (!wasOpen) {
+    lastDrawerOpener = document.activeElement;
+    setBackgroundInert(true);
+  }
   drawer.classList.add('open');
   if (name === 'settings') loadSettings();
   if (name === 'jobs') {
@@ -65,15 +118,26 @@ function openDrawer(name) {
     const pill = document.getElementById('jobs-pill');
     if (pill) pill.hidden = true;
   }
+  // Move focus into the drawer (first focusable — the close button).
+  const target = firstFocusable(drawer);
+  if (target) target.focus();
 }
 
-/* Close a drawer; restore the logical tab to the underlying workspace view. */
+/* Close a drawer; restore the logical tab to the underlying workspace view. When the last
+   drawer closes, lift the background `inert` and restore focus to the opener. */
 function closeDrawer(name) {
   const drawer = document.getElementById('panel-' + name);
   if (drawer) drawer.classList.remove('open');
   if (name === 'jobs') {
     currentTab = currentView; // stop renderJobsPage from re-running
     if (typeof updateJobsPill === 'function') updateJobsPill();
+  }
+  if (!anyDrawerOpen()) {
+    setBackgroundInert(false);
+    if (lastDrawerOpener && typeof lastDrawerOpener.focus === 'function') {
+      lastDrawerOpener.focus();
+    }
+    lastDrawerOpener = null;
   }
 }
 

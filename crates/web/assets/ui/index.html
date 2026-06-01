@@ -46,14 +46,14 @@
   <main class="app-main">
     <div class="workspace-toolbar">
       <div class="view-toggle" role="tablist" aria-label="Workspace view">
-        <button class="view-tab active" id="view-tree" role="tab" onclick="switchTab('tree')">Context</button>
-        <button class="view-tab" id="view-map" role="tab" onclick="switchTab('map')">Map</button>
-        <button class="view-tab" id="view-chat" role="tab" onclick="switchTab('chat')">Ask</button>
+        <button class="view-tab active" id="view-tree" role="tab" aria-selected="true" aria-controls="panel-tree" onclick="switchTab('tree')">Context</button>
+        <button class="view-tab" id="view-map" role="tab" aria-selected="false" aria-controls="panel-map" onclick="switchTab('map')">Map</button>
+        <button class="view-tab" id="view-chat" role="tab" aria-selected="false" aria-controls="panel-chat" onclick="switchTab('chat')">Ask</button>
       </div>
     </div>
 
     <div class="workspace-views" id="workspace-views">
-      <div class="tab-panel active" id="panel-tree">
+      <div class="tab-panel active" id="panel-tree" role="tabpanel" aria-labelledby="view-tree">
         <div class="summary-view" id="summary-view">
           <div class="welcome" id="browse-welcome">
             <!-- Default welcome (populated index, nothing selected). JS hides this and
@@ -81,7 +81,7 @@
           </div>
         </div>
       </div>
-      <div class="tab-panel" id="panel-chat">
+      <div class="tab-panel" id="panel-chat" role="tabpanel" aria-labelledby="view-chat">
         <div class="chat-view" id="chat-view">
           <div class="chat-area" id="chat">
             <div class="welcome">
@@ -92,7 +92,7 @@
           </div>
         </div>
       </div>
-      <div class="tab-panel" id="panel-map">
+      <div class="tab-panel" id="panel-map" role="tabpanel" aria-labelledby="view-map">
         <div class="map-view" id="map-view">
           <h2 class="panel-heading">Context map</h2>
           <table id="map-table"></table>
