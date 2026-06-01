@@ -28,7 +28,9 @@ pub(crate) use jobs::{
 };
 pub(crate) use keys::{api_keys_get, api_keys_set};
 pub(crate) use misc::{api_delete_entry, api_logs_tail, api_version};
-pub(crate) use models::{api_models_installed, api_models_pull};
+pub(crate) use models::{
+    api_models, api_models_catalog_refresh, api_models_installed, api_models_pull,
+};
 pub(crate) use providers::api_providers_status;
 pub(crate) use queue::{api_queue_failed, api_queue_retry, api_queue_stats};
 pub(crate) use stats::{api_map, api_roots, api_search, api_stats};

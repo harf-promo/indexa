@@ -28,6 +28,22 @@ pub struct Config {
     /// Optional cloud-provider API keys persisted to config.toml.
     #[serde(default)]
     pub api_keys: ApiKeysConfig,
+    /// Model-catalog settings (optional online refresh source).
+    #[serde(default)]
+    pub models: ModelsConfig,
+}
+
+// ── Model catalog ───────────────────────────────────────────────────────────
+
+/// Settings for the local-model catalog.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelsConfig {
+    /// Optional URL to a JSON array of catalog entries used by
+    /// `POST /api/models/catalog/refresh`. When unset, the refresh endpoint is a
+    /// no-op and the bundled curated catalog is served. The fetch fails open:
+    /// any error leaves the bundled/prior catalog in place.
+    pub catalog_url: Option<String>,
 }
 
 // ── API keys ──────────────────────────────────────────────────────────────────

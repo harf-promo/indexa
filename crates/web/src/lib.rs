@@ -198,8 +198,13 @@ pub async fn serve(
         )
         .route("/api/telemetry", get(api_telemetry))
         .route("/api/telemetry/stream", get(api_telemetry_stream))
+        .route("/api/models", get(api_models))
         .route("/api/models/installed", get(api_models_installed))
         .route("/api/models/pull", post(api_models_pull))
+        .route(
+            "/api/models/catalog/refresh",
+            post(api_models_catalog_refresh),
+        )
         .route("/api/keys", get(api_keys_get).post(api_keys_set))
         .route("/api/providers/status", get(api_providers_status))
         .route("/api/jobs", get(api_jobs_list))

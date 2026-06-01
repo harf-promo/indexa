@@ -321,6 +321,90 @@ pub fn lookup_footprint(name: &str) -> Option<&'static ModelFootprint> {
     MODEL_FOOTPRINTS.iter().find(|m| m.name == name)
 }
 
+/// Quantisation level → resident-weights multiplier in **GB per billion params**.
+///
+/// Calibrated so `params_b × quant_scale(quant)` lands near the measured Q4_K_M
+/// weights in [`MODEL_FOOTPRINTS`] (e.g. 9B × 0.65 ≈ 5.9 GB ≈ the table's 6 GB).
+/// `BF16`/`F16` are matched **before** the `Q*` prefixes because `BF16` begins
+/// with `B`, not `F`. Unknown quants fall back to Q4_K_M, the common Ollama
+/// default.
+fn quant_scale(quant: &str) -> f64 {
+    let q = quant.to_ascii_uppercase();
+    if q.starts_with("BF16") || q.starts_with("F16") {
+        2.0
+    } else if q.starts_with("Q8") {
+        1.15
+    } else if q.starts_with("Q6") {
+        0.95
+    } else if q.starts_with("Q5") {
+        0.80
+    } else if q.starts_with("Q3") {
+        0.47
+    } else if q.starts_with("Q2") {
+        0.35
+    } else {
+        // Q4_K_M / Q4_0 and any unknown quant → the common 4-bit default.
+        0.65
+    }
+}
+
+/// Derive a [`ModelFootprint`] purely from parameter count + quantisation.
+///
+/// For catalog / preview models that have no [`MODEL_FOOTPRINTS`] entry. The
+/// constants are calibrated against that table (see [`quant_scale`]); the
+/// estimate reads *lower* than the table for very small models, whose entries
+/// are deliberately rounded up for safety. Good enough for a fit/ETA preview,
+/// not a substitute for a measured entry on the hot path.
+///
+/// The synthesized `name` is the literal `"estimated"` (the field is
+/// `&'static str`); the caller carries the real model name.
+pub fn estimate_footprint(params_b: f64, quant: &str, ctx: u32) -> ModelFootprint {
+    // Guard against zero/negative params so the divisions below stay finite.
+    let params_b = params_b.max(0.1);
+    let gib = 1024.0 * 1024.0 * 1024.0;
+    ModelFootprint {
+        name: "estimated",
+        weights_bytes: (params_b * quant_scale(quant) * gib) as u64,
+        kv_bytes_per_ctx_token: (params_b * 320.0) as u64,
+        default_num_ctx: ctx.max(1),
+        prompt_eval_tok_s_apple_m3: 4500.0 / params_b,
+        gen_tok_s_apple_m3: 500.0 / params_b,
+        gen_tok_s_generic: (500.0 / params_b) / 3.5,
+    }
+}
+
+/// Resolve a footprint for **any** model name.
+///
+/// Resolution order, most accurate first:
+/// 1. exact [`MODEL_FOOTPRINTS`] entry (measured) — `params_b`/`quant`/`ctx` are
+///    ignored on a hit;
+/// 2. [`estimate_footprint`] from `params_b` (e.g. Ollama `/api/show` metadata);
+/// 3. a conservative unknown default (heavy + slow) when nothing is known, so a
+///    metadata-less model is treated cautiously rather than optimistically.
+pub fn footprint_for(
+    name: &str,
+    params_b: Option<f64>,
+    quant: Option<&str>,
+    ctx: u32,
+) -> ModelFootprint {
+    if let Some(fp) = lookup_footprint(name) {
+        // Deref then clone to yield an owned `ModelFootprint` from the static ref.
+        return (*fp).clone();
+    }
+    match params_b {
+        Some(p) => estimate_footprint(p, quant.unwrap_or("Q4_K_M"), ctx),
+        None => ModelFootprint {
+            name: "unknown",
+            weights_bytes: 7 * 1024 * 1024 * 1024, // ~7 GB — assume a mid-size model
+            kv_bytes_per_ctx_token: 4096,
+            default_num_ctx: ctx.max(1),
+            prompt_eval_tok_s_apple_m3: 200.0,
+            gen_tok_s_apple_m3: 15.0,
+            gen_tok_s_generic: 5.0,
+        },
+    }
+}
+
 // ── Resource profiles ─────────────────────────────────────────────────────────
 
 /// How aggressively Indexa should use machine resources.
@@ -715,16 +799,7 @@ pub fn estimate_eta(
     let n_passes = n_passes.max(1);
 
     let (prompt_tok_s, gen_tok_s, embed_per_min) = if let Some(fp) = lookup_footprint(model_name) {
-        let p = if is_apple_m3 {
-            fp.prompt_eval_tok_s_apple_m3
-        } else {
-            fp.prompt_eval_tok_s_apple_m3 * 0.3 // conservative non-M3 fallback
-        };
-        let g = if is_apple_m3 {
-            fp.gen_tok_s_apple_m3
-        } else {
-            fp.gen_tok_s_generic
-        };
+        let (p, g) = throughput(fp, is_apple_m3);
         // Embed throughput in chunks/min: embedders are fast; nomic ~400/min on M3 Max.
         let e = if is_apple_m3 { 400.0 } else { 120.0 };
         (p, g, e)
@@ -745,6 +820,65 @@ pub fn estimate_eta(
 
     EtaEstimate {
         model_name: model_name.to_owned(),
+        secs_per_file,
+        secs_per_embed_chunk,
+        total_secs,
+        display,
+    }
+}
+
+/// M3 vs non-M3 (prompt_eval, generation) throughput selection for a footprint,
+/// in tokens/sec. Factored out of [`estimate_eta`] so [`estimate_eta_with`]
+/// reuses identical arithmetic — one source of truth, no drift.
+fn throughput(fp: &ModelFootprint, is_apple_m3: bool) -> (f64, f64) {
+    let prompt_tok_s = if is_apple_m3 {
+        fp.prompt_eval_tok_s_apple_m3
+    } else {
+        fp.prompt_eval_tok_s_apple_m3 * 0.3 // conservative non-M3 fallback
+    };
+    let gen_tok_s = if is_apple_m3 {
+        fp.gen_tok_s_apple_m3
+    } else {
+        fp.gen_tok_s_generic
+    };
+    (prompt_tok_s, gen_tok_s)
+}
+
+/// ETA for an arbitrary [`ModelFootprint`] — lets catalog / unknown models that
+/// have no [`MODEL_FOOTPRINTS`] entry get real estimates via [`footprint_for`].
+///
+/// `embed_per_min` is a **workload-class** constant (embedding vs generation),
+/// not a model property, so the caller supplies it (M3 ≈ 400, non-M3 ≈ 120,
+/// unknown ≈ 80). The per-file / per-chunk math mirrors [`estimate_eta`] exactly
+/// via the shared [`throughput`] helper.
+pub fn estimate_eta_with(
+    fp: &ModelFootprint,
+    n_files: usize,
+    n_chunks: usize,
+    avg_file_tokens: u32,
+    n_passes: u32,
+    is_apple_m3: bool,
+    embed_per_min: f64,
+) -> EtaEstimate {
+    let avg_file_tokens = if avg_file_tokens == 0 {
+        600
+    } else {
+        avg_file_tokens
+    };
+    let n_passes = n_passes.max(1);
+
+    let (prompt_tok_s, gen_tok_s) = throughput(fp, is_apple_m3);
+
+    let prompt_secs = avg_file_tokens as f64 / prompt_tok_s;
+    let gen_secs = 100.0 / gen_tok_s; // ~100 output tokens per summary
+    let secs_per_file = (prompt_secs + gen_secs) * n_passes as f64;
+    let secs_per_embed_chunk = 60.0 / embed_per_min;
+
+    let total_secs = secs_per_file * n_files as f64 + secs_per_embed_chunk * n_chunks as f64;
+    let display = format_duration(total_secs as u64);
+
+    EtaEstimate {
+        model_name: fp.name.to_owned(),
         secs_per_file,
         secs_per_embed_chunk,
         total_secs,
@@ -1089,5 +1223,118 @@ mod tests {
             pause_decision(Pressure::Critical, MAX_PAUSE_SECS + 10),
             PauseAction::Proceed
         );
+    }
+
+    // ── Footprint heuristic (B1) ──────────────────────────────────────────────
+
+    #[test]
+    fn estimate_footprint_lands_near_table_for_mid_large_models() {
+        // The heuristic must land within ~20% of the measured table for the
+        // mid/large models (the 4B entry is a deliberate outlier — see below).
+        let cases = [
+            ("gemma2:9b", 9.0_f64),
+            ("gemma3:12b", 12.0),
+            ("qwen2.5:14b", 14.0),
+            ("mistral-small:22b", 22.0),
+        ];
+        for (name, params_b) in cases {
+            let table = lookup_footprint(name).unwrap();
+            let est = estimate_footprint(params_b, "Q4_K_M", 4096);
+            let w_err = (est.weights_bytes as f64 - table.weights_bytes as f64).abs()
+                / table.weights_bytes as f64;
+            let pe_err = (est.prompt_eval_tok_s_apple_m3 - table.prompt_eval_tok_s_apple_m3).abs()
+                / table.prompt_eval_tok_s_apple_m3;
+            assert!(
+                w_err < 0.20,
+                "{name}: weights err {w_err:.3} (est {} vs table {})",
+                est.weights_bytes,
+                table.weights_bytes
+            );
+            assert!(pe_err < 0.20, "{name}: prompt_eval err {pe_err:.3}");
+        }
+    }
+
+    #[test]
+    fn estimate_footprint_4b_is_conservative_outlier() {
+        // The 4B table entry is hand-inflated for safety (~1.0 GB/param vs ~0.65
+        // for the rest), so the heuristic reads systematically lower. Documented
+        // here rather than hidden; a wide band keeps the test honest.
+        let table = lookup_footprint("gemma3:4b").unwrap();
+        let est = estimate_footprint(4.0, "Q4_K_M", 4096);
+        let ratio = est.weights_bytes as f64 / table.weights_bytes as f64;
+        assert!(
+            (0.50..=1.10).contains(&ratio),
+            "4b weights ratio {ratio:.3}"
+        );
+    }
+
+    #[test]
+    fn footprint_for_prefers_exact_table_entry() {
+        // An exact table hit wins verbatim — params/quant/ctx are ignored.
+        let fp = footprint_for("gemma3:12b", Some(99.0), Some("F16"), 8192);
+        assert_eq!(fp.name, "gemma3:12b");
+        assert_eq!(fp.weights_bytes, 9 * 1024 * 1024 * 1024);
+        assert_eq!(fp.kv_bytes_per_ctx_token, 4096);
+    }
+
+    #[test]
+    fn footprint_for_estimates_when_no_table_entry() {
+        let fp = footprint_for("llama3:70b", Some(70.0), Some("Q4_K_M"), 8192);
+        assert_eq!(fp.name, "estimated");
+        let expected = (70.0 * 0.65 * 1024.0 * 1024.0 * 1024.0) as u64;
+        assert_eq!(fp.weights_bytes, expected);
+    }
+
+    #[test]
+    fn footprint_for_unknown_defaults_when_no_params() {
+        let fp = footprint_for("mystery-model", None, None, 4096);
+        assert_eq!(fp.name, "unknown");
+        // Heavy + slow conservative posture.
+        assert!(fp.weights_bytes >= 6 * 1024 * 1024 * 1024);
+        assert!(fp.gen_tok_s_apple_m3 <= 20.0);
+    }
+
+    #[test]
+    fn quant_scale_maps_known_quants() {
+        let cases = [
+            ("Q4_K_M", 0.65),
+            ("Q4_0", 0.65),
+            ("Q5_K_M", 0.80),
+            ("Q6_K", 0.95),
+            ("Q8_0", 1.15),
+            ("Q3_K_M", 0.47),
+            ("Q2_K", 0.35),
+            ("F16", 2.0),
+            ("BF16", 2.0), // must NOT fall through to a Q-branch (starts with 'B')
+            ("garbage", 0.65),
+        ];
+        for (q, expected) in cases {
+            assert!(
+                (quant_scale(q) - expected).abs() < 1e-9,
+                "quant {q}: got {}, want {expected}",
+                quant_scale(q)
+            );
+        }
+    }
+
+    #[test]
+    fn estimate_eta_with_matches_estimate_eta_on_known_model() {
+        // Option-B factoring regression guard: the footprint-driven path must
+        // match estimate_eta exactly on a known model (M3 path, embed_per_min
+        // 400.0 = estimate_eta's inline literal).
+        let baseline = estimate_eta("gemma3:4b", 100, 500, 600, 2, true);
+        let fp = footprint_for("gemma3:4b", None, None, 4096);
+        let via = estimate_eta_with(&fp, 100, 500, 600, 2, true, 400.0);
+        assert!((baseline.secs_per_file - via.secs_per_file).abs() < 1e-9);
+        assert!((baseline.secs_per_embed_chunk - via.secs_per_embed_chunk).abs() < 1e-9);
+        assert!((baseline.total_secs - via.total_secs).abs() < 1e-9);
+    }
+
+    #[test]
+    fn estimate_eta_with_produces_real_eta_for_catalog_model() {
+        let fp = estimate_footprint(70.0, "Q4_K_M", 8192);
+        let eta = estimate_eta_with(&fp, 200, 600, 600, 2, true, 400.0);
+        assert!(eta.total_secs > 0.0);
+        assert!(!eta.display.is_empty());
     }
 }

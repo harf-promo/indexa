@@ -84,6 +84,42 @@ pub(crate) struct PullRequest {
     pub(crate) name: String,
 }
 
+/// Query for `GET /api/models`. `num_ctx` overrides the configured context
+/// window for the peak/ETA estimate; `?path=` scoping is deferred to PR-C.
+#[derive(Deserialize)]
+pub(crate) struct ModelsQuery {
+    pub(crate) num_ctx: Option<u32>,
+}
+
+/// One model in the unified `GET /api/models` list — installed or catalog-only.
+#[derive(Serialize)]
+pub(crate) struct ModelRow {
+    pub(crate) name: String,
+    /// `embed` | `file` | `dir` | `qa` | `code` | `vision`.
+    pub(crate) role: String,
+    pub(crate) vendor: String,
+    pub(crate) params_b: Option<f64>,
+    /// Real on-disk size when installed, else the estimated weights size.
+    pub(crate) size_bytes: u64,
+    pub(crate) size_is_estimate: bool,
+    pub(crate) installed: bool,
+    /// Peak resident bytes (weights + KV) at the requested `num_ctx`.
+    pub(crate) peak_bytes: u64,
+    /// Whether `peak_bytes` fits the live memory budget.
+    pub(crate) fits: bool,
+    pub(crate) eta_display: String,
+    pub(crate) eta_secs: u64,
+    pub(crate) recommended_default: bool,
+    pub(crate) safe_default: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ModelsResponse {
+    pub(crate) budget_bytes: i64,
+    pub(crate) num_ctx: u32,
+    pub(crate) models: Vec<ModelRow>,
+}
+
 #[derive(Deserialize)]
 pub(crate) struct KeyRequest {
     pub(crate) provider: String,
