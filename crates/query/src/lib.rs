@@ -8,7 +8,10 @@ pub mod worker;
 
 pub use export::{build_tree, render_json, render_markdown, render_xml};
 pub use indexa_core::config::HybridMode;
-pub use qa::{answer, answer_stream, Answer, AnswerChunk, QaConfig, SourceCitation};
+pub use qa::{
+    answer, answer_stream, answer_stream_with_ann, answer_with_ann, Answer, AnswerChunk, QaConfig,
+    SourceCitation,
+};
 pub use summarize::{
     enqueue_subtree, process_queue_item_with_passes, summarize_subtree_sync, QueueOutcome,
 };

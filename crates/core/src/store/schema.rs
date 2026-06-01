@@ -33,9 +33,13 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_entries_kind   ON entries(kind);
             CREATE INDEX IF NOT EXISTS idx_entries_cat    ON entries(hint_cat);
 
-            -- Deep-scan chunks (text + embeddings)
+            -- Deep-scan chunks (text + embeddings).
+            -- AUTOINCREMENT (not a bare rowid) so ids are never reused after a re-deep
+            -- deletes+reinserts a file's chunks. Stable ids are load-bearing for the ANN
+            -- index (store::ann), which maps a node back to a chunk by id: a reused id would
+            -- silently attribute the wrong file's content.
             CREATE TABLE IF NOT EXISTS chunks (
-                id          INTEGER PRIMARY KEY,
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 entry_path  TEXT NOT NULL,
                 seq         INTEGER NOT NULL,
                 heading     TEXT NOT NULL DEFAULT '',
@@ -134,6 +138,46 @@ impl Store {
         if !has_l0 {
             self.conn
                 .execute_batch("ALTER TABLE summaries ADD COLUMN summary_l0 TEXT;")?;
+        }
+
+        // Migration: give `chunks.id` AUTOINCREMENT on databases created before stable ids
+        // (a bare rowid is reused after a delete, which would mis-attribute ANN results to a
+        // different chunk). SQLite can't ALTER a column to add AUTOINCREMENT, so recreate the
+        // table preserving every id (so the FTS chunk_id references stay valid) and let
+        // sqlite_sequence continue from MAX(id). One-time O(rows) copy on first open.
+        let chunks_has_autoinc: bool = self
+            .conn
+            .query_row(
+                "SELECT sql LIKE '%AUTOINCREMENT%' FROM sqlite_master
+                   WHERE type='table' AND name='chunks'",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap_or(true); // table absent (fresh DB) → CREATE above already has it
+        if !chunks_has_autoinc {
+            self.conn.execute_batch(
+                "
+                CREATE TABLE chunks_migrate (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entry_path  TEXT NOT NULL,
+                    seq         INTEGER NOT NULL,
+                    heading     TEXT NOT NULL DEFAULT '',
+                    text        TEXT NOT NULL,
+                    language    TEXT,
+                    embedding   BLOB,
+                    embed_model TEXT,
+                    indexed_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                    UNIQUE (entry_path, seq)
+                );
+                INSERT INTO chunks_migrate
+                    (id, entry_path, seq, heading, text, language, embedding, embed_model, indexed_at)
+                    SELECT id, entry_path, seq, heading, text, language, embedding, embed_model, indexed_at
+                    FROM chunks;
+                DROP TABLE chunks;
+                ALTER TABLE chunks_migrate RENAME TO chunks;
+                CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(entry_path);
+                ",
+            )?;
         }
 
         Ok(())

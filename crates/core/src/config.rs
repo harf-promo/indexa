@@ -152,6 +152,15 @@ pub struct RetrievalConfig {
     pub summary_depth_alpha: f32,
     /// Max characters of retrieved context packed into the answer-synthesis prompt.
     pub context_budget: usize,
+    /// Use an in-memory HNSW (ANN) index for dense retrieval instead of a brute-force
+    /// cosine scan (opt-in). Brute-force is fine to ~300K chunks; enable this beyond that.
+    /// The index is built in a long-lived process (the web server) and cached; a one-shot
+    /// CLI `ask` would pay the build cost for a single query, so prefer it for `serve`.
+    /// Falls back to brute-force for scoped queries and below `ann_min_chunks`.
+    pub ann: bool,
+    /// Minimum chunk count before the ANN index is built/used (below this, brute-force is
+    /// faster than building an index). Only consulted when `ann` is true.
+    pub ann_min_chunks: usize,
 }
 
 impl Default for RetrievalConfig {
@@ -164,6 +173,8 @@ impl Default for RetrievalConfig {
             summary_weight: 0.0,
             summary_depth_alpha: 0.15,
             context_budget: 4000,
+            ann: false,
+            ann_min_chunks: 50_000,
         }
     }
 }

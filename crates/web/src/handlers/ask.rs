@@ -7,8 +7,10 @@ use axum::{
     },
     Json,
 };
+use indexa_core::store::{AnnIndex, Store};
 use indexa_query::{AnswerChunk, QaConfig};
 use std::convert::Infallible;
+use std::sync::Arc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::dto::{err_json, AskRequest, AskResponse, AskSource};
@@ -28,22 +30,101 @@ fn qa_config(state: &AppState) -> QaConfig {
     }
 }
 
+/// Lazily build (and cache) the ANN index for dense retrieval, or return `None` to use the
+/// brute-force cosine scan. `None` when ANN is off (`[retrieval] ann`), the index is below
+/// `ann_min_chunks`, or a build/read fails. Rebuilds when the chunk watermark
+/// `(count, last_indexed_at)` changes, so a `deep` job that adds or edits chunks
+/// transparently refreshes the index on the next Ask. All store access uses fresh read
+/// connections (WAL → concurrent reads) so the shared store mutex is never held across the
+/// CPU-heavy build.
+async fn ensure_ann(state: &AppState) -> Option<Arc<AnnIndex>> {
+    if !state.config.retrieval.ann {
+        return None;
+    }
+    let db_path = state.db_path.clone();
+    let min_chunks = state.config.retrieval.ann_min_chunks;
+
+    // Watermark = (chunk_count, max_chunk_id). With AUTOINCREMENT ids, max_chunk_id is
+    // monotonic: any insert/edit bumps it, any delete changes the count — so a stale index
+    // is always detected. (last_indexed_at was 1-second-granular and could miss a same-second
+    // in-place edit.)
+    let (count, max_id) = tokio::task::spawn_blocking({
+        let db_path = db_path.clone();
+        move || -> Option<(i64, i64)> {
+            let s = Store::open(&db_path).ok()?;
+            Some((s.chunk_count().ok()? as i64, s.max_chunk_id().ok()?))
+        }
+    })
+    .await
+    .ok()??;
+
+    if (count as usize) < min_chunks {
+        return None;
+    }
+
+    // Fast path: cached index still matches the watermark.
+    {
+        let cache = state.ann.read().await;
+        if let Some(idx) = &cache.index {
+            if cache.watermark == (count, max_id) {
+                return Some(idx.clone());
+            }
+        }
+    }
+
+    // Single-flight: serialize builds so concurrent cold/stale Asks don't each allocate a
+    // full index (each build transiently holds all embeddings). Re-check after acquiring —
+    // another caller may have just built the current index.
+    let _build_guard = state.ann_build_lock.lock().await;
+    {
+        let cache = state.ann.read().await;
+        if let Some(idx) = &cache.index {
+            if cache.watermark == (count, max_id) {
+                return Some(idx.clone());
+            }
+        }
+    }
+
+    // Build fresh (CPU-heavy → spawn_blocking; reads on its own connection).
+    let built = tokio::task::spawn_blocking(move || -> Option<AnnIndex> {
+        let s = Store::open(&db_path).ok()?;
+        let items = s.all_chunk_embeddings().ok()?;
+        let dim = items
+            .iter()
+            .find(|(_, v)| !v.is_empty())
+            .map(|(_, v)| v.len())?;
+        Some(AnnIndex::build(&items, dim))
+    })
+    .await
+    .ok()??;
+
+    let idx = Arc::new(built);
+    {
+        let mut cache = state.ann.write().await;
+        cache.index = Some(idx.clone());
+        cache.watermark = (count, max_id);
+    }
+    Some(idx)
+}
+
 pub(crate) async fn api_ask(
     State(state): State<AppState>,
     Json(body): Json<AskRequest>,
 ) -> Response {
     let qa_cfg = qa_config(&state);
+    let ann = ensure_ann(&state).await;
 
     // Single shared, Send-safe pipeline (embed → scoped retrieve → optional
-    // rerank → synthesize). `answer` opens its own short-lived read connection
+    // rerank → synthesize). `answer_with_ann` opens its own short-lived read connection
     // from `db_path`, so we don't hold the shared store mutex across the LLM
-    // round-trips. Empty-hit short-circuit lives inside `answer`.
-    match indexa_query::answer(
+    // round-trips. Empty-hit short-circuit lives inside it.
+    match indexa_query::answer_with_ann(
         &state.db_path,
         state.embedder.as_ref(),
         state.llm.as_ref(),
         &body.question,
         &qa_cfg,
+        ann.as_deref(),
     )
     .await
     {
@@ -72,6 +153,7 @@ pub(crate) async fn api_ask_stream(
     Json(body): Json<AskRequest>,
 ) -> impl IntoResponse {
     let qa_cfg = qa_config(&state);
+    let ann = ensure_ann(&state).await; // owned Arc moved into the task below
     let db_path = state.db_path.clone();
     let embedder = state.embedder.clone();
     let llm = state.llm.clone();
@@ -94,12 +176,13 @@ pub(crate) async fn api_ask_stream(
             let _ = send_tx.send(Ok(Event::default().data(payload.to_string())));
         };
 
-        let result = indexa_query::answer_stream(
+        let result = indexa_query::answer_stream_with_ann(
             &db_path,
             embedder.as_ref(),
             llm.as_ref(),
             &question,
             &qa_cfg,
+            ann.as_deref(),
             &mut on_chunk,
         )
         .await;
