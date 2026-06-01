@@ -55,6 +55,29 @@ impl Store {
         Ok(item)
     }
 
+    /// True if any item strictly deeper inside `dir_path`'s subtree is still `pending`
+    /// or `in_flight`.
+    ///
+    /// The summarize loop uses this to **defer** a directory roll-up (re-enqueue it
+    /// `pending`) until its children are summarized — so a concurrent worker can't roll
+    /// the directory up from an incomplete child set and mark it `done`. This is a
+    /// read-only check that does NOT touch the atomic claim in
+    /// [`next_queue_item`](Self::next_queue_item). The `|| '/'` trailing slash guards
+    /// prefix-siblings (`/proj` must not match `/projector/x`).
+    pub fn subtree_has_unfinished(&self, dir_path: &str, dir_depth: i64) -> Result<bool> {
+        let unfinished: bool = self.conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM summary_queue
+                 WHERE state IN ('pending','in_flight')
+                   AND depth > ?2
+                   AND substr(path, 1, length(?1) + 1) = ?1 || '/'
+             )",
+            params![dir_path, dir_depth],
+            |r| r.get(0),
+        )?;
+        Ok(unfinished)
+    }
+
     /// Reset items left `in_flight` by a previously crashed/killed run back to `pending`
     /// so they get retried; items whose `attempts` already reached `max_attempts` are marked
     /// `failed` instead (they keep crashing). Returns `(requeued, failed)`.
@@ -78,6 +101,21 @@ impl Store {
         )?;
         tx.commit()?;
         Ok((requeued, failed))
+    }
+
+    /// Re-enqueue a just-claimed item as `pending` and **undo the claim's `attempts++`**
+    /// (a defer is not a summarization attempt). The summarize loop calls this when it
+    /// defers a directory whose children aren't summarized yet, so repeated defers don't
+    /// inflate `attempts` and cause `requeue_stale_in_flight` to wrongly fail the dir after
+    /// a crash. Floors `attempts` at 0.
+    pub fn defer_queue_item(&mut self, path: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE summary_queue
+             SET state='pending', attempts=MAX(0, attempts - 1), updated_at=unixepoch()
+             WHERE path=?1",
+            params![path],
+        )?;
+        Ok(())
     }
 
     /// Mark a queue item's state (e.g. "done" or "failed").

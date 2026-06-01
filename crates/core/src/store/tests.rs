@@ -742,3 +742,64 @@ fn mark_for_resummary_does_not_reset_in_flight() {
         .unwrap();
     assert_eq!(state, "in_flight", "in_flight row left untouched");
 }
+
+#[test]
+fn subtree_has_unfinished_tracks_children() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .enqueue_summary_items(&[
+            ("/proj".into(), "dir".into(), 1),
+            ("/proj/f.txt".into(), "file".into(), 2),
+        ])
+        .unwrap();
+    assert!(
+        store.subtree_has_unfinished("/proj", 1).unwrap(),
+        "pending child"
+    );
+    // Claim the child → in_flight still counts as unfinished.
+    assert_eq!(
+        store.next_queue_item().unwrap().unwrap().path,
+        "/proj/f.txt"
+    );
+    assert!(
+        store.subtree_has_unfinished("/proj", 1).unwrap(),
+        "in_flight child"
+    );
+    // Done → no longer unfinished.
+    store.mark_queue_state("/proj/f.txt", "done", None).unwrap();
+    assert!(
+        !store.subtree_has_unfinished("/proj", 1).unwrap(),
+        "child done"
+    );
+}
+
+#[test]
+fn subtree_has_unfinished_failed_child_is_terminal() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .enqueue_summary_items(&[
+            ("/a".into(), "dir".into(), 1),
+            ("/a/f.txt".into(), "file".into(), 2),
+        ])
+        .unwrap();
+    store
+        .mark_queue_state("/a/f.txt", "failed", Some("x"))
+        .unwrap();
+    assert!(
+        !store.subtree_has_unfinished("/a", 1).unwrap(),
+        "a failed child must not block the dir forever"
+    );
+}
+
+#[test]
+fn subtree_has_unfinished_guards_prefix_siblings() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .enqueue_summary_items(&[
+            ("/proj".into(), "dir".into(), 1),
+            ("/projector/x.txt".into(), "file".into(), 2),
+        ])
+        .unwrap();
+    // /projector/x.txt is a prefix-sibling, NOT inside /proj's subtree → /proj not blocked.
+    assert!(!store.subtree_has_unfinished("/proj", 1).unwrap());
+}
