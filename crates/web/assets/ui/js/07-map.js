@@ -25,33 +25,137 @@ async function loadMap() {
   }
 }
 
+/* ── Local models (Ollama): rich installed ∪ catalog rows from /api/models ── */
+// Active per-role assignments, read from /api/config; used to light up live rows.
+var activeModelCfg = {};
+
+// Bare name == :latest variant — match the backend's dedup.
+function normModel(name) {
+  return String(name).replace(/:latest$/, '');
+}
+// Params in billions → "12.2B" / "137M" (embedders are sub-1B).
+function fmtParams(b) {
+  if (!b || b <= 0) return '';
+  return b >= 1 ? (b < 10 ? b.toFixed(1) : Math.round(b)) + 'B' : Math.round(b * 1000) + 'M';
+}
+// Bytes → "7.6 GB". Local copy: 09-engine.js's fmtGB is IIFE-scoped, not global.
+function fmtBytesGB(bytes) {
+  var gb = (bytes || 0) / 1073741824;
+  return gb.toFixed(gb < 10 ? 1 : 0) + ' GB';
+}
+
 async function loadModels() {
   const list = document.getElementById('models-list');
   try {
-    const r = await fetch('/api/models/installed');
-    const models = await r.json();
-    if (models.error) throw new Error(models.error);
-    if (!models.length) {
-      list.innerHTML = '<div style="color:var(--muted);font-size:13px">No models installed. Pull one below.</div>';
-      return;
+    const [cfgR, modR] = await Promise.all([fetch('/api/config'), fetch('/api/models')]);
+    activeModelCfg = cfgR.ok ? await cfgR.json() : {};
+    const endpointEl = document.getElementById('ollama-endpoint');
+    if (endpointEl && !endpointEl.value) endpointEl.value = activeModelCfg.base_url || '';
+    const data = await modR.json();
+    if (data.error) throw new Error(data.error);
+    const models = data.models || [];
+
+    // "No job selected" line: budget + the active dir model's whole-index ETA.
+    const budgetEl = document.getElementById('models-budget');
+    if (budgetEl) {
+      const dir = models.find(function(m) { return normModel(m.name) === normModel(activeModelCfg.dir_model || ''); });
+      var line = 'Memory budget ' + fmtBytesGB(Math.max(0, data.budget_bytes || 0));
+      if (dir && dir.eta_display) line += ' · summarize your whole index with ' + escapeHtml(dir.name) + ' ≈ ' + escapeHtml(dir.eta_display);
+      budgetEl.innerHTML = line;
     }
-    list.innerHTML = models.map(function(m) {
-      const mb = m.size > 0 ? (m.size / 1024 / 1024).toFixed(0) + ' MB' : '';
-      return '<div class="model-row"><span class="model-name">' + escapeHtml(m.name) + '</span>' +
-        '<span class="model-size">' + mb + '</span></div>';
-    }).join('');
+
+    const installed = models.filter(function(m) { return m.installed; });
+    const avail = models.filter(function(m) { return !m.installed; });
+    var html = '';
+    html += '<div class="model-subhead">Installed</div>';
+    html += installed.length
+      ? installed.map(renderModelRow).join('')
+      : '<div class="model-empty">No models installed. Pull one below.</div>';
+    if (avail.length) {
+      html += '<div class="model-subhead">Available to download</div>';
+      html += avail.map(renderModelRow).join('');
+    }
+    list.innerHTML = html;
   } catch(e) {
-    list.innerHTML = '<div style="color:var(--red);font-size:13px">Ollama not reachable: ' + escapeHtml(e.message) + '</div>';
+    list.innerHTML = '<div class="model-empty" style="color:var(--red)">Ollama not reachable: ' + escapeHtml(e.message) + '</div>';
   }
 }
 
-async function pullModel() {
-  const input = document.getElementById('pull-input');
-  const name = input.value.trim();
+function renderModelRow(m) {
+  const isEmbed = m.role === 'embed';
+  const norm = normModel(m.name);
+  const fitCls = m.fits ? 'fit-ok' : 'fit-warn';
+  const fitTxt = m.fits ? '✅ fits' : '⚠ tight';
+  const size = m.size_bytes > 0 ? fmtBytesGB(m.size_bytes) + (m.size_is_estimate ? ' est' : '') : '';
+  const params = fmtParams(m.params_b);
+  const meta = [size, params, (m.installed ? '' : m.vendor)].filter(Boolean).join(' · ');
+  // Which roles is this model currently assigned to?
+  var activeChips = '';
+  if (norm === normModel(activeModelCfg.file_model || '')) activeChips += '<span class="active-role">file</span>';
+  if (norm === normModel(activeModelCfg.dir_model || '')) activeChips += '<span class="active-role">dir</span>';
+  if (norm === normModel(activeModelCfg.embed_model || '')) activeChips += '<span class="active-role">embed</span>';
+
+  var actions = '';
+  if (m.installed) {
+    if (isEmbed) {
+      actions = '<button class="btn-sm" onclick="setModelRole(this.closest(\'.model-row\').dataset.name,\'embed\')">Set embedder</button>';
+    } else {
+      actions = '<button class="btn-sm" onclick="setModelRole(this.closest(\'.model-row\').dataset.name,\'file\')">Set file</button>' +
+        '<button class="btn-sm" onclick="setModelRole(this.closest(\'.model-row\').dataset.name,\'dir\')">Set dir</button>';
+    }
+  } else {
+    actions = '<button class="btn-sm" onclick="pullModelNamed(this.closest(\'.model-row\').dataset.name)">Pull</button>';
+  }
+  const flag = m.safe_default === false ? '<span class="vendor-flag" title="Listed but not a recommended default per vendor policy">⚠</span>' : '';
+
+  return '<div class="model-row' + (m.installed ? '' : ' avail') + '" data-name="' + escapeAttr(m.name) + '">' +
+    '<span class="model-name">' + escapeHtml(m.name) + flag + '</span>' +
+    '<span class="role-chip">' + escapeHtml(m.role) + '</span>' +
+    activeChips +
+    '<span class="model-meta">' + escapeHtml(meta) + '</span>' +
+    '<span class="fit-badge ' + fitCls + '">' + fitTxt + '</span>' +
+    '<span class="model-eta">' + escapeHtml(m.eta_display || '') + '</span>' +
+    '<span class="model-actions">' + actions + '</span>' +
+    '</div>';
+}
+
+async function setModelRole(name, role) {
+  if (role === 'embed') {
+    if (!confirm('Set the embedding model to "' + name + '"?\n\nThis applies on the next re-embed (indexa deep). An embedder with a different vector dimension makes your existing index incompatible — search stays wrong until a full re-embed.')) return;
+  }
+  const field = role === 'file' ? 'file_model' : role === 'dir' ? 'dir_model' : 'embed_model';
+  const body = {}; body[field] = name;
+  try {
+    const r = await fetch('/api/config/provider', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (d.error) { toast(d.error, 'error'); return; }
+    toast('Set ' + role + ' model → ' + name + (d.restart_required ? ' · restart indexa to apply' : ''), 'info');
+    loadModels();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function refreshCatalog() {
+  const btn = document.getElementById('refresh-catalog-btn');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/models/catalog/refresh', {method: 'POST'});
+    const d = await r.json();
+    if (d.refreshed) toast('Catalog refreshed (' + (d.count || 0) + ' models)', 'info');
+    else toast(d.reason || d.error || 'Catalog not refreshed', 'warn');
+    loadModels();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+  if (btn) btn.disabled = false;
+}
+
+// Streaming pull core, shared by the manual input and per-row Pull buttons.
+async function pullModelNamed(name) {
+  name = (name || '').trim();
   if (!name) return;
   const btn = document.getElementById('pull-btn');
   const prog = document.getElementById('pull-progress');
-  btn.disabled = true;
+  if (btn) btn.disabled = true;
   prog.style.display = 'block';
   prog.textContent = 'Starting pull for ' + name + '…\n';
   try {
@@ -76,13 +180,50 @@ async function pullModel() {
       });
     }
     prog.textContent += '✓ Done.\n';
-    input.value = '';
-    settingsLoaded = false;
+    const input = document.getElementById('pull-input');
+    if (input) input.value = '';
     setTimeout(loadModels, 500);
   } catch(e) {
     prog.textContent += '✗ Error: ' + e.message + '\n';
   }
-  btn.disabled = false;
+  if (btn) btn.disabled = false;
+}
+
+function pullModel() {
+  const input = document.getElementById('pull-input');
+  pullModelNamed(input ? input.value : '');
+}
+
+// Provider switch + Ollama endpoint write-back (POST /api/config/provider).
+async function setProvider(provider, model) {
+  const body = {provider: provider};
+  if (model) body.model = model;
+  try {
+    const r = await fetch('/api/config/provider', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (d.error) { toast(d.error, 'error'); return; }
+    toast('Provider → ' + provider + (d.restart_required ? ' · restart indexa to apply' : ''), 'info');
+    loadProviderStatus();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+function useClaude() { setProvider('claude-code', 'sonnet'); }
+function useLocalOllama() { setProvider('ollama', ''); }
+
+async function saveEndpoint() {
+  const el = document.getElementById('ollama-endpoint');
+  const url = el ? el.value.trim() : '';
+  if (!url) return;
+  try {
+    const r = await fetch('/api/config/provider', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({base_url: url})
+    });
+    const d = await r.json();
+    if (d.error) { toast(d.error, 'error'); return; }
+    toast('Ollama endpoint saved' + (d.restart_required ? ' · restart indexa to apply' : ''), 'info');
+    loadModels();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
 async function loadKeys() {
@@ -123,6 +264,12 @@ async function loadProviderStatus() {
     if (active) active.textContent = d.describer_provider === 'claude-code'
       ? '✓ claude-code'
       : (d.describer_provider || '—');
+    // Show the provider switch that moves AWAY from the current provider.
+    const useClaudeBtn = document.getElementById('use-claude-btn');
+    const useLocalBtn = document.getElementById('use-local-btn');
+    const onClaude = d.describer_provider === 'claude-code';
+    if (useClaudeBtn) useClaudeBtn.style.display = onClaude ? 'none' : '';
+    if (useLocalBtn) useLocalBtn.style.display = onClaude ? '' : 'none';
   } catch(_) {}
 }
 

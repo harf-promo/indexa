@@ -98,25 +98,50 @@
     </div>
     <div class="settings-view" id="settings-view">
       <div class="settings-section">
-        <h2>Local Models (Ollama)</h2>
-        <div id="models-list" class="model-list"><div style="color:var(--muted);font-size:13px">Loading&#x2026;</div></div>
+        <h2>Local models &middot; Ollama</h2>
+        <div class="key-row">
+          <span class="key-label">Endpoint</span>
+          <input type="text" class="key-input" id="ollama-endpoint" placeholder="http://localhost:11434" autocomplete="off" aria-label="Ollama endpoint URL (local or remote)">
+          <button class="btn-sm" onclick="saveEndpoint()">Save</button>
+          <button class="btn-sm" id="use-local-btn" style="display:none" onclick="useLocalOllama()">Use local Ollama</button>
+        </div>
+        <div id="models-budget" class="models-budget"></div>
+        <div id="models-list" class="model-list"><div class="model-empty">Loading&#x2026;</div></div>
         <div class="pull-row">
-          <input type="text" id="pull-input" placeholder="Model name (e.g. gemma3:4b, nomic-embed-text)" autocomplete="off" list="model-suggestions" aria-label="Model name to pull">
+          <input type="text" id="pull-input" placeholder="Pull by name (e.g. gemma3:4b)" autocomplete="off" list="model-suggestions" aria-label="Model name to pull">
           <datalist id="model-suggestions">
             <option value="gemma3:4b">
             <option value="gemma3:12b">
-            <option value="gemma3:27b">
             <option value="nomic-embed-text">
-            <option value="qwen2.5-coder:7b">
+            <option value="llama3.1:8b">
             <option value="mistral:7b">
           </datalist>
           <button id="pull-btn" onclick="pullModel()">Pull</button>
+          <button class="btn-sm" id="refresh-catalog-btn" onclick="refreshCatalog()" title="Refresh the downloadable-model catalog">&#x21bb; Refresh</button>
         </div>
         <div id="pull-progress" class="pull-progress"></div>
-        <p class="settings-note">Models are stored by Ollama. After pulling, update <code>[describer] model</code> in your config file to use the new model. Run <code>indexa status</code> to see its exact path.</p>
+        <p class="settings-note">Click <strong>Set file</strong> / <strong>Set dir</strong> on an installed model to assign it; changes apply on the next <code>indexa serve</code>. The endpoint can point at a remote Ollama. Editing requires <code>INDEXA_WEB_ALLOW_KEY_EDIT=1</code>.</p>
       </div>
       <div class="settings-section">
-        <h2>Cloud Provider API Keys</h2>
+        <h2>Cloud providers</h2>
+        <h3 class="settings-subhead">OAuth / subscription</h3>
+        <div class="key-rows">
+          <div class="key-row">
+            <span class="key-label">Claude CLI</span>
+            <span class="key-set-badge" id="badge-claude-cli">&#x2026;</span>
+          </div>
+          <div class="key-row">
+            <span class="key-label">Signed in</span>
+            <span class="key-set-badge" id="badge-claude-auth">&#x2026;</span>
+          </div>
+          <div class="key-row">
+            <span class="key-label">Active provider</span>
+            <span class="key-set-badge" id="badge-claude-active">&#x2026;</span>
+            <button class="btn-sm" id="use-claude-btn" style="display:none" onclick="useClaude()">Use subscription</button>
+          </div>
+        </div>
+        <p class="settings-note">Run summaries and answers on your Claude Pro/Max plan &mdash; no API key, no per-token billing. Sign in with <code>claude login</code>. Embeddings always stay local.</p>
+        <h3 class="settings-subhead">API key</h3>
         <div id="key-gate-notice" class="key-gate-notice" style="display:none">
           API key editing is disabled. To enable: <code>INDEXA_WEB_ALLOW_KEY_EDIT=1 indexa serve</code>
         </div>
@@ -143,25 +168,7 @@
             <button class="btn-sm" onclick="clearKey('google')">Clear</button>
           </div>
         </div>
-        <p class="settings-note">Keys are saved to your config file with 0600 permissions (run <code>indexa status</code> for its path). Restart <code>indexa serve</code> after saving to apply.</p>
-      </div>
-      <div class="settings-section">
-        <h2>Claude subscription</h2>
-        <div class="key-rows">
-          <div class="key-row">
-            <span class="key-label">Claude CLI</span>
-            <span class="key-set-badge" id="badge-claude-cli">&#x2026;</span>
-          </div>
-          <div class="key-row">
-            <span class="key-label">Signed in</span>
-            <span class="key-set-badge" id="badge-claude-auth">&#x2026;</span>
-          </div>
-          <div class="key-row">
-            <span class="key-label">Active provider</span>
-            <span class="key-set-badge" id="badge-claude-active">&#x2026;</span>
-          </div>
-        </div>
-        <p class="settings-note">Run summaries and answers on your Claude Pro/Max plan &mdash; no API key, no per-token billing. Set <code>[describer] provider = "claude-code"</code> with <code>model = "sonnet"</code> in your config file, then sign in with <code>claude login</code>. Embeddings always stay local.</p>
+        <p class="settings-note">Keys are saved to your config file with 0600 permissions. A self-hosted Ollama/llama.cpp endpoint is configured under <strong>Local models</strong> above. Restart <code>indexa serve</code> after saving to apply.</p>
       </div>
       <div class="settings-section">
         <h2>Refinement Passes</h2>

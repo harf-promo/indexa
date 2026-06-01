@@ -21,16 +21,46 @@ async function modelFitGate(path) {
     return '';
   }
   if (est.configured_fits) return ''; // fits → no popover, proceed as configured
-  return await showModelFitPopover(est);
+  // PR-C: suggest the most capable INSTALLED model that fits (from /api/models),
+  // not just the backend's floor. Fails open to est.recommended_* on any error.
+  const best = await bestInstalledFit(est.num_ctx);
+  return await showModelFitPopover(est, best);
 }
 
-function showModelFitPopover(est) {
+// The largest installed generative model whose single-model peak fits the live
+// budget (the popover loads it as both file+dir → one resident, so single-model
+// `fits` is the right predicate). Timeout-bounded and fail-open (null on error).
+async function bestInstalledFit(numCtx) {
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(function () { ctl.abort(); }, 4000);
+    const url = '/api/models' + (numCtx ? '?num_ctx=' + encodeURIComponent(numCtx) : '');
+    const r = await fetch(url, { signal: ctl.signal });
+    clearTimeout(timer);
+    if (!r.ok) return null;
+    const data = await r.json();
+    const cands = (data.models || []).filter(function (m) {
+      return m.installed && m.fits && m.role !== 'embed';
+    });
+    if (!cands.length) return null;
+    cands.sort(function (a, b) {
+      return (b.params_b || 0) - (a.params_b || 0) || (b.size_bytes || 0) - (a.size_bytes || 0);
+    });
+    return cands[0].name;
+  } catch (e) {
+    return null;
+  }
+}
+
+function showModelFitPopover(est, bestFit) {
   return new Promise(function (resolve) {
     const gb = function (b) { return (b / (1024 * 1024 * 1024)).toFixed(1); };
-    const recFits = est.recommended_fits === true && !!est.recommended_dir_model;
+    // Prefer a real installed model that fits (PR-C); else the backend's floor.
+    const recModel = bestFit || (est.recommended_fits === true ? est.recommended_dir_model : '');
+    const recFits = !!recModel;
     const recParams = recFits
-      ? '&file_model=' + encodeURIComponent(est.recommended_file_model || est.recommended_dir_model) +
-        '&dir_model=' + encodeURIComponent(est.recommended_dir_model) +
+      ? '&file_model=' + encodeURIComponent(bestFit || est.recommended_file_model || est.recommended_dir_model) +
+        '&dir_model=' + encodeURIComponent(recModel) +
         '&num_ctx=' + (est.num_ctx || 4096)
       : '';
 
@@ -55,7 +85,7 @@ function showModelFitPopover(est) {
     overlay.querySelector('.fit-need').textContent = 'Needs ~' + gb(est.configured_peak_bytes) + ' GB';
     overlay.querySelector('.fit-budget').textContent = 'Budget ~' + gb(est.budget_bytes) + ' GB';
     if (recFits) {
-      overlay.querySelector('[data-act="rec"]').textContent = 'Use ' + est.recommended_dir_model + ' (fits)';
+      overlay.querySelector('[data-act="rec"]').textContent = 'Use ' + recModel + ' (fits)';
     }
     overlay.querySelector('[data-act="anyway"]').textContent = 'Build anyway (' + est.configured_dir_model + ')';
 

@@ -7,7 +7,9 @@ use axum::{
 use indexa_core::config;
 use indexa_core::resource::ResourceProfile;
 
-use crate::dto::{err_json, ConfigResponse, PassesRequest, ResourceRequest, ResourceResponse};
+use crate::dto::{
+    err_json, ConfigResponse, PassesRequest, ProviderRequest, ResourceRequest, ResourceResponse,
+};
 use crate::AppState;
 
 pub(crate) async fn api_config_get(State(state): State<AppState>) -> Json<ConfigResponse> {
@@ -17,7 +19,73 @@ pub(crate) async fn api_config_get(State(state): State<AppState>) -> Json<Config
         passes_refresh: cfg.passes_refresh,
         passes_cap: cfg.passes_cap,
         max_children_per_summary: cfg.max_children_per_summary,
+        describer_provider: cfg.provider.clone(),
+        base_url: cfg.base_url.clone(),
+        file_model: cfg.file_model.clone(),
+        dir_model: cfg.dir_model.clone(),
+        qa_model: cfg.model.clone(),
+        embed_model: state.config.embedding.model.clone(),
     })
+}
+
+/// Persist describer/embedding model assignments (provider, per-role models,
+/// base URL) to config.toml. Gated like `api_config_passes` — these select which
+/// model runs and can point at a remote endpoint, so they are not ungated like the
+/// non-secret resource profile. Only the fields present in the body are written;
+/// every other config section is preserved by the load → mutate → save round-trip.
+pub(crate) async fn api_config_provider_set(Json(body): Json<ProviderRequest>) -> Response {
+    if std::env::var("INDEXA_WEB_ALLOW_KEY_EDIT").as_deref() != Ok("1") {
+        return err_json(StatusCode::FORBIDDEN, "INDEXA_WEB_ALLOW_KEY_EDIT not set");
+    }
+    // Whitelist providers we actually support, so a typo can't strand the next launch.
+    if let Some(p) = &body.provider {
+        if !matches!(
+            p.as_str(),
+            "ollama" | "openai" | "anthropic" | "claude-code"
+        ) {
+            return err_json(StatusCode::BAD_REQUEST, format!("unknown provider: {p}"));
+        }
+    }
+
+    let cfg_path = config::default_config_path();
+    // Err here = the file exists but failed to parse: never overwrite it (would wipe
+    // [api_keys] etc.); the user can still fix it by hand. Mirrors api_config_passes.
+    let mut cfg = match config::load(&cfg_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("config exists but failed to parse; refusing to overwrite it: {e:#}"),
+            )
+        }
+    };
+    // Apply only the present, non-empty fields. Empty values are ignored rather
+    // than written, so a stray "" can't strand the next job with a blank model name.
+    let set = |dst: &mut String, v: Option<String>| {
+        if let Some(v) = v {
+            let v = v.trim();
+            if !v.is_empty() {
+                *dst = v.to_owned();
+            }
+        }
+    };
+    if let Some(v) = body.provider {
+        cfg.describer.provider = v.trim().to_owned(); // already whitelisted above
+    }
+    set(&mut cfg.describer.model, body.model);
+    set(&mut cfg.describer.file_model, body.file_model);
+    set(&mut cfg.describer.dir_model, body.dir_model);
+    set(&mut cfg.describer.base_url, body.base_url);
+    set(&mut cfg.embedding.model, body.embed_model);
+
+    match config::save(&cfg, &cfg_path) {
+        // restart_required: the running server holds an Arc<Config> snapshot and does
+        // not hot-reload, so the change applies on the next `indexa serve`.
+        Ok(_) => {
+            Json(serde_json::json!({ "saved": true, "restart_required": true })).into_response()
+        }
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
 }
 
 pub(crate) async fn api_config_passes(

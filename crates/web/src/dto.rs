@@ -201,6 +201,27 @@ pub(crate) struct ConfigResponse {
     pub(crate) passes_refresh: u32,
     pub(crate) passes_cap: u32,
     pub(crate) max_children_per_summary: usize,
+    /// Active describer provider (`"ollama"` | `"claude-code"` | …).
+    pub(crate) describer_provider: String,
+    /// Ollama base URL (the IP/self-hosted endpoint).
+    pub(crate) base_url: String,
+    /// Active model per role — lets the Settings UI mark the live rows.
+    pub(crate) file_model: String,
+    pub(crate) dir_model: String,
+    pub(crate) qa_model: String,
+    pub(crate) embed_model: String,
+}
+
+/// Inbound model/provider assignment from the Settings UI. Every field is
+/// optional; only the present ones are written. Gated like `api_config_passes`.
+#[derive(Deserialize)]
+pub(crate) struct ProviderRequest {
+    pub(crate) provider: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) file_model: Option<String>,
+    pub(crate) dir_model: Option<String>,
+    pub(crate) embed_model: Option<String>,
+    pub(crate) base_url: Option<String>,
 }
 
 /// Current resource/workload settings returned to the Settings UI.
