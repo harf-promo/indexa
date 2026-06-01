@@ -56,9 +56,28 @@
       <div class="tab-panel active" id="panel-tree">
         <div class="summary-view" id="summary-view">
           <div class="welcome" id="browse-welcome">
-            <h2>Your local context, on tap</h2>
-            <p>Click any folder in the sidebar to read its context summary, switch to the <strong>Map</strong>, or <strong>Ask</strong> a question below.<br><br>
-            Use the row actions to <strong>&#x21BB; scan</strong>, <strong>&#x26A1; build deep context</strong>, or <strong>&#x1F4DD; summarize</strong> a folder.</p>
+            <!-- Default welcome (populated index, nothing selected). JS hides this and
+                 reveals #welcome-empty when /api/roots is empty (first run). -->
+            <div id="welcome-default">
+              <h2>Your local context, on tap</h2>
+              <p>Click any folder in the sidebar to read its context summary, switch to the <strong>Map</strong>, or <strong>Ask</strong> a question below.<br><br>
+              Use the row actions to <strong>&#x21BB; scan</strong>, <strong>&#x26A1; build deep context</strong>, or <strong>&#x1F4DD; summarize</strong> a folder.</p>
+            </div>
+            <!-- First-run / empty-index guidance. Shown by onboarding.js when there are no
+                 roots; self-dismisses once a folder is added (index becomes non-empty). -->
+            <div id="welcome-empty" hidden>
+              <h2>Welcome to Indexa &mdash; your local context engine</h2>
+              <p>Point Indexa at a folder and it builds a searchable context map of everything inside &mdash; entirely on your machine.</p>
+              <ol class="onboard-steps">
+                <li><strong>Add a folder.</strong> A code repo, your Documents, a notes vault &mdash; anything.</li>
+                <li><strong>Indexa builds context.</strong> It scans, embeds, and summarizes locally with Ollama. No files leave your machine.</li>
+                <li><strong>Ask or export.</strong> Query in plain language, or export a context pack to Claude, Cursor, or any AI tool.</li>
+              </ol>
+              <div class="onboard-actions">
+                <button class="onboard-cta" onclick="openAddRoot()">&#x2b; Add a folder</button>
+                <span class="onboard-hint">or run <code>indexa scan &lt;path&gt;</code> in your terminal</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -67,7 +86,7 @@
           <div class="chat-area" id="chat">
             <div class="welcome">
               <h2>Ask your local context</h2>
-              <p>Indexa has built context for your files. Ask a question, export to your AI tool, or browse the tree.<br><br>
+              <p>Ask a question about your files in plain language, export to your AI tool, or browse the tree. Add a folder first if you haven&#x2019;t yet.<br><br>
               <code>&#x201C;where are my tax documents?&#x201D;</code> &nbsp;&middot;&nbsp; <code>&#x201C;where is auth handled in this repo?&#x201D;</code></p>
             </div>
           </div>

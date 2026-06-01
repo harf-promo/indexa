@@ -84,6 +84,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/08-util-palette-init.js"),
     include_str!("../assets/ui/js/09-engine.js"),
     include_str!("../assets/ui/js/10-model-fit-popover.js"),
+    include_str!("../assets/ui/js/11-onboarding.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
