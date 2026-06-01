@@ -24,6 +24,26 @@ impl Store {
         Ok(current)
     }
 
+    /// Like [`chunks_are_current`](Self::chunks_are_current), but compares chunks
+    /// against a caller-supplied mtime (Unix seconds) instead of the stored
+    /// `entries.modified_s`.
+    ///
+    /// `cmd_deep` walks files fresh from disk and can run *without* a preceding
+    /// `scan`, so the DB's recorded `modified_s` may be stale — comparing against
+    /// the live on-disk mtime ensures an edited file is re-embedded rather than
+    /// skipped. No `entries` join, so it also holds for a file with no entries row.
+    pub fn chunks_current_for_mtime(&self, path: &str, mtime_secs: i64) -> Result<bool> {
+        let current: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0
+             FROM chunks
+             WHERE entry_path = ?1
+               AND indexed_at >= ?2",
+            params![path, mtime_secs],
+            |r| r.get(0),
+        )?;
+        Ok(current)
+    }
+
     // ── Deep-scan writes ──────────────────────────────────────────────────────
 
     /// Re-index a batch of chunks (text + optional embedding), making the operation
