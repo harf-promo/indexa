@@ -392,6 +392,18 @@ async fn run_deep_phase(
         None
     };
 
+    // Optional image captioning (opt-in): a vision model adds a caption chunk per image.
+    let captioner: Option<OllamaLlm> = if state.config.parsers.image.caption {
+        let base_url = OllamaLlm::resolve_base_url(Some(&cfg.base_url));
+        Some(
+            OllamaLlm::new(&base_url, state.config.parsers.image.caption_model())
+                .with_num_ctx(cfg.num_ctx),
+        )
+    } else {
+        None
+    };
+    let caption_model = state.config.parsers.image.caption_model().to_owned();
+
     // Memory watchdog: checked before each Ollama call.
     let mut wdog = WatchdogState::new();
 
@@ -438,7 +450,7 @@ async fn run_deep_phase(
         } else {
             let ep = entry.path.clone();
             let sz = entry.size;
-            let extracted = match tokio::task::spawn_blocking(move || {
+            let mut extracted = match tokio::task::spawn_blocking(move || {
                 indexa_parsers::registry::parse_guarded(&ep, sz, max_parse_bytes)
             })
             .await
@@ -473,6 +485,45 @@ async fn run_deep_phase(
                     continue;
                 }
             };
+
+            // Image captioning (opt-in): append a vision-model caption chunk alongside the
+            // EXIF chunk. Watchdog-gated (the vision model is heavy); failure only warns.
+            if let Some(cap) = &captioner {
+                if extracted.mime.starts_with("image/") {
+                    run_watchdog_check(
+                        &mut wdog,
+                        &spec,
+                        headroom,
+                        handle,
+                        "deep",
+                        Some(state.embedder.as_ref()),
+                        Some(cap as &(dyn Describer + Send + Sync)),
+                    )
+                    .await;
+                    match indexa_llm::caption_image_file(cap, &caption_model, &entry.path).await {
+                        Ok(text) if !text.trim().is_empty() => {
+                            let seq = extracted.chunks.len();
+                            extracted.chunks.push(indexa_parsers::types::Chunk {
+                                source: entry.path.clone(),
+                                seq,
+                                heading: "caption".to_owned(),
+                                text,
+                                language: None,
+                            });
+                        }
+                        Ok(_) => {}
+                        Err(e) => push(
+                            handle,
+                            JobEvent::Warning {
+                                stage: "deep".to_owned(),
+                                item_path: Some(path_str.clone()),
+                                message: format!("caption failed: {e:#}"),
+                                pressure: None,
+                            },
+                        ),
+                    }
+                }
+            }
 
             if !extracted.chunks.is_empty() {
                 // Build a document-level context string for contextual retrieval.

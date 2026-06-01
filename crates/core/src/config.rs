@@ -285,11 +285,29 @@ impl Default for PdfParserConfig {
     }
 }
 
+/// Default Ollama vision model for image captioning. Non-Chinese-vendor per the project's
+/// model-preference guidance; the user pulls it (it is NOT auto-downloaded).
+pub const DEFAULT_CAPTION_MODEL: &str = "llama3.2-vision";
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ImageParserConfig {
-    /// Set true to enable SigLIP-2 / vision-model captioning (opt-in).
+    /// Set true to caption images with an Ollama vision model (opt-in). NOTE: this loads a
+    /// vision model (~7-8 GB) that the resource watchdog does not yet budget — enable only
+    /// with memory headroom. Images are sent to a local Ollama; nothing leaves the machine.
+    /// Captions are produced on the next `deep` for newly-scanned or modified images;
+    /// images already indexed (unchanged mtime) are skipped, so to caption an existing tree,
+    /// touch the files or rebuild the index.
     pub caption: bool,
+    /// Vision model to caption with. Defaults to [`DEFAULT_CAPTION_MODEL`] when unset.
+    pub model: Option<String>,
+}
+
+impl ImageParserConfig {
+    /// The vision model to use for captioning (configured value or the default).
+    pub fn caption_model(&self) -> &str {
+        self.model.as_deref().unwrap_or(DEFAULT_CAPTION_MODEL)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -496,6 +514,13 @@ mod tests {
         assert_eq!(cfg.retrieval.rrf_k, 60);
         assert!(!cfg.parsers.audio.transcribe);
         assert!(!cfg.parsers.image.caption);
+        // Caption model falls back to the default vision model when unset.
+        assert_eq!(cfg.parsers.image.caption_model(), DEFAULT_CAPTION_MODEL);
+        let custom = ImageParserConfig {
+            caption: true,
+            model: Some("moondream".to_owned()),
+        };
+        assert_eq!(custom.caption_model(), "moondream");
     }
 
     #[test]

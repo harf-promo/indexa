@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Image captioning with a local vision model (opt-in).** Set `[parsers.image] caption = true` and `deep` sends each image to an Ollama vision model (default `llama3.2-vision`) and stores the caption as a searchable chunk alongside the file's EXIF metadata — so you can find images by what's *in* them, fully offline. Nothing leaves the machine. Configure the model via `[parsers.image] model`. Note: the vision model (~7–8 GB) isn't yet counted by the memory watchdog, so enable it with headroom; captions are produced for newly-scanned or modified images.
+
 ## [0.10.0] — 2026-06-01
 
 ### Added

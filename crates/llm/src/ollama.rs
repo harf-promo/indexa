@@ -106,6 +106,49 @@ impl OllamaLlm {
         Self::new(Self::resolve_base_url(None), DEFAULT_MODEL)
     }
 
+    /// Caption an image with an explicit **vision** model via Ollama's `/api/generate`
+    /// `images` field (base64). `image_b64` is the raw file bytes, base64-encoded.
+    /// Non-streaming; used by the deep phase when `[parsers.image] caption` is enabled.
+    /// Kept inherent (not on the `Generator` trait) because the `images` array is
+    /// Ollama-specific wire format the cloud providers don't share.
+    pub async fn caption_image(&self, model: &str, image_b64: &str) -> Result<String> {
+        let url = format!("{}/api/generate", self.base_url);
+        let body = Req {
+            model,
+            prompt: "Describe this image in 1-3 factual sentences for search indexing. \
+                     Note any visible text, the main objects/people, the setting, and the \
+                     document type if it is a screenshot or scan. Answer only with the \
+                     description, no preamble.",
+            stream: false,
+            keep_alive: self.keep_alive,
+            options: Some(GenOptions {
+                num_parallel: 1,
+                num_ctx: self.num_ctx,
+            }),
+            images: Some(vec![image_b64.to_owned()]),
+        };
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("Ollama caption request to {url}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Ollama returned {status}: {text}");
+        }
+        let parsed: Resp = resp
+            .json()
+            .await
+            .context("parsing Ollama caption response")?;
+        if let Some(err) = parsed.error {
+            anyhow::bail!("Ollama returned an error: {err}");
+        }
+        Ok(parsed.response.trim().to_owned())
+    }
+
     fn effective_dir_model(&self) -> &str {
         self.dir_model.as_deref().unwrap_or(&self.model)
     }
@@ -128,6 +171,7 @@ impl OllamaLlm {
                 num_parallel: 1,
                 num_ctx: self.num_ctx,
             }),
+            images: None,
         };
         let resp = self
             .client
@@ -220,6 +264,9 @@ struct Req<'a> {
     /// Inference options: pin num_parallel=1 to avoid KV-cache explosion.
     #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<GenOptions>,
+    /// Base64-encoded images for a vision model (Ollama-specific). Omitted for text calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    images: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -258,6 +305,7 @@ impl Generator for OllamaLlm {
                 num_parallel: 1,
                 num_ctx: self.num_ctx,
             }),
+            images: None,
         };
 
         let resp = self
@@ -301,6 +349,7 @@ impl Generator for OllamaLlm {
                 num_parallel: 1,
                 num_ctx: self.num_ctx,
             }),
+            images: None,
         };
 
         let resp = self
@@ -514,6 +563,7 @@ impl Describer for OllamaLlm {
                 num_parallel: 1,
                 num_ctx: self.num_ctx,
             }),
+            images: None,
         };
         let resp = self
             .client
@@ -544,6 +594,20 @@ impl Describer for OllamaLlm {
     }
 }
 
+/// Read an image file, base64-encode it, and caption it with `model` via `llm`. Convenience
+/// over [`OllamaLlm::caption_image`] for the deep phase, which has the file path. The image
+/// bytes are sent to the local Ollama as-is (no decode needed); nothing leaves the machine.
+pub async fn caption_image_file(
+    llm: &OllamaLlm,
+    model: &str,
+    path: &std::path::Path,
+) -> Result<String> {
+    use base64::Engine;
+    let bytes = std::fs::read(path).with_context(|| format!("reading image {}", path.display()))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    llm.caption_image(model, &b64).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,6 +627,36 @@ mod tests {
         let ok: Resp = serde_json::from_str(r#"{"response":"hello"}"#).unwrap();
         assert!(ok.error.is_none());
         assert_eq!(ok.response, "hello");
+    }
+
+    #[test]
+    fn req_omits_images_for_text_and_includes_for_vision() {
+        // A text generate must NOT send `images` (it would confuse/error non-vision models);
+        // a caption call must send the base64 array.
+        let text = Req {
+            model: "gemma3:4b",
+            prompt: "hi",
+            stream: false,
+            keep_alive: None,
+            options: None,
+            images: None,
+        };
+        let j = serde_json::to_string(&text).unwrap();
+        assert!(!j.contains("images"), "text request must omit images: {j}");
+
+        let vision = Req {
+            model: "llama3.2-vision",
+            prompt: "describe",
+            stream: false,
+            keep_alive: None,
+            options: None,
+            images: Some(vec!["QUJD".to_owned()]),
+        };
+        let j = serde_json::to_string(&vision).unwrap();
+        assert!(
+            j.contains("\"images\":[\"QUJD\"]"),
+            "vision request must carry images: {j}"
+        );
     }
 
     #[test]
