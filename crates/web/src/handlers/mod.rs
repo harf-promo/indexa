@@ -17,7 +17,7 @@ mod telemetry;
 mod tree;
 mod ui;
 
-pub(crate) use ask::api_ask;
+pub(crate) use ask::{api_ask, api_ask_stream};
 pub(crate) use config::{
     api_config_get, api_config_passes, api_config_provider_set, api_config_resource_get,
     api_config_resource_set,
