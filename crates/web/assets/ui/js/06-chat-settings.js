@@ -14,6 +14,17 @@ function appendMsg(role, html) {
   return div;
 }
 
+/* Render the Sources block appended below an answer. */
+function renderSources(sources) {
+  if (!sources || !sources.length) return '';
+  return '<div class="sources"><h4>Sources</h4>' +
+    sources.map(function(s) {
+      return '<div class="source-item"><span class="path">' + escapeHtml(s.path) + '</span>' +
+        (s.heading ? '<span class="heading">' + escapeHtml(s.heading) + '</span>' : '') +
+        '<div class="snippet">' + escapeHtml(s.snippet) + '</div></div>';
+    }).join('') + '</div>';
+}
+
 async function doAsk() {
   const q = qInput.value.trim();
   if (!q) return;
@@ -23,28 +34,65 @@ async function doAsk() {
 
   appendMsg('user', escapeHtml(q));
   const thinking = appendMsg('assistant', '<span class="thinking">Thinking…</span>');
+  const bubble = thinking.querySelector('.bubble');
+
+  let answerText = '';
+  let sources = [];
+  // Render the partial answer (leading whitespace from the model's first token trimmed so
+  // it doesn't briefly indent) + sources, keeping the view pinned to the bottom.
+  const renderAnswer = function() {
+    return renderMarkdown(answerText.replace(/^\s+/, '')) + renderSources(sources);
+  };
+  const repaint = function() {
+    bubble.innerHTML = renderAnswer();
+    chat.scrollTop = chat.scrollHeight;
+  };
+  const handleEvent = function(ev) {
+    if (ev.type === 'sources') { sources = ev.sources || []; }
+    else if (ev.type === 'fragment') { answerText += ev.text; repaint(); }
+    else if (ev.type === 'error') { throw new Error(ev.message || 'Generation failed'); }
+    // 'done' is terminal; the loop ends when the stream closes.
+  };
 
   try {
-    const r = await fetch('/api/ask', {
+    const r = await fetch('/api/ask/stream', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ question: q })
     });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || 'Request failed');
+    if (!r.ok || !r.body) throw new Error('Request failed (' + r.status + ')');
 
-    let html = renderMarkdown(d.answer);
-    if (d.sources && d.sources.length > 0) {
-      html += '<div class="sources"><h4>Sources</h4>' +
-        d.sources.map(function(s) {
-          return '<div class="source-item"><span class="path">' + escapeHtml(s.path) + '</span>' +
-            (s.heading ? '<span class="heading">' + escapeHtml(s.heading) + '</span>' : '') +
-            '<div class="snippet">' + escapeHtml(s.snippet) + '</div></div>';
-        }).join('') + '</div>';
+    // Parse the text/event-stream body: events are separated by a blank line; we read the
+    // `data:` line(s) of each and ignore `:`-comment keep-alives.
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buf += decoder.decode(chunk.value, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf('\n\n')) !== -1) {
+        const rawEvent = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        const data = rawEvent.split('\n')
+          .filter(function(l) { return l.indexOf('data:') === 0; })
+          .map(function(l) { return l.slice(5).replace(/^ /, ''); })
+          .join('\n');
+        if (!data) continue;
+        let parsed;
+        // Skip an unparseable line (e.g. a truncated frame) rather than aborting the whole
+        // render; a real `error` event is valid JSON and still throws out of handleEvent.
+        try { parsed = JSON.parse(data); } catch (_) { continue; }
+        handleEvent(parsed);
+      }
     }
-    thinking.querySelector('.bubble').innerHTML = html;
+    // Guard: a stream that closed without ever producing a fragment (e.g. empty answer).
+    if (!answerText) repaint();
   } catch(err) {
-    thinking.querySelector('.bubble').innerHTML = '<span style="color:var(--red)">' + escapeHtml(err.message) + '</span>';
+    // Keep any already-streamed answer; append the error beneath it rather than discarding.
+    const errHtml = '<div class="ask-error" style="color:var(--red)">' + escapeHtml(err.message) + '</div>';
+    bubble.innerHTML = answerText ? renderAnswer() + errHtml : errHtml;
   }
 
   sendBtn.disabled = false;

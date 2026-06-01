@@ -5,6 +5,7 @@
 //! - `GET /api/stats`    — { entries, chunks }
 //! - `GET /api/map`      — [{ category, entry_count, total_size }]
 //! - `POST /api/ask`     — { question } → { answer, sources }
+//! - `POST /api/ask/stream` — { question } → SSE: `sources` event, then `fragment` events, then `done`
 //! - `POST /api/jobs/index?path=` — start scan→deep→summarize job, returns { job_id }
 //! - `GET /api/jobs`     — list active jobs
 //! - `GET /api/jobs/:id/events` — SSE progress stream
@@ -185,6 +186,7 @@ pub async fn serve(
         .route("/api/search", get(api_search))
         .route("/api/fs/ls", get(api_fs_ls))
         .route("/api/ask", post(api_ask))
+        .route("/api/ask/stream", post(api_ask_stream))
         .route("/api/tree", get(api_tree))
         .route("/api/summary", get(api_summary))
         .route("/api/summarize", post(api_summarize_enqueue))

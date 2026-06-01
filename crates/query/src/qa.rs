@@ -16,11 +16,20 @@ pub struct Answer {
     pub sources: Vec<SourceCitation>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SourceCitation {
     pub path: String,
     pub heading: String,
     pub snippet: String,
+}
+
+/// An event emitted by [`answer_stream`]: the cited sources once up front (so a UI can
+/// render citations before any token arrives), then answer text fragments as the model
+/// produces them. Providers without real token streaming (everything but Ollama today)
+/// emit a single `Fragment` with the whole answer.
+pub enum AnswerChunk {
+    Sources(Vec<SourceCitation>),
+    Fragment(String),
 }
 
 /// Configuration for the Q&A pipeline.
@@ -101,6 +110,67 @@ pub async fn answer(
     question: &str,
     cfg: &QaConfig,
 ) -> Result<Answer> {
+    let hits = retrieve_and_rerank(db_path, embedder, llm, question, cfg).await?;
+    if hits.is_empty() {
+        return Ok(no_match_answer(question));
+    }
+    // Synthesize (no store access).
+    synthesize_from_hits(hits, llm, question, cfg).await
+}
+
+/// Streaming variant of [`answer`]: identical retrieve → rerank → synthesize pipeline, but
+/// emits [`AnswerChunk`]s via `on_chunk` — `Sources` first (citations are known before
+/// generation), then answer `Fragment`s as the LLM streams them. Returns the same
+/// [`Answer`] as [`answer`] so callers that also want the assembled result (logging, tests)
+/// get it. The no-match short-circuit emits its guidance as a single fragment so streaming
+/// and non-streaming surfaces read identically.
+pub async fn answer_stream(
+    db_path: &Path,
+    embedder: &dyn Embedder,
+    llm: &dyn Generator,
+    question: &str,
+    cfg: &QaConfig,
+    on_chunk: &mut (dyn FnMut(AnswerChunk) + Send),
+) -> Result<Answer> {
+    let hits = retrieve_and_rerank(db_path, embedder, llm, question, cfg).await?;
+    if hits.is_empty() {
+        let ans = no_match_answer(question);
+        on_chunk(AnswerChunk::Sources(Vec::new()));
+        on_chunk(AnswerChunk::Fragment(ans.answer.clone()));
+        return Ok(ans);
+    }
+
+    let (context, sources) = pack_context(&hits, cfg.context_budget);
+    // Citations up front so the UI can render them before the first token.
+    on_chunk(AnswerChunk::Sources(sources.clone()));
+
+    let prompt = build_prompt(question, &context);
+    let mut full = String::new();
+    {
+        let mut on_frag = |frag: String| {
+            full.push_str(&frag);
+            on_chunk(AnswerChunk::Fragment(frag));
+        };
+        llm.generate_stream(&prompt, &mut on_frag).await?;
+    }
+    Ok(Answer {
+        question: question.to_owned(),
+        answer: full.trim().to_owned(),
+        sources,
+    })
+}
+
+/// Embed → retrieve → optional rerank, shared by [`answer`] and [`answer_stream`].
+/// Returns an empty `Vec` when nothing matched (callers emit the no-match guidance).
+/// The `&Store` is confined to a sync scope and dropped before any `.await`, so the
+/// returned future is `Send`.
+async fn retrieve_and_rerank(
+    db_path: &Path,
+    embedder: &dyn Embedder,
+    llm: &dyn Generator,
+    question: &str,
+    cfg: &QaConfig,
+) -> Result<Vec<SearchHit>> {
     // 1. Embed (no store in scope). Skip for sparse-only.
     let query_vec = match cfg.mode {
         HybridMode::Sparse => None,
@@ -113,29 +183,31 @@ pub async fn answer(
         retrieve(&store, question, query_vec.as_deref(), cfg)?
     };
 
-    // 2b. Short-circuit on no matches: with zero grounding the LLM would
-    //     hallucinate a confident answer. Tell the user to index instead.
-    //     Centralised here so CLI, web, and MCP all behave the same.
+    // 2b. No matches: with zero grounding the LLM would hallucinate a confident answer, so
+    //     callers short-circuit to a "run indexa deep first" message (do not rerank).
     if hits.is_empty() {
-        return Ok(Answer {
-            question: question.to_owned(),
-            answer: "No indexed content matched your query. Run `indexa deep` and \
-                     `indexa summarize` on the relevant folder first, then ask again."
-                .to_owned(),
-            sources: Vec::new(),
-        });
+        return Ok(Vec::new());
     }
 
     // 3. Optional cross-encoder rerank (fails open). Reaches every surface
-    //    because they all call this function.
+    //    because they all call this helper.
     let hits = if cfg.rerank {
         apply_rerank(&LlmReranker::new(llm), question, hits).await
     } else {
         hits
     };
+    Ok(hits)
+}
 
-    // 4. Synthesize (no store access).
-    synthesize_from_hits(hits, llm, question, cfg).await
+/// The shared no-match answer (identical across CLI, web, MCP).
+fn no_match_answer(question: &str) -> Answer {
+    Answer {
+        question: question.to_owned(),
+        answer: "No indexed content matched your query. Run `indexa deep` and \
+                 `indexa summarize` on the relevant folder first, then ask again."
+            .to_owned(),
+        sources: Vec::new(),
+    }
 }
 
 /// Synthesise an answer from pre-retrieved hits (no store access). Internal helper for
@@ -370,5 +442,118 @@ mod tests {
         assert_eq!(ans.answer, "a synthesized answer");
         assert!(!ans.sources.is_empty());
         assert_eq!(gen_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Generator that streams several fragments (overrides generate_stream) so we can verify
+    /// answer_stream preserves fragment order and event ordering.
+    struct StreamingGen;
+    #[async_trait::async_trait]
+    impl Generator for StreamingGen {
+        async fn generate(&self, _prompt: &str) -> Result<String> {
+            Ok("unused".to_owned())
+        }
+        async fn generate_stream(
+            &self,
+            _prompt: &str,
+            on_fragment: &mut (dyn FnMut(String) + Send),
+        ) -> Result<String> {
+            let mut full = String::new();
+            for part in ["Ferris ", "is the ", "Rust mascot."] {
+                on_fragment(part.to_owned());
+                full.push_str(part);
+            }
+            Ok(full)
+        }
+    }
+
+    #[tokio::test]
+    async fn answer_stream_emits_sources_before_fragments_in_order() {
+        let (_dir, path) = temp_index_with_chunk("ferris the crab is the rust mascot");
+        let embedder = CountingEmbedder {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let cfg = QaConfig {
+            mode: HybridMode::Sparse,
+            ..QaConfig::default()
+        };
+
+        let mut frags = String::new();
+        let mut seen_fragment = false;
+        let mut sources_before_fragment = true;
+        let mut sources_count = None;
+        {
+            let mut on_chunk = |c: AnswerChunk| match c {
+                AnswerChunk::Sources(s) => {
+                    if seen_fragment {
+                        sources_before_fragment = false;
+                    }
+                    sources_count = Some(s.len());
+                }
+                AnswerChunk::Fragment(t) => {
+                    seen_fragment = true;
+                    frags.push_str(&t);
+                }
+            };
+            let ans = answer_stream(
+                &path,
+                &embedder,
+                &StreamingGen,
+                "ferris",
+                &cfg,
+                &mut on_chunk,
+            )
+            .await
+            .unwrap();
+            // Reaching the streamed text (not the no-match message) proves hits matched.
+            assert_eq!(ans.answer, "Ferris is the Rust mascot.");
+            assert_eq!(ans.sources.len(), 1);
+        }
+        assert!(
+            sources_before_fragment,
+            "Sources must be emitted before any fragment"
+        );
+        assert_eq!(sources_count, Some(1), "one source emitted up front");
+        assert_eq!(
+            frags, "Ferris is the Rust mascot.",
+            "fragments must arrive in order and concatenate to the full answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn answer_stream_no_match_emits_guidance_as_one_fragment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        Store::open(&path).unwrap(); // empty index
+        let embedder = CountingEmbedder {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let cfg = QaConfig {
+            mode: HybridMode::Sparse,
+            ..QaConfig::default()
+        };
+        let mut frags = String::new();
+        let mut sources_len = None;
+        {
+            let mut on_chunk = |c: AnswerChunk| match c {
+                AnswerChunk::Sources(s) => sources_len = Some(s.len()),
+                AnswerChunk::Fragment(t) => frags.push_str(&t),
+            };
+            let ans = answer_stream(
+                &path,
+                &embedder,
+                &StreamingGen,
+                "anything",
+                &cfg,
+                &mut on_chunk,
+            )
+            .await
+            .unwrap();
+            assert!(ans.answer.contains("indexa deep"));
+        }
+        assert_eq!(sources_len, Some(0), "empty sources event still emitted");
+        assert!(
+            frags.contains("indexa deep"),
+            "no-match guidance arrives as a fragment"
+        );
     }
 }

@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Streaming answers in the web Ask view.** `POST /api/ask/stream` serves the same RAG answer as `/api/ask` over server-sent events — one `sources` event up front (citations render immediately), then the answer token-by-token as the model produces it, then a terminal `done`/`error`. Real streaming on Ollama; cloud/`claude-code` providers send the answer in one piece (graceful fallback). The UI consumes it via `fetch` + a streamed-body reader so the question stays in the POST body, not the URL.
+- **First-run onboarding for an empty index.** With no roots, the web UI now shows a guided three-step walkthrough (add a folder → Indexa builds context locally → ask or export) and lands on the Context view instead of an Ask view whose copy assumed context already existed. Derived from live state, so it self-dismisses once a folder is added and never nags a populated index.
+
 ### Changed
 
 - **`deep` embeds in batched round-trips — materially faster on multi-chunk files.** The deep phase previously made one embedding HTTP call per chunk; it now sends up to 64 chunks per call via Ollama's `/api/embed` batch endpoint (CLI `deep` and the web Deep job alike), falling back per-chunk on any batch error, count mismatch, or older Ollama without the endpoint — so correctness never depends on the batch path. Order is preserved and the embedding dimension is unchanged. Search results are identical: `/api/embed` returns L2-normalized vectors and the legacy single endpoint raw ones, but the directions match exactly and Indexa ranks by scale-invariant cosine.
+- **Accessible Settings/Activity drawers.** Opening a drawer now traps focus inside it (the rest of the page is made `inert`) and restores focus to the opener on close; only one drawer can be open at a time. The workspace view tabs expose `aria-selected`/`aria-controls` and the panels are proper `tabpanel`s.
 
 A **model-intelligence + freshness** release: a hardware-aware Local-vs-Cloud model picker, a summary-quality fix, and live-freshness fixes across `deep` and `watch`.
 
