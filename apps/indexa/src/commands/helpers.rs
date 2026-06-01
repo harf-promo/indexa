@@ -106,27 +106,57 @@ smallest model. Free some RAM or lower the resource profile; the memory watchdog
     (file_model, dir_model)
 }
 
+/// Canonicalize a root so scan/deep/watch/rm all agree on its path form. `notify`
+/// (watch) reports canonical event paths, so a symlinked root — e.g. macOS /tmp →
+/// /private/tmp — would otherwise mismatch the non-canonical path scan stored,
+/// producing duplicate queue rows and missed re-summarization. Falls back to the
+/// input when it can't be resolved (e.g. doesn't exist yet). Applied to *every*
+/// branch so a bare-home root and an explicit path land in the same form.
+fn canonical_root(p: PathBuf) -> PathBuf {
+    match p.canonicalize() {
+        Ok(c) => strip_verbatim_prefix(c),
+        Err(_) => p,
+    }
+}
+
+/// On Windows, `canonicalize` returns a `\\?\` verbatim path; strip it so stored
+/// roots stay comparable to `notify`'s non-verbatim event paths and to user-facing
+/// display. No-op on Unix.
+#[cfg(windows)]
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    p
+}
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    p
+}
+
 pub(crate) fn resolve_roots(paths: Vec<String>, all: bool) -> Result<Vec<PathBuf>> {
     if all {
         #[cfg(windows)]
-        return Ok(vec![PathBuf::from("C:\\")]);
+        let root = PathBuf::from("C:\\");
         #[cfg(not(windows))]
-        return Ok(vec![PathBuf::from("/")]);
+        let root = PathBuf::from("/");
+        return Ok(vec![canonical_root(root)]);
     }
 
     if paths.is_empty() {
         let base =
             BaseDirs::new().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-        return Ok(vec![base.home_dir().to_path_buf()]);
+        return Ok(vec![canonical_root(base.home_dir().to_path_buf())]);
     }
 
-    paths
+    Ok(paths
         .into_iter()
-        .map(|p| {
-            let expanded = shellexpand::tilde(&p).into_owned();
-            Ok(PathBuf::from(expanded))
-        })
-        .collect()
+        .map(|p| canonical_root(PathBuf::from(shellexpand::tilde(&p).into_owned())))
+        .collect())
 }
 
 pub(crate) fn index_db_path() -> Result<PathBuf> {
@@ -217,4 +247,60 @@ pub(crate) fn format_unix_timestamp(ts: i64) -> String {
     let year = if month <= 2 { y + 1 } else { y };
 
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_roots;
+    use std::path::PathBuf;
+
+    #[test]
+    fn resolve_roots_canonicalizes_existing_paths() {
+        // An existing dir resolves to its canonical form, so scan/deep/watch agree even on
+        // symlinked roots (e.g. macOS /tmp → /private/tmp).
+        let dir = std::env::temp_dir();
+        let got = resolve_roots(vec![dir.to_string_lossy().into_owned()], false).unwrap();
+        // On Windows `canonicalize` returns a `\\?\` verbatim path; resolve_roots strips it,
+        // so the expected value must strip it too.
+        #[allow(unused_mut)]
+        let mut expected = dir.canonicalize().unwrap();
+        #[cfg(windows)]
+        {
+            let s = expected.to_string_lossy().into_owned();
+            if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+                expected = PathBuf::from(format!(r"\\{rest}"));
+            } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+                expected = PathBuf::from(rest);
+            }
+        }
+        assert_eq!(got, vec![expected]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_roots_resolves_a_symlinked_dir() {
+        // The real intent: a symlinked root resolves to its canonical target, so a
+        // `scan`/`watch` on the symlink agree with notify's canonical event paths.
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().canonicalize().unwrap();
+        let pid = std::process::id();
+        let target = base.join(format!("indexa_rr_target_{pid}"));
+        let link = base.join(format!("indexa_rr_link_{pid}"));
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::create_dir_all(&target).unwrap();
+        symlink(&target, &link).unwrap();
+        let got = resolve_roots(vec![link.to_string_lossy().into_owned()], false).unwrap();
+        assert_eq!(got, vec![target.clone()]);
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn resolve_roots_falls_back_when_path_missing() {
+        // A path that can't be canonicalized (doesn't exist yet) falls back to the expanded form.
+        let missing = PathBuf::from("/no/such/indexa/path/zzz123");
+        let got = resolve_roots(vec![missing.to_string_lossy().into_owned()], false).unwrap();
+        assert_eq!(got, vec![missing]);
+    }
 }

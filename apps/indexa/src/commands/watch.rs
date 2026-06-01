@@ -66,14 +66,10 @@ pub(crate) async fn cmd_watch(
 
     let db_path_clone = db_path.clone();
     let max_parse_bytes = cfg.parsers.max_file_mb.saturating_mul(1024 * 1024);
-    // Canonicalize so the ancestor walk's root match works: notify reports event
-    // paths in canonical form (e.g. macOS /tmp → /private/tmp), which would not
-    // `starts_with` a symlinked watched root. Falls back to the raw path if the
-    // root can't be canonicalized.
-    let watch_roots: Vec<PathBuf> = roots
-        .iter()
-        .map(|r| r.canonicalize().unwrap_or_else(|_| r.clone()))
-        .collect();
+    // `resolve_roots` already returns canonical (verbatim-stripped) roots, which match
+    // notify's canonical event paths — so the ancestor-walk `starts_with` check works
+    // without re-canonicalizing here (which on Windows would re-add the `\\?\` prefix).
+    let watch_roots = roots.clone();
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Handle::current();
 

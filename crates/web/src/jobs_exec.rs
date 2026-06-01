@@ -823,8 +823,14 @@ pub(crate) async fn run_summarize_phase(
         let llm_secs = llm_start.elapsed().as_secs_f64();
         match r {
             Ok(true) => done += 1,
-            // Ok(false) = item failed but was recorded in the queue; Err = unexpected store error.
-            Ok(false) | Err(_) => errors += 1,
+            // Ok(false) = item already recorded `failed` in the queue.
+            Ok(false) => errors += 1,
+            // Err = unexpected store error that left the row `in_flight`. Terminalize it
+            // (best-effort) so it can't get stuck blocking the queue.
+            Err(e) => {
+                errors += 1;
+                let _ = job_store.mark_queue_state(&item.path, "failed", Some(&format!("{e:#}")));
+            }
         }
 
         let processed = (done + errors) as u64;

@@ -348,7 +348,10 @@ pub async fn process_queue_item_with_passes(
     let passes = match passes_override {
         Some(n) => n.min(cfg.passes_cap),
         None => {
-            let already_summarized = store.summary_by_path(&item.path)?.is_some();
+            // Don't `?` here: a read error would propagate while the item is still
+            // `in_flight`. Treat an unreadable summary row as "not yet summarized"
+            // (→ passes_first); the summarize result below always terminalizes the row.
+            let already_summarized = store.summary_by_path(&item.path).ok().flatten().is_some();
             if already_summarized {
                 cfg.passes_refresh
             } else {
@@ -454,6 +457,10 @@ pub async fn summarize_subtree_sync(
             Ok(false) => errors += 1,
             Err(e) => {
                 errors += 1;
+                // A store error left the claimed row `in_flight`; terminalize it (best-effort)
+                // so it isn't stuck for the rest of this process (this CLI loop runs no startup
+                // sweep). Mirrors the worker + web drain loops.
+                let _ = store.mark_queue_state(&item.path, "failed", Some(&format!("{e:#}")));
                 if first_error.is_none() {
                     first_error = Some(e.to_string());
                 }

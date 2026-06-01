@@ -115,7 +115,15 @@ pub async fn run_worker(
                 )
                 .await
                 {
-                    tracing::warn!("worker: process_queue_item error: {e}");
+                    // `process_queue_item` only returns Err on an unexpected store error,
+                    // which leaves the claimed row `in_flight`. Terminalize it (best-effort)
+                    // so it can't get stuck blocking the queue until the next restart sweep.
+                    tracing::warn!("worker: process_queue_item error for {}: {e}", item.path);
+                    if let Err(e2) =
+                        job_store.mark_queue_state(&item.path, "failed", Some(&format!("{e:#}")))
+                    {
+                        tracing::warn!("worker: could not terminalize {}: {e2}", item.path);
+                    }
                 }
             }
         }
