@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-06-01
+
+A **local multimodal + scale** release: opt-in image captioning, audio transcription, and an ANN index for dense search on large corpora.
+
 ### Added
 
 - **Optional ANN (HNSW) index for dense search at scale (opt-in).** Set `[retrieval] ann = true` and, once the index passes `ann_min_chunks` (default 50,000), the web server builds an in-memory HNSW index (`hnsw_rs`, cosine) and uses it for the dense arm of retrieval instead of a brute-force cosine scan — cutting latency on large indexes. Built lazily and rebuilt when the chunks change; scoped queries and smaller indexes transparently fall back to brute-force, so results are unchanged (only faster). Default off — small/normal indexes are unaffected.
