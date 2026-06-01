@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use indexa_core::config::HybridMode;
-use indexa_core::store::{SearchHit, Store};
+use indexa_core::store::{AnnIndex, SearchHit, Store};
 use indexa_embed::Embedder;
 use indexa_llm::Generator;
 
@@ -76,14 +76,16 @@ pub(crate) fn retrieve(
     question: &str,
     query_vec: Option<&[f32]>,
     cfg: &QaConfig,
+    ann: Option<&AnnIndex>,
 ) -> Result<Vec<SearchHit>> {
-    let mut hits = store.hybrid_search(
+    let mut hits = store.hybrid_search_with_ann(
         question,
         query_vec,
         &cfg.mode,
         cfg.scope.as_deref(),
         cfg.top_k,
         cfg.rrf_k,
+        ann,
     )?;
     if let Some(qvec) = query_vec {
         let _ = store.boost_with_summaries(
@@ -110,7 +112,22 @@ pub async fn answer(
     question: &str,
     cfg: &QaConfig,
 ) -> Result<Answer> {
-    let hits = retrieve_and_rerank(db_path, embedder, llm, question, cfg).await?;
+    answer_with_ann(db_path, embedder, llm, question, cfg, None).await
+}
+
+/// [`answer`] with an optional ANN index for dense retrieval (see
+/// [`Store::hybrid_search_with_ann`](indexa_core::store::Store::hybrid_search_with_ann)).
+/// Long-lived callers (the web server) build + cache the index and pass it here; one-shot
+/// callers pass `None` and get brute-force. `None` ⇒ identical to [`answer`].
+pub async fn answer_with_ann(
+    db_path: &Path,
+    embedder: &dyn Embedder,
+    llm: &dyn Generator,
+    question: &str,
+    cfg: &QaConfig,
+    ann: Option<&AnnIndex>,
+) -> Result<Answer> {
+    let hits = retrieve_and_rerank(db_path, embedder, llm, question, cfg, ann).await?;
     if hits.is_empty() {
         return Ok(no_match_answer(question));
     }
@@ -132,7 +149,22 @@ pub async fn answer_stream(
     cfg: &QaConfig,
     on_chunk: &mut (dyn FnMut(AnswerChunk) + Send),
 ) -> Result<Answer> {
-    let hits = retrieve_and_rerank(db_path, embedder, llm, question, cfg).await?;
+    answer_stream_with_ann(db_path, embedder, llm, question, cfg, None, on_chunk).await
+}
+
+/// [`answer_stream`] with an optional ANN index for dense retrieval. `None` ⇒ identical to
+/// [`answer_stream`].
+#[allow(clippy::too_many_arguments)]
+pub async fn answer_stream_with_ann(
+    db_path: &Path,
+    embedder: &dyn Embedder,
+    llm: &dyn Generator,
+    question: &str,
+    cfg: &QaConfig,
+    ann: Option<&AnnIndex>,
+    on_chunk: &mut (dyn FnMut(AnswerChunk) + Send),
+) -> Result<Answer> {
+    let hits = retrieve_and_rerank(db_path, embedder, llm, question, cfg, ann).await?;
     if hits.is_empty() {
         let ans = no_match_answer(question);
         on_chunk(AnswerChunk::Sources(Vec::new()));
@@ -170,6 +202,7 @@ async fn retrieve_and_rerank(
     llm: &dyn Generator,
     question: &str,
     cfg: &QaConfig,
+    ann: Option<&AnnIndex>,
 ) -> Result<Vec<SearchHit>> {
     // 1. Embed (no store in scope). Skip for sparse-only.
     let query_vec = match cfg.mode {
@@ -180,7 +213,7 @@ async fn retrieve_and_rerank(
     // 2. Retrieve in a sync scope — `&Store` never crosses an await.
     let hits = {
         let store = Store::open(db_path)?;
-        retrieve(&store, question, query_vec.as_deref(), cfg)?
+        retrieve(&store, question, query_vec.as_deref(), cfg, ann)?
     };
 
     // 2b. No matches: with zero grounding the LLM would hallucinate a confident answer, so

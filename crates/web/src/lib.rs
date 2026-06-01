@@ -24,7 +24,7 @@ use axum::{
 use indexa_core::{
     config::Config,
     resource::{detect_machine, MachineSpec, TelemetrySampler},
-    store::Store,
+    store::{AnnIndex, Store},
 };
 use indexa_embed::Embedder;
 use indexa_llm::Generator;
@@ -53,6 +53,20 @@ pub struct AppState {
     /// Latest machine telemetry (CPU/RAM/swap/pressure), refreshed ~1.5 s by a
     /// background sampler. Read by the `/api/telemetry` endpoints.
     pub(crate) telemetry: tokio::sync::watch::Receiver<dto::TelemetrySample>,
+    /// Cached in-memory ANN index for dense retrieval (opt-in, `[retrieval] ann`), lazily
+    /// built on first Ask and rebuilt when the chunk watermark changes. See `ensure_ann`.
+    pub(crate) ann: Arc<tokio::sync::RwLock<AnnCache>>,
+    /// Serializes ANN index builds so N concurrent cold/stale Asks don't each allocate a
+    /// full index (each build transiently holds all embeddings — N× would risk OOM).
+    pub(crate) ann_build_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// The web server's cached ANN index plus the `(chunk_count, last_indexed_at)` watermark it
+/// was built at — a mismatch means `deep` changed the table and the index must be rebuilt.
+#[derive(Default)]
+pub(crate) struct AnnCache {
+    pub(crate) index: Option<Arc<AnnIndex>>,
+    pub(crate) watermark: (i64, i64),
 }
 
 // ── Embedded UI (split into asset files, included at compile time) ──────────
@@ -168,6 +182,8 @@ pub async fn serve(
         walk_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         machine_spec,
         telemetry: telemetry_rx,
+        ann: Arc::new(tokio::sync::RwLock::new(AnnCache::default())),
+        ann_build_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     // Restrict CORS to localhost only — prevents drive-by sites from reading the

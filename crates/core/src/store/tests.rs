@@ -104,6 +104,67 @@ fn chunk_upsert_is_idempotent() {
     assert_eq!(store.chunk_count().unwrap(), 1);
 }
 
+#[test]
+fn chunk_ids_are_not_reused_after_delete() {
+    // AUTOINCREMENT guarantee — load-bearing for the ANN index: a deleted chunk's id must
+    // never be reassigned to a different chunk (else a stale ANN node mis-attributes content).
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_chunks(&[
+            dummy_chunk("/a.txt", 0, "one"),
+            dummy_chunk("/b.txt", 0, "two"),
+        ])
+        .unwrap();
+    let max_before = store.max_chunk_id().unwrap();
+    assert_eq!(max_before, 2);
+    store.delete_chunks_for("/b.txt").unwrap(); // frees the max id
+    store
+        .upsert_chunks(&[dummy_chunk("/c.txt", 0, "three")])
+        .unwrap();
+    assert!(
+        store.max_chunk_id().unwrap() > max_before,
+        "AUTOINCREMENT must not reuse the freed id (got {})",
+        store.max_chunk_id().unwrap()
+    );
+}
+
+#[test]
+fn migrates_legacy_chunks_to_autoincrement() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.db");
+    {
+        // Hand-build a pre-AUTOINCREMENT chunks table (bare rowid) with one row at id 5.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chunks (
+                id INTEGER PRIMARY KEY, entry_path TEXT NOT NULL, seq INTEGER NOT NULL,
+                heading TEXT NOT NULL DEFAULT '', text TEXT NOT NULL, language TEXT,
+                embedding BLOB, embed_model TEXT,
+                indexed_at INTEGER NOT NULL DEFAULT (unixepoch()), UNIQUE(entry_path, seq));
+             INSERT INTO chunks (id, entry_path, seq, text) VALUES (5, '/x.txt', 0, 'legacy');",
+        )
+        .unwrap();
+    }
+    // Opening runs init_schema → detects the missing AUTOINCREMENT → migrates.
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.max_chunk_id().unwrap(),
+        5,
+        "migration must preserve ids"
+    );
+    assert_eq!(store.chunk_count().unwrap(), 1);
+    // Post-migration the table has AUTOINCREMENT: deleting id 5 then inserting must not reuse 5.
+    store.delete_chunks_for("/x.txt").unwrap();
+    store
+        .upsert_chunks(&[dummy_chunk("/y.txt", 0, "new")])
+        .unwrap();
+    assert!(
+        store.max_chunk_id().unwrap() > 5,
+        "post-migration ids must not be reused (got {})",
+        store.max_chunk_id().unwrap()
+    );
+}
+
 fn fts_row_count(store: &Store) -> i64 {
     store
         .conn

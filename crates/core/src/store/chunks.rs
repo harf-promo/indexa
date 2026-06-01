@@ -158,6 +158,17 @@ impl Store {
         Ok(n as u64)
     }
 
+    /// Largest chunk id, or 0 when empty. With AUTOINCREMENT this is monotonic and never
+    /// repeats, so `(chunk_count, max_chunk_id)` is a robust change watermark: any insert
+    /// bumps the max, any delete changes the count — including an in-place edit that keeps
+    /// the count but reinserts at a fresh id. Used to decide when to rebuild the ANN index.
+    pub fn max_chunk_id(&self) -> Result<i64> {
+        let id: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(MAX(id), 0) FROM chunks", [], |r| r.get(0))?;
+        Ok(id)
+    }
+
     /// Text of the first chunk for a given file path (used as description input).
     pub fn first_chunk_text(&self, entry_path: &str) -> Result<Option<String>> {
         let text: Option<String> = self

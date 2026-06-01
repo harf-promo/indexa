@@ -1,6 +1,6 @@
 //! Hybrid / cosine search and the shared FTS / embedding encoding helpers.
 
-use super::{RegionSummary, SearchHit, Store, TreeNode};
+use super::{AnnIndex, RegionSummary, SearchHit, Store, TreeNode};
 use crate::config::HybridMode;
 use rusqlite::{params, Row};
 
@@ -114,6 +114,24 @@ impl Store {
         limit: usize,
         rrf_k: f32,
     ) -> Result<Vec<SearchHit>> {
+        self.hybrid_search_with_ann(query_text, query_embedding, mode, scope, limit, rrf_k, None)
+    }
+
+    /// `hybrid_search` plus an optional ANN index for the dense arm. When `ann` is `Some`
+    /// and the query is unscoped, dense candidates come from the HNSW index instead of a
+    /// brute-force cosine scan; any miss (scoped query, dimension mismatch, empty result)
+    /// falls back to brute-force, so results are unchanged — only faster at scale.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hybrid_search_with_ann(
+        &self,
+        query_text: &str,
+        query_embedding: Option<&[f32]>,
+        mode: &HybridMode,
+        scope: Option<&str>,
+        limit: usize,
+        rrf_k: f32,
+        ann: Option<&AnnIndex>,
+    ) -> Result<Vec<SearchHit>> {
         let rrf_k = rrf_k as f64;
 
         // ── FTS5 keyword retrieval ────────────────────────────────────────────
@@ -161,7 +179,7 @@ impl Store {
             HybridMode::Sparse => Vec::new(),
             _ => {
                 if let Some(qvec) = query_embedding {
-                    self.cosine_search(qvec, 100, scope)?
+                    self.dense_candidates(qvec, 100, scope, ann)?
                 } else {
                     Vec::new()
                 }
@@ -415,5 +433,68 @@ impl Store {
         scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(limit);
         Ok(scored.into_iter().map(|(id, path, _)| (id, path)).collect())
+    }
+
+    /// Dense top-`limit` candidates as `(chunk_id, entry_path)`, via the ANN index when one
+    /// is supplied and the query is unscoped (HNSW returns global neighbours with no path
+    /// filter), else a brute-force cosine scan. An ANN miss (empty result, e.g. a dimension
+    /// mismatch) also falls back, so dense recall is never worse than brute-force.
+    fn dense_candidates(
+        &self,
+        query: &[f32],
+        limit: usize,
+        scope: Option<&str>,
+        ann: Option<&AnnIndex>,
+    ) -> Result<Vec<(i64, String)>> {
+        if scope.is_none() {
+            if let Some(index) = ann {
+                let ids = index.search(query, limit);
+                if !ids.is_empty() {
+                    let resolved = self.paths_for_ids(&ids)?;
+                    // Fall back when nothing resolved (e.g. every id was deleted since the
+                    // index was built) rather than contributing zero dense candidates.
+                    if !resolved.is_empty() {
+                        return Ok(resolved);
+                    }
+                }
+            }
+        }
+        self.cosine_search(query, limit, scope)
+    }
+
+    /// Resolve `(id, entry_path)` for chunk ids in order, skipping ids no longer present
+    /// (an ANN node can outlive its chunk row between rebuilds — dropping it is safe).
+    fn paths_for_ids(&self, ids: &[i64]) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT entry_path FROM chunks WHERE id = ?1")?;
+        let mut out = Vec::with_capacity(ids.len());
+        for &id in ids {
+            if let Ok(path) = stmt.query_row(params![id], |r| r.get::<_, String>(0)) {
+                out.push((id, path));
+            }
+        }
+        Ok(out)
+    }
+
+    /// All `(chunk_id, embedding)` pairs with an embedding — the input to building an
+    /// [`AnnIndex`](super::AnnIndex).
+    pub fn all_chunk_embeddings(&self) -> Result<Vec<(i64, Vec<f32>)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| {
+            let id: i64 = r.get(0)?;
+            let blob: Vec<u8> = r.get(1)?;
+            Ok((id, blob))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, blob) = row?;
+            if blob.len().is_multiple_of(4) {
+                out.push((id, blob_to_embedding(&blob)));
+            }
+        }
+        Ok(out)
     }
 }

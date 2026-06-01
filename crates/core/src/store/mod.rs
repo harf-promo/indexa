@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
+mod ann;
 mod chunks;
 mod classify;
 mod edges;
@@ -30,6 +31,7 @@ mod tests;
 
 // Re-export every public record type so external paths (`indexa_core::store::*`)
 // are unchanged by the split.
+pub use ann::AnnIndex;
 pub use types::{
     ChunkRecord, ClassificationRecord, EdgeRecord, FailedQueueItem, QueueItem, QueueStats,
     RegionSummary, SearchHit, SummaryRecord, TreeNode,
