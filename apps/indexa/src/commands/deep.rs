@@ -104,6 +104,10 @@ pub(crate) async fn cmd_deep(
         None
     };
     let caption_model = cfg.parsers.image.caption_model().to_owned();
+    // Optional audio transcription (opt-in): a whisper.cpp-style CLI per audio file.
+    let transcribe = cfg.parsers.audio.transcribe;
+    let transcribe_binary = cfg.parsers.audio.transcribe_binary().to_owned();
+    let transcribe_model = cfg.parsers.audio.model.clone();
 
     for root in &roots {
         println!(
@@ -194,6 +198,43 @@ pub(crate) async fn cmd_deep(
                             }
                             eprintln!("  caption failed for {path_str}: {e:#}");
                         }
+                    }
+                }
+            }
+
+            // Audio transcription (opt-in): append a whisper transcript as an extra chunk
+            // alongside the ffprobe metadata chunk. Blocking subprocess → spawn_blocking.
+            if transcribe && extracted.mime.starts_with("audio/") {
+                let bin = transcribe_binary.clone();
+                let model = transcribe_model.clone();
+                let p = entry.path.clone();
+                let res = tokio::task::spawn_blocking(move || {
+                    indexa_parsers::media::transcribe_audio(&p, &bin, model.as_deref())
+                })
+                .await;
+                match res {
+                    Ok(Ok(text)) if !text.trim().is_empty() => {
+                        let seq = extracted.chunks.len();
+                        extracted.chunks.push(indexa_parsers::types::Chunk {
+                            source: entry.path.clone(),
+                            seq,
+                            heading: "transcript".to_owned(),
+                            text,
+                            language: None,
+                        });
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        if show_progress {
+                            eprint!("\r\x1b[K");
+                        }
+                        eprintln!("  transcription failed for {path_str}: {e:#}");
+                    }
+                    Err(e) => {
+                        if show_progress {
+                            eprint!("\r\x1b[K");
+                        }
+                        eprintln!("  transcription task panicked for {path_str}: {e}");
                     }
                 }
             }

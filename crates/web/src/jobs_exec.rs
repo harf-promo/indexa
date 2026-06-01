@@ -403,6 +403,10 @@ async fn run_deep_phase(
         None
     };
     let caption_model = state.config.parsers.image.caption_model().to_owned();
+    // Optional audio transcription (opt-in): a whisper.cpp-style CLI per audio file.
+    let transcribe = state.config.parsers.audio.transcribe;
+    let transcribe_binary = state.config.parsers.audio.transcribe_binary().to_owned();
+    let transcribe_model = state.config.parsers.audio.model.clone();
 
     // Memory watchdog: checked before each Ollama call.
     let mut wdog = WatchdogState::new();
@@ -522,6 +526,50 @@ async fn run_deep_phase(
                             },
                         ),
                     }
+                }
+            }
+
+            // Audio transcription (opt-in): append a whisper transcript chunk alongside the
+            // ffprobe metadata chunk. Blocking subprocess (can take minutes) → spawn_blocking
+            // so it never stalls the server's async runtime.
+            if transcribe && extracted.mime.starts_with("audio/") {
+                let bin = transcribe_binary.clone();
+                let model = transcribe_model.clone();
+                let p = entry.path.clone();
+                let res = tokio::task::spawn_blocking(move || {
+                    indexa_parsers::media::transcribe_audio(&p, &bin, model.as_deref())
+                })
+                .await;
+                match res {
+                    Ok(Ok(text)) if !text.trim().is_empty() => {
+                        let seq = extracted.chunks.len();
+                        extracted.chunks.push(indexa_parsers::types::Chunk {
+                            source: entry.path.clone(),
+                            seq,
+                            heading: "transcript".to_owned(),
+                            text,
+                            language: None,
+                        });
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => push(
+                        handle,
+                        JobEvent::Warning {
+                            stage: "deep".to_owned(),
+                            item_path: Some(path_str.clone()),
+                            message: format!("transcription failed: {e:#}"),
+                            pressure: None,
+                        },
+                    ),
+                    Err(e) => push(
+                        handle,
+                        JobEvent::Warning {
+                            stage: "deep".to_owned(),
+                            item_path: Some(path_str.clone()),
+                            message: format!("transcription task panicked: {e}"),
+                            pressure: None,
+                        },
+                    ),
                 }
             }
 

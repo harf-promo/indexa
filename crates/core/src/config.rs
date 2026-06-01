@@ -310,11 +310,32 @@ impl ImageParserConfig {
     }
 }
 
+/// Default whisper.cpp-style CLI used for audio transcription. Users install it (and a
+/// model); it is NOT bundled or auto-downloaded.
+pub const DEFAULT_TRANSCRIBE_BINARY: &str = "whisper-cli";
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioParserConfig {
-    /// Set true to enable whisper.cpp transcription (opt-in).
+    /// Set true to transcribe audio files by shelling out to a whisper.cpp-style CLI
+    /// (opt-in). Requires the `binary` (default `whisper-cli`) on PATH and a `model`. The
+    /// transcript is stored as a searchable chunk; the binary must accept the input format
+    /// (whisper.cpp expects 16 kHz WAV — convert beforehand if needed). Only `audio/*` files
+    /// are transcribed — extract the audio track from video files first. Like captioning,
+    /// this applies to newly-scanned or modified files on the next `deep`.
     pub transcribe: bool,
+    /// Transcription CLI to invoke. Defaults to [`DEFAULT_TRANSCRIBE_BINARY`].
+    pub binary: Option<String>,
+    /// Path to the whisper model file (passed as `-m`). Omitted when unset (the CLI then
+    /// uses its own default model lookup).
+    pub model: Option<String>,
+}
+
+impl AudioParserConfig {
+    /// The transcription binary to invoke (configured value or the default).
+    pub fn transcribe_binary(&self) -> &str {
+        self.binary.as_deref().unwrap_or(DEFAULT_TRANSCRIBE_BINARY)
+    }
 }
 
 // ── Per-region overrides ──────────────────────────────────────────────────────
