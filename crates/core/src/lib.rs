@@ -1,5 +1,6 @@
 pub mod config;
 pub mod fingerprint;
+pub mod models_catalog;
 pub mod resource;
 pub mod smart_classify;
 pub mod store;
