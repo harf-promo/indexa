@@ -22,6 +22,128 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// Strip a leading conversational preamble some LLMs emit before the actual summary
+/// (e.g. "Here's a refined summary:", "Summary:") and trim.
+///
+/// The LangChain-style refine prompt ("refine the original summary…") invites such
+/// meta-commentary. Running this in the summarize loop guarantees three things the
+/// raw `.trim()` did not: the stored **L1** summary is clean; the **L0** abstract
+/// `upsert_summary` derives from it is clean; and the loop's "no change" early-stop
+/// can actually fire on idempotent passes (a re-wrapped preamble used to make every
+/// pass compare unequal, so on `--passes 3` preambles compounded).
+///
+/// Conservative by design — only strips a leading segment that is clearly a
+/// summary/description meta-label, never real content.
+pub(crate) fn strip_summary_preamble(s: &str) -> String {
+    let mut text = s.trim();
+    // A preamble can be re-wrapped across passes; peel a few layers, but bounded.
+    for _ in 0..3 {
+        match strip_one_preamble(text) {
+            Some(rest) if !rest.is_empty() => text = rest.trim(),
+            _ => break,
+        }
+    }
+    text.to_owned()
+}
+
+/// Strip a single leading meta-preamble segment, returning the remainder, or `None`
+/// when the text doesn't begin with one.
+fn strip_one_preamble(text: &str) -> Option<&str> {
+    // Only the first line can be a "…:" label.
+    let first_line_end = text.find('\n').unwrap_or(text.len());
+    let colon = text[..first_line_end].find(':')?; // ':' is ASCII → char boundary
+    let label = text[..colon].trim().to_ascii_lowercase();
+    // Bound the label so a real sentence containing a colon is never eaten.
+    if label.is_empty() || label.len() > 60 {
+        return None;
+    }
+    is_preamble_label(&label).then(|| text[colon + 1..].trim_start())
+}
+
+/// True ONLY when `label` (lowercased, trimmed) is a pure "here is the summary"-style
+/// meta-label — never when it carries substantive content after the core noun.
+///
+/// Structural, not keyword-loose: peel an optional opener / "here's" / article /
+/// adjective, then require what remains to be EXACTLY `summary`/`description` plus
+/// meta-filler. So "Updated summary serialization: …" and "Here's how the summary
+/// module works: …" are preserved (real content), while "Here's a refined summary:"
+/// and a bare "Summary:" are stripped.
+fn is_preamble_label(label: &str) -> bool {
+    let mut s = label;
+    // Optional leading conversational opener — only when followed by space/comma/end
+    // (so "okta…" is not mistaken for the "ok" opener).
+    for opener in [
+        "sure",
+        "certainly",
+        "okay",
+        "ok",
+        "of course",
+        "alright",
+        "right",
+    ] {
+        if let Some(rest) = s.strip_prefix(opener) {
+            if rest.is_empty() || rest.starts_with([' ', ',']) {
+                s = rest.trim_start_matches([' ', ',']);
+                break;
+            }
+        }
+    }
+    // Optional "here's / here is / here are / here".
+    for h in ["here's", "here is", "here are", "here"] {
+        if let Some(rest) = s.strip_prefix(h) {
+            if rest.is_empty() || rest.starts_with(' ') {
+                s = rest.trim_start();
+                break;
+            }
+        }
+    }
+    // Optional article, then optional adjective.
+    for a in ["a ", "an ", "the "] {
+        if let Some(rest) = s.strip_prefix(a) {
+            s = rest;
+            break;
+        }
+    }
+    for adj in [
+        "refined ",
+        "updated ",
+        "revised ",
+        "concise ",
+        "brief ",
+        "short ",
+        "detailed ",
+        "final ",
+    ] {
+        if let Some(rest) = s.strip_prefix(adj) {
+            s = rest;
+            break;
+        }
+    }
+    // What remains must be the core noun plus only recognised meta-filler — anything
+    // substantive after it (e.g. "summary serialization") means it's real content.
+    let Some(rest) = s
+        .strip_prefix("summary")
+        .or_else(|| s.strip_prefix("description"))
+    else {
+        return false;
+    };
+    let rest = rest.trim();
+    rest.is_empty()
+        || matches!(
+            rest,
+            "of the file"
+                | "of this file"
+                | "of the code"
+                | "of the directory"
+                | "of the folder"
+                | "of the contents"
+                | "of the module"
+                | "for this file"
+                | "below"
+                | "of it"
+        )
+}
+
 /// Summarise one file and persist the row. Returns true if successful.
 ///
 /// When `on_fragment` is `Some`, each generated token is forwarded to the
@@ -60,7 +182,7 @@ pub async fn summarize_file(
                     .await?
             }
         };
-        let next = next.trim().to_owned();
+        let next = strip_summary_preamble(&next);
         if next.is_empty() {
             break;
         }
@@ -151,7 +273,7 @@ pub async fn summarize_directory(
                     .await?
             }
         };
-        let next = next.trim().to_owned();
+        let next = strip_summary_preamble(&next);
         if next.is_empty() {
             break;
         }
@@ -377,4 +499,134 @@ pub async fn summarize_subtree_sync(
 
     println!("Done. {done} summaries generated.");
     Ok(done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_summary_preamble;
+
+    #[test]
+    fn strips_here_is_refined_summary() {
+        assert_eq!(
+            strip_summary_preamble(
+                "Here's a refined summary of the file:\n\nA Rust module that parses TOML."
+            ),
+            "A Rust module that parses TOML."
+        );
+    }
+
+    #[test]
+    fn strips_bare_summary_label() {
+        assert_eq!(
+            strip_summary_preamble("Summary: Defines the CLI entrypoint."),
+            "Defines the CLI entrypoint."
+        );
+    }
+
+    #[test]
+    fn strips_refined_summary_label() {
+        assert_eq!(
+            strip_summary_preamble("Refined summary: Handles auth."),
+            "Handles auth."
+        );
+    }
+
+    #[test]
+    fn strips_here_is_a_brief_description() {
+        assert_eq!(
+            strip_summary_preamble(
+                "Sure, here is a brief description: It rolls up child summaries."
+            ),
+            "It rolls up child summaries."
+        );
+    }
+
+    #[test]
+    fn keeps_real_content_with_a_colon() {
+        // A leading clause with a colon that is NOT a summary meta-label must survive.
+        let s = "Here is the build configuration: it compiles with cargo and clippy.";
+        assert_eq!(strip_summary_preamble(s), s);
+    }
+
+    #[test]
+    fn keeps_content_that_merely_mentions_summary() {
+        // No colon → nothing to strip; real content preserved verbatim.
+        let s = "A summary of recent changes to the parser pipeline lives here.";
+        assert_eq!(strip_summary_preamble(s), s);
+    }
+
+    #[test]
+    fn peels_compounded_preambles() {
+        assert_eq!(
+            strip_summary_preamble(
+                "Here's a refined summary:\n\nHere is a summary:\n\nThe core engine."
+            ),
+            "The core engine."
+        );
+    }
+
+    #[test]
+    fn plain_summary_is_only_trimmed() {
+        assert_eq!(
+            strip_summary_preamble("  Just a plain summary sentence.  "),
+            "Just a plain summary sentence."
+        );
+    }
+
+    #[test]
+    fn preamble_only_is_kept_not_emptied() {
+        // Pathological: model returned nothing but a preamble — keep it rather than
+        // store an empty summary.
+        let s = "Here's a refined summary:";
+        assert_eq!(strip_summary_preamble(s), s);
+    }
+
+    #[test]
+    fn enables_early_stop_idempotence() {
+        // Two passes whose only difference is the preamble compare equal once stripped,
+        // so the loop's "no change" early-stop can fire.
+        let a = strip_summary_preamble("Here's a summary: The file defines X.");
+        let b = strip_summary_preamble("Here is a refined summary: The file defines X.");
+        assert_eq!(a, b);
+        assert_eq!(a, "The file defines X.");
+    }
+
+    // ── False-positive guards: real content whose first clause names "summary" /
+    //    "description" before a colon must NEVER be truncated. These are exactly the
+    //    summaries Indexa would generate when indexing its own summarization code. ──
+
+    #[test]
+    fn keeps_content_describing_a_summary_feature() {
+        for s in [
+            "Here's how the summary module works: it caches results per path.",
+            "Updated summary serialization: now emits ISO timestamps.",
+            "Concise summary generator: builds L0 abstracts from L1 text.",
+            "Revised description handling: trims whitespace and newlines.",
+            "Brief description of each summary tier: L0 is one sentence, L1 is full.",
+            "Summary of changes: adds the refine loop and a backstop.",
+            "Okta integration summary: wires SSO into the gateway.",
+        ] {
+            assert_eq!(strip_summary_preamble(s), s, "must not truncate: {s:?}");
+        }
+    }
+
+    #[test]
+    fn compound_does_not_over_strip_real_subject() {
+        // Peel the genuine first preamble, but stop before deleting the real subject
+        // of the next clause ("Updated description schema").
+        assert_eq!(
+            strip_summary_preamble(
+                "Here's a summary: Updated description schema: now supports nested keys."
+            ),
+            "Updated description schema: now supports nested keys."
+        );
+    }
+
+    #[test]
+    fn strips_preamble_with_meta_filler_tail() {
+        assert_eq!(
+            strip_summary_preamble("Sure, here's a summary of the file: It issues JWTs."),
+            "It issues JWTs."
+        );
+    }
 }

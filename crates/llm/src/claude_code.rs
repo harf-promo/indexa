@@ -160,6 +160,7 @@ impl Describer for ClaudeCodeLlm {
                 "Briefly describe what this file is about in 1-2 sentences.\nFile: {path}\nContent:\n{sample}",
             ),
         };
+        let prompt = format!("{prompt}\n\n{}", crate::SUMMARY_OUTPUT_RULE);
         self.run(&prompt, &self.file_model).await
     }
 
@@ -184,6 +185,7 @@ impl Describer for ClaudeCodeLlm {
                  {child_text}\nDirectory: {dir_path}",
             ),
         };
+        let prompt = format!("{prompt}\n\n{}", crate::SUMMARY_OUTPUT_RULE);
         self.run(&prompt, &self.dir_model).await
     }
     // describe_stream / summarize_dir_stream: default buffered fallback.
