@@ -87,10 +87,52 @@ pub trait Embedder: Send + Sync {
     async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>>;
     fn dim(&self) -> usize;
 
+    /// Embed many texts in one round-trip where the provider supports it, preserving
+    /// input order (`out[i]` is the embedding of `texts[i]`). The default loops
+    /// [`embed`](Self::embed) for back-compat; the Ollama adapter overrides it to use the
+    /// batch endpoint, cutting deep-phase HTTP round-trips ~Nx. Returns exactly one vector
+    /// per input.
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        let mut out = Vec::with_capacity(texts.len());
+        for t in texts {
+            out.push(self.embed(t).await?);
+        }
+        Ok(out)
+    }
+
     /// Best-effort: free any resident model so RAM can recover during a memory-pressure
     /// pause. The default is a no-op (cloud adapters hold no local memory); Ollama
     /// overrides this to unload its loaded model.
     async fn unload(&self) {}
+}
+
+/// Default chunks per `embed_batch` round-trip for the deep phase. Big enough to amortize
+/// HTTP/model overhead, small enough to bound request size + memory.
+pub const EMBED_BATCH_SIZE: usize = 64;
+
+/// Embed many texts with per-item resilience, preserving order (`out[i]` ↔ `texts[i]`).
+///
+/// Sub-batches by `batch_size` and uses [`Embedder::embed_batch`] (one round-trip per
+/// sub-batch — the deep-phase speedup); if a sub-batch errors, it falls back to per-text
+/// [`Embedder::embed`], recording `None` for any individual text that fails — so one bad
+/// chunk never drops a whole file's embeddings.
+pub async fn embed_all(
+    embedder: &dyn Embedder,
+    texts: &[&str],
+    batch_size: usize,
+) -> Vec<Option<Vec<f32>>> {
+    let mut out = Vec::with_capacity(texts.len());
+    for group in texts.chunks(batch_size.max(1)) {
+        match embedder.embed_batch(group).await {
+            Ok(embs) => out.extend(embs.into_iter().map(Some)),
+            Err(_) => {
+                for t in group {
+                    out.push(embedder.embed(t).await.ok());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Build an `Embedder` from config values, optionally setting `keep_alive` on Ollama adapters.
@@ -169,5 +211,113 @@ mod retry_tests {
             backoff_delay(5, Some(Duration::from_secs(120))),
             Duration::from_secs(30)
         );
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Deterministic 1-D embedding of a text (its byte sum), so identity and order are checkable.
+    fn code(text: &str) -> Vec<f32> {
+        vec![text.bytes().map(u32::from).sum::<u32>() as f32]
+    }
+
+    /// Stub relying on the trait's *default* `embed_batch` (which loops `embed`). Counts `embed`
+    /// calls so we can assert the default batch path actually fans out one call per text.
+    struct LoopEmbedder {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Embedder for LoopEmbedder {
+        async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(code(text))
+        }
+        fn dim(&self) -> usize {
+            1
+        }
+    }
+
+    /// Stub whose overridden `embed_batch` always errors, forcing `embed_all` onto its per-text
+    /// fallback; the single `embed` errors for one configured text so that slot becomes `None`.
+    struct BatchFailsEmbedder {
+        fail: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl Embedder for BatchFailsEmbedder {
+        async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            if text == self.fail {
+                anyhow::bail!("forced embed failure for {text}");
+            }
+            Ok(code(text))
+        }
+        fn dim(&self) -> usize {
+            1
+        }
+        async fn embed_batch(&self, _texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            anyhow::bail!("forced batch failure")
+        }
+    }
+
+    #[tokio::test]
+    async fn default_embed_batch_loops_embed_in_order() {
+        let e = LoopEmbedder {
+            calls: AtomicUsize::new(0),
+        };
+        let texts = ["a", "bb", "ccc"];
+        let got = e.embed_batch(&texts).await.unwrap();
+        assert_eq!(got.len(), 3);
+        for i in 0..texts.len() {
+            assert_eq!(
+                got[i],
+                code(texts[i]),
+                "embedding {i} must match single embed"
+            );
+        }
+        assert_eq!(
+            e.calls.load(Ordering::SeqCst),
+            3,
+            "default embed_batch fans out to embed once per text"
+        );
+    }
+
+    #[tokio::test]
+    async fn embed_all_preserves_order_across_sub_batches() {
+        let e = LoopEmbedder {
+            calls: AtomicUsize::new(0),
+        };
+        let texts = ["one", "two", "three", "four", "five"];
+        let refs: Vec<&str> = texts.to_vec();
+        // batch_size 2 → sub-batches [0,1] [2,3] [4]; order must survive the chunking.
+        let got = embed_all(&e, &refs, 2).await;
+        assert_eq!(got.len(), 5);
+        for i in 0..texts.len() {
+            assert_eq!(
+                got[i].as_ref(),
+                Some(&code(texts[i])),
+                "slot {i} order/identity"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn embed_all_falls_back_and_records_none_on_failure() {
+        // The batch endpoint always errors → per-text fallback; only the "bad" text's embed
+        // fails → that slot is None, neighbors are intact and unshifted.
+        let e = BatchFailsEmbedder { fail: "bad" };
+        let texts = ["ok1", "bad", "ok2"];
+        let refs: Vec<&str> = texts.to_vec();
+        let got = embed_all(&e, &refs, 64).await;
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].as_ref(), Some(&code("ok1")));
+        assert_eq!(
+            got[1], None,
+            "failing text is None, not a panic or a shifted slot"
+        );
+        assert_eq!(got[2].as_ref(), Some(&code("ok2")));
     }
 }

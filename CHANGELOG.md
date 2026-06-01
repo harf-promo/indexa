@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.0] — 2026-06-01
+### Changed
+
+- **`deep` embeds in batched round-trips — materially faster on multi-chunk files.** The deep phase previously made one embedding HTTP call per chunk; it now sends up to 64 chunks per call via Ollama's `/api/embed` batch endpoint (CLI `deep` and the web Deep job alike), falling back per-chunk on any batch error, count mismatch, or older Ollama without the endpoint — so correctness never depends on the batch path. Order is preserved and the embedding dimension is unchanged. Search results are identical: `/api/embed` returns L2-normalized vectors and the legacy single endpoint raw ones, but the directions match exactly and Indexa ranks by scale-invariant cosine.
 
 A **model-intelligence + freshness** release: a hardware-aware Local-vs-Cloud model picker, a summary-quality fix, and live-freshness fixes across `deep` and `watch`.
 

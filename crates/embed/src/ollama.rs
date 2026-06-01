@@ -128,25 +128,46 @@ struct EmbedResponse {
     embedding: Vec<f32>,
 }
 
+/// Batch request for Ollama's newer `/api/embed` endpoint (`input` accepts an array).
+#[derive(Serialize)]
+struct EmbedBatchRequest<'a> {
+    model: &'a str,
+    input: &'a [&'a str],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keep_alive: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<EmbedOptions>,
+}
+
+#[derive(Deserialize)]
+struct EmbedBatchResponse {
+    embeddings: Vec<Vec<f32>>,
+}
+
+/// Truncate over-long input on a UTF-8 boundary so Ollama can't 500 on it. Shared by
+/// the single and batch embed paths.
+fn truncate_for_embed(text: &str) -> &str {
+    if text.chars().count() > EMBED_MAX_CHARS {
+        let cut = text
+            .char_indices()
+            .nth(EMBED_MAX_CHARS)
+            .map(|(i, _)| i)
+            .unwrap_or(text.len());
+        tracing::debug!(
+            "embed input truncated to {EMBED_MAX_CHARS} chars (was {})",
+            text.chars().count()
+        );
+        &text[..cut]
+    } else {
+        text
+    }
+}
+
 #[async_trait::async_trait]
 impl Embedder for OllamaEmbedder {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let url = format!("{}/api/embeddings", self.base_url);
-        // Backstop: truncate over-long input on a UTF-8 boundary so Ollama can't 500.
-        let prompt: &str = if text.chars().count() > EMBED_MAX_CHARS {
-            let cut = text
-                .char_indices()
-                .nth(EMBED_MAX_CHARS)
-                .map(|(i, _)| i)
-                .unwrap_or(text.len());
-            tracing::debug!(
-                "embed input truncated to {EMBED_MAX_CHARS} chars (was {})",
-                text.chars().count()
-            );
-            &text[..cut]
-        } else {
-            text
-        };
+        let prompt = truncate_for_embed(text);
         let body = EmbedRequest {
             model: &self.model,
             prompt,
@@ -175,6 +196,75 @@ impl Embedder for OllamaEmbedder {
             .await
             .context("parsing Ollama embedding response")?;
         Ok(parsed.embedding)
+    }
+
+    /// Batch via Ollama's `/api/embed` (array `input`), preserving order. Falls back to
+    /// sequential `embed` calls on any error or a count mismatch (e.g. an older Ollama
+    /// without `/api/embed`), so correctness never depends on the batch endpoint.
+    ///
+    /// NOTE on normalization: `/api/embed` returns **L2-normalized** vectors, whereas the
+    /// legacy `/api/embeddings` used by [`embed`](Self::embed) returns **raw** ones (same
+    /// direction, different magnitude). This is safe because Indexa's only consumer is
+    /// `cosine_similarity` (`store::search`), which divides by both magnitudes and is therefore
+    /// scale-invariant — a query and a doc embedded via different endpoints score identically,
+    /// and a mixed index (some chunks batched/normalized, some single/raw after a fallback or an
+    /// incremental re-`deep`) ranks identically. A future L2-distance ANN index would NOT be
+    /// scale-invariant, so it must normalize both paths consistently before relying on raw
+    /// magnitudes.
+    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let inputs: Vec<&str> = texts.iter().map(|t| truncate_for_embed(t)).collect();
+        let url = format!("{}/api/embed", self.base_url);
+        let body = EmbedBatchRequest {
+            model: &self.model,
+            input: &inputs,
+            keep_alive: self.keep_alive,
+            options: Some(EmbedOptions {
+                num_parallel: 1,
+                num_ctx: self.num_ctx,
+            }),
+        };
+        let attempt: Result<Vec<Vec<f32>>> = async {
+            let resp = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .with_context(|| format!("Ollama batch request to {url}"))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let t = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Ollama returned {status}: {t}");
+            }
+            let parsed: EmbedBatchResponse = resp
+                .json()
+                .await
+                .context("parsing Ollama batch embedding response")?;
+            if parsed.embeddings.len() != texts.len() {
+                anyhow::bail!(
+                    "Ollama batch returned {} embeddings for {} inputs",
+                    parsed.embeddings.len(),
+                    texts.len()
+                );
+            }
+            Ok(parsed.embeddings)
+        }
+        .await;
+
+        match attempt {
+            Ok(embeddings) => Ok(embeddings),
+            Err(e) => {
+                tracing::debug!("Ollama batch embed failed ({e:#}); falling back to sequential");
+                let mut out = Vec::with_capacity(texts.len());
+                for t in texts {
+                    out.push(self.embed(t).await?);
+                }
+                Ok(out)
+            }
+        }
     }
 
     fn dim(&self) -> usize {
