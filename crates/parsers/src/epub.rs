@@ -112,6 +112,7 @@ impl Parser for EpubParser {
             source: path.to_path_buf(),
             mime: "application/epub+zip".into(),
             chunks,
+            edges: Vec::new(),
         })
     }
 }

@@ -11,6 +11,15 @@ pub struct ChunkRecord {
     pub embed_model: Option<String>,
 }
 
+/// One code-relationship-graph edge (see the `edges` table). `kind` is `"imports"`
+/// (then `to_ref` is a module/path) or `"defines"` (then `to_ref` is a symbol name).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeRecord {
+    pub from_path: String,
+    pub kind: String,
+    pub to_ref: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub chunk_id: i64,

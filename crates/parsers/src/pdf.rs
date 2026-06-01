@@ -66,6 +66,7 @@ impl Parser for PdfParser {
             source: path.to_path_buf(),
             mime: "application/pdf".to_owned(),
             chunks,
+            edges: Vec::new(),
         })
     }
 }

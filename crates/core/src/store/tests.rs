@@ -803,3 +803,100 @@ fn subtree_has_unfinished_guards_prefix_siblings() {
     // /projector/x.txt is a prefix-sibling, NOT inside /proj's subtree → /proj not blocked.
     assert!(!store.subtree_has_unfinished("/proj", 1).unwrap());
 }
+
+fn edge(from: &str, kind: &str, to: &str) -> EdgeRecord {
+    EdgeRecord {
+        from_path: from.into(),
+        kind: kind.into(),
+        to_ref: to.into(),
+    }
+}
+
+#[test]
+fn edges_upsert_query_and_reverse_lookup() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_edges(&[
+            edge("/a.rs", "imports", "std::fs"),
+            edge("/a.rs", "defines", "run"),
+            edge("/b.rs", "imports", "std::fs"),
+        ])
+        .unwrap();
+
+    let from_a = store.edges_from("/a.rs").unwrap();
+    assert_eq!(from_a.len(), 2);
+    assert!(from_a
+        .iter()
+        .any(|e| e.kind == "imports" && e.to_ref == "std::fs"));
+    assert!(from_a
+        .iter()
+        .any(|e| e.kind == "defines" && e.to_ref == "run"));
+
+    // Reverse: both files import std::fs (sorted), only /a.rs defines `run`.
+    assert_eq!(
+        store.edges_to("imports", "std::fs").unwrap(),
+        vec!["/a.rs".to_string(), "/b.rs".to_string()]
+    );
+    assert_eq!(
+        store.edges_to("defines", "run").unwrap(),
+        vec!["/a.rs".to_string()]
+    );
+}
+
+#[test]
+fn edges_reupsert_replaces_only_that_file() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_edges(&[
+            edge("/a.rs", "imports", "std::fs"),
+            edge("/b.rs", "imports", "std::fs"),
+        ])
+        .unwrap();
+
+    // Re-deep of /a.rs with a different edge set drops its stale rows, leaves /b.rs.
+    store
+        .upsert_edges(&[edge("/a.rs", "imports", "std::io")])
+        .unwrap();
+    let from_a = store.edges_from("/a.rs").unwrap();
+    assert_eq!(from_a.len(), 1);
+    assert_eq!(from_a[0].to_ref, "std::io");
+    assert_eq!(
+        store.edges_to("imports", "std::fs").unwrap(),
+        vec!["/b.rs".to_string()]
+    );
+}
+
+#[test]
+fn edges_dedup_within_batch_and_cleanup_on_delete() {
+    let mut store = Store::open_in_memory().unwrap();
+    // Duplicate edge in one batch collapses against the composite PK.
+    store
+        .upsert_edges(&[edge("/c.rs", "imports", "x"), edge("/c.rs", "imports", "x")])
+        .unwrap();
+    assert_eq!(store.edges_from("/c.rs").unwrap().len(), 1);
+
+    // Deleting a file's chunks also clears its edges (no orphans).
+    store.delete_chunks_for("/c.rs").unwrap();
+    assert!(store.edges_from("/c.rs").unwrap().is_empty());
+}
+
+#[test]
+fn delete_entry_also_removes_edges() {
+    // The watcher's file-removal path is delete_entry; it must clear edges too, or
+    // who_imports/dependencies keep listing a deleted file.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[dummy_entry("/gone.rs", EntryKind::File, 1)])
+        .unwrap();
+    store
+        .upsert_edges(&[
+            edge("/gone.rs", "imports", "std::fs"),
+            edge("/gone.rs", "defines", "run"),
+        ])
+        .unwrap();
+    assert_eq!(store.edges_from("/gone.rs").unwrap().len(), 2);
+
+    store.delete_entry("/gone.rs").unwrap();
+    assert!(store.edges_from("/gone.rs").unwrap().is_empty());
+    assert!(store.edges_to("imports", "std::fs").unwrap().is_empty());
+}

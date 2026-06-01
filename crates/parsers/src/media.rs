@@ -69,6 +69,7 @@ impl Parser for MediaParser {
                 text,
                 language: None,
             }],
+            edges: Vec::new(),
         })
     }
 }

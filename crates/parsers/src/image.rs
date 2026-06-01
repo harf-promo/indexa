@@ -64,6 +64,7 @@ impl Parser for ImageParser {
                 text,
                 language: None,
             }],
+            edges: Vec::new(),
         })
     }
 }

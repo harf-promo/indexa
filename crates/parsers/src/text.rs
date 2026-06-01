@@ -74,6 +74,7 @@ impl Parser for TextParser {
             source: path.to_path_buf(),
             mime: "text/plain".into(),
             chunks,
+            edges: Vec::new(),
         })
     }
 }
@@ -204,6 +205,7 @@ impl Parser for MarkdownParser {
             source: path.to_path_buf(),
             mime: "text/markdown".into(),
             chunks,
+            edges: Vec::new(),
         })
     }
 }

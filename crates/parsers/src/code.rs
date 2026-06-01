@@ -1,4 +1,4 @@
-use crate::types::{Chunk, Extracted, Parser};
+use crate::types::{Chunk, Edge, Extracted, Parser};
 use anyhow::Result;
 use std::path::Path;
 use tree_sitter::Node;
@@ -211,12 +211,141 @@ impl Parser for CodeParser {
             }
         }
 
+        // Code-graph edges (D1): `defines` from every named top-level (and nested) symbol
+        // node, `imports` from the language's import/use nodes — both walked on the same
+        // tree. Defines come from the tree, not from `chunks`, so symbols too small to be
+        // chunked (e.g. an empty-bodied `fn`) are still captured.
+        let mut edges = Vec::new();
+        let mut seen_defs = std::collections::HashSet::new();
+        extract_defines(
+            root,
+            &source,
+            path,
+            lang_def.top_level_kinds,
+            &mut edges,
+            &mut seen_defs,
+        );
+        let import_kinds = import_kinds_for(lang_def.name);
+        if !import_kinds.is_empty() {
+            extract_imports(root, &source, path, import_kinds, &mut edges);
+        }
+
         Ok(Extracted {
             source: path.to_path_buf(),
             mime,
             chunks,
+            edges,
         })
     }
+}
+
+/// Tree-sitter node kinds that represent an import/use statement, by language name. An
+/// empty slice means imports aren't extracted for that language (its `defines` edges are
+/// still emitted). Go uses `import_spec` (one per import) so grouped `import ( … )` blocks
+/// yield an edge per line.
+fn import_kinds_for(language: &str) -> &'static [&'static str] {
+    match language {
+        "rust" => &["use_declaration"],
+        "python" => &["import_statement", "import_from_statement"],
+        "javascript" | "typescript" | "tsx" => &["import_statement"],
+        "go" => &["import_spec"],
+        "java" => &["import_declaration"],
+        _ => &[],
+    }
+}
+
+/// Walk the tree and push a `defines` edge per named symbol node (functions, types,
+/// classes, …). Recurses through everything so nested symbols (impl methods, class
+/// methods, exported declarations) are captured too. `symbol_name` returns the node kind
+/// as a sentinel when no name child exists (anonymous/wrapper nodes like
+/// `export_statement` / `decorated_definition`) — those are skipped, and the real name is
+/// found when recursion reaches the inner declaration. Deduped by name.
+fn extract_defines(
+    node: Node,
+    source: &str,
+    path: &Path,
+    kinds: &[&str],
+    edges: &mut Vec<Edge>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if kinds.contains(&child.kind()) {
+            let name = symbol_name(&child, source);
+            if name != child.kind() && seen.insert(name.clone()) {
+                edges.push(Edge {
+                    from: path.to_path_buf(),
+                    kind: "defines",
+                    to: name,
+                });
+            }
+        }
+        extract_defines(child, source, path, kinds, edges, seen);
+    }
+}
+
+/// Walk the tree for import/use nodes and push an `imports` edge per resolved module path.
+/// Recurses through non-import nodes so imports nested in `mod` blocks or functions are
+/// still found; it does not descend into a matched import node.
+fn extract_imports(node: Node, source: &str, path: &Path, kinds: &[&str], edges: &mut Vec<Edge>) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if kinds.contains(&child.kind()) {
+            if let Some(target) = import_target(&child, source) {
+                if !target.is_empty() {
+                    edges.push(Edge {
+                        from: path.to_path_buf(),
+                        kind: "imports",
+                        to: target,
+                    });
+                }
+            }
+        } else {
+            extract_imports(child, source, path, kinds, edges);
+        }
+    }
+}
+
+/// Resolve the imported module/path from an import node: prefer a string-literal module
+/// path (JS/TS `from "x"`, Go `import_spec "fmt"`), else the dotted/scoped name (Python
+/// `import a.b`, Rust `use a::b`, Java `import a.b`). Returns the primary target; grouped
+/// multi-name imports (e.g. Python `import a, b`) surface their first module in D1.
+fn import_target(node: &Node, source: &str) -> Option<String> {
+    const STRING_KINDS: &[&str] = &[
+        "string",
+        "string_literal",
+        "interpreted_string_literal",
+        "raw_string_literal",
+    ];
+    if let Some(s) = find_descendant(node, STRING_KINDS) {
+        let raw = &source[s.byte_range()];
+        return Some(
+            raw.trim_matches(|c| c == '"' || c == '\'' || c == '`')
+                .to_owned(),
+        );
+    }
+    const NAME_KINDS: &[&str] = &[
+        "dotted_name",
+        "scoped_identifier",
+        "scoped_use_list",
+        "use_list",
+        "identifier",
+    ];
+    find_descendant(node, NAME_KINDS).map(|n| source[n.byte_range()].trim().to_owned())
+}
+
+/// First descendant (pre-order) whose kind is in `kinds`.
+fn find_descendant<'a>(node: &Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if kinds.contains(&child.kind()) {
+            return Some(child);
+        }
+        if let Some(found) = find_descendant(&child, kinds) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 fn extract_chunks(
@@ -353,5 +482,97 @@ impl Greeter {
             .expect("must not panic on broken source");
         // Behaviour is best-effort; we only require it returned cleanly.
         let _ = extracted.chunks;
+    }
+
+    fn imports_of(ex: &Extracted) -> Vec<&str> {
+        ex.edges
+            .iter()
+            .filter(|e| e.kind == "imports")
+            .map(|e| e.to.as_str())
+            .collect()
+    }
+    fn defines_of(ex: &Extracted) -> Vec<&str> {
+        ex.edges
+            .iter()
+            .filter(|e| e.kind == "defines")
+            .map(|e| e.to.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn edges_rust_imports_and_defines() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("lib.rs");
+        std::fs::write(
+            &p,
+            "use std::collections::HashMap;\nuse crate::foo::Bar;\n\npub fn run() {}\npub struct Widget { x: i32 }\n",
+        )
+        .unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+        let imports = imports_of(&ex);
+        let defines = defines_of(&ex);
+        assert!(
+            imports
+                .iter()
+                .any(|i| i.contains("std::collections::HashMap")),
+            "imports: {imports:?}"
+        );
+        assert!(
+            imports.iter().any(|i| i.contains("crate::foo::Bar")),
+            "imports: {imports:?}"
+        );
+        assert!(defines.contains(&"run"), "defines: {defines:?}");
+        assert!(defines.contains(&"Widget"), "defines: {defines:?}");
+        // Every edge originates at the parsed file.
+        assert!(ex.edges.iter().all(|e| e.from == p));
+    }
+
+    #[test]
+    fn edges_python_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("m.py");
+        std::fs::write(
+            &p,
+            "import os\nfrom collections import OrderedDict\n\ndef f():\n    return os.getpid()\n",
+        )
+        .unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+        let imports = imports_of(&ex);
+        assert!(imports.contains(&"os"), "py imports: {imports:?}");
+        assert!(
+            imports.iter().any(|i| i.contains("collections")),
+            "py imports: {imports:?}"
+        );
+    }
+
+    #[test]
+    fn edges_javascript_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.js");
+        std::fs::write(
+            &p,
+            "import { x } from './util';\nimport React from 'react';\nfunction go() {}\n",
+        )
+        .unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+        let imports = imports_of(&ex);
+        assert!(imports.contains(&"./util"), "js imports: {imports:?}");
+        assert!(imports.contains(&"react"), "js imports: {imports:?}");
+    }
+
+    #[test]
+    fn edges_go_grouped_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.go");
+        std::fs::write(
+            &p,
+            "package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\nfunc main() { fmt.Println(os.Args) }\n",
+        )
+        .unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+        let imports = imports_of(&ex);
+        // Grouped imports must each yield an edge (we match import_spec, not the block).
+        assert!(imports.contains(&"fmt"), "go imports: {imports:?}");
+        assert!(imports.contains(&"os"), "go imports: {imports:?}");
     }
 }

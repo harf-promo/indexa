@@ -2,7 +2,7 @@ use anyhow::Result;
 use indexa_core::{
     config::{Config, SummaryMode},
     resource::{detect_machine, estimate_eta, format_duration_pub},
-    store::{ChunkRecord, Store},
+    store::{ChunkRecord, EdgeRecord, Store},
     walker::{walk, WalkConfig},
 };
 use indexa_query::enqueue_subtree;
@@ -180,6 +180,21 @@ pub(crate) async fn cmd_deep(
 
             store.upsert_chunks(&chunk_records)?;
             total_chunks += chunk_records.len();
+
+            // Persist the file's code-graph edges (imports/defines) keyed on the same
+            // entry-path string as its chunks, so `edges_from(path)` lines up with search.
+            if !extracted.edges.is_empty() {
+                let edge_records: Vec<EdgeRecord> = extracted
+                    .edges
+                    .iter()
+                    .map(|e| EdgeRecord {
+                        from_path: path_str.clone(),
+                        kind: e.kind.to_owned(),
+                        to_ref: e.to.clone(),
+                    })
+                    .collect();
+                store.upsert_edges(&edge_records)?;
+            }
         }
 
         if show_progress {
