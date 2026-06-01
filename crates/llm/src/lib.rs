@@ -15,7 +15,7 @@ pub mod openai_compat;
 
 pub use anthropic::AnthropicLlm;
 pub use claude_code::{claude_status, ClaudeCodeLlm, ClaudeStatus};
-pub use ollama::OllamaLlm;
+pub use ollama::{caption_image_file, OllamaLlm};
 pub use openai_compat::OpenAICompatLlm;
 
 /// Build a reqwest client with a finite request + connect timeout, shared by every LLM

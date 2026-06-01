@@ -5,6 +5,7 @@ use indexa_core::{
     store::{ChunkRecord, EdgeRecord, Store},
     walker::{walk, WalkConfig},
 };
+use indexa_llm::OllamaLlm;
 use indexa_query::enqueue_subtree;
 use std::io::{IsTerminal, Write};
 
@@ -91,6 +92,19 @@ pub(crate) async fn cmd_deep(
     let mut store = Store::open(&db_path)?;
     let embedder = build_embedder(cfg, Some(&embed_model))?;
 
+    // Optional image captioning (opt-in): a vision model adds a caption chunk per image.
+    // Built once, gated on [parsers.image] caption; shares the describer's Ollama endpoint.
+    let captioner = if cfg.parsers.image.caption {
+        let base = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
+        Some(
+            OllamaLlm::new(&base, cfg.parsers.image.caption_model())
+                .with_num_ctx(cfg.describer.num_ctx),
+        )
+    } else {
+        None
+    };
+    let caption_model = cfg.parsers.image.caption_model().to_owned();
+
     for root in &roots {
         println!(
             "Deep-scanning {} with embed model '{}'",
@@ -147,7 +161,7 @@ pub(crate) async fn cmd_deep(
                 continue;
             }
 
-            let extracted = match indexa_parsers::registry::parse_guarded(
+            let mut extracted = match indexa_parsers::registry::parse_guarded(
                 &entry.path,
                 entry.size,
                 max_parse_bytes,
@@ -155,6 +169,35 @@ pub(crate) async fn cmd_deep(
                 Ok(e) => e,
                 Err(_) => continue,
             };
+
+            // Image captioning (opt-in): append a vision-model caption as an extra chunk
+            // (kept alongside the EXIF chunk, not replacing it — both are searchable).
+            if let Some(cap) = &captioner {
+                if extracted.mime.starts_with("image/") {
+                    match indexa_llm::caption_image_file(cap, &caption_model, &entry.path).await {
+                        Ok(text) if !text.trim().is_empty() => {
+                            let seq = extracted.chunks.len();
+                            extracted.chunks.push(indexa_parsers::types::Chunk {
+                                source: entry.path.clone(),
+                                seq,
+                                heading: "caption".to_owned(),
+                                text,
+                                language: None,
+                            });
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            // Warn unconditionally (clearing the progress line first on a TTY)
+                            // so the failure isn't lost on piped/CI runs.
+                            if show_progress {
+                                eprint!("\r\x1b[K");
+                            }
+                            eprintln!("  caption failed for {path_str}: {e:#}");
+                        }
+                    }
+                }
+            }
+
             if extracted.chunks.is_empty() {
                 continue;
             }
