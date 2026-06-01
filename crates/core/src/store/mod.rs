@@ -54,7 +54,13 @@ impl Store {
         }
         let conn = Connection::open(path)
             .with_context(|| format!("opening index at {}", path.display()))?;
-        let store = Self {
+        // Set the busy timeout BEFORE any SQL (init_schema sets it again via PRAGMA, but the
+        // first statements there — journal_mode=WAL, the AUTOINCREMENT migration — can contend
+        // when worker + serve open the same DB at once; without an already-armed timeout that
+        // surfaces as an immediate "database is locked" (notably on Windows). 5s matches the
+        // PRAGMA.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let mut store = Self {
             conn,
             db_path: path.to_path_buf(),
         };
@@ -65,7 +71,7 @@ impl Store {
     /// Open an in-memory database (useful for tests).
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let store = Self {
+        let mut store = Self {
             conn,
             db_path: PathBuf::from(":memory:"),
         };

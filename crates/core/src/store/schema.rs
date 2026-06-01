@@ -3,8 +3,20 @@
 use super::Store;
 use anyhow::Result;
 
+/// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
+/// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
+fn chunks_has_autoincrement(conn: &rusqlite::Connection) -> bool {
+    conn.query_row(
+        "SELECT sql LIKE '%AUTOINCREMENT%' FROM sqlite_master
+           WHERE type='table' AND name='chunks'",
+        [],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(true)
+}
+
 impl Store {
-    pub(super) fn init_schema(&self) -> Result<()> {
+    pub(super) fn init_schema(&mut self) -> Result<()> {
         self.conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
@@ -145,39 +157,43 @@ impl Store {
         // different chunk). SQLite can't ALTER a column to add AUTOINCREMENT, so recreate the
         // table preserving every id (so the FTS chunk_id references stay valid) and let
         // sqlite_sequence continue from MAX(id). One-time O(rows) copy on first open.
-        let chunks_has_autoinc: bool = self
-            .conn
-            .query_row(
-                "SELECT sql LIKE '%AUTOINCREMENT%' FROM sqlite_master
-                   WHERE type='table' AND name='chunks'",
-                [],
-                |r| r.get::<_, bool>(0),
-            )
-            .unwrap_or(true); // table absent (fresh DB) → CREATE above already has it
-        if !chunks_has_autoinc {
-            self.conn.execute_batch(
-                "
-                CREATE TABLE chunks_migrate (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    entry_path  TEXT NOT NULL,
-                    seq         INTEGER NOT NULL,
-                    heading     TEXT NOT NULL DEFAULT '',
-                    text        TEXT NOT NULL,
-                    language    TEXT,
-                    embedding   BLOB,
-                    embed_model TEXT,
-                    indexed_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-                    UNIQUE (entry_path, seq)
-                );
-                INSERT INTO chunks_migrate
-                    (id, entry_path, seq, heading, text, language, embedding, embed_model, indexed_at)
-                    SELECT id, entry_path, seq, heading, text, language, embedding, embed_model, indexed_at
-                    FROM chunks;
-                DROP TABLE chunks;
-                ALTER TABLE chunks_migrate RENAME TO chunks;
-                CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(entry_path);
-                ",
-            )?;
+        //
+        // `worker` and `serve` are separate processes on one DB, so two could open a legacy
+        // DB at once. The non-atomic CREATE/DROP/RENAME would then race (a "table exists"
+        // error, or a window where `chunks` is gone). Guard with a fast lock-free pre-check,
+        // then run the whole migration inside one IMMEDIATE transaction with the check
+        // re-done under the write lock: the second opener blocks, re-checks, sees
+        // AUTOINCREMENT, and skips. (busy_timeout, set above, bounds the wait.)
+        if !chunks_has_autoincrement(&self.conn) {
+            let tx = self
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if !chunks_has_autoincrement(&tx) {
+                tx.execute_batch(
+                    "
+                    CREATE TABLE chunks_migrate (
+                        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                        entry_path  TEXT NOT NULL,
+                        seq         INTEGER NOT NULL,
+                        heading     TEXT NOT NULL DEFAULT '',
+                        text        TEXT NOT NULL,
+                        language    TEXT,
+                        embedding   BLOB,
+                        embed_model TEXT,
+                        indexed_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                        UNIQUE (entry_path, seq)
+                    );
+                    INSERT INTO chunks_migrate
+                        (id, entry_path, seq, heading, text, language, embedding, embed_model, indexed_at)
+                        SELECT id, entry_path, seq, heading, text, language, embedding, embed_model, indexed_at
+                        FROM chunks;
+                    DROP TABLE chunks;
+                    ALTER TABLE chunks_migrate RENAME TO chunks;
+                    CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(entry_path);
+                    ",
+                )?;
+            }
+            tx.commit()?;
         }
 
         Ok(())
