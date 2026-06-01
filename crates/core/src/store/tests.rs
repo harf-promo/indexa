@@ -165,6 +165,67 @@ fn migrates_legacy_chunks_to_autoincrement() {
     );
 }
 
+#[test]
+fn legacy_chunks_migration_is_concurrency_safe() {
+    // `worker` and `serve` are separate processes on one DB; two could open a legacy DB at
+    // once. The migration must be atomic + single-flight so neither errors or corrupts.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy_concurrent.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        // WAL like a real Indexa DB (so the concurrent opens don't contend on a journal-mode
+        // conversion — the migration's write lock is the only contention under test).
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE chunks (
+                id INTEGER PRIMARY KEY, entry_path TEXT NOT NULL, seq INTEGER NOT NULL,
+                heading TEXT NOT NULL DEFAULT '', text TEXT NOT NULL, language TEXT,
+                embedding BLOB, embed_model TEXT,
+                indexed_at INTEGER NOT NULL DEFAULT (unixepoch()), UNIQUE(entry_path, seq));",
+        )
+        .unwrap();
+        for i in 1..=20 {
+            conn.execute(
+                "INSERT INTO chunks (id, entry_path, seq, text) VALUES (?1, ?2, 0, 'x')",
+                rusqlite::params![i, format!("/f{i}.txt")],
+            )
+            .unwrap();
+        }
+    }
+    // Open from several threads simultaneously — exactly one migrates, none error.
+    let handles: Vec<_> = (0..6)
+        .map(|_| {
+            let p = path.clone();
+            std::thread::spawn(move || Store::open(&p).map(|_| ()))
+        })
+        .collect();
+    for h in handles {
+        h.join()
+            .unwrap()
+            .expect("concurrent open must not error during the migration");
+    }
+    // Data intact, no orphan migrate table, AUTOINCREMENT in effect (no id reuse).
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.chunk_count().unwrap(), 20);
+    let leftover: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks_migrate'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(leftover, 0, "no orphan chunks_migrate table left behind");
+    store.delete_chunks_for("/f20.txt").unwrap();
+    store
+        .upsert_chunks(&[dummy_chunk("/new.txt", 0, "n")])
+        .unwrap();
+    assert!(
+        store.max_chunk_id().unwrap() > 20,
+        "ids must not be reused post-migration"
+    );
+}
+
 fn fts_row_count(store: &Store) -> i64 {
     store
         .conn
