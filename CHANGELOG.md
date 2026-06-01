@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Audio transcription with a local whisper CLI (opt-in).** Set `[parsers.audio] transcribe = true` and `deep` shells out to a whisper.cpp-style CLI (default `whisper-cli`, configurable `binary`/`model`) for each audio file, storing the transcript as a searchable chunk alongside the file's metadata — so you can find audio by what's said in it, fully offline. The binary + model are user-installed (not bundled); only `audio/*` files are transcribed, and a missing/failing binary warns and skips without aborting the run.
 - **Image captioning with a local vision model (opt-in).** Set `[parsers.image] caption = true` and `deep` sends each image to an Ollama vision model (default `llama3.2-vision`) and stores the caption as a searchable chunk alongside the file's EXIF metadata — so you can find images by what's *in* them, fully offline. Nothing leaves the machine. Configure the model via `[parsers.image] model`. Note: the vision model (~7–8 GB) isn't yet counted by the memory watchdog, so enable it with headroom; captions are produced for newly-scanned or modified images.
 
 ## [0.10.0] — 2026-06-01

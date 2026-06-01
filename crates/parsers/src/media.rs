@@ -52,8 +52,10 @@ impl Parser for MediaParser {
 
         let mime = if matches!(
             path.extension().and_then(|e| e.to_str()),
-            Some("mp3" | "m4a" | "aac" | "flac" | "wav" | "ogg" | "opus" | "aiff")
+            Some("mp3" | "m4a" | "m4b" | "aac" | "flac" | "wav" | "ogg" | "opus" | "aiff" | "alac")
         ) {
+            // `m4b` (audiobooks) + `alac` are audio, not video — so they reach the
+            // transcription gate (which keys on an "audio/" mime).
             "audio/mpeg"
         } else {
             "video/mp4"
@@ -72,6 +74,37 @@ impl Parser for MediaParser {
             edges: Vec::new(),
         })
     }
+}
+
+/// Transcribe an audio file by shelling out to a whisper.cpp-style CLI (e.g. `whisper-cli`),
+/// mirroring [`run_ffprobe`]'s subprocess pattern. Runs `<binary> [-m <model>] -f <path> -nt
+/// -np` and returns stdout (the transcript, no timestamps). The binary must accept the input
+/// format — whisper.cpp expects 16 kHz WAV. This is a **blocking** subprocess (callers in an
+/// async context must wrap it in `spawn_blocking`); transcription can take minutes. Errors
+/// (binary absent, non-zero exit, empty output) propagate so the caller can warn and skip,
+/// leaving the file's metadata chunk intact.
+pub fn transcribe_audio(path: &Path, binary: &str, model: Option<&str>) -> Result<String> {
+    let path_str = path.to_str().context("non-UTF-8 audio path")?;
+    let mut cmd = Command::new(binary);
+    if let Some(m) = model {
+        cmd.args(["-m", m]);
+    }
+    cmd.args(["-f", path_str, "-nt", "-np"]);
+    let output = cmd
+        .output()
+        .with_context(|| format!("running {binary} (is it installed and on PATH?)"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "{binary} exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if text.is_empty() {
+        anyhow::bail!("{binary} produced no transcript");
+    }
+    Ok(text)
 }
 
 fn run_ffprobe(path: &Path) -> Result<String> {
@@ -160,5 +193,20 @@ mod tests {
         assert!(p.accepts_path(Path::new("video.mp4")));
         assert!(p.accepts_path(Path::new("audio.flac")));
         assert!(!p.accepts_path(Path::new("doc.pdf")));
+    }
+
+    #[test]
+    fn transcribe_audio_errors_gracefully_when_binary_missing() {
+        // A missing transcription binary must return Err (the deep loop warns + skips,
+        // keeping the metadata chunk) — never panic.
+        let res = transcribe_audio(
+            Path::new("/tmp/nonexistent.wav"),
+            "indexa-no-such-whisper-binary",
+            None,
+        );
+        assert!(
+            res.is_err(),
+            "missing binary must Err, not panic or succeed"
+        );
     }
 }
