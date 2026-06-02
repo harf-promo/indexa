@@ -11,6 +11,10 @@ members = [
     "crates/mcp",
     "apps/indexa",
 ]
+# Excluded from --workspace builds: Tauri requires platform-specific native
+# libraries (webkit2gtk on Linux) that the CI ubuntu-latest runner does not have.
+# Build manually with: cargo build --manifest-path apps/indexa-desktop/Cargo.toml
+exclude = ["apps/indexa-desktop"]
 
 [workspace.package]
 version = "0.11.0"

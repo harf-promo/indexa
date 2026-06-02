@@ -1,0 +1,37 @@
+{
+  "productName": "Indexa",
+  "identifier": "dev.indexa.Indexa",
+  "version": "0.11.0",
+  "app": {
+    "windows": [
+      {
+        "url": "http://localhost:7620",
+        "title": "Indexa — local context engine",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "trayIcon": {
+      "id": "main",
+      "iconPath": "icons/icon.png"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
