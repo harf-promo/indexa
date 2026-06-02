@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Interactive squarified treemap for the Map view.** The Map tab now shows a squarified SVG treemap of your indexed folder structure, sized proportionally by disk usage. A **Treemap | Table** toggle keeps the old category table accessible. Cells are colour-coded by top-level directory, show name + size labels, and support click-to-drill-down navigation with a breadcrumb trail and hover tooltips. No external dependencies — offline-safe, pure vanilla JS. Backed by a new `GET /api/map/treemap` endpoint that builds a depth-3 hierarchy with bottom-up subtree-size aggregation.
+
+- **D2 code-graph call edges + `who_calls` / `blast_radius` MCP tools.** Deep-indexing a source file now also records every function/method name it *calls* as `kind='calls'` edges (Rust, Python, JavaScript/TypeScript, Go, Java). Two new MCP tools query them: `who_calls(symbol)` returns all indexed files that call a given name (up to 100 results); `blast_radius(symbol)` returns the 1-hop transitive set — direct callers plus files that call any symbol defined in those callers — giving a conservative "what breaks if I change this?" answer (up to 200 results). The `dependencies` tool now also lists a file's call edges. Existing databases are migrated automatically (the `edges` table's `CHECK` constraint is widened from `imports/defines` to `imports/defines/calls` on first open). MCP tool count: 8 → 10.
+
 ## [0.11.0] — 2026-06-01
 
 A **local multimodal + scale** release: opt-in image captioning, audio transcription, and an ANN index for dense search on large corpora.

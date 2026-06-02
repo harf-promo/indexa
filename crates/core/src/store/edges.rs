@@ -1,8 +1,7 @@
 //! Code-relationship-graph edge writes and queries (the `edges` table).
 //!
-//! D1 of the code graph: per-file `imports` and `defines` edges. Reads power the
-//! `dependencies` / `who_imports` / `who_calls` MCP tools. Cross-file *call* edges (D2)
-//! are a deliberate later follow-up.
+//! D1: per-file `imports` and `defines` edges.
+//! D2: per-file `calls` edges — function/method names called by a file.
 
 use super::{EdgeRecord, Store};
 use anyhow::Result;
@@ -58,6 +57,47 @@ impl Store {
             "SELECT DISTINCT from_path FROM edges WHERE kind = ?1 AND to_ref = ?2 ORDER BY from_path",
         )?;
         let rows = stmt.query_map(params![kind, to_ref], |r| r.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// D2 — files that contain a `calls` edge to `symbol` (direct callers), capped at
+    /// `limit`. The match is on the bare symbol name, case-sensitive.
+    pub fn who_calls(&self, symbol: &str, limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT from_path FROM edges
+              WHERE kind = 'calls' AND to_ref = ?1
+              ORDER BY from_path LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![symbol, limit as i64], |r| r.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// D2 — 1-hop blast radius for `symbol`: direct callers **plus** files that call any
+    /// symbol defined in one of those callers. Gives a conservative "what breaks if I
+    /// change this?" set without full recursive name resolution. Capped at `limit`.
+    pub fn blast_radius(&self, symbol: &str, limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "WITH direct_callers AS (
+                 SELECT DISTINCT from_path FROM edges
+                  WHERE kind = 'calls' AND to_ref = ?1
+             ),
+             caller_exports AS (
+                 SELECT DISTINCT to_ref FROM edges
+                  WHERE kind = 'defines'
+                    AND from_path IN (SELECT from_path FROM direct_callers)
+             ),
+             transitive_callers AS (
+                 SELECT DISTINCT from_path FROM edges
+                  WHERE kind = 'calls'
+                    AND to_ref IN (SELECT to_ref FROM caller_exports)
+             )
+             SELECT from_path FROM direct_callers
+             UNION
+             SELECT from_path FROM transitive_callers
+             ORDER BY from_path
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![symbol, limit as i64], |r| r.get(0))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }
