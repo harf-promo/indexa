@@ -290,11 +290,12 @@ Add it to **Claude Desktop** (`claude_desktop_config.json`) — or any MCP clien
 }
 ```
 
-Eight tools are exposed: `search` (find paths), `browse_tree` (one directory level), `get_summary`
+Ten tools are exposed: `search` (find paths), `browse_tree` (one directory level), `get_summary`
 (`tier` = l0 one-liner / l1 full+children / l2 file content — progressive disclosure), `read_file`
 (content, confined to indexed roots), `ask` (full retrieval+answer pipeline), `dependencies` (a code
-file's imports + defined symbols) and `who_imports` (reverse lookup over the code graph), and
-`get_stats`.
+file's imports, defined symbols, and calls), `who_imports` (reverse code-graph lookup), `who_calls`
+(D2 — which files call a given function name), `blast_radius` (D2 — 1-hop transitive call impact
+set for "what breaks if I change X?"), and `get_stats`.
 
 A local agent pulls `get_summary("auth")` on demand instead of pre-loading the repo — staying coherent
 across long tasks without hitting the context-window cliff.

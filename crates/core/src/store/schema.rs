@@ -15,6 +15,17 @@ fn chunks_has_autoincrement(conn: &rusqlite::Connection) -> bool {
     .unwrap_or(true)
 }
 
+/// Does the `edges` table's CHECK constraint already allow `'calls'`?
+/// Returns `true` when the table is absent (fresh DB) — DDL below already includes it.
+fn edges_allows_calls(conn: &rusqlite::Connection) -> bool {
+    conn.query_row(
+        "SELECT sql LIKE \"%'calls'%\" FROM sqlite_master WHERE type='table' AND name='edges'",
+        [],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(true)
+}
+
 impl Store {
     pub(super) fn init_schema(&mut self) -> Result<()> {
         self.conn.execute_batch(
@@ -124,15 +135,16 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_classifications_source   ON classifications(source);
             CREATE INDEX IF NOT EXISTS idx_classifications_category ON classifications(category);
 
-            -- Code-relationship graph (D1). One row per edge from a code file:
+            -- Code-relationship graph (D1 + D2). One row per edge from a code file:
             --   kind='imports' → to_ref is an imported module/path
             --   kind='defines' → to_ref is a symbol defined in the file
+            --   kind='calls'   → to_ref is a function/method name called by the file (D2)
             -- Composite PK dedups identical edges; idx_edges_to powers reverse lookups
-            -- (who imports module X / who defines symbol Y). Re-deep of a file replaces
+            -- (who imports X / who defines Y / who calls Z). Re-deep of a file replaces
             -- its rows (delete-by-from_path then insert), mirroring chunks.
             CREATE TABLE IF NOT EXISTS edges (
                 from_path TEXT NOT NULL,
-                kind      TEXT NOT NULL CHECK(kind IN ('imports','defines')),
+                kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls')),
                 to_ref    TEXT NOT NULL,
                 PRIMARY KEY (from_path, kind, to_ref)
             ) WITHOUT ROWID;
@@ -190,6 +202,32 @@ impl Store {
                     DROP TABLE chunks;
                     ALTER TABLE chunks_migrate RENAME TO chunks;
                     CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(entry_path);
+                    ",
+                )?;
+            }
+            tx.commit()?;
+        }
+
+        // Migration: widen the edges.kind CHECK to include 'calls' (D2 call edges).
+        // SQLite can't ALTER a constraint, so recreate the table when the old DDL is
+        // detected. Same IMMEDIATE-tx double-check pattern as the chunks migration above.
+        if !edges_allows_calls(&self.conn) {
+            let tx = self
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if !edges_allows_calls(&tx) {
+                tx.execute_batch(
+                    "
+                    CREATE TABLE edges_new (
+                        from_path TEXT NOT NULL,
+                        kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls')),
+                        to_ref    TEXT NOT NULL,
+                        PRIMARY KEY (from_path, kind, to_ref)
+                    ) WITHOUT ROWID;
+                    INSERT OR IGNORE INTO edges_new SELECT * FROM edges;
+                    DROP TABLE edges;
+                    ALTER TABLE edges_new RENAME TO edges;
+                    CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(kind, to_ref);
                     ",
                 )?;
             }

@@ -229,6 +229,12 @@ impl Parser for CodeParser {
         if !import_kinds.is_empty() {
             extract_imports(root, &source, path, import_kinds, &mut edges);
         }
+        // D2: extract call edges (function/method names invoked by this file).
+        let call_kinds = call_kinds_for(lang_def.name);
+        if !call_kinds.is_empty() {
+            let mut seen_calls = std::collections::HashSet::new();
+            extract_calls(root, &source, path, call_kinds, &mut edges, &mut seen_calls);
+        }
 
         Ok(Extracted {
             source: path.to_path_buf(),
@@ -237,6 +243,99 @@ impl Parser for CodeParser {
             edges,
         })
     }
+}
+
+/// Tree-sitter node kinds that represent a call expression, by language name.
+fn call_kinds_for(language: &str) -> &'static [&'static str] {
+    match language {
+        "rust" => &["call_expression", "method_call_expression"],
+        "python" => &["call"],
+        "javascript" | "typescript" | "tsx" => &["call_expression"],
+        "go" => &["call_expression"],
+        "java" => &["method_invocation"],
+        _ => &[],
+    }
+}
+
+/// Walk the tree and push one `calls` edge per distinct function/method name invoked.
+/// Deduped by name across the whole file so repeated calls produce a single edge.
+/// Names shorter than 2 characters are skipped (noise: `f`, `g`, operators, etc.).
+fn extract_calls(
+    node: Node,
+    source: &str,
+    path: &Path,
+    call_kinds: &[&str],
+    edges: &mut Vec<Edge>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if call_kinds.contains(&child.kind()) {
+            if let Some(name) = call_callee(&child, source) {
+                if name.len() >= 2 && seen.insert(name.clone()) {
+                    edges.push(Edge {
+                        from: path.to_path_buf(),
+                        kind: "calls",
+                        to: name,
+                    });
+                }
+            }
+        }
+        extract_calls(child, source, path, call_kinds, edges, seen);
+    }
+}
+
+/// Extract the bare callee name from a call node.
+///
+/// Strategy (applies across all supported languages):
+/// 1. Look for a direct `identifier` or `field_identifier` child — covers Rust
+///    `method_call_expression` (`name` is a direct identifier child) and Java
+///    `method_invocation` (same).
+/// 2. If the first child is a qualified expression (`scoped_identifier`,
+///    `member_expression`, `attribute`, `field_expression`, `selector_expression`),
+///    return the last `identifier`/`property_identifier` inside it — strips the
+///    receiver and gives the bare method name.
+fn call_callee(node: &Node, source: &str) -> Option<String> {
+    const ID_KINDS: &[&str] = &["identifier", "field_identifier", "property_identifier"];
+    const QUALIFIED_KINDS: &[&str] = &[
+        "scoped_identifier",
+        "member_expression",
+        "attribute",
+        "field_expression",
+        "selector_expression",
+    ];
+
+    // Pass 1: direct identifier child
+    let direct: Vec<String> = {
+        let mut c = node.walk();
+        node.children(&mut c)
+            .filter(|n| ID_KINDS.contains(&n.kind()))
+            .map(|n| source[n.byte_range()].trim().to_owned())
+            .collect()
+    };
+    if let Some(name) = direct.last() {
+        return Some(name.clone());
+    }
+
+    // Pass 2: identifier inside a qualified expression child
+    {
+        let mut c = node.walk();
+        for child in node.children(&mut c) {
+            if QUALIFIED_KINDS.contains(&child.kind()) {
+                let mut ic = child.walk();
+                let last = child
+                    .children(&mut ic)
+                    .filter(|n| ID_KINDS.contains(&n.kind()))
+                    .last()
+                    .map(|n| source[n.byte_range()].trim().to_owned());
+                if last.is_some() {
+                    return last;
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Tree-sitter node kinds that represent an import/use statement, by language name. An
@@ -574,5 +673,64 @@ impl Greeter {
         // Grouped imports must each yield an edge (we match import_spec, not the block).
         assert!(imports.contains(&"fmt"), "go imports: {imports:?}");
         assert!(imports.contains(&"os"), "go imports: {imports:?}");
+    }
+
+    fn calls_of(ex: &Extracted) -> Vec<&str> {
+        ex.edges
+            .iter()
+            .filter(|e| e.kind == "calls")
+            .map(|e| e.to.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn edges_calls_rust() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("main.rs");
+        std::fs::write(
+            &p,
+            "fn main() { parse(\"a\"); render(); obj.connect(); }\n\
+             fn parse(s: &str) -> i32 { s.len() as i32 }\n",
+        )
+        .unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+        let calls = calls_of(&ex);
+        assert!(calls.contains(&"parse"), "rust calls: {calls:?}");
+        assert!(calls.contains(&"render"), "rust calls: {calls:?}");
+        assert!(calls.contains(&"connect"), "rust calls: {calls:?}");
+        // Deduped — parse called once but only one edge
+        assert_eq!(calls.iter().filter(|&&c| c == "parse").count(), 1);
+    }
+
+    #[test]
+    fn edges_calls_python() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("app.py");
+        std::fs::write(
+            &p,
+            "import os\ndef run():\n    parse(data)\n    render(ctx)\n    obj.save()\n",
+        )
+        .unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+        let calls = calls_of(&ex);
+        assert!(calls.contains(&"parse"), "python calls: {calls:?}");
+        assert!(calls.contains(&"render"), "python calls: {calls:?}");
+        assert!(calls.contains(&"save"), "python calls: {calls:?}");
+    }
+
+    #[test]
+    fn edges_calls_javascript() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("app.js");
+        std::fs::write(
+            &p,
+            "const x = parse(data);\nobj.render(ctx);\nconst y = build();\n",
+        )
+        .unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+        let calls = calls_of(&ex);
+        assert!(calls.contains(&"parse"), "js calls: {calls:?}");
+        assert!(calls.contains(&"render"), "js calls: {calls:?}");
+        assert!(calls.contains(&"build"), "js calls: {calls:?}");
     }
 }

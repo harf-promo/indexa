@@ -6,9 +6,10 @@
 //!
 //! **stdout is the protocol channel** — all logging must go to stderr.
 //!
-//! Tools (8): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
-//! disclosure), `read_file`, `ask`, `dependencies` (a file's imports + defined
-//! symbols), `who_imports` (reverse code-graph lookup), `get_stats`.
+//! Tools (10): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
+//! disclosure), `read_file`, `ask`, `dependencies` (a file's imports, defined symbols,
+//! and calls), `who_imports` (reverse code-graph lookup), `who_calls` (D2 — reverse
+//! call lookup), `blast_radius` (D2 — 1-hop call blast radius), `get_stats`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -94,6 +95,18 @@ pub struct WhoImportsParams {
     pub module: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WhoCallsParams {
+    /// Bare function or method name to find callers of (e.g. `parse`, `render`, `connect`).
+    pub symbol: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct BlastRadiusParams {
+    /// Bare function or method name whose blast radius to compute.
+    pub symbol: String,
+}
+
 fn mcp_err(e: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
 }
@@ -177,6 +190,11 @@ impl IndexaMcp {
             .filter(|e| e.kind == "defines")
             .map(|e| e.to_ref.as_str())
             .collect();
+        let calls: Vec<&str> = edges
+            .iter()
+            .filter(|e| e.kind == "calls")
+            .map(|e| e.to_ref.as_str())
+            .collect();
         let mut out = String::new();
         if !imports.is_empty() {
             out.push_str(&format!(
@@ -194,6 +212,12 @@ impl IndexaMcp {
                 defines.len(),
                 line("•", defines)
             ));
+        }
+        if !calls.is_empty() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&format!("\nCalls ({}):\n{}", calls.len(), line("↪", calls)));
         }
         Ok(ok_text(out))
     }
@@ -235,6 +259,62 @@ impl IndexaMcp {
             format!("{total} file(s) import '{}':", params.0.module)
         };
         Ok(ok_text(format!("{header}\n{body}")))
+    }
+
+    /// D2 — which files call a given function or method name.
+    #[tool(
+        description = "D2 code-graph: which indexed files contain a call to the given function or method name (bare, unqualified — e.g. `parse`, `render`, `connect`). Requires `indexa deep` to have been run on source files. Returns up to 100 results."
+    )]
+    async fn who_calls(
+        &self,
+        params: Parameters<WhoCallsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let store = self.store()?;
+        let files = store.who_calls(&params.0.symbol, 100).map_err(mcp_err)?;
+        if files.is_empty() {
+            return Ok(ok_text(format!(
+                "No indexed file calls '{}'. Run `indexa deep` on source files first.",
+                params.0.symbol
+            )));
+        }
+        let total = files.len();
+        let body = files
+            .iter()
+            .map(|p| format!("📄 {p}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ok_text(format!(
+            "{total} file(s) call '{}':\n{body}",
+            params.0.symbol
+        )))
+    }
+
+    /// D2 — 1-hop blast radius for a symbol: direct callers and transitive callers.
+    #[tool(
+        description = "D2 code-graph: compute the blast radius of changing a function or method — returns the direct callers plus files that call any symbol defined in those callers (1-hop transitive). Use to answer 'what breaks if I change X?'. Returns up to 200 results."
+    )]
+    async fn blast_radius(
+        &self,
+        params: Parameters<BlastRadiusParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let store = self.store()?;
+        let files = store.blast_radius(&params.0.symbol, 200).map_err(mcp_err)?;
+        if files.is_empty() {
+            return Ok(ok_text(format!(
+                "No blast radius found for '{}'. Run `indexa deep` on source files first.",
+                params.0.symbol
+            )));
+        }
+        let total = files.len();
+        let body = files
+            .iter()
+            .map(|p| format!("📄 {p}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ok_text(format!(
+            "Blast radius of '{}' ({total} file(s)):\n{body}",
+            params.0.symbol
+        )))
     }
 
     /// List the direct children (with summary state) of a directory.
