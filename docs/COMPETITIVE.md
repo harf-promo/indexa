@@ -1,7 +1,6 @@
 # Competitive landscape
 
-Where Indexa sits, who's nearby, and what makes it defensible. Honest, with the gaps named. Snapshot:
-May 2026.
+Where Indexa sits, who's nearby, and what makes it defensible. Honest, with the gaps named. Snapshot updated June 2026 (v0.11.0).
 
 ## The one-line position
 
@@ -71,25 +70,36 @@ an LLM, with a **web-dashboard graph visualization** and export to wiki/Obsidian
   (they regenerate per run); **whole-disk** ambient scope (they're per-repo); **resource-aware** local-model
   discipline; **dual cloud+local** value; a single Rust binary.
 
-**What Indexa should borrow (now on the roadmap):**
-- Make a **signature graph/treemap visualization** the brand visual (the existing per-node
-  `context: N%` coverage data already supports it).
-- **Make token-savings visible** in `export` and the workspace.
-- **Local multimodal** understanding (do what they do with cloud vision, but offline).
-- A **code-relationship graph** — they prove the demand; Indexa's edge is doing it in **local SQLite,
-  behind MCP**, not Neo4j/cloud.
-- Consider an **Indexa MCP/skill distribution** so AI assistants can invoke it as easily as these skills.
+**What Indexa borrowed (✅) and what's still open:**
+- ✅ **Local multimodal** understanding — what they do with cloud vision, Indexa does **offline**
+  (opt-in image captioning + audio transcription).
+- ✅ A **code-relationship graph** — they prove the demand; Indexa does it in **local SQLite, behind
+  MCP** (`dependencies` / `who_imports`), not Neo4j/cloud. (Cross-file call edges are the next step.)
+- Still open: a **signature graph/treemap visualization** as the brand visual (the per-node
+  `context: N%` coverage data already supports it); **making token-savings visible** in `export` and
+  the workspace; and an **Indexa MCP/skill distribution** so AI assistants can invoke it as easily as
+  these skills.
 
-## Capability gaps (ranked by impact) — all now on the roadmap
+## Capability arc — what we closed, and what's next
 
-1. **No code-relationship graph** (calls/imports/blast-radius). Foundation exists: tree-sitter already
-   extracts symbol definitions; edges are missing.
-2. **No multimodal content understanding** — media is metadata-only today. Config stubs exist but are unwired.
-3. **Brute-force vector search** — no ANN/HNSW index; a practical ceiling around a few hundred thousand
-   chunks. Embedding is also one-text-at-a-time (no batching).
-4. **Single-shot `ask`** — no agentic multi-step retrieve→reflect→retrieve for hard cross-cutting questions.
-5. **Onboarding & the Map** — weak first-run guidance; the Map view under-delivers on its name.
-6. **No GraphRAG-style thematic answers** — would follow the code/knowledge graph.
+**Closed since this analysis began (all shipped):**
+
+- ✅ **Code-relationship graph (D1)** — imports + defined symbols across Rust/Python/JS/TS/Go/Java,
+  queryable over MCP (`dependencies`, `who_imports`).
+- ✅ **Local multimodal** — opt-in on-device image captioning and audio transcription; media is no
+  longer metadata-only.
+- ✅ **ANN/HNSW + batch embedding** — an opt-in HNSW index lifts the brute-force ceiling on large
+  corpora, and deep-phase embedding now batches.
+- ✅ **First-run onboarding + streaming `ask`** — guided empty-state flow; answers stream token-by-token.
+
+**Still open (honest, ranked):**
+
+1. **Cross-file call edges / blast-radius (D2)** — D1 records imports + defines; "what calls this / what
+   breaks if I change it" is the next step.
+2. **Agentic, multi-step `ask`** — retrieve → reflect → retrieve for hard cross-cutting questions.
+3. **The Map, as a real map** — a coverage-colored treemap/sunburst, not a table.
+4. **Context Packs** — subject-scoped portable bundles auto-gathered from across the disk.
+5. **GraphRAG-style thematic answers** — would build on the code/knowledge graph.
 
 ## 2026 trends to ride
 

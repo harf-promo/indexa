@@ -2,6 +2,8 @@
 
 This document explains the technical decisions behind how Indexa builds context, generates embeddings, and retrieves answers. Every default described here is overridable via `config.toml` (see [Config Reference](config.md)).
 
+**In one sentence:** Indexa reads your files once, turns each piece into a searchable summary, and at question time hands your AI tool only the handful of pieces that matter — so the model reasons over a small, relevant slice instead of your whole disk. The detail below is *how* it keeps that slice relevant, and the honest trade-offs of doing it this way.
+
 ---
 
 ## Overview

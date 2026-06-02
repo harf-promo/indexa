@@ -1,12 +1,22 @@
 # Security Policy
 
-## Supported Versions
+## Security posture
 
-During the pre-alpha period, only the latest commit on `main` is supported.
+Indexa is **local-first by design**, which removes most of the usual attack surface: it runs
+entirely on your machine, makes **no network calls while building or serving context**, and stores
+everything in a single local SQLite file. Nothing leaves your device unless you explicitly configure
+a cloud model. API keys are written to a `0600` config file and are never logged. The optional web UI
+binds to `localhost`; config-write endpoints are gated behind an explicit opt-in env var.
+
+## Supported versions
+
+Indexa is pre-1.0 and ships on a steady release cadence. Security fixes land on the latest release
+(currently **v0.11.0**) and `main`.
 
 | Version | Supported |
 |---------|-----------|
-| main (pre-alpha) | ✅ |
+| latest release (v0.11.0) | ✅ |
+| `main` | ✅ |
 
 ## Reporting a Vulnerability
 

@@ -6,8 +6,9 @@
 //!
 //! **stdout is the protocol channel** — all logging must go to stderr.
 //!
-//! Tools: `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
-//! disclosure), `read_file`, `ask`, `get_stats`.
+//! Tools (8): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
+//! disclosure), `read_file`, `ask`, `dependencies` (a file's imports + defined
+//! symbols), `who_imports` (reverse code-graph lookup), `get_stats`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -1,6 +1,6 @@
 [package]
 name = "indexa-cli"
-description = "CLI command definitions for Indexa."
+description = "Command-line interface for Indexa, the local context engine for AI."
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

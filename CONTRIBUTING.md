@@ -1,6 +1,8 @@
 # Contributing to Indexa
 
-Thank you for your interest in contributing. This document covers everything you need to get your first patch merged.
+Indexa is building the local context engine for AI — private, fast, and yours. If you care about
+AI that runs on your own hardware and respects your data, we'd love your help. This document covers
+everything you need to get your first patch merged.
 
 ---
 
