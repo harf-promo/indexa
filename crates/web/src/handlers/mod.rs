@@ -34,7 +34,7 @@ pub(crate) use models::{
 };
 pub(crate) use providers::api_providers_status;
 pub(crate) use queue::{api_queue_failed, api_queue_retry, api_queue_stats};
-pub(crate) use stats::{api_map, api_roots, api_search, api_stats};
+pub(crate) use stats::{api_map, api_map_treemap, api_roots, api_search, api_stats};
 pub(crate) use summary::{api_summarize_enqueue, api_summary};
 pub(crate) use telemetry::{api_telemetry, api_telemetry_stream};
 pub(crate) use tree::api_tree;

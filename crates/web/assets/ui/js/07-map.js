@@ -3,6 +3,8 @@ let mapLoaded = false;
 async function loadMap() {
   if (mapLoaded) return;
   mapLoaded = true;
+  // Also kick off the treemap (no-op if already loaded)
+  if (typeof loadTreemap === 'function') loadTreemap();
   const table = document.getElementById('map-table');
   try {
     const r = await fetch('/api/map');
