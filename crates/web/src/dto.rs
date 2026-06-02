@@ -25,6 +25,17 @@ pub(crate) struct MapRow {
     pub(crate) total_size: u64,
 }
 
+/// One node in the treemap tree (nested; children omitted when empty).
+#[derive(Serialize)]
+pub(crate) struct TreemapNodeDto {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) size: u64,
+    pub(crate) file_count: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) children: Vec<TreemapNodeDto>,
+}
+
 #[derive(Serialize)]
 pub(crate) struct TreeNodeResponse {
     pub(crate) path: String,

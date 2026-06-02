@@ -213,4 +213,21 @@ impl Store {
         let rows = stmt.query_map([], |r| r.get(0))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+
+    /// Flat list of all entries for building client-side tree visualisations (e.g. treemap).
+    /// Returns `(path, parent_path, is_dir, size_bytes)`. Capped at 500,000 rows.
+    pub fn all_entry_sizes(&self) -> Result<Vec<(String, String, bool, u64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, COALESCE(parent_path, ''), kind, size FROM entries LIMIT 500000",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)? == "dir",
+                r.get::<_, i64>(3)? as u64,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
 }

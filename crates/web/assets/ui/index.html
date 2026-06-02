@@ -94,8 +94,23 @@
       </div>
       <div class="tab-panel" id="panel-map" role="tabpanel" aria-labelledby="view-map">
         <div class="map-view" id="map-view">
-          <h2 class="panel-heading">Context map</h2>
-          <table id="map-table"></table>
+          <div class="map-toolbar">
+            <h2 class="panel-heading">Context map</h2>
+            <div class="map-sub-toggle" role="tablist" aria-label="Map view">
+              <button id="map-tab-treemap" class="map-sub-tab active" role="tab" aria-selected="true" onclick="switchMapView('treemap')">Treemap</button>
+              <button id="map-tab-table"   class="map-sub-tab"        role="tab" aria-selected="false" onclick="switchMapView('table')">Table</button>
+            </div>
+          </div>
+          <!-- Treemap sub-view (default) -->
+          <div id="map-panel-treemap">
+            <div class="treemap-breadcrumb" id="treemap-breadcrumb" aria-label="Treemap navigation path"></div>
+            <svg id="treemap-svg" class="treemap-svg" role="img" aria-label="Disk usage treemap — click a cell to drill down"></svg>
+            <div class="treemap-tooltip" id="treemap-tooltip" role="tooltip" hidden></div>
+          </div>
+          <!-- Table sub-view -->
+          <div id="map-panel-table" hidden>
+            <table id="map-table"></table>
+          </div>
         </div>
       </div>
     </div>

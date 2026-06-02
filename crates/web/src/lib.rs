@@ -87,6 +87,7 @@ pub(crate) const UI_CSS: &str = concat!(
     include_str!("../assets/ui/css/07-jobs.css"),
     include_str!("../assets/ui/css/08-engine.css"),
     include_str!("../assets/ui/css/09-model-fit-popover.css"),
+    include_str!("../assets/ui/css/10-treemap.css"),
 );
 pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/01-state-theme-tabs.js"),
@@ -100,6 +101,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/09-engine.js"),
     include_str!("../assets/ui/js/10-model-fit-popover.js"),
     include_str!("../assets/ui/js/11-onboarding.js"),
+    include_str!("../assets/ui/js/12-treemap.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -198,6 +200,7 @@ pub async fn serve(
         .route("/assets/app.js", get(serve_ui_js))
         .route("/api/stats", get(api_stats))
         .route("/api/map", get(api_map))
+        .route("/api/map/treemap", get(api_map_treemap))
         .route("/api/roots", get(api_roots))
         .route("/api/search", get(api_search))
         .route("/api/fs/ls", get(api_fs_ls))
