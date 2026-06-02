@@ -1,6 +1,8 @@
 # Indexa — Usage Guide
 
-The complete how-to for Indexa, **the local context engine for AI**. If you just want the 30-second
+The complete how-to for Indexa, **the local context engine for AI** — the tool that reads your code or
+your disk once, on your machine, and hands any AI tool the slice it needs instead of the whole repo
+(saving cloud tokens and giving local models context they can't hold). If you just want the 30-second
 version, see the [README](README.md). This guide covers every command, the full config, the MCP setup,
 and common recipes.
 
@@ -288,9 +290,11 @@ Add it to **Claude Desktop** (`claude_desktop_config.json`) — or any MCP clien
 }
 ```
 
-Six tools are exposed: `search` (find paths), `browse_tree` (one directory level), `get_summary`
+Eight tools are exposed: `search` (find paths), `browse_tree` (one directory level), `get_summary`
 (`tier` = l0 one-liner / l1 full+children / l2 file content — progressive disclosure), `read_file`
-(content, confined to indexed roots), `ask` (full retrieval+answer pipeline), `get_stats`.
+(content, confined to indexed roots), `ask` (full retrieval+answer pipeline), `dependencies` (a code
+file's imports + defined symbols) and `who_imports` (reverse lookup over the code graph), and
+`get_stats`.
 
 A local agent pulls `get_summary("auth")` on demand instead of pre-loading the repo — staying coherent
 across long tasks without hitting the context-window cliff.

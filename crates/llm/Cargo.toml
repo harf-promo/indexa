@@ -1,6 +1,6 @@
 [package]
 name = "indexa-llm"
-description = "Description-generation adapter trait and implementations for Indexa."
+description = "Summary + answer generation adapters for Indexa (Ollama, Claude subscription, OpenAI, Anthropic, llama.cpp)."
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

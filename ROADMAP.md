@@ -76,7 +76,7 @@ A local-AI index that no longer freezes the machine.
 
 The local context engine is now reachable by AI agents and ranks its own retrieval.
 
-- **MCP server** — `indexa mcp` runs a stdio [Model Context Protocol](https://modelcontextprotocol.io) server (pure-Rust `rmcp`). Six tools: `search`, `browse_tree`, `get_summary` (L0/L1/L2 tiers), `read_file`, `ask`, `get_stats`.
+- **MCP server** — `indexa mcp` runs a stdio [Model Context Protocol](https://modelcontextprotocol.io) server (pure-Rust `rmcp`). Six tools at launch — now **eight** (`dependencies` / `who_imports` joined with the code graph): `search`, `browse_tree`, `get_summary` (L0/L1/L2 tiers), `read_file`, `ask`, `dependencies`, `who_imports`, `get_stats`.
 - **Cross-encoder reranking** — optional `[retrieval] rerank` listwise reorder pass; off by default, fails open.
 - **Unified Send-safe `query::answer()`** — CLI, web, and MCP all share one retrieval pipeline.
 

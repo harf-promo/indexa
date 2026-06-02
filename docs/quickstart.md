@@ -1,6 +1,9 @@
 # Quickstart
 
-Get Indexa running in under 5 minutes.
+In five minutes you'll point Indexa at a folder, watch it build a searchable context map on your
+own machine, and ask it questions in plain language — or hand a context file to Claude Code, Cursor,
+or any AI tool. Everything below runs locally; **nothing leaves your machine** unless you choose a
+cloud model.
 
 ## Prerequisites
 
