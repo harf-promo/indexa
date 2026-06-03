@@ -31,6 +31,10 @@
   <aside class="app-sidebar" id="tree-pane">
     <div class="sidebar-header">
       <span class="sidebar-title">Folders</span>
+      <button class="icon-btn sm failed-retry-badge" id="sidebar-failed-badge" hidden
+        onclick="switchTab('jobs');setJobsFilter('failed')"
+        title="Failed summaries — click to retry"
+        aria-label="Failed summaries — open Activity to retry"></button>
       <button class="icon-btn sm" onclick="reindexAll()" title="Rebuild context for all roots" aria-label="Rebuild context for all roots">&#x21BB;</button>
       <button class="icon-btn sm" onclick="openAddRoot()" title="Add root folder" aria-label="Add root folder">+</button>
     </div>
@@ -290,8 +294,8 @@
             <span class="jd-status-chip" id="jd-status-chip"></span>
             <span class="jd-elapsed" id="jd-elapsed"></span>
             <div style="flex:1"></div>
-            <button class="jd-copy-btn" id="jd-copy-btn" title="Copy error report" style="display:none" onclick="copyJobReport()">&#x1F4CB;</button>
-            <button class="jd-dismiss-btn" id="jd-dismiss-btn" title="Dismiss this job" onclick="dismissSelectedJob()">&#xd7;</button>
+            <button class="jd-copy-btn" id="jd-copy-btn" title="Copy error report" aria-label="Copy error report" style="display:none" onclick="copyJobReport()">&#x1F4CB;</button>
+            <button class="jd-dismiss-btn" id="jd-dismiss-btn" title="Dismiss this job" aria-label="Dismiss this job" onclick="dismissSelectedJob()">&#xd7;</button>
           </div>
 
           <!-- Progress -->
