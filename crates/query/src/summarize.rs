@@ -459,6 +459,9 @@ pub async fn process_queue_item_with_passes(
 
 /// Enqueue all files + directories under `root` that are not yet in the queue.
 /// Returns the number of items enqueued.
+///
+/// Uses `INSERT OR IGNORE` — already-queued rows (including `done` and `failed`) are
+/// left untouched. Use [`requeue_subtree`] when the user explicitly asks to regenerate.
 pub fn enqueue_subtree(store: &mut Store, root: &Path) -> Result<usize> {
     let root_str = root.to_string_lossy();
     let items = store.entries_for_summarization(&root_str)?;
@@ -473,6 +476,24 @@ pub fn enqueue_subtree(store: &mut Store, root: &Path) -> Result<usize> {
 
     let n = depth_items.len();
     store.enqueue_summary_items(&depth_items)?;
+    Ok(n)
+}
+
+/// Force-requeue all files + directories under `root` for (re-)summarization,
+/// resetting any existing `done`/`failed` rows back to `pending`.
+///
+/// Unlike [`enqueue_subtree`] (which uses `INSERT OR IGNORE` and skips existing rows),
+/// this function calls `mark_for_resummary` for every entry so that already-summarized
+/// paths are re-processed — making "Regenerate" actually regenerate.
+///
+/// Returns the number of items reset or newly enqueued.
+pub fn requeue_subtree(store: &mut Store, root: &Path) -> Result<usize> {
+    let root_str = root.to_string_lossy();
+    let items = store.entries_for_resummary(&root_str)?;
+    let n = items.len();
+    for (path, kind, depth) in &items {
+        store.mark_for_resummary(path, kind, *depth)?;
+    }
     Ok(n)
 }
 

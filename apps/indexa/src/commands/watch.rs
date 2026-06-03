@@ -149,7 +149,9 @@ pub(crate) async fn cmd_watch(
                             // Re-embedding alone leaves the summary stale. Re-queue this file
                             // and every ancestor roll-up so the background worker refreshes them.
                             // `watch` itself only embeds + enqueues — run `indexa worker` (or
-                            // `serve`) to drain the queue and actually regenerate the summaries.
+                            // click "Regenerate" / "Rebuild all" in the web UI) to drain the queue
+                            // and actually regenerate the summaries. `indexa serve` does NOT
+                            // drain the queue automatically; only explicit jobs do.
                             // (`mark_for_resummary` skips an item a worker is already summarizing,
                             // so an edit landing during that window is picked up by the next edit
                             // or a later `deep`/`summarize` rather than double-claimed.)

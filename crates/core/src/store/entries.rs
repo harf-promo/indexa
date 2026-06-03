@@ -6,6 +6,10 @@ use crate::walker::{Entry, EntryKind};
 use anyhow::Result;
 use rusqlite::{params, Transaction};
 
+/// Row type for [`Store::all_coverage_entries`]:
+/// `(path, parent_path, is_dir, own_chunk_count, queue_state)`.
+pub type CoverageEntry = (String, String, bool, u64, Option<String>);
+
 /// Delete chunks (and their FTS5 entries) for every row whose `entry_path`
 /// matches the LIKE pattern. Shared by `delete_subtree` and
 /// `delete_chunks_for_subtree`.
@@ -229,5 +233,87 @@ impl Store {
             ))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Coverage-oriented flat list for the context-coverage treemap.
+    ///
+    /// Returns `(path, parent_path, is_dir, own_chunk_count, queue_state)` for each entry.
+    ///
+    /// - `own_chunk_count`: for files, the count of their indexed chunks; for dirs, 0
+    ///   (the treemap builder propagates chunk counts up the tree).
+    /// - `queue_state`: the entry's own row in `summary_queue` (`None` when absent).
+    ///
+    /// Capped at 500,000 rows. The correlated chunk subquery is acceptable at typical
+    /// index sizes (thousands of files, each resolved in microseconds).
+    pub fn all_coverage_entries(&self) -> Result<Vec<CoverageEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.path,
+                    COALESCE(e.parent_path, '') AS parent,
+                    e.kind,
+                    CASE WHEN e.kind = 'file' THEN
+                      (SELECT COUNT(*) FROM chunks WHERE entry_path = e.path)
+                    ELSE 0 END AS chunk_count,
+                    sq.state
+             FROM entries e
+             LEFT JOIN summary_queue sq ON sq.path = e.path
+             LIMIT 500000",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)? == "dir",
+                r.get::<_, i64>(3)? as u64,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Aggregate coverage statistics for the coverage table view.
+    ///
+    /// Returns counts of directories grouped by their summary queue state:
+    /// `(total_dirs, built, partial, failed, none, total_chunks, total_files)`.
+    pub fn coverage_stats(&self) -> Result<(u64, u64, u64, u64, u64, u64, u64)> {
+        // rusqlite's FromSql is not implemented for u64; use i64 and cast.
+        let total_dirs = self.conn.query_row(
+            "SELECT COUNT(*) FROM entries WHERE kind = 'dir'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as u64;
+        let total_files = self.conn.query_row(
+            "SELECT COUNT(*) FROM entries WHERE kind = 'file'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as u64;
+        let total_chunks = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get::<_, i64>(0))?
+            as u64;
+        let built = self.conn.query_row(
+            "SELECT COUNT(*) FROM summary_queue WHERE state = 'done' AND kind = 'dir'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as u64;
+        let partial = self.conn.query_row(
+            "SELECT COUNT(*) FROM summary_queue WHERE state IN ('pending','in_flight') AND kind = 'dir'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as u64;
+        let failed = self.conn.query_row(
+            "SELECT COUNT(*) FROM summary_queue WHERE state = 'failed' AND kind = 'dir'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as u64;
+        let none = total_dirs.saturating_sub(built + partial + failed);
+        Ok((
+            total_dirs,
+            built,
+            partial,
+            failed,
+            none,
+            total_chunks,
+            total_files,
+        ))
     }
 }

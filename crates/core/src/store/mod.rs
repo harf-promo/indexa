@@ -32,6 +32,7 @@ mod tests;
 // Re-export every public record type so external paths (`indexa_core::store::*`)
 // are unchanged by the split.
 pub use ann::AnnIndex;
+pub use entries::CoverageEntry;
 pub use types::{
     ChunkRecord, ClassificationRecord, EdgeRecord, FailedQueueItem, QueueItem, QueueStats,
     RegionSummary, SearchHit, SummaryRecord, TreeNode,
