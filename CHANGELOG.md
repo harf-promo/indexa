@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] — 2026-06-03
+
+### Added
+
+- **Tauri desktop app auto-update.** The desktop app now silently checks for a newer release on
+  every launch and installs it automatically (download → install → restart). A new tray menu
+  item "Check for Updates…" also triggers the flow on demand. Uses Tauri's own minisign keypair
+  for artifact verification — no Apple Developer ID required. `release.yml` gains a new
+  `desktop` job that produces `.dmg`, `.app.tar.gz`, signed `.sig`, and `latest.json` for every
+  tagged release (macOS Apple Silicon first; Intel and Linux/Windows desktop in a future release).
+
 ## [0.12.1] — 2026-06-03
 
 ### Fixed
