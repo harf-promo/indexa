@@ -19,7 +19,7 @@ fn chunks_has_autoincrement(conn: &rusqlite::Connection) -> bool {
 /// Returns `true` when the table is absent (fresh DB) — DDL below already includes it.
 fn edges_allows_calls(conn: &rusqlite::Connection) -> bool {
     conn.query_row(
-        "SELECT sql LIKE \"%'calls'%\" FROM sqlite_master WHERE type='table' AND name='edges'",
+        "SELECT sql LIKE '%''calls''%' FROM sqlite_master WHERE type='table' AND name='edges'",
         [],
         |r| r.get::<_, bool>(0),
     )
