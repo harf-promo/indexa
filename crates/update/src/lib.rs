@@ -173,6 +173,8 @@ pub async fn apply(tag: &str) -> anyhow::Result<String> {
         .to_path_buf();
 
     // All file I/O (including self_replace) is blocking; run on the thread pool.
+    #[cfg(target_os = "macos")]
+    let exe_clone = exe.clone(); // for the post-replace re-sign step on macOS
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         let mut tmp = tempfile::Builder::new()
             .prefix(".indexa-update-")
@@ -200,6 +202,18 @@ pub async fn apply(tag: &str) -> anyhow::Result<String> {
         // Atomically replace the running binary. On UNIX: rename(2). On Windows:
         // MoveFileExW with MOVEFILE_REPLACE_EXISTING (old exe is deleted at exit).
         self_replace::self_replace(&tmp_path).map_err(|e| permission_error(e, &tmp_path))?;
+
+        // macOS 26+ Code Signing Monitor invalidates the trust record when a
+        // binary at a known path is overwritten, even with an identical ad-hoc
+        // signature. Re-signing forces a fresh evaluation so the new binary
+        // actually runs. The `codesign` tool ships with Xcode Command Line
+        // Tools; we fail silently if it is absent.
+        #[cfg(target_os = "macos")]
+        if let Some(path_str) = exe_clone.to_str() {
+            let _ = std::process::Command::new("codesign")
+                .args(["--force", "--sign", "-", path_str])
+                .output();
+        }
 
         Ok(())
     })
