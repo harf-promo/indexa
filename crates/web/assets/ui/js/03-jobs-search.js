@@ -154,8 +154,27 @@ async function initTree() {
     }
     list.innerHTML = '';
     roots.forEach(function(root) {
-      list.appendChild(buildTreeNode({path: root.path, name: root.name, kind: 'dir', summary_state: null}));
+      var node = buildTreeNode({path: root.path, name: root.name, kind: 'dir', summary_state: null});
+      // Add watch-toggle eye button to each root row
+      var row = node.querySelector('.tree-node-row');
+      if (row) {
+        var eyeBtn = document.createElement('button');
+        eyeBtn.className = 'watch-toggle-btn icon-btn sm';
+        eyeBtn.dataset.watchPath = root.path;
+        eyeBtn.textContent = '👁‍🗨';
+        eyeBtn.title = 'Watch for changes (live re-embed on save)';
+        eyeBtn.setAttribute('aria-label', 'Start watching');
+        eyeBtn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          if (typeof toggleWatch === 'function') toggleWatch(root.path);
+        });
+        var actions = row.querySelector('.tree-row-actions');
+        if (actions) row.insertBefore(eyeBtn, actions);
+      }
+      list.appendChild(node);
     });
+    // Sync eye icons with current watch state
+    if (typeof updateWatchIcons === 'function') updateWatchIcons();
   } catch(e) {
     list.innerHTML = '<div style="padding:8px 12px;color:var(--red);font-size:12px">Error loading tree</div>';
   }

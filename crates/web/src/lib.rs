@@ -59,6 +59,20 @@ pub struct AppState {
     /// Serializes ANN index builds so N concurrent cold/stale Asks don't each allocate a
     /// full index (each build transiently holds all embeddings — N× would risk OOM).
     pub(crate) ann_build_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Active filesystem watch sessions keyed by root path. Each task re-embeds changed
+    /// files and marks stale summaries for re-generation, exactly as `indexa watch` does.
+    pub(crate) watch_sessions:
+        Arc<tokio::sync::Mutex<std::collections::HashMap<String, WatchTaskInfo>>>,
+}
+
+/// Info about a running watch task so it can be listed and aborted via the web API.
+pub(crate) struct WatchTaskInfo {
+    /// Abort signal to stop the background watcher task.
+    pub(crate) abort: tokio::task::AbortHandle,
+    /// Total file-change events processed since the session started.
+    pub(crate) events_count: Arc<std::sync::atomic::AtomicU64>,
+    /// Unix timestamp when watching started.
+    pub(crate) started_at: u64,
 }
 
 /// The web server's cached ANN index plus the `(chunk_count, last_indexed_at)` watermark it
@@ -102,6 +116,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/10-model-fit-popover.js"),
     include_str!("../assets/ui/js/11-onboarding.js"),
     include_str!("../assets/ui/js/12-treemap.js"),
+    include_str!("../assets/ui/js/14-watch.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -186,6 +201,7 @@ pub async fn serve(
         telemetry: telemetry_rx,
         ann: Arc::new(tokio::sync::RwLock::new(AnnCache::default())),
         ann_build_lock: Arc::new(tokio::sync::Mutex::new(())),
+        watch_sessions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // Restrict CORS to localhost only — prevents drive-by sites from reading the
@@ -241,6 +257,9 @@ pub async fn serve(
         .route("/api/entry", delete(api_delete_entry))
         .route("/api/version", get(api_version))
         .route("/api/logs/tail", get(api_logs_tail))
+        .route("/api/watch/status", get(api_watch_status))
+        .route("/api/watch/start", post(api_watch_start))
+        .route("/api/watch/stop", post(api_watch_stop))
         .with_state(state)
         .layer(
             tower_http::cors::CorsLayer::new()

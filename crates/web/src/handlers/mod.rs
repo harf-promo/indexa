@@ -16,6 +16,7 @@ mod summary;
 mod telemetry;
 mod tree;
 mod ui;
+mod watch;
 
 pub(crate) use ask::{api_ask, api_ask_stream};
 pub(crate) use config::{
@@ -39,3 +40,4 @@ pub(crate) use summary::{api_summarize_enqueue, api_summary};
 pub(crate) use telemetry::{api_telemetry, api_telemetry_stream};
 pub(crate) use tree::api_tree;
 pub(crate) use ui::{serve_ui, serve_ui_css, serve_ui_js};
+pub(crate) use watch::{api_watch_start, api_watch_status, api_watch_stop};
