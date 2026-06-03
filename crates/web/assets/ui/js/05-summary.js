@@ -1,13 +1,13 @@
 /* ── Summary view ── */
 async function showSummary(path) {
   switchTab('tree');
-  const view = document.getElementById('summary-view');
+  var view = document.getElementById('summary-view');
   view.style.display = 'block';
   view.innerHTML = '<div class="summary-pending">Loading summary…</div>';
 
   try {
-    const r = await fetch('/api/summary?path=' + encodeURIComponent(path));
-    const d = await r.json();
+    var r = await fetch('/api/summary?path=' + encodeURIComponent(path));
+    var d = await r.json();
 
     if (d.error === 'no summary' || d.pending) {
       view.innerHTML = renderNoPendingSummary(path);
@@ -26,7 +26,7 @@ async function showSummary(path) {
     view.querySelectorAll('.crumb[data-path]').forEach(function(el) {
       el.addEventListener('click', function() { showSummary(el.dataset.path); });
     });
-    const enqBtn = view.querySelector('#enqueue-btn');
+    var enqBtn = view.querySelector('#enqueue-btn');
     if (enqBtn) {
       enqBtn.addEventListener('click', async function() {
         enqBtn.disabled = true;
@@ -35,8 +35,8 @@ async function showSummary(path) {
         setTimeout(function() { showSummary(path); }, 2000);
       });
     }
-    // Regenerate button: triggers a new summarize job just like the row ⚡ action
-    const regenBtn = view.querySelector('#regen-btn');
+    // Regenerate button: triggers a new summarize job just like the row 📝 action
+    var regenBtn = view.querySelector('#regen-btn');
     if (regenBtn) {
       regenBtn.addEventListener('click', function() {
         if (typeof fireJob === 'function') fireJob('summarize', path);
@@ -48,15 +48,15 @@ async function showSummary(path) {
 }
 
 function renderNoPendingSummary(path) {
-  const name = path.split('/').pop() || path;
+  var name = path.split('/').pop() || path;
   return '<div class="summary-text">' +
     '<div style="color:var(--muted);margin-bottom:12px">No summary yet for <strong>' + escapeHtml(name) + '</strong></div>' +
     '<button class="enqueue-btn" id="enqueue-btn">Generate summary</button>' +
     '</div>';
 }
 
-/* Format a unix timestamp as a relative human string: "just now", "3 minutes ago",
-   "2 hours ago", "5 days ago". Falls back to locale date string for older dates. */
+/* Format a unix timestamp as a relative human string: "just now", "3 min ago",
+   "2 hr ago", "5 days ago". Falls back to locale date for older timestamps. */
 function fmtRelTime(unixSecs) {
   if (!unixSecs) return '';
   var now = Math.floor(Date.now() / 1000);
@@ -96,8 +96,8 @@ function renderSummary(d) {
   // Freshness: relative time + model name
   var relTime = d.generated_at ? fmtRelTime(d.generated_at) : '';
   var metaParts = [];
-  if (d.model)   metaParts.push(escapeHtml(d.model));
-  if (relTime)   metaParts.push(relTime);
+  if (d.model)  metaParts.push(escapeHtml(d.model));
+  if (relTime)  metaParts.push(relTime);
   var metaHtml = metaParts.length
     ? '<div class="summary-meta">' + metaParts.join(' \xb7 ') + '</div>'
     : '';
@@ -117,16 +117,49 @@ function renderSummary(d) {
     abstractHtml = '<div class="summary-abstract">' + escapeHtml(d.abstract_) + '</div>';
   }
 
-  // Regenerate button — runs a new summarize job, same as the row 📝 action
+  // Header toolbar: Regenerate + Export buttons
   var regenHtml = '<button class="btn-sm summary-regen-btn" id="regen-btn" ' +
     'title="Re-run AI summarization for this path" aria-label="Regenerate summary">↻ Regenerate</button>';
+
+  var exportBtnHtml =
+    '<div class="export-menu-wrap">' +
+    '<button class="btn-sm export-menu-btn" title="Export context as XML, Markdown, or JSON" aria-label="Export context" onclick="toggleExportMenu(this)">Export ↓</button>' +
+    '<div class="export-menu" hidden>' +
+    '<button onclick="doExport(' + JSON.stringify(d.path) + ',\'xml\')">XML <span class="export-hint">for Claude / Cursor</span></button>' +
+    '<button onclick="doExport(' + JSON.stringify(d.path) + ',\'md\')">Markdown</button>' +
+    '<button onclick="doExport(' + JSON.stringify(d.path) + ',\'json\')">JSON</button>' +
+    '</div></div>';
 
   return crumbHtml +
     '<div class="summary-header"><span style="font-size:22px">' + icon + '</span>' +
     '<span class="summary-title">' + escapeHtml(name) + '</span>' + covChip +
-    '<span style="flex:1"></span>' + regenHtml + '</div>' +
+    '<span style="flex:1"></span>' + regenHtml + exportBtnHtml + '</div>' +
     metaHtml +
     abstractHtml +
     '<div class="summary-text">' + escapeHtml(d.summary) + '</div>' +
     childrenHtml;
+}
+
+function toggleExportMenu(btn) {
+  var menu = btn.nextElementSibling;
+  if (!menu) return;
+  var isHidden = menu.hidden;
+  document.querySelectorAll('.export-menu').forEach(function(m) { m.hidden = true; });
+  menu.hidden = !isHidden;
+  if (!menu.hidden) {
+    setTimeout(function() {
+      document.addEventListener('click', function closeMenu(e) {
+        if (!menu.contains(e.target) && e.target !== btn) {
+          menu.hidden = true;
+          document.removeEventListener('click', closeMenu);
+        }
+      });
+    }, 0);
+  }
+}
+
+function doExport(path, format) {
+  var url = '/api/export?format=' + encodeURIComponent(format) + '&path=' + encodeURIComponent(path);
+  window.open(url, '_blank');
+  document.querySelectorAll('.export-menu').forEach(function(m) { m.hidden = true; });
 }

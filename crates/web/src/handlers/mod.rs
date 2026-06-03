@@ -4,6 +4,7 @@
 
 mod ask;
 mod config;
+mod export;
 mod fs;
 mod jobs;
 mod keys;
@@ -22,6 +23,7 @@ pub(crate) use config::{
     api_config_get, api_config_passes, api_config_provider_set, api_config_resource_get,
     api_config_resource_set,
 };
+pub(crate) use export::api_export;
 pub(crate) use fs::api_fs_ls;
 pub(crate) use jobs::{
     api_job_deep, api_job_delete, api_job_estimate, api_job_get, api_job_index, api_job_scan,

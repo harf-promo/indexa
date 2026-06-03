@@ -71,10 +71,10 @@ function buildTreeNode(node) {
     coverageCount +
     badge +
     '<span class="tree-row-actions">' +
-    '<button data-act="scan" title="Re-scan">&#x21BB;</button>' +
-    '<button data-act="deep" title="Build deep context">&#x26A1;</button>' +
-    '<button data-act="summarize" title="Summarize">&#x1F4DD;</button>' +
-    '<button data-act="remove" title="Remove from context">&#x1F5D1;</button>' +
+    '<button data-act="scan"      title="Re-scan"              aria-label="Re-scan">&#x21BB;</button>' +
+    '<button data-act="deep"      title="Build deep context"   aria-label="Build deep context">&#x26A1;</button>' +
+    '<button data-act="summarize" title="Summarize"            aria-label="Summarize">&#x1F4DD;</button>' +
+    '<button data-act="remove"    title="Remove from context"  aria-label="Remove from context">&#x1F5D1;</button>' +
     '</span>';
 
   row.querySelectorAll('.tree-row-actions button').forEach(function(btn) {
