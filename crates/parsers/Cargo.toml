@@ -12,7 +12,7 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 # Markdown parsing
-pulldown-cmark = "0.12"
+pulldown-cmark = "0.13"
 # Mime type detection
 mime_guess = "2"
 # Code parsing via tree-sitter
