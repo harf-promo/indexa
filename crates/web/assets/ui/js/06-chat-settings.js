@@ -132,6 +132,7 @@ async function loadSettings() {
   loadProviderStatus();
   loadPasses();
   loadResource();
+  if (typeof loadFeatures === 'function') loadFeatures();
 }
 async function loadPasses() {
   try {

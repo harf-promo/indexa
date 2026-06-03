@@ -251,6 +251,51 @@
         </div>
         <p class="settings-note">Governs how much RAM Indexa keeps free and how hard it pushes the machine. Applies to the next job.</p>
       </div>
+      <div class="settings-section">
+        <h2>Advanced Features</h2>
+        <div class="key-rows">
+          <!-- ANN -->
+          <div class="key-row">
+            <span class="key-label">ANN search</span>
+            <label class="toggle-label">
+              <input type="checkbox" id="feat-ann" aria-label="Enable approximate nearest-neighbor search">
+              <span class="toggle-text">Enable approximate nearest-neighbor index</span>
+            </label>
+          </div>
+          <p class="settings-note" style="margin-top:0">Speeds up dense retrieval on indexes with ≥
+            <input type="number" id="feat-ann-min-chunks" min="1000" step="1000" value="50000" style="width:72px;display:inline-block" aria-label="Minimum chunks for ANN"> chunks. Rebuilt automatically when the chunk count changes. Restart required.</p>
+          <!-- Image captions -->
+          <div class="key-row" style="margin-top:8px">
+            <span class="key-label">Image captions</span>
+            <label class="toggle-label">
+              <input type="checkbox" id="feat-image-caption" aria-label="Caption images with a local vision model">
+              <span class="toggle-text">Caption images with a local vision model</span>
+            </label>
+          </div>
+          <div class="key-row">
+            <span class="key-label">Vision model</span>
+            <input type="text" class="key-input" id="feat-image-model" placeholder="llama3.2-vision (default)" autocomplete="off" aria-label="Vision model name">
+          </div>
+          <p class="settings-note" style="margin-top:0">⚠ Requires ~7–8 GB RAM. Not yet counted by the memory watchdog — enable only with headroom. Applies on the next <code>indexa deep</code> run.</p>
+          <!-- Audio transcription -->
+          <div class="key-row" style="margin-top:8px">
+            <span class="key-label">Audio transcription</span>
+            <label class="toggle-label">
+              <input type="checkbox" id="feat-audio-transcribe" aria-label="Transcribe audio files with whisper-cli">
+              <span class="toggle-text">Transcribe audio with a local whisper CLI</span>
+            </label>
+          </div>
+          <div class="key-row">
+            <span class="key-label">whisper binary</span>
+            <input type="text" class="key-input" id="feat-audio-binary" placeholder="whisper-cli (default)" autocomplete="off" aria-label="whisper-cli binary path or name">
+          </div>
+          <p class="settings-note" style="margin-top:0">Requires <code>whisper-cli</code> (whisper.cpp) installed separately. Applies on the next <code>indexa deep</code> run.</p>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+          <button class="btn-sm" onclick="saveFeatures()">Save features</button>
+          <span id="features-status" style="font-size:12px;color:var(--muted)"></span>
+        </div>
+      </div>
     </div>
   </div>
 </div>

@@ -116,6 +116,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/10-model-fit-popover.js"),
     include_str!("../assets/ui/js/11-onboarding.js"),
     include_str!("../assets/ui/js/12-treemap.js"),
+    include_str!("../assets/ui/js/13-classify.js"),
     include_str!("../assets/ui/js/14-watch.js"),
 );
 
@@ -215,6 +216,15 @@ pub async fn serve(
         .route("/assets/app.css", get(serve_ui_css))
         .route("/assets/app.js", get(serve_ui_js))
         .route("/api/stats", get(api_stats))
+        .route("/api/classifications", get(api_classifications_list))
+        .route(
+            "/api/classifications/confirm",
+            post(api_classifications_confirm),
+        )
+        .route(
+            "/api/classifications/ignore",
+            post(api_classifications_ignore),
+        )
         .route("/api/export", get(api_export))
         .route("/api/map", get(api_map))
         .route("/api/map/treemap", get(api_map_treemap))
@@ -235,6 +245,10 @@ pub async fn serve(
         .route(
             "/api/config/resource",
             get(api_config_resource_get).post(api_config_resource_set),
+        )
+        .route(
+            "/api/config/features",
+            get(api_config_features_get).post(api_config_features_set),
         )
         .route("/api/telemetry", get(api_telemetry))
         .route("/api/telemetry/stream", get(api_telemetry_stream))

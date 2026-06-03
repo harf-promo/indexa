@@ -42,6 +42,8 @@ async function showSummary(path) {
         if (typeof fireJob === 'function') fireJob('summarize', path);
       });
     }
+    // Load smart label (classification) asynchronously after the summary renders
+    if (typeof loadClassificationForPath === 'function') loadClassificationForPath(path);
   } catch(e) {
     view.innerHTML = '<div class="summary-pending" style="color:var(--red)">Error: ' + escapeHtml(e.message) + '</div>';
   }
@@ -137,7 +139,9 @@ function renderSummary(d) {
     metaHtml +
     abstractHtml +
     '<div class="summary-text">' + escapeHtml(d.summary) + '</div>' +
-    childrenHtml;
+    childrenHtml +
+    // Smart-label container: populated asynchronously by loadClassificationForPath()
+    '<div id="summary-classify"></div>';
 }
 
 function toggleExportMenu(btn) {
