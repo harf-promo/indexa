@@ -253,6 +253,29 @@ pub(crate) struct ResourceRequest {
     pub(crate) headroom_gb: f32,
 }
 
+/// Advanced opt-in feature toggles exposed in the Settings → Advanced drawer section.
+/// Ungated (no INDEXA_WEB_ALLOW_KEY_EDIT) — same rationale as ResourceRequest: no
+/// secrets here. Changes apply to the next `indexa deep` run (restart_required: true).
+#[derive(Serialize)]
+pub(crate) struct FeaturesResponse {
+    pub(crate) ann: bool,
+    pub(crate) ann_min_chunks: usize,
+    pub(crate) image_caption: bool,
+    pub(crate) image_model: Option<String>,
+    pub(crate) audio_transcribe: bool,
+    pub(crate) audio_binary: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct FeaturesRequest {
+    pub(crate) ann: Option<bool>,
+    pub(crate) ann_min_chunks: Option<usize>,
+    pub(crate) image_caption: Option<bool>,
+    pub(crate) image_model: Option<String>,
+    pub(crate) audio_transcribe: Option<bool>,
+    pub(crate) audio_binary: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub(crate) struct AskRequest {
     pub(crate) question: String,

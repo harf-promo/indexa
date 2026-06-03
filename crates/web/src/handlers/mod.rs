@@ -19,8 +19,8 @@ mod ui;
 
 pub(crate) use ask::{api_ask, api_ask_stream};
 pub(crate) use config::{
-    api_config_get, api_config_passes, api_config_provider_set, api_config_resource_get,
-    api_config_resource_set,
+    api_config_features_get, api_config_features_set, api_config_get, api_config_passes,
+    api_config_provider_set, api_config_resource_get, api_config_resource_set,
 };
 pub(crate) use fs::api_fs_ls;
 pub(crate) use jobs::{

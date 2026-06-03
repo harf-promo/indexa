@@ -8,7 +8,8 @@ use indexa_core::config;
 use indexa_core::resource::ResourceProfile;
 
 use crate::dto::{
-    err_json, ConfigResponse, PassesRequest, ProviderRequest, ResourceRequest, ResourceResponse,
+    err_json, ConfigResponse, FeaturesRequest, FeaturesResponse, PassesRequest, ProviderRequest,
+    ResourceRequest, ResourceResponse,
 };
 use crate::AppState;
 
@@ -188,6 +189,67 @@ pub(crate) async fn api_config_resource_set(Json(body): Json<ResourceRequest>) -
 
     match config::save(&cfg, &cfg_path) {
         Ok(_) => Json(serde_json::json!({ "saved": true })).into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
+}
+
+/// Return the current advanced feature toggle states (ANN, image caption, audio transcription).
+pub(crate) async fn api_config_features_get(
+    State(state): State<AppState>,
+) -> Json<FeaturesResponse> {
+    Json(FeaturesResponse {
+        ann: state.config.retrieval.ann,
+        ann_min_chunks: state.config.retrieval.ann_min_chunks,
+        image_caption: state.config.parsers.image.caption,
+        image_model: state.config.parsers.image.model.clone(),
+        audio_transcribe: state.config.parsers.audio.transcribe,
+        audio_binary: state.config.parsers.audio.binary.clone(),
+    })
+}
+
+/// Persist advanced feature toggles. Ungated — no secrets involved. Only supplied
+/// fields are written; every other config section is preserved by the round-trip.
+pub(crate) async fn api_config_features_set(Json(body): Json<FeaturesRequest>) -> Response {
+    let cfg_path = config::default_config_path();
+    let mut cfg = match config::load(&cfg_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("config exists but failed to parse; refusing to overwrite it: {e:#}"),
+            )
+        }
+    };
+    if let Some(v) = body.ann {
+        cfg.retrieval.ann = v;
+    }
+    if let Some(v) = body.ann_min_chunks {
+        cfg.retrieval.ann_min_chunks = v;
+    }
+    if let Some(v) = body.image_caption {
+        cfg.parsers.image.caption = v;
+    }
+    if let Some(v) = body.image_model {
+        cfg.parsers.image.model = if v.trim().is_empty() {
+            None
+        } else {
+            Some(v.trim().to_owned())
+        };
+    }
+    if let Some(v) = body.audio_transcribe {
+        cfg.parsers.audio.transcribe = v;
+    }
+    if let Some(v) = body.audio_binary {
+        cfg.parsers.audio.binary = if v.trim().is_empty() {
+            None
+        } else {
+            Some(v.trim().to_owned())
+        };
+    }
+    match config::save(&cfg, &cfg_path) {
+        Ok(_) => {
+            Json(serde_json::json!({ "saved": true, "restart_required": true })).into_response()
+        }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
 }
