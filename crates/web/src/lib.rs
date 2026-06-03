@@ -199,6 +199,7 @@ pub async fn serve(
         .route("/assets/app.css", get(serve_ui_css))
         .route("/assets/app.js", get(serve_ui_js))
         .route("/api/stats", get(api_stats))
+        .route("/api/export", get(api_export))
         .route("/api/map", get(api_map))
         .route("/api/map/treemap", get(api_map_treemap))
         .route("/api/roots", get(api_roots))

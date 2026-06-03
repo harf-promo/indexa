@@ -83,11 +83,47 @@ function renderSummary(d) {
     covChip = '<span class="cov-chip" title="' + cov.covered + ' of ' + cov.total +
       ' folders in this subtree have context built">context: ' + pct + '%</span>';
   }
+  const exportBtnHtml =
+    '<div class="export-menu-wrap">' +
+    '<button class="btn-sm export-menu-btn" title="Export context as XML, Markdown, or JSON" aria-label="Export context" onclick="toggleExportMenu(this)">Export ↓</button>' +
+    '<div class="export-menu" hidden>' +
+    '<button onclick="doExport(' + JSON.stringify(d.path) + ',\'xml\')">XML <span class="export-hint">for Claude / Cursor</span></button>' +
+    '<button onclick="doExport(' + JSON.stringify(d.path) + ',\'md\')">Markdown</button>' +
+    '<button onclick="doExport(' + JSON.stringify(d.path) + ',\'json\')">JSON</button>' +
+    '</div></div>';
+
   return crumbHtml +
     '<div class="summary-header"><span style="font-size:22px">' + icon + '</span>' +
-    '<span class="summary-title">' + escapeHtml(name) + '</span>' + covChip + '</div>' +
+    '<span class="summary-title">' + escapeHtml(name) + '</span>' + covChip +
+    '<span style="flex:1"></span>' + exportBtnHtml + '</div>' +
     '<div class="summary-meta">Model: ' + escapeHtml(d.model) + (ts ? ' \xb7 ' + ts : '') + '</div>' +
     '<div class="summary-text">' + escapeHtml(d.summary) + '</div>' +
     childrenHtml;
+}
+
+function toggleExportMenu(btn) {
+  var menu = btn.nextElementSibling;
+  if (!menu) return;
+  var isHidden = menu.hidden;
+  // Close any other open export menus first
+  document.querySelectorAll('.export-menu').forEach(function(m) { m.hidden = true; });
+  menu.hidden = !isHidden;
+  if (!menu.hidden) {
+    // Close on outside click
+    setTimeout(function() {
+      document.addEventListener('click', function closeMenu(e) {
+        if (!menu.contains(e.target) && e.target !== btn) {
+          menu.hidden = true;
+          document.removeEventListener('click', closeMenu);
+        }
+      });
+    }, 0);
+  }
+}
+
+function doExport(path, format) {
+  var url = '/api/export?format=' + encodeURIComponent(format) + '&path=' + encodeURIComponent(path);
+  window.open(url, '_blank');
+  document.querySelectorAll('.export-menu').forEach(function(m) { m.hidden = true; });
 }
 
