@@ -3,6 +3,7 @@
 //! from when they lived in `lib.rs`.
 
 mod ask;
+mod classify;
 mod config;
 mod export;
 mod fs;
@@ -19,6 +20,9 @@ mod tree;
 mod ui;
 
 pub(crate) use ask::{api_ask, api_ask_stream};
+pub(crate) use classify::{
+    api_classifications_confirm, api_classifications_ignore, api_classifications_list,
+};
 pub(crate) use config::{
     api_config_features_get, api_config_features_set, api_config_get, api_config_passes,
     api_config_provider_set, api_config_resource_get, api_config_resource_set,
