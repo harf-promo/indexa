@@ -22,7 +22,11 @@ async function fireJob(kind, path) {
    Files (total === 0) and un-rolled-up roots carry no glyph. No animation. */
 function coverageGlyph(node) {
   if (node.summary_state === 'failed') {
-    return '<span class="cov-glyph cov-failed" title="Summary failed">✗</span>';
+    // ✗ is clickable: retries the failed summary job
+    return '<span class="cov-glyph cov-failed cov-retry" ' +
+      'title="Summary failed — click to retry" ' +
+      'role="button" tabindex="0" aria-label="Retry failed summary" ' +
+      'data-retry-path="' + escapeAttr(node.path) + '">✗</span>';
   }
   const total = node.total || 0;
   if (total <= 0) return '';
@@ -33,7 +37,7 @@ function coverageGlyph(node) {
   if (covered > 0) {
     return '<span class="cov-glyph cov-partial" title="Partly built (' + covered + '/' + total + ')">◐</span>';
   }
-  return '<span class="cov-glyph cov-none" title="No context yet (0/' + total + ')">○</span>';
+  return '<span class="cov-glyph cov-none" title="No context yet — click ⚡ Build deep context to embed this folder">○</span>';
 }
 
 function buildTreeNode(node) {
@@ -71,10 +75,10 @@ function buildTreeNode(node) {
     coverageCount +
     badge +
     '<span class="tree-row-actions">' +
-    '<button data-act="scan" title="Re-scan">&#x21BB;</button>' +
-    '<button data-act="deep" title="Build deep context">&#x26A1;</button>' +
-    '<button data-act="summarize" title="Summarize">&#x1F4DD;</button>' +
-    '<button data-act="remove" title="Remove from context">&#x1F5D1;</button>' +
+    '<button data-act="scan"      title="Re-scan"              aria-label="Re-scan">&#x21BB;</button>' +
+    '<button data-act="deep"      title="Build deep context"   aria-label="Build deep context">&#x26A1;</button>' +
+    '<button data-act="summarize" title="Summarize"            aria-label="Summarize">&#x1F4DD;</button>' +
+    '<button data-act="remove"    title="Remove from context"  aria-label="Remove from context">&#x1F5D1;</button>' +
     '</span>';
 
   row.querySelectorAll('.tree-row-actions button').forEach(function(btn) {
@@ -141,6 +145,30 @@ function buildTreeNode(node) {
   if (isDir) wrap.appendChild(childContainer);
   return wrap;
 }
+
+/* Delegated handler: clicking a ✗ retry glyph calls /api/queue/retry for that path. */
+(function() {
+  var treeList = document.getElementById('tree-list');
+  if (!treeList) return;
+  treeList.addEventListener('click', async function(e) {
+    var target = e.target.closest('.cov-retry');
+    if (!target) return;
+    e.stopPropagation();
+    var path = target.dataset.retryPath;
+    if (!path) return;
+    target.textContent = '⋯';
+    try {
+      await fetch('/api/queue/retry?path=' + encodeURIComponent(path), { method: 'POST' });
+      toast('Queued retry for "' + escapeHtml(path.split('/').pop() || path) + '"', 'info');
+      setTimeout(function() { refreshTree(); }, 400);
+    } catch(err) { toast('Retry failed: ' + escapeHtml(err.message), 'error'); }
+  });
+  treeList.addEventListener('keydown', function(e) {
+    var target = e.target.closest('.cov-retry');
+    if (!target) return;
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); target.click(); }
+  });
+}());
 
 async function initTree() {
   const list = document.getElementById('tree-list');

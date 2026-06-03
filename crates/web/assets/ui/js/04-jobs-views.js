@@ -70,6 +70,13 @@ function subscribeJob(jobId, path, kind) {
         _markDirty(jobId);
         // Refresh tree (preserving expand/scroll state) and stats in background.
         setTimeout(function() { refreshTree(); loadStats(); }, 500);
+        // Post-completion guidance for deep/index jobs: toast + welcome-panel update.
+        if (j.kind === 'deep' || j.kind === 'index') {
+          var folderName = (j.path || '').split('/').pop() || j.path || 'folder';
+          toast('✓ Context ready for “' + escapeHtml(folderName) + '” — ' +
+            '<a href=”#” onclick=”switchTab(\'chat\');return false;” style=”color:var(--accent)”>Ask a question →</a>', 'info');
+          if (typeof onContextReady === 'function') onContextReady(folderName);
+        }
 
       } else if (ev.type === 'failed') {
         j.status = 'failed';

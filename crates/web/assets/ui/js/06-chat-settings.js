@@ -28,6 +28,25 @@ function renderSources(sources) {
 async function doAsk() {
   const q = qInput.value.trim();
   if (!q) return;
+
+  // Pre-flight: if no embeddings exist yet, guide the user instead of returning
+  // an unhelpful empty/error answer.
+  try {
+    const statsR = await fetch('/api/stats');
+    const stats = await statsR.json();
+    if (stats.chunks === 0) {
+      switchTab('chat');
+      appendMsg('user', escapeHtml(q));
+      appendMsg('assistant',
+        '<div class="ask-guidance">' +
+        '<strong>No context built yet.</strong><br>' +
+        'Select a folder in the sidebar and click <strong>⚡ Build deep context</strong> to index it first.<br>' +
+        '<button class="btn-sm" style="margin-top:10px" onclick="switchTab(\'tree\')">Go to folders →</button>' +
+        '</div>');
+      return;
+    }
+  } catch(_) {} // ignore stats failure, proceed normally
+
   qInput.value = '';
   sendBtn.disabled = true;
   switchTab('chat');
@@ -174,12 +193,19 @@ async function saveResource() {
   }
 }
 
-/* ── Queue stats (shown in Jobs tab) ── */
+/* ── Queue stats (shown in Jobs tab + sidebar failed badge) ── */
 async function pollQueue() {
   try {
     const r = await fetch('/api/queue');
     const d = await r.json();
-    // Update the Jobs tab queue row (if visible)
+    // Sidebar failed badge — visible when there are failed summaries
+    var badge = document.getElementById('sidebar-failed-badge');
+    if (badge) {
+      var hasFailed = d.failed > 0;
+      badge.hidden = !hasFailed;
+      if (hasFailed) badge.textContent = '⚠ ' + d.failed + ' failed';
+    }
+    // Activity drawer queue row
     const queueEl = document.getElementById('jobs-queue-stats');
     if (!queueEl) return;
     const total = d.pending + d.in_flight + d.failed;
