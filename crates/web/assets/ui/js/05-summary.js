@@ -35,6 +35,8 @@ async function showSummary(path) {
         setTimeout(function() { showSummary(path); }, 2000);
       });
     }
+    // Load smart label (classification) asynchronously after the summary renders
+    if (typeof loadClassificationForPath === 'function') loadClassificationForPath(path);
   } catch(e) {
     view.innerHTML = '<div class="summary-pending" style="color:var(--red)">Error: ' + escapeHtml(e.message) + '</div>';
   }
@@ -88,6 +90,8 @@ function renderSummary(d) {
     '<span class="summary-title">' + escapeHtml(name) + '</span>' + covChip + '</div>' +
     '<div class="summary-meta">Model: ' + escapeHtml(d.model) + (ts ? ' \xb7 ' + ts : '') + '</div>' +
     '<div class="summary-text">' + escapeHtml(d.summary) + '</div>' +
-    childrenHtml;
+    childrenHtml +
+    // Smart-label container: populated asynchronously by loadClassificationForPath()
+    '<div id="summary-classify"></div>';
 }
 
