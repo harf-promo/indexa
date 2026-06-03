@@ -18,6 +18,17 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
 
+    // Guard against port conflicts: if something is already listening on PORT
+    // before we spawn our server, we refuse to start rather than silently
+    // attaching the webview to a foreign service.
+    if std::net::TcpStream::connect(format!("127.0.0.1:{PORT}")).is_ok() {
+        eprintln!(
+            "[indexa-desktop] port {PORT} is already in use. \
+             Stop any existing `indexa serve` process and try again."
+        );
+        std::process::exit(1);
+    }
+
     // Start the embedded web server on a background Tokio runtime so Tauri's
     // main thread stays free for the UI event loop.
     std::thread::spawn(|| {
@@ -29,17 +40,15 @@ fn main() {
         rt.block_on(async {
             if let Err(e) = run_server(PORT).await {
                 eprintln!("[indexa-desktop] server error: {e:#}");
+                std::process::exit(1); // propagate fatal errors (e.g. bind failure) to the UI process
             }
         });
     });
 
-    // Wait until the server is accepting connections (up to 15 s) before
-    // opening the webview — avoids a blank window on slow storage or cold
-    // Ollama start.
+    // Wait until our server is accepting connections (up to 15 s).
     if !wait_for_port(PORT, Duration::from_secs(15)) {
-        eprintln!(
-            "[indexa-desktop] warning: server did not start within 15 s; opening window anyway"
-        );
+        eprintln!("[indexa-desktop] server did not start within 15 s");
+        std::process::exit(1);
     }
 
     // Build the Tauri application.

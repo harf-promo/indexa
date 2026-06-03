@@ -5,6 +5,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "url": "http://localhost:7620",
         "title": "Indexa — local context engine",
         "width": 1280,

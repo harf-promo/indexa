@@ -82,7 +82,7 @@ indexa mcp                                                 # or expose the live 
 - **Hybrid retrieval** — keyword (BM25) + semantic (vector) fused with RRF, plus an **opt-in ANN index** that keeps dense search fast on 50K-plus-chunk corpora.
 - **Local multimodal** *(opt-in, on-device)* — caption images with a local vision model and transcribe audio with a local whisper CLI, so you can find media by what's *in* it, not just its filename.
 - **Code intelligence** — a code-relationship graph (imports + defined symbols) across Rust, Python, JS/TS, Go, and Java, queryable over MCP.
-- **Three interfaces** — a CLI, a local web workspace with a live **Engine** status bar, and a native **MCP** server (8 tools) for AI agents.
+- **Three interfaces** — a CLI, a local web workspace with a live **Engine** status bar, and a native **MCP** server (10 tools) for AI agents.
 - **Resource-aware** — a memory watchdog that won't freeze your machine, and a hardware-aware model picker that annotates every model with its memory footprint, fit against your live RAM, and a per-job ETA.
 - **Use your Claude subscription** — the `claude-code` provider runs summaries and answers on your Claude Pro/Max plan (no per-token billing); embeddings always stay local.
 - **Export** — XML (the format Anthropic's own docs recommend for context windows), Markdown, or JSON. **Watch** keeps the context current as files change.
@@ -96,8 +96,8 @@ indexa mcp                                                 # or expose the live 
   ```
   Engine  Building · 42 files/s · ETA 1m12s · gemma3:4b    CPU 38%   RAM 9.1 / 16 GB   pressure: ok
   ```
-- **MCP server** — `indexa mcp` exposes the live index to any [MCP](https://modelcontextprotocol.io) client (Claude Desktop, Cursor, Claude Code) over **8 tools**:
-  `search · browse_tree · get_summary · read_file · ask · dependencies · who_imports · get_stats`.
+- **MCP server** — `indexa mcp` exposes the live index to any [MCP](https://modelcontextprotocol.io) client (Claude Desktop, Cursor, Claude Code) over **10 tools**:
+  `search · browse_tree · get_summary · read_file · ask · dependencies · who_imports · who_calls · blast_radius · get_stats`.
 
 ---
 

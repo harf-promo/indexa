@@ -61,7 +61,8 @@ async function loadTreemap() {
     renderTreemapCurrent();
 
   } catch (e) {
-    if (svg) svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" fill="var(--red)" font-size="13">Error: ' + escapeHtml(e.message) + '</text>';
+    treemapLoaded = false; // allow retry on next tab visit
+    if (svg) svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" fill="var(--red)" font-size="13">Error: ' + escapeHtml(e.message) + ' — switch away and back to retry</text>';
   }
 }
 
@@ -95,14 +96,16 @@ function renderTreemapCurrent() {
   squarify(children, 0, 0, W, H);
 
   svg.innerHTML = '';
+  var clipIdx = 0; // monotonic counter → unique clip-path IDs (no path-encoding collisions)
   children.forEach(function(node) {
-    drawCell(svg, node);
+    drawCell(svg, node, clipIdx++);
   });
 
   renderBreadcrumb();
 }
 
-function drawCell(svg, node) {
+// idx: monotonic per-render counter; drives unique clip-path IDs
+function drawCell(svg, node, idx) {
   var r = node._rect;
   if (!r || r.w < 2 || r.h < 2) return;
 
@@ -126,12 +129,13 @@ function drawCell(svg, node) {
   // Labels — only when cell is large enough
   if (r.w > 36 && r.h > 22) {
     var pad = 5;
+    var clipId = 'tmc-' + idx; // index-based → guaranteed unique per render
 
     var txt = document.createElementNS(treemapSvgNS, 'text');
     txt.setAttribute('class', 'treemap-label');
     txt.setAttribute('x', r.x + pad);
     txt.setAttribute('y', r.y + pad);
-    txt.setAttribute('clip-path', 'url(#clip-' + sanitizeId(node.path) + ')');
+    txt.setAttribute('clip-path', 'url(#' + clipId + ')');
     txt.textContent = node.name;
     g.appendChild(txt);
 
@@ -150,30 +154,34 @@ function drawCell(svg, node) {
       svg.insertBefore(d, svg.firstChild);
       return d;
     }());
-    var clipId = 'clip-' + sanitizeId(node.path);
-    if (!defs.querySelector('#' + clipId)) {
-      var cp = document.createElementNS(treemapSvgNS, 'clipPath');
-      cp.setAttribute('id', clipId);
-      var cpr = document.createElementNS(treemapSvgNS, 'rect');
-      cpr.setAttribute('x', r.x + 1);
-      cpr.setAttribute('y', r.y + 1);
-      cpr.setAttribute('width', Math.max(0, r.w - 4));
-      cpr.setAttribute('height', Math.max(0, r.h - 4));
-      cp.appendChild(cpr);
-      defs.appendChild(cp);
-    }
+    var cp = document.createElementNS(treemapSvgNS, 'clipPath');
+    cp.setAttribute('id', clipId);
+    var cpr = document.createElementNS(treemapSvgNS, 'rect');
+    cpr.setAttribute('x', r.x + 1);
+    cpr.setAttribute('y', r.y + 1);
+    cpr.setAttribute('width', Math.max(0, r.w - 4));
+    cpr.setAttribute('height', Math.max(0, r.h - 4));
+    cp.appendChild(cpr);
+    defs.appendChild(cp);
   }
 
-  // Click: drill down if the node has children
+  // Click + keyboard: drill down if the node has children
   if (node._hasChildren) {
     g.style.cursor = 'pointer';
-    g.addEventListener('click', function() {
+    g.setAttribute('tabindex', '0');
+    g.setAttribute('role', 'button');
+    g.setAttribute('aria-label', node.name + ' — ' + fmtSize(node.size) + ' — click to drill down');
+    function drillIn() {
       treemapStack.push(treemapCurrentNode);
       treemapCurrentNode = node;
       renderTreemapCurrent();
+    }
+    g.addEventListener('click', drillIn);
+    g.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drillIn(); }
     });
   } else {
-    g.style.cursor = 'default';
+    g.setAttribute('aria-label', node.name + ' — ' + fmtSize(node.size));
   }
 
   // Hover tooltip
@@ -184,9 +192,6 @@ function drawCell(svg, node) {
   svg.appendChild(g);
 }
 
-function sanitizeId(path) {
-  return (path || 'root').replace(/[^a-zA-Z0-9_-]/g, '_');
-}
 
 /* ── Tooltip ── */
 function showTreemapTooltip(e, node) {
