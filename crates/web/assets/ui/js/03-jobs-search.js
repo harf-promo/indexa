@@ -33,7 +33,7 @@ function coverageGlyph(node) {
   if (covered > 0) {
     return '<span class="cov-glyph cov-partial" title="Partly built (' + covered + '/' + total + ')">◐</span>';
   }
-  return '<span class="cov-glyph cov-none" title="No context yet (0/' + total + ')">○</span>';
+  return '<span class="cov-glyph cov-none" title="No context yet — click ⚡ Build deep context to embed this folder">○</span>';
 }
 
 function buildTreeNode(node) {
