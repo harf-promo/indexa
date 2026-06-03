@@ -258,3 +258,17 @@
 }
 .jd-error-msg { font-size: 13px; color: var(--red); margin-bottom: 6px; word-break: break-word; }
 .jd-error-chain-item { font-size: 11px; color: var(--muted); padding: 2px 0; }
+
+/* ── Sidebar failed-items badge ── */
+.failed-retry-badge {
+  font-size: 10px !important; font-weight: 600; padding: 2px 6px !important;
+  color: var(--red) !important; border: 1px solid var(--red) !important;
+  border-radius: var(--radius-sm); background: none !important;
+  cursor: pointer; white-space: nowrap;
+}
+.failed-retry-badge:hover { background: color-mix(in srgb, var(--red) 12%, transparent) !important; }
+
+/* ── Clickable ✗ retry glyph on tree nodes ── */
+.cov-retry { cursor: pointer; }
+.cov-retry:hover { opacity: 0.75; }
+.cov-retry:focus { outline: 1px solid var(--red); outline-offset: 2px; border-radius: 2px; }

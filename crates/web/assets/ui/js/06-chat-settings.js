@@ -193,12 +193,19 @@ async function saveResource() {
   }
 }
 
-/* ── Queue stats (shown in Jobs tab) ── */
+/* ── Queue stats (shown in Jobs tab + sidebar failed badge) ── */
 async function pollQueue() {
   try {
     const r = await fetch('/api/queue');
     const d = await r.json();
-    // Update the Jobs tab queue row (if visible)
+    // Sidebar failed badge — visible when there are failed summaries
+    var badge = document.getElementById('sidebar-failed-badge');
+    if (badge) {
+      var hasFailed = d.failed > 0;
+      badge.hidden = !hasFailed;
+      if (hasFailed) badge.textContent = '⚠ ' + d.failed + ' failed';
+    }
+    // Activity drawer queue row
     const queueEl = document.getElementById('jobs-queue-stats');
     if (!queueEl) return;
     const total = d.pending + d.in_flight + d.failed;
