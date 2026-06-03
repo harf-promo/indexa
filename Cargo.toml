@@ -18,7 +18,7 @@ members = [
 exclude = ["apps/indexa-desktop"]
 
 [workspace.package]
-version = "0.12.0"
+version = "0.12.1"
 edition = "2021"
 authors = ["Harf Promo <ahmed541991@gmail.com>"]
 license = "Apache-2.0"

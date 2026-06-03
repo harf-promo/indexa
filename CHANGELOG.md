@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] — 2026-06-03
+
+### Fixed
+
+- Version bump to verify end-to-end self-update (`indexa update`) introduced in v0.12.0.
+
 ## [0.12.0] — 2026-06-03
 
 A **visual + self-update** release: a squarified treemap for the Map view, one-click self-update from both the CLI and the web UI, D2 call-graph edges in the MCP, and the Tauri desktop app scaffold.
