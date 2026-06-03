@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3] — 2026-06-03
+
+### Fixed
+
+- Version bump to verify end-to-end desktop auto-update introduced in v0.12.2.
+
 ## [0.12.2] — 2026-06-03
 
 ### Added
