@@ -220,6 +220,10 @@ pub async fn serve(
             "/api/config/resource",
             get(api_config_resource_get).post(api_config_resource_set),
         )
+        .route(
+            "/api/config/features",
+            get(api_config_features_get).post(api_config_features_set),
+        )
         .route("/api/telemetry", get(api_telemetry))
         .route("/api/telemetry/stream", get(api_telemetry_stream))
         .route("/api/models", get(api_models))

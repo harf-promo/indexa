@@ -300,3 +300,52 @@ async function clearKey(provider) {
   loadKeys();
 }
 
+
+/* ── Advanced features (ANN / image / audio) ── */
+async function loadFeatures() {
+  try {
+    const r = await fetch('/api/config/features');
+    if (!r.ok) return;
+    const d = await r.json();
+    var ann = document.getElementById('feat-ann');
+    var annMin = document.getElementById('feat-ann-min-chunks');
+    var imgCap = document.getElementById('feat-image-caption');
+    var imgModel = document.getElementById('feat-image-model');
+    var audTx = document.getElementById('feat-audio-transcribe');
+    var audBin = document.getElementById('feat-audio-binary');
+    if (ann)     ann.checked = !!d.ann;
+    if (annMin)  annMin.value = d.ann_min_chunks || 50000;
+    if (imgCap)  imgCap.checked = !!d.image_caption;
+    if (imgModel && d.image_model) imgModel.value = d.image_model;
+    if (audTx)   audTx.checked = !!d.audio_transcribe;
+    if (audBin && d.audio_binary) audBin.value = d.audio_binary;
+  } catch(_) {}
+}
+
+async function saveFeatures() {
+  var status = document.getElementById('features-status');
+  var body = {
+    ann:              document.getElementById('feat-ann')?.checked,
+    ann_min_chunks:   parseInt(document.getElementById('feat-ann-min-chunks')?.value, 10) || 50000,
+    image_caption:    document.getElementById('feat-image-caption')?.checked,
+    image_model:      (document.getElementById('feat-image-model')?.value || '').trim() || null,
+    audio_transcribe: document.getElementById('feat-audio-transcribe')?.checked,
+    audio_binary:     (document.getElementById('feat-audio-binary')?.value || '').trim() || null,
+  };
+  try {
+    var r = await fetch('/api/config/features', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    var d = await r.json();
+    if (d.error) { if (status) { status.style.color = 'var(--red)'; status.textContent = d.error; } return; }
+    if (status) {
+      status.style.color = 'var(--green)';
+      status.textContent = 'Saved' + (d.restart_required ? ' · restart indexa to apply' : '');
+      setTimeout(function() { if (status) status.textContent = ''; }, 4000);
+    }
+  } catch(e) {
+    if (status) { status.style.color = 'var(--red)'; status.textContent = 'Error: ' + e.message; }
+  }
+}

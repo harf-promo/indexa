@@ -256,6 +256,11 @@
 .pull-row .btn-sm:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 
 
+/* ── Toggle / checkbox label in settings ── */
+.toggle-label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.toggle-label input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
+.toggle-text { font-size: 13px; color: var(--text); }
+
 /* ── Summary UX enrichments ── */
 .summary-abstract {
   font-size: 13px; color: var(--muted); font-style: italic;
