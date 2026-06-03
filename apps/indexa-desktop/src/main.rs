@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::Manager;
+use tauri_plugin_updater::UpdaterExt;
 
 const PORT: u16 = 7620;
 
@@ -53,18 +54,17 @@ fn main() {
 
     // Build the Tauri application.
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            // Tray icon: pause/resume is a future addition; for now just
-            // provide a "Show" and "Quit" menu so the app is quit-able from
-            // the menu bar when all windows are closed.
             use tauri::{
                 menu::{Menu, MenuItem},
                 tray::TrayIconBuilder,
             };
-            let show = MenuItem::with_id(app, "show", "Show Indexa", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let show   = MenuItem::with_id(app, "show",         "Show Indexa",         true, None::<&str>)?;
+            let update = MenuItem::with_id(app, "check-update", "Check for Updates…",  true, None::<&str>)?;
+            let quit   = MenuItem::with_id(app, "quit",         "Quit",                true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &update, &quit])?;
 
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
@@ -76,14 +76,60 @@ fn main() {
                             let _ = win.set_focus();
                         }
                     }
+                    "check-update" => run_update_check(app.clone()),
                     "quit" => app.exit(0),
                     _ => {}
                 })
                 .build(app)?;
+
+            // Kick off a background update check on every launch.
+            run_update_check(app.handle().clone());
+
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running Indexa desktop app");
+}
+
+/// Spawn an async update check. If a newer release is available it is
+/// downloaded, installed, and the app restarted — all silently. Errors are
+/// logged to stderr and the app keeps running normally.
+fn run_update_check(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let updater = match app.updater() {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!("[indexa-desktop] updater init failed: {e:#}");
+                return;
+            }
+        };
+        let update = match updater.check().await {
+            Ok(Some(u)) => u,
+            Ok(None) => return, // already up to date
+            Err(e) => {
+                // Network errors (offline, GitHub unavailable) are expected;
+                // log at debug level so they don't alarm users.
+                eprintln!("[indexa-desktop] update check skipped: {e:#}");
+                return;
+            }
+        };
+
+        eprintln!(
+            "[indexa-desktop] update available: {} — downloading…",
+            update.version
+        );
+
+        if let Err(e) = update
+            .download_and_install(|_chunk, _total| {}, || {})
+            .await
+        {
+            eprintln!("[indexa-desktop] update install failed: {e:#}");
+            return;
+        }
+
+        eprintln!("[indexa-desktop] update installed — restarting");
+        app.restart();
+    });
 }
 
 /// Embed and start the indexa web server directly — no subprocess needed.
