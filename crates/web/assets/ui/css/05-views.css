@@ -255,3 +255,12 @@
 }
 .pull-row .btn-sm:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 
+
+/* ── Summary UX enrichments ── */
+.summary-abstract {
+  font-size: 13px; color: var(--muted); font-style: italic;
+  margin-bottom: 12px; line-height: 1.5;
+}
+.summary-regen-btn {
+  flex-shrink: 0;
+}
