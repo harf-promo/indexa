@@ -55,7 +55,7 @@ notify = "6"
 notify-debouncer-full = "0.3"
 
 # Storage
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Platform paths
 directories = "5"
