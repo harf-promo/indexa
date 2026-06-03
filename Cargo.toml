@@ -55,7 +55,7 @@ notify = "6"
 notify-debouncer-full = "0.3"
 
 # Storage
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Platform paths
 directories = "5"
@@ -67,7 +67,7 @@ async-trait = "0.1"
 shellexpand = "3"
 
 # Config file parsing
-toml = "0.8"
+toml = "1.1"
 
 # System resource detection
-sysinfo = { version = "0.30" }
+sysinfo = { version = "0.39" }

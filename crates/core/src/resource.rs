@@ -53,7 +53,7 @@ pub fn detect_machine() -> MachineSpec {
 
     let total_ram_bytes = sys.total_memory();
 
-    let physical_cores = sys.physical_core_count().unwrap_or(1);
+    let physical_cores = System::physical_core_count().unwrap_or(1);
     let logical_cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(physical_cores);
@@ -85,7 +85,7 @@ pub fn detect_machine() -> MachineSpec {
 ///
 /// Obtain by calling `sample_memory(&mut sys)` where `sys` is a long-lived
 /// `sysinfo::System`.  Only `refresh_memory()` is called — avoid the much
-/// more expensive `refresh_cpu()` in hot loops.
+/// more expensive `refresh_cpu_usage()` in hot loops.
 #[derive(Debug, Clone, Default)]
 pub struct MemSample {
     /// Bytes reported as "available" by the OS (unreliable on macOS — see module docs).
@@ -164,7 +164,7 @@ pub struct CpuSample {
 ///
 /// Unlike [`WatchdogState`] — which deliberately samples *memory only* to stay
 /// cheap inside the per-file job hot loop — this sampler also calls the more
-/// expensive `refresh_cpu()`. It is meant to run on its **own** low-frequency
+/// expensive `refresh_cpu_usage()`. It is meant to run on its **own** low-frequency
 /// task (~1–2 s cadence), never in a hot loop, so the cost is negligible.
 ///
 /// Because CPU usage needs two refreshes spaced apart, the first call to
@@ -186,10 +186,10 @@ impl TelemetrySampler {
     /// Refresh CPU + memory and return `(cpu, mem)`. `cpu` is `None` on the first
     /// call (priming the delta) and `Some` thereafter.
     pub fn sample(&mut self) -> (Option<CpuSample>, MemSample) {
-        self.sys.refresh_cpu();
+        self.sys.refresh_cpu_usage();
         let cpu = if self.primed {
             Some(CpuSample {
-                global_percent: self.sys.global_cpu_info().cpu_usage(),
+                global_percent: self.sys.global_cpu_usage(),
                 per_core: self.sys.cpus().iter().map(|c| c.cpu_usage()).collect(),
             })
         } else {
