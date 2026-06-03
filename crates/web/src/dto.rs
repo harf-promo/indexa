@@ -281,6 +281,13 @@ pub(crate) struct AskRequest {
     pub(crate) question: String,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct UpdateRequest {
+    /// Optional specific release tag to install, e.g. `"v0.12.1"`.
+    /// When absent the latest release is used.
+    pub(crate) pin: Option<String>,
+}
+
 #[derive(Serialize)]
 pub(crate) struct AskResponse {
     pub(crate) answer: String,

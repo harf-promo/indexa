@@ -118,6 +118,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/12-treemap.js"),
     include_str!("../assets/ui/js/13-classify.js"),
     include_str!("../assets/ui/js/14-watch.js"),
+    include_str!("../assets/ui/js/15-update.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -271,6 +272,8 @@ pub async fn serve(
         .route("/api/jobs/:id", get(api_job_get).delete(api_job_delete))
         .route("/api/entry", delete(api_delete_entry))
         .route("/api/version", get(api_version))
+        .route("/api/update/check", get(api_update_check))
+        .route("/api/update/apply", post(api_update_apply))
         .route("/api/logs/tail", get(api_logs_tail))
         .route("/api/watch/status", get(api_watch_status))
         .route("/api/watch/start", post(api_watch_start))

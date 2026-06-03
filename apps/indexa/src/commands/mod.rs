@@ -13,6 +13,7 @@ mod scan;
 mod serve;
 mod status;
 mod summarize;
+mod update;
 mod watch;
 mod worker;
 
@@ -30,5 +31,6 @@ pub(crate) use scan::cmd_scan;
 pub(crate) use serve::cmd_serve;
 pub(crate) use status::cmd_status;
 pub(crate) use summarize::cmd_summarize;
+pub(crate) use update::cmd_update;
 pub(crate) use watch::cmd_watch;
 pub(crate) use worker::cmd_worker;
