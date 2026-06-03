@@ -31,6 +31,10 @@
   <aside class="app-sidebar" id="tree-pane">
     <div class="sidebar-header">
       <span class="sidebar-title">Folders</span>
+      <button class="icon-btn sm failed-retry-badge" id="sidebar-failed-badge" hidden
+        onclick="switchTab('jobs');setJobsFilter('failed')"
+        title="Failed summaries — click to retry"
+        aria-label="Failed summaries — open Activity to retry"></button>
       <button class="icon-btn sm" onclick="reindexAll()" title="Rebuild context for all roots" aria-label="Rebuild context for all roots">&#x21BB;</button>
       <button class="icon-btn sm" onclick="openAddRoot()" title="Add root folder" aria-label="Add root folder">+</button>
     </div>

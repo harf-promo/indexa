@@ -261,6 +261,13 @@
 .toggle-label input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
 .toggle-text { font-size: 13px; color: var(--text); }
 
+/* ── Summary UX enrichments ── */
+.summary-abstract {
+  font-size: 13px; color: var(--muted); font-style: italic;
+  margin-bottom: 12px; line-height: 1.5;
+}
+.summary-regen-btn { flex-shrink: 0; }
+
 /* ── Export dropdown ── */
 .export-menu-wrap { position: relative; flex-shrink: 0; }
 .export-menu {
