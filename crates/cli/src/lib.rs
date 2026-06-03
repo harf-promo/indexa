@@ -294,6 +294,31 @@ pub enum Commands {
         #[arg(long)]
         category: Option<String>,
     },
+
+    /// Update indexa to the latest release by replacing the running binary.
+    ///
+    /// Downloads the prebuilt binary for this platform from GitHub Releases and
+    /// atomically replaces the current executable. The new binary is active on
+    /// the next invocation.
+    #[command(after_help = "Examples:
+  indexa update              # check, confirm, then update
+  indexa update --check      # report only (exit 1 = update available, 0 = current)
+  indexa update -y           # update without interactive prompt
+  indexa update --pin v0.12.1  # install a specific release")]
+    Update {
+        /// Only check and report — do not download or replace.
+        /// Exits 1 if an update is available, 0 if already current.
+        #[arg(long)]
+        check: bool,
+
+        /// Skip the interactive confirmation prompt.
+        #[arg(short = 'y', long)]
+        yes: bool,
+
+        /// Install a specific release tag instead of the latest, e.g. `v0.12.1`.
+        #[arg(long)]
+        pin: Option<String>,
+    },
 }
 
 #[cfg(test)]

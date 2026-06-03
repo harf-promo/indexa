@@ -1,0 +1,85 @@
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
+
+use crate::dto::{err_json, UpdateRequest};
+
+/// `GET /api/update/check` — returns the current and latest version without
+/// modifying anything. Network errors are swallowed so a transient GitHub
+/// outage never breaks the page load.
+pub(crate) async fn api_update_check() -> Response {
+    match indexa_update::check().await {
+        Ok(info) => Json(serde_json::json!({
+            "current":          info.current,
+            "latest":           info.latest,
+            "update_available": info.update_available,
+        }))
+        .into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "update check failed");
+            // Return current version only; do not surface errors to the UI.
+            Json(serde_json::json!({
+                "current":          env!("CARGO_PKG_VERSION"),
+                "latest":           null,
+                "update_available": false,
+                "error":            format!("{e:#}"),
+            }))
+            .into_response()
+        }
+    }
+}
+
+/// `POST /api/update/apply` — download the requested (or latest) release and
+/// atomically replace the running binary.
+///
+/// Gated behind the `INDEXA_WEB_ALLOW_UPDATE=1` environment variable (mirrors
+/// the `INDEXA_WEB_ALLOW_KEY_EDIT` gate on the keys endpoint). The `indexa
+/// update` CLI command is always available as the ungated path.
+///
+/// After a successful update the new binary is on disk; the running server
+/// keeps its old code in memory until the process is restarted.
+pub(crate) async fn api_update_apply(Json(body): Json<UpdateRequest>) -> Response {
+    if std::env::var("INDEXA_WEB_ALLOW_UPDATE").as_deref() != Ok("1") {
+        return err_json(
+            StatusCode::FORBIDDEN,
+            "Set INDEXA_WEB_ALLOW_UPDATE=1 to enable one-click updates via the web UI, \
+             or run `indexa update` in a terminal.",
+        );
+    }
+
+    // Resolve tag: use the pin from the request body, or fetch the latest.
+    let tag = match body.pin.as_deref() {
+        Some(t) => t.to_string(),
+        None => match indexa_update::check().await {
+            Ok(info) => info.latest_tag,
+            Err(e) => {
+                return err_json(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("could not resolve latest release: {e:#}"),
+                )
+            }
+        },
+    };
+
+    match indexa_update::apply(&tag).await {
+        Ok(version) => {
+            // The desktop app sets INDEXA_DESKTOP=1 and owns the relaunch.
+            // Plain `indexa serve` requires a manual restart.
+            let relaunch = if std::env::var("INDEXA_DESKTOP").as_deref() == Ok("1") {
+                "desktop"
+            } else {
+                "manual"
+            };
+            Json(serde_json::json!({
+                "updated":          true,
+                "version":          version,
+                "restart_required": true,
+                "relaunch":         relaunch,
+            }))
+            .into_response()
+        }
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
+}

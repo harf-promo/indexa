@@ -296,6 +296,31 @@
           <span id="features-status" style="font-size:12px;color:var(--muted)"></span>
         </div>
       </div>
+      <div class="settings-section" id="section-update">
+        <h2>Software Update</h2>
+        <p class="settings-note" style="margin-bottom:8px">
+          Replace the running binary with the latest release from
+          <a href="https://github.com/harf-promo/indexa/releases" target="_blank" rel="noopener" style="color:var(--accent)">GitHub Releases</a>.
+          The new version takes effect after restarting <code>indexa</code>.
+          You can also run <code>indexa update</code> in a terminal.
+        </p>
+        <div class="key-row" style="margin-bottom:8px">
+          <span class="key-label">Installed</span>
+          <span id="update-installed-ver" style="font-family:var(--font-mono);font-size:12px;color:var(--muted)">v<span id="update-current-ver">…</span></span>
+        </div>
+        <div class="key-row" style="margin-bottom:12px">
+          <span class="key-label">Latest release</span>
+          <span id="update-version-badge" style="font-family:var(--font-mono);font-size:12px;color:var(--muted)">checking…</span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn-sm" id="update-apply-btn" onclick="applyUpdate()">Update now</button>
+          <span id="update-apply-status" style="font-size:12px;color:var(--muted)"></span>
+        </div>
+        <p class="settings-note" style="margin-top:8px">
+          Requires <code>INDEXA_WEB_ALLOW_UPDATE=1</code> to be set when starting
+          <code>indexa serve</code>. Without it, use <code>indexa update</code> in a terminal.
+        </p>
+      </div>
     </div>
   </div>
 </div>

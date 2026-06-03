@@ -28,3 +28,4 @@ indexa-llm = { path = "../../crates/llm" }
 indexa-query = { path = "../../crates/query" }
 indexa-web = { path = "../../crates/web" }
 indexa-mcp = { path = "../../crates/mcp" }
+indexa-update = { path = "../../crates/update" }

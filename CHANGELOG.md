@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-06-03
+
+A **visual + self-update** release: a squarified treemap for the Map view, one-click self-update from both the CLI and the web UI, D2 call-graph edges in the MCP, and the Tauri desktop app scaffold.
+
 ### Added
+
+- **`indexa update` — self-update from the CLI.** Running `indexa update` checks GitHub Releases for a newer version, confirms with the user, and atomically replaces the running binary. Flags: `--check` (report only, exit 1 = update available); `-y` (skip prompt); `--pin v0.12.1` (install a specific release). Works on macOS/Linux/Windows with no external tools. **Note:** this is the first release to include the updater; the first hop from v0.11.0 is still a manual re-download.
+
+- **Web UI version badge + one-click update.** The topbar now shows the installed version. When a newer release is available the badge turns blue and links to a new "Software Update" section in Settings, where you can apply the update in one click (requires `INDEXA_WEB_ALLOW_UPDATE=1`).
 
 - **Interactive squarified treemap for the Map view.** The Map tab now shows a squarified SVG treemap of your indexed folder structure, sized proportionally by disk usage. A **Treemap | Table** toggle keeps the old category table accessible. Cells are colour-coded by top-level directory, show name + size labels, and support click-to-drill-down navigation with a breadcrumb trail and hover tooltips. No external dependencies — offline-safe, pure vanilla JS. Backed by a new `GET /api/map/treemap` endpoint that builds a depth-3 hierarchy with bottom-up subtree-size aggregation.
 

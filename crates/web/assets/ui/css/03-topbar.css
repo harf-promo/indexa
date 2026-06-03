@@ -23,6 +23,12 @@
   font-family: var(--font-mono);
   opacity: 0.8;
 }
+.app-version.update-available {
+  color: var(--accent);
+  opacity: 1;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 .app-stats {
   font-size: 12px;
   color: var(--muted);
