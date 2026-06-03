@@ -167,4 +167,25 @@ impl Store {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+
+    /// All (path, kind, depth) entries under `root`, including those already in the queue.
+    ///
+    /// Unlike [`entries_for_summarization`] (which uses `INSERT OR IGNORE` and skips existing
+    /// rows), this method is used by force-requeue: every item — even ones already `done` or
+    /// `failed` — will be reset to `pending` via `mark_for_resummary`.
+    pub fn entries_for_resummary(&self, root: &str) -> Result<Vec<(String, String, i64)>> {
+        let pattern = like_prefix(root);
+        let mut stmt = self.conn.prepare(
+            "SELECT path, kind FROM entries
+             WHERE (path LIKE ?1 ESCAPE '\\' OR parent_path LIKE ?1 ESCAPE '\\')
+               AND (deep_policy IS NULL OR deep_policy != 'Skip')",
+        )?;
+        let rows = stmt.query_map(params![pattern], |r| {
+            let path: String = r.get(0)?;
+            let kind: String = r.get(1)?;
+            let depth = path.chars().filter(|&c| c == '/' || c == '\\').count() as i64;
+            Ok((path, kind, depth))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
 }

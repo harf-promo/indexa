@@ -54,6 +54,18 @@
         <button class="view-tab" id="view-map" role="tab" aria-selected="false" aria-controls="panel-map" onclick="switchTab('map')">Map</button>
         <button class="view-tab" id="view-chat" role="tab" aria-selected="false" aria-controls="panel-chat" onclick="switchTab('chat')">Ask</button>
       </div>
+      <!-- Export: the headline action — hand context to an AI tool -->
+      <div class="export-menu-wrap toolbar-export">
+        <button class="btn-sm export-menu-btn toolbar-export-btn"
+          title="Export context as XML, Markdown, or JSON — paste into Claude, Cursor, or any AI tool"
+          aria-label="Export context"
+          onclick="toggleExportMenu(this)">Export &#x2193;</button>
+        <div class="export-menu" hidden>
+          <button onclick="doExport(selectedPath||'','xml')">XML <span class="export-hint">for Claude / Cursor</span></button>
+          <button onclick="doExport(selectedPath||'','md')">Markdown</button>
+          <button onclick="doExport(selectedPath||'','json')">JSON</button>
+        </div>
+      </div>
     </div>
 
     <div class="workspace-views" id="workspace-views">
@@ -108,8 +120,15 @@
           <!-- Treemap sub-view (default) -->
           <div id="map-panel-treemap">
             <div class="treemap-breadcrumb" id="treemap-breadcrumb" aria-label="Treemap navigation path"></div>
-            <svg id="treemap-svg" class="treemap-svg" role="group" aria-label="Disk usage treemap — Tab to navigate cells, Enter to drill down"></svg>
+            <svg id="treemap-svg" class="treemap-svg" role="group" aria-label="Context coverage treemap — cells sized by chunk count, colored by coverage state. Tab to navigate, Enter to drill down"></svg>
             <div class="treemap-tooltip" id="treemap-tooltip" role="tooltip" hidden></div>
+            <div class="treemap-legend" aria-label="Coverage legend">
+              <span class="legend-item"><span class="legend-swatch" style="background:#22c55e"></span>Built</span>
+              <span class="legend-item"><span class="legend-swatch" style="background:#f97316"></span>In progress</span>
+              <span class="legend-item"><span class="legend-swatch" style="background:#f43f5e"></span>Failed</span>
+              <span class="legend-item"><span class="legend-swatch" style="background:#374151"></span>Not built</span>
+              <span class="legend-hint">· sized by chunks indexed</span>
+            </div>
           </div>
           <!-- Table sub-view -->
           <div id="map-panel-table" hidden>

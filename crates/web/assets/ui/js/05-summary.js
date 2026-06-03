@@ -28,11 +28,10 @@ async function showSummary(path) {
     });
     var enqBtn = view.querySelector('#enqueue-btn');
     if (enqBtn) {
-      enqBtn.addEventListener('click', async function() {
-        enqBtn.disabled = true;
-        enqBtn.textContent = 'Queued…';
-        await fetch('/api/summarize?path=' + encodeURIComponent(path), { method: 'POST' });
-        setTimeout(function() { showSummary(path); }, 2000);
+      // Fire the draining summarize job (same path as Regenerate) instead of the bare
+      // /api/summarize enqueue, so items are actually processed — not just enqueued.
+      enqBtn.addEventListener('click', function() {
+        if (typeof fireJob === 'function') fireJob('summarize', path);
       });
     }
     // Regenerate button: triggers a new summarize job just like the row 📝 action
