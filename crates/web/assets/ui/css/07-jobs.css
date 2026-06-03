@@ -272,3 +272,8 @@
 .cov-retry { cursor: pointer; }
 .cov-retry:hover { opacity: 0.75; }
 .cov-retry:focus { outline: 1px solid var(--red); outline-offset: 2px; border-radius: 2px; }
+
+/* ── Watch eye icon on root rows ── */
+.watch-toggle-btn { font-size: 14px !important; opacity: 0.5; transition: opacity 0.15s; }
+.watch-toggle-btn:hover { opacity: 1 !important; }
+.watch-toggle-btn.watch-on { opacity: 1 !important; filter: drop-shadow(0 0 3px var(--accent)); }
