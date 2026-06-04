@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`indexa index` — one-shot context build.** `indexa index <path>` replaces the
+  three-step pipeline (`scan` → `deep` → `summarize`) with a single command. Each phase
+  prints a "Phase 1/2/3" progress header. Supports `--embed-model`, `--mode`, `--passes`.
+- **Job cancel button.** A ■ Cancel button now appears in the Activity drawer job
+  detail pane for running jobs. Calls `DELETE /api/jobs/:id`; disables immediately on
+  click to prevent double-cancel; hides once the job transitions out of running.
+- **Context Coverage Map.** The Map tab treemap now sizes cells by **chunk count** (not
+  bytes) and colors them by coverage state: ● green = built, ◐ orange = in progress,
+  ✗ red = failed, ○ grey = not built. A root picker prevents a large root (e.g. `/`)
+  from swallowing everything into one block. The Table sub-view shows a coverage
+  breakdown (built / in-progress / failed / not-built counts + % of folders covered).
+- **Export toolbar button.** "Export ↓" added to the workspace toolbar (right of the
+  Context / Map / Ask tab row) so the export action is always reachable without first
+  opening a folder summary panel.
+- **MCP `search` now does real content search.** Upgraded from a path-LIKE query
+  (`store.search_paths`) to BM25 + vector hybrid retrieval (`hybrid_search`). Returns
+  chunk-level results: file path, heading, 120-char snippet. Adds optional `scope`
+  parameter for subtree filtering.
+- **`indexa serve` enables web update button.** `INDEXA_WEB_ALLOW_UPDATE=1` is now
+  set automatically in `cmd_serve()`, so the "Update now" button in the web UI works
+  for CLI users — not just the desktop app.
+- **Native dialogs for the macOS desktop app.** Port-conflict error and post-update
+  restart confirmation now show native `osascript` alerts instead of silently logging
+  to stderr (invisible when launched from Finder/Spotlight).
+- **AI output toggle persists.** The "Show AI output" preference in the Activity drawer
+  is stored in `localStorage` and restored on page reload.
+
+### Fixed
+
+- **Double menu bar icon on macOS.** `app.trayIcon` in `tauri.conf.json` auto-created
+  a second tray icon alongside the one created by `TrayIconBuilder::new()` in Rust.
+  Removed the config-level entry — only one icon is created now.
+- **Window now hides to tray on ✕.** Clicking the window's close button now hides the
+  window instead of quitting the app (standard macOS menu-bar behavior). Tray "Quit"
+  still exits cleanly.
+- **`INDEXA_DESKTOP` and `INDEXA_WEB_ALLOW_UPDATE` not set in the desktop app.** The
+  embedded web server never received these env vars, so `POST /api/update/apply` always
+  returned 403 and the `relaunch: "desktop"` path was dead. Both are now set before the
+  server starts.
+- **Update pipeline — three bugs fixed:**
+  - `reindexAll()` called `fireJob('deep', …)` (embed only, no summaries). Now calls
+    `fireJob('index', …)` (deep + summarize full pipeline).
+  - "Generate summary" enqueued items without ever draining the queue (59 rows were
+    stuck `pending`). Now calls the draining `fireJob('summarize', path)` path.
+  - "Regenerate" was a no-op on already-summarized paths (`enqueue_subtree` uses
+    `INSERT OR IGNORE` which cannot reset a `done` row). Added `requeue_subtree` that
+    calls `mark_for_resummary` per item, resetting `done`/`failed` → `pending`.
+- **HTTP status codes corrected.** `GET /api/summary` when no summary exists: 200 →
+  404 (body unchanged for backward compat). `POST /api/models/catalog/refresh` on
+  network error: 200 → 502.
+- **Watch session memory leak.** Watch tasks that crashed or panicked left zombie
+  entries in `state.watch_sessions`, causing the UI to show "watching" indefinitely
+  with no events flowing. A watchdog task now removes the session entry on completion.
+- **`setModelRole` used blocking native `confirm()`.** Replaced with the existing async
+  `confirmModal()` to avoid freezing the browser event loop (which breaks headless and
+  automation contexts).
+- **`fireJob()` missing error handling.** Did not check `r.ok` before reading
+  `d.job_id`; on a 4xx/5xx response this caused a silent runtime error. Now checks
+  `r.ok` and shows an error toast on failure.
+- **Toolbar Export with no folder selected.** Was opening `/api/export?path=` with an
+  empty path. Now shows a "Select a folder first" toast and returns early.
+- **Multiple missing `r.ok` checks.** `showSummary`, `setModelRole`, `setProvider`,
+  `saveEndpoint`, `saveKey`, `clearKey`, `refreshCatalog` all now check HTTP status
+  before attempting to parse the response body, and show error toasts on failure.
+- **Treemap cells lacked keyboard focus indicator.** SVG cells have `tabindex=0` but
+  no `:focus-visible` style. Added `stroke: var(--accent)` on focus so keyboard users
+  can see which cell is focused.
+- **README stale version numbers and competitor table removed.** Version pins removed
+  (README is now evergreen; version info belongs in CHANGELOG). The "Why it's
+  defensible" competitor comparison table replaced with a bold "The only tool of its
+  kind" section.
+
 ## [0.12.3] — 2026-06-03
 
 ### Fixed

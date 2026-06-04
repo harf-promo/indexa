@@ -7,6 +7,8 @@ async function showSummary(path) {
 
   try {
     var r = await fetch('/api/summary?path=' + encodeURIComponent(path));
+    // 404 = "no summary yet" (not an error — parse the body for pending state)
+    if (!r.ok && r.status !== 404) throw new Error('Server error ' + r.status);
     var d = await r.json();
 
     if (d.error === 'no summary' || d.pending) {
@@ -28,11 +30,10 @@ async function showSummary(path) {
     });
     var enqBtn = view.querySelector('#enqueue-btn');
     if (enqBtn) {
-      enqBtn.addEventListener('click', async function() {
-        enqBtn.disabled = true;
-        enqBtn.textContent = 'Queued…';
-        await fetch('/api/summarize?path=' + encodeURIComponent(path), { method: 'POST' });
-        setTimeout(function() { showSummary(path); }, 2000);
+      // Fire the draining summarize job (same path as Regenerate) instead of the bare
+      // /api/summarize enqueue, so items are actually processed — not just enqueued.
+      enqBtn.addEventListener('click', function() {
+        if (typeof fireJob === 'function') fireJob('summarize', path);
       });
     }
     // Regenerate button: triggers a new summarize job just like the row 📝 action
@@ -145,6 +146,7 @@ function renderSummary(d) {
 }
 
 function toggleExportMenu(btn) {
+  if (!btn) return;
   var menu = btn.nextElementSibling;
   if (!menu) return;
   var isHidden = menu.hidden;
@@ -163,6 +165,11 @@ function toggleExportMenu(btn) {
 }
 
 function doExport(path, format) {
+  if (!path || typeof path !== 'string') {
+    toast('Select a folder first', 'warn');
+    document.querySelectorAll('.export-menu').forEach(function(m) { m.hidden = true; });
+    return;
+  }
   var url = '/api/export?format=' + encodeURIComponent(format) + '&path=' + encodeURIComponent(path);
   window.open(url, '_blank');
   document.querySelectorAll('.export-menu').forEach(function(m) { m.hidden = true; });

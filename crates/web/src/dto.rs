@@ -18,22 +18,37 @@ pub(crate) struct StatsResponse {
     pub(crate) chunks: u64,
 }
 
-#[derive(Serialize)]
-pub(crate) struct MapRow {
-    pub(crate) category: String,
-    pub(crate) entry_count: u64,
-    pub(crate) total_size: u64,
-}
-
-/// One node in the treemap tree (nested; children omitted when empty).
+/// One node in the coverage treemap tree (nested; children omitted when empty).
+///
+/// `size` is the subtree chunk count (used to determine cell area).
+/// `coverage` is the node's own summary state: `"full"` | `"partial"` | `"none"` | `"failed"`.
 #[derive(Serialize)]
 pub(crate) struct TreemapNodeDto {
     pub(crate) name: String,
     pub(crate) path: String,
+    /// Subtree chunk count — used as cell area in the coverage treemap.
     pub(crate) size: u64,
     pub(crate) file_count: u64,
+    /// Coverage state of THIS node: `"full"` | `"partial"` | `"none"` | `"failed"`.
+    pub(crate) coverage: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) children: Vec<TreemapNodeDto>,
+}
+
+/// Coverage statistics for the Map → Table view.
+#[derive(Serialize)]
+pub(crate) struct CoverageStats {
+    pub(crate) total_dirs: u64,
+    /// Directories with a `done` summary.
+    pub(crate) built: u64,
+    /// Directories queued (`pending` / `in_flight`).
+    pub(crate) partial: u64,
+    /// Directories whose summary `failed`.
+    pub(crate) failed: u64,
+    /// Directories with no summary queue entry at all.
+    pub(crate) none: u64,
+    pub(crate) total_chunks: u64,
+    pub(crate) total_files: u64,
 }
 
 #[derive(Serialize)]

@@ -136,15 +136,16 @@ Analytical reports over your context store.
 
 ---
 
-## v0.11 — Desktop app (Tauri)
+## v0.11 — Desktop app (Tauri)  *(shipped — v0.12.0)*
 
-A native, installable desktop app — so Indexa runs as a proper background service, not a terminal window you have to leave open.
+A native macOS desktop app — Indexa runs as a menu-bar app instead of a terminal window.
 
-- **Menu-bar control** — start/pause indexing, switch resource profile, and see live status from the menu bar; one click to ease off when your machine is busy
-- **Real background daemon** — replaces leaving `indexa serve` / `indexa worker` running in a terminal; launches at login (opt-in)
-- **Signed & notarized installer** — a proper `.dmg` / `.msi` instead of `curl` + a Gatekeeper-quarantine bypass
-- **Native notifications** — "deep context ready", "low on memory — easing off" — outside the browser
-- Wraps the existing web UI (already a self-contained SPA served by a thin Axum layer), so the workspace is unchanged. **Note:** this is a packaging / daemon-UX upgrade — memory-pressure handling itself lives in the engine, not the shell.
+- **Menu-bar tray** — Show/Hide window, Check for Updates, Quit — all from the macOS menu bar
+- **Bundles the web workspace** — no separate `indexa serve` needed; the full web UI is served by the embedded Axum server
+- **Silent auto-update** — Tauri updater downloads and installs new releases in the background; asks before restarting
+- **Window hides on close** — clicking ✕ hides to the tray instead of quitting (standard macOS menu-bar behavior)
+- **Native error dialogs** — port-conflict and update-confirmation alerts shown via native macOS dialogs
+- macOS Apple Silicon (aarch64); Intel Mac via CLI binary
 
 ---
 
@@ -180,16 +181,13 @@ Today Indexa stores **metadata** for images, audio, and video (EXIF, ffprobe). T
 - Opt-in per region; goes through the same parse → embed → store pipeline and the resource watchdog
 - Default vision/audio models follow the project's model policy (non-Chinese defaults; user-configurable)
 
-## Code-relationship graph  *(headline differentiator)*
+## Code-relationship graph  *(shipped — v0.12.0)*
 
-Indexa already extracts code **symbols** via tree-sitter. This milestone adds the **edges** — a real code
-graph for structural questions — kept in the existing **local SQLite** store (no Neo4j, no cloud), and
-exposed over MCP so agents can traverse it.
+A real code graph kept in local SQLite (no Neo4j, no cloud), queryable over MCP:
 
-- **Phase 1** — imports / defines edges (file-level): "what does this import", "who imports this"; a new
-  MCP `dependencies` tool; surfaced in the folder context summary
-- **Phase 2** — call edges with cross-file resolution: `who_calls` / blast-radius via SQLite recursive
-  CTEs; optional PageRank-style ranking to improve code retrieval (à la aider's repo-map)
+- **Phase 1** — imports / defines edges (file-level): `dependencies`, `who_imports` MCP tools *(shipped)*
+- **Phase 2** — call edges with cross-file resolution: `who_calls`, `blast_radius` MCP tools *(shipped)*
+- Optional PageRank-style ranking and deeper reachability analysis — future iteration
 
 ---
 

@@ -2,43 +2,33 @@
 
 **The local context engine for AI.**
 
-Your AI meets your codebase cold on every chat — burning paid tokens to relearn what it knew yesterday, or choking on a context window that can't hold your repo at all. Indexa reads your code or your whole disk **once, on your machine**, and hands any AI tool the small, relevant slice it needs — not the whole tree.
+Your AI meets your codebase cold on every session — burning paid tokens to relearn what it knew yesterday, or choking on a context window that can't hold your repo at all. Indexa reads your code or your entire disk **once, on your machine**, builds a persistent hierarchical context store, and serves any AI tool the precise, ranked slice it needs — instantly, every time.
 
 ```bash
-indexa scan      ~/code/my-repo            # instant context map — zero AI
-indexa deep      ~/code/my-repo            # parse + embed, fully local
-indexa summarize ~/code/my-repo            # hierarchical L0/L1/L2 context
-indexa export    ~/code/my-repo --format xml > .context.xml
+indexa index  ~/code/my-repo            # scan + embed + summarize in one command
+indexa ask    "where is auth handled?"  # grounded answer with sources
+indexa export ~/code/my-repo --format xml > .context.xml
 claude "given @.context.xml, find the auth flow and add MFA"
-# the paid model spends its budget on the change — not on re-reading your tree
+# the model spends its budget on the work you asked for — not on re-reading your tree
 ```
-
-**For cloud agents** (Claude Code · Cursor · Copilot · Codex): stop paying tokens to re-read your tree.
-**For local models** (Ollama · llama.cpp): reason over a 100 MB repo from a 4K window.
 
 *The index is the substrate; context is the product. Local-first · model-agnostic · Apache-2.0.*
 
-> **Status — v0.11.0.** Eleven releases of shipped features, built in the open. The full flow works today — scan → deep context → hierarchical summaries → ask, plus a local web workspace and an MCP server for AI agents. A daily-driver for a single repo; very large whole-disk runs are still getting faster, and the storage format may move before 1.0. New here? Start with the **[Usage Guide](USAGE.md)** or **[Quickstart](docs/quickstart.md)**.
+> Indexa is production-ready for daily use on one or more repos. Whole-disk indexing is fast; the storage format stabilises before 1.0. New here? Start with the **[Usage Guide](USAGE.md)** or **[Quickstart](docs/quickstart.md)**.
 
 ---
 
 ## See it work
 
-Three commands build the context. The fourth uses it.
+Four commands. One context. Every session.
 
 ```console
-$ indexa scan ~/code/my-repo
+$ indexa index ~/code/my-repo
 Scanning ~/code/my-repo
-  1,284 entries
-Index saved to ~/.indexa/index.db
-Run `indexa map` to see a summary.
-Run `indexa deep <path>` to parse and embed file contents.
-
-$ indexa deep ~/code/my-repo          # parse + embed, fully local — nothing leaves the machine
-  embedded 6,470 new chunks.
-
-$ indexa summarize ~/code/my-repo     # 1–2 sentence summary per file, rolled up folder-by-folder
-Done. 318 summaries generated.
+  1,284 entries indexed.
+  Embedded 6,470 new chunks.
+  318 summaries generated.
+Context is ready.
 
 $ indexa ask "where is auth handled?"
 Searching 6,470 indexed chunks...
@@ -54,12 +44,12 @@ Sources:
   [3] src/auth/session.rs — mint_token
 ```
 
-Then hand it to your AI tool — or skip the file entirely and let your agent pull context live over MCP:
+Then hand the context to your AI tool — or let your agent pull it live over MCP:
 
 ```bash
 indexa export ~/code/my-repo --format xml > .context.xml   # the artifact, built on your machine
-indexa serve                                               # or open the web workspace at :7620
-indexa mcp                                                 # or expose the live index to any agent
+indexa serve                                               # open the web workspace at :7620
+indexa mcp                                                 # expose the live index to any agent
 ```
 
 ---
@@ -76,26 +66,38 @@ indexa mcp                                                 # or expose the live 
 
 ---
 
-## What ships today (v0.11.0)
+## The only tool of its kind
 
+**No other tool does this.** Indexa is the first local context engine that builds a persistent, hierarchically-summarised, locally-queryable index over your entire disk — and exposes it simultaneously through a CLI, a live web workspace, a native desktop app, and an MCP server that any AI agent can call in real time.
+
+This is not a repo-to-prompt converter. It is not a document chat app. It is not an IDE extension. It is a persistent, on-device intelligence layer that any AI tool can reach — without re-reading your files, without sending your data to a server, and without starting from zero every session.
+
+**Indexa ends the cold-start problem, permanently.**
+
+---
+
+## What Indexa does
+
+- **One-command context** — `indexa index <path>` scans, embeds, and summarises in a single step. Context is ready immediately; no pipeline to manage.
 - **Two-phase context** — an instant surface scan (zero AI, classifies code vs media vs build artifacts) then deep context: parse → chunk → embed → LLM file summaries rolled up bottom-up into a hierarchical context graph, with **L0 / L1 / L2 progressive disclosure** (one-line abstract → full summary → raw content).
 - **Hybrid retrieval** — keyword (BM25) + semantic (vector) fused with RRF, plus an **opt-in ANN index** that keeps dense search fast on 50K-plus-chunk corpora.
 - **Local multimodal** *(opt-in, on-device)* — caption images with a local vision model and transcribe audio with a local whisper CLI, so you can find media by what's *in* it, not just its filename.
-- **Code intelligence** — a code-relationship graph (imports + defined symbols) across Rust, Python, JS/TS, Go, and Java, queryable over MCP.
-- **Three interfaces** — a CLI, a local web workspace with a live **Engine** status bar, and a native **MCP** server (10 tools) for AI agents.
+- **Code intelligence** — a code-relationship graph (imports + defined symbols + call edges) across Rust, Python, JS/TS, Go, and Java, plus `who_calls` and `blast_radius` for impact analysis — all queryable over MCP.
+- **Four ways to reach the index** — a CLI, a live web workspace with an Engine status bar, a native macOS desktop app (menu-bar, auto-updating), and an MCP server (10 tools) that AI agents call directly.
 - **Resource-aware** — a memory watchdog that won't freeze your machine, and a hardware-aware model picker that annotates every model with its memory footprint, fit against your live RAM, and a per-job ETA.
 - **Use your Claude subscription** — the `claude-code` provider runs summaries and answers on your Claude Pro/Max plan (no per-token billing); embeddings always stay local.
 - **Export** — XML (the format Anthropic's own docs recommend for context windows), Markdown, or JSON. **Watch** keeps the context current as files change.
 
 ---
 
-## Three ways in
+## Four ways to use it
 
-- **CLI** — `scan · deep · summarize · ask · export · watch · serve · mcp · doctor · classify`. Scriptable, pipeable, zero services.
+- **CLI** — `index · ask · export · scan · deep · summarize · watch · serve · mcp · doctor · classify · update`. Scriptable, pipeable, zero services required.
 - **Web workspace** — `indexa serve` → `http://localhost:7620`. A live Engine status bar shows what the machine is doing while it builds:
   ```
   Engine  Building · 42 files/s · ETA 1m12s · gemma3:4b    CPU 38%   RAM 9.1 / 16 GB   pressure: ok
   ```
+- **Desktop app** — a native macOS app that lives in the menu bar. Auto-updates silently. Bundles the web workspace — no separate `indexa serve` needed.
 - **MCP server** — `indexa mcp` exposes the live index to any [MCP](https://modelcontextprotocol.io) client (Claude Desktop, Cursor, Claude Code) over **10 tools**:
   `search · browse_tree · get_summary · read_file · ask · dependencies · who_imports · who_calls · blast_radius · get_stats`.
 
@@ -103,7 +105,7 @@ indexa mcp                                                 # or expose the live 
 
 ## Code intelligence
 
-Deep-indexing records each code file's graph edges — what it **imports** and the symbols it **defines** — across Rust, Python, JS/TS, Go, and Java. Two MCP tools query it, so your agent reasons about structure without reading every file:
+Deep-indexing records each code file's graph edges — what it **imports**, the symbols it **defines**, and what it **calls** — across Rust, Python, JS/TS, Go, and Java. Query it over MCP, so your agent reasons about structure without reading every file:
 
 ```text
 dependencies("src/auth/session.rs")
@@ -112,23 +114,10 @@ dependencies("src/auth/session.rs")
 
 who_imports("crate::store::Db")
   → src/auth/session.rs
+
+blast_radius("mint_token")
+  → src/auth/session.rs, src/auth/login.rs, src/auth/middleware.rs
 ```
-
----
-
-## Why it's defensible
-
-No tool occupies all of this at once:
-
-| | Local / offline | Whole-disk **and** code | Persistent index + retrieval | CLI · Web · MCP |
-|---|---|---|---|---|
-| **Indexa** | ✅ | ✅ | ✅ | ✅ |
-| Repomix / gitingest (repo→prompt) | ✅ | repo only | ❌ one-shot | CLI |
-| AnythingLLM / Khoj (local doc-chat) | ✅ | manual docs | ✅ | desktop/web |
-| Continue / Cursor / Cody (IDE) | ✅ / cloud | repo | partial | IDE |
-| Codebase-graph skills (graphify, etc.) | cloud LLM | folder | regenerated per run | skill/plugin |
-
-That intersection — local-first, whole-disk *and* code, a persistent queryable store, three interfaces, resource-aware, and valuable to **both** cloud and local models — is where Indexa lives. Full breakdown in [docs/COMPETITIVE.md](docs/COMPETITIVE.md).
 
 ---
 
@@ -175,16 +164,12 @@ Defaults: `nomic-embed-text` (embeddings) · `gemma3:4b` (file context) · `gemm
 
 ---
 
-## Roadmap
+## What's coming
 
-Built in the open; ships when ready. **Coming, not yet shipped:**
+- **Context Packs** — name and save a subject-scoped set of files scattered across your disk ("Auth", "Tax 2025", "Client X project"), and export them as one portable context bundle. The context you need, at hand, in one click.
+- **Plugin SDK** — custom parsers and adapters. Extend Indexa for your own file types and data sources without forking the core.
 
-- **Context Packs** — auto-detect files scattered across your disk that belong to one subject ("Auth", "Tax 2025", "Client X"), bundle them into a named context, and export as one portable file.
-- **Context-Map visualization** — the folder tree as a coverage-colored treemap/sunburst.
-- **Deeper code graph** — cross-file call edges and "what breaks if I change this?" blast-radius queries.
-- **Desktop app · Plugin SDK** — a background service with menu-bar control; custom parsers and adapters.
-
-See [ROADMAP.md](ROADMAP.md); vote on ideas in [Discussions](../../discussions/categories/ideas).
+Ideas and votes in [Discussions](../../discussions/categories/ideas). Full detail in [ROADMAP.md](ROADMAP.md).
 
 ---
 

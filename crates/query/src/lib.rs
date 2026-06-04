@@ -13,6 +13,7 @@ pub use qa::{
     SourceCitation,
 };
 pub use summarize::{
-    enqueue_subtree, process_queue_item_with_passes, summarize_subtree_sync, QueueOutcome,
+    enqueue_subtree, process_queue_item_with_passes, requeue_subtree, summarize_subtree_sync,
+    QueueOutcome,
 };
 pub use worker::run_worker;

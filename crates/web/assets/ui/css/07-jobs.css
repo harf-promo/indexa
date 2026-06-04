@@ -136,6 +136,21 @@
 .jd-copy-btn:hover { color: var(--text); }
 .jd-dismiss-btn:hover { color: var(--red); }
 
+/* Cancel button — visible only on running jobs */
+.jd-cancel-btn {
+  background: none;
+  border: 1px solid rgba(248,81,73,0.4);
+  color: var(--red, #f85149);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  transition: background 120ms, color 120ms;
+  white-space: nowrap;
+}
+.jd-cancel-btn:hover:not(:disabled) { background: rgba(248,81,73,0.12); }
+.jd-cancel-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
 /* Progress row */
 .jd-progress-row {}
 .jd-bar {

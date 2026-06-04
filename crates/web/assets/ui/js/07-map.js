@@ -1,4 +1,4 @@
-/* ── Map view ── */
+/* ── Map coverage table view ── */
 let mapLoaded = false;
 async function loadMap() {
   if (mapLoaded) return;
@@ -9,19 +9,46 @@ async function loadMap() {
   try {
     const r = await fetch('/api/map');
     const d = await r.json();
-    if (!d.length) {
-      table.innerHTML = '<tr><td style="color:var(--muted);padding:12px 10px">No context yet. Run <code>indexa deep &lt;path&gt;</code> first.</td></tr>';
+    if (!d.total_dirs && !d.total_chunks) {
+      table.innerHTML = '<tr><td colspan="2" style="color:var(--muted);padding:12px 10px">No context yet. Add a folder and build deep context first.</td></tr>';
       return;
     }
-    table.innerHTML = '<thead><tr><th>Category</th><th>Files</th><th>Size</th></tr></thead>';
+    // Coverage percentage across directories
+    const pct = d.total_dirs > 0 ? Math.round(100 * d.built / d.total_dirs) : 0;
+    const rows = [
+      { label: '● Built',     value: d.built,         cls: 'cov-full',    desc: 'Folders with AI summaries' },
+      { label: '◐ In progress', value: d.partial,     cls: 'cov-partial', desc: 'Queued for summarization' },
+      { label: '✗ Failed',    value: d.failed,         cls: 'cov-failed',  desc: 'Summarization failed' },
+      { label: '○ Not built', value: d.none,           cls: 'cov-none',    desc: 'No context yet' },
+    ];
+    table.innerHTML =
+      '<thead><tr><th>Coverage</th><th style="text-align:right">Folders</th></tr></thead>';
     const tbody = document.createElement('tbody');
-    d.forEach(function(row) {
+    rows.forEach(function(row) {
+      if (row.value === 0 && row.cls !== 'cov-full') return; // hide empty rows except "Built"
       const tr = document.createElement('tr');
-      const sz = row.total_size > 0 ? (row.total_size > 1048576 ? (row.total_size/1048576).toFixed(1)+' MB' : (row.total_size/1024).toFixed(0)+' KB') : '';
-      tr.innerHTML = '<td>' + escapeHtml(row.category || 'Unknown') + '</td><td style="text-align:right">' + (row.entry_count||0).toLocaleString() + '</td><td style="text-align:right">' + sz + '</td>';
+      tr.innerHTML = '<td><span class="cov-glyph ' + row.cls + '" style="margin-right:6px"></span>' +
+        '<span title="' + escapeHtml(row.desc) + '">' + escapeHtml(row.label) + '</span></td>' +
+        '<td style="text-align:right">' + (row.value || 0).toLocaleString() + '</td>';
       tbody.appendChild(tr);
     });
+    // Summary footer
+    const tfoot = document.createElement('tfoot');
+    tfoot.innerHTML =
+      '<tr style="border-top:1px solid var(--border)">' +
+        '<td style="color:var(--muted);padding-top:8px">Total folders</td>' +
+        '<td style="text-align:right;padding-top:8px">' + (d.total_dirs||0).toLocaleString() + '</td>' +
+      '</tr>' +
+      '<tr>' +
+        '<td style="color:var(--muted)">Total chunks</td>' +
+        '<td style="text-align:right">' + (d.total_chunks||0).toLocaleString() + '</td>' +
+      '</tr>' +
+      '<tr>' +
+        '<td style="color:var(--muted)">Coverage</td>' +
+        '<td style="text-align:right;font-weight:600;color:var(--accent)">' + pct + '%</td>' +
+      '</tr>';
     table.appendChild(tbody);
+    table.appendChild(tfoot);
   } catch(e) {
     table.innerHTML = '<tr><td style="color:var(--red)">' + escapeHtml(e.message) + '</td></tr>';
   }
@@ -123,7 +150,8 @@ function renderModelRow(m) {
 
 async function setModelRole(name, role) {
   if (role === 'embed') {
-    if (!confirm('Set the embedding model to "' + name + '"?\n\nThis applies on the next re-embed (indexa deep). An embedder with a different vector dimension makes your existing index incompatible — search stays wrong until a full re-embed.')) return;
+    const msg = 'Set the embedding model to "' + name + '"?\n\nThis applies on the next re-embed (indexa deep). An embedder with a different vector dimension makes your existing index incompatible — search stays wrong until a full re-embed.';
+    if (!(await confirmModal(msg, 'Set embedder'))) return;
   }
   const field = role === 'file' ? 'file_model' : role === 'dir' ? 'dir_model' : 'embed_model';
   const body = {}; body[field] = name;
@@ -131,6 +159,7 @@ async function setModelRole(name, role) {
     const r = await fetch('/api/config/provider', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
     });
+    if (!r.ok) { toast('Failed to set model (' + r.status + ')', 'error'); return; }
     const d = await r.json();
     if (d.error) { toast(d.error, 'error'); return; }
     toast('Set ' + role + ' model → ' + name + (d.restart_required ? ' · restart indexa to apply' : ''), 'info');
@@ -143,7 +172,8 @@ async function refreshCatalog() {
   if (btn) btn.disabled = true;
   try {
     const r = await fetch('/api/models/catalog/refresh', {method: 'POST'});
-    const d = await r.json();
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { toast(d.error || 'Catalog refresh failed (' + r.status + ')', 'error'); return; }
     if (d.refreshed) toast('Catalog refreshed (' + (d.count || 0) + ' models)', 'info');
     else toast(d.reason || d.error || 'Catalog not refreshed', 'warn');
     loadModels();
@@ -204,6 +234,7 @@ async function setProvider(provider, model) {
     const r = await fetch('/api/config/provider', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
     });
+    if (!r.ok) { toast('Failed to set provider (' + r.status + ')', 'error'); return; }
     const d = await r.json();
     if (d.error) { toast(d.error, 'error'); return; }
     toast('Provider → ' + provider + (d.restart_required ? ' · restart indexa to apply' : ''), 'info');
@@ -221,6 +252,7 @@ async function saveEndpoint() {
     const r = await fetch('/api/config/provider', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({base_url: url})
     });
+    if (!r.ok) { toast('Failed to save endpoint (' + r.status + ')', 'error'); return; }
     const d = await r.json();
     if (d.error) { toast(d.error, 'error'); return; }
     toast('Ollama endpoint saved' + (d.restart_required ? ' · restart indexa to apply' : ''), 'info');
@@ -278,26 +310,32 @@ async function loadProviderStatus() {
 async function saveKey(provider) {
   const val = document.getElementById('key-' + provider).value.trim();
   if (!val) return clearKey(provider);
-  const r = await fetch('/api/keys', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({provider: provider, key: val})
-  });
-  const d = await r.json();
-  if (d.error) { toast(d.error, 'error'); return; }
-  document.getElementById('key-' + provider).value = '';
-  loadKeys();
+  try {
+    const r = await fetch('/api/keys', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider: provider, key: val})
+    });
+    if (!r.ok) { toast('Failed to save key (' + r.status + ')', 'error'); return; }
+    const d = await r.json();
+    if (d.error) { toast(d.error, 'error'); return; }
+    document.getElementById('key-' + provider).value = '';
+    loadKeys();
+  } catch(e) { toast('Error saving key: ' + e.message, 'error'); }
 }
 
 async function clearKey(provider) {
-  const r = await fetch('/api/keys', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({provider: provider, key: ''})
-  });
-  const d = await r.json();
-  if (d.error) { toast(d.error, 'error'); return; }
-  loadKeys();
+  try {
+    const r = await fetch('/api/keys', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider: provider, key: ''})
+    });
+    if (!r.ok) { toast('Failed to clear key (' + r.status + ')', 'error'); return; }
+    const d = await r.json();
+    if (d.error) { toast(d.error, 'error'); return; }
+    loadKeys();
+  } catch(e) { toast('Error clearing key: ' + e.message, 'error'); }
 }
 
 

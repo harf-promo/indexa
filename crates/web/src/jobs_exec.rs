@@ -13,7 +13,7 @@ use indexa_core::{
 };
 use indexa_embed::Embedder;
 use indexa_llm::{Describer, Generator, OllamaLlm};
-use indexa_query::{enqueue_subtree, process_queue_item_with_passes, QueueOutcome};
+use indexa_query::{process_queue_item_with_passes, requeue_subtree, QueueOutcome};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -857,7 +857,11 @@ pub(crate) async fn run_summarize_phase(
         }
     };
 
-    let newly_enqueued = match enqueue_subtree(&mut job_store, &root) {
+    // Force-requeue the whole subtree: reset any existing `done`/`failed` rows back
+    // to `pending` so Regenerate actually re-runs the AI, not just drains new items.
+    // `mark_for_resummary` (used internally) leaves `in_flight` rows untouched so
+    // concurrent workers aren't double-claimed.
+    let newly_enqueued = match requeue_subtree(&mut job_store, &root) {
         Ok(n) => n,
         Err(e) => {
             finalize_failed(handle, "summarize", &e);
@@ -865,11 +869,8 @@ pub(crate) async fn run_summarize_phase(
         }
     };
 
-    // The work total is the actual pending queue depth, not just the items WE
-    // enqueued: re-running summarize on an already-queued path enqueues 0 new
-    // items but still drains the existing backlog. Using `newly_enqueued` (0)
-    // as the total produced "4 / 0" progress and a garbage ETA. Fall back to
-    // the real pending count when nothing new was enqueued.
+    // Use the actual pending queue depth (includes items from other subtrees that
+    // were already pending) so the progress "N / total" ETA is meaningful.
     let enqueued = if newly_enqueued > 0 {
         newly_enqueued
     } else {

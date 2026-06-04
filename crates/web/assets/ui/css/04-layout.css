@@ -113,7 +113,7 @@
 /* ── Main content / Context workspace ── */
 .app-main { display: flex; flex-direction: column; overflow: hidden; }
 
-/* Workspace toolbar: the Context | Map | Ask segmented view toggle. */
+/* Workspace toolbar: the Context | Map | Ask segmented view toggle + Export action. */
 .workspace-toolbar {
   display: flex;
   align-items: center;
@@ -122,6 +122,26 @@
   border-bottom: 1px solid var(--border);
   background: var(--surface);
   flex-shrink: 0;
+}
+
+/* Push the Export button to the far right of the toolbar */
+.toolbar-export {
+  margin-left: auto;
+}
+
+.toolbar-export-btn {
+  font-size: 12px;
+  padding: 4px 12px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.toolbar-export-btn:hover {
+  background: var(--surface3);
 }
 .view-toggle {
   display: inline-flex;

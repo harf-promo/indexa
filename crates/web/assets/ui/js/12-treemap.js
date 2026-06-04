@@ -1,17 +1,32 @@
-/* ── Treemap view ── */
+/* ── Treemap view (coverage map) ── */
 var treemapLoaded = false;
 var treemapData = null;       // full root array from /api/map/treemap
 var treemapStack = [];        // navigation stack: [{name, path, children}]
 var treemapCurrentNode = null;
+var treemapRootIndex = 0;     // which top-level root to show when multiple exist
 var treemapSvgNS = 'http://www.w3.org/2000/svg';
 
-// Colour palette for top-level directories (cycles)
-var TM_PALETTE = [
-  '#3b82f6','#22c55e','#f97316','#a855f7',
-  '#eab308','#06b6d4','#f43f5e','#14b8a6',
-  '#8b5cf6','#ec4899','#10b981','#f59e0b',
-];
+// Coverage colours — keyed by coverage state from the backend
+var TM_COV_COLORS = {
+  'full':    '#22c55e',   // green  — all summaries built
+  'partial': '#f97316',   // orange — some built / in progress
+  'failed':  '#f43f5e',   // red    — summarization failed
+  'none':    '#374151',   // grey   — no context yet
+};
+// Fallback if coverage field missing
+var TM_COV_DEFAULT = '#374151';
 
+function covColor(node) {
+  return TM_COV_COLORS[node.coverage] || TM_COV_DEFAULT;
+}
+
+function fmtChunks(n) {
+  if (!n) return '0 chunks';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k chunks';
+  return n + ' chunks';
+}
+
+// Keep fmtSize for backward compat (used in tooltip)
 function fmtSize(bytes) {
   if (!bytes) return '0 B';
   if (bytes < 1024) return bytes + ' B';
@@ -38,32 +53,47 @@ async function loadTreemap() {
     treemapData = await r.json();
 
     if (!treemapData || !treemapData.length) {
-      if (svg) svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" fill="var(--muted)" font-size="13">No context yet — run indexa deep <path> first.</text>';
+      if (svg) svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" fill="var(--muted)" font-size="13">No context yet — build deep context first.</text>';
       return;
     }
 
-    // Wrap multiple roots in a synthetic root if needed
-    var root;
-    if (treemapData.length === 1) {
-      root = treemapData[0];
-    } else {
-      root = {
-        name: 'All roots',
-        path: '',
-        size: treemapData.reduce(function(s, n) { return s + n.size; }, 0),
-        file_count: treemapData.reduce(function(s, n) { return s + n.file_count; }, 0),
-        children: treemapData,
-      };
-    }
-
+    renderRootPicker();
     treemapStack = [];
-    treemapCurrentNode = root;
+    treemapCurrentNode = treemapData[treemapRootIndex] || treemapData[0];
     renderTreemapCurrent();
 
   } catch (e) {
     treemapLoaded = false; // allow retry on next tab visit
     if (svg) svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" fill="var(--red)" font-size="13">Error: ' + escapeHtml(e.message) + ' — switch away and back to retry</text>';
   }
+}
+
+/* ── Root picker ── Renders a small pill row above the treemap when there are multiple roots.
+   Prevents a large root (e.g. '/') from swallowing a small one ('projects') into one blue block. */
+function renderRootPicker() {
+  if (!treemapData || treemapData.length <= 1) return;
+  var bc = document.getElementById('treemap-breadcrumb');
+  if (!bc) return;
+  var picker = document.createElement('div');
+  picker.className = 'treemap-root-picker';
+  treemapData.forEach(function(root, i) {
+    var btn = document.createElement('button');
+    btn.className = 'treemap-root-btn' + (i === treemapRootIndex ? ' active' : '');
+    btn.textContent = root.name || root.path || 'root ' + i;
+    btn.title = root.path || '';
+    btn.addEventListener('click', function() {
+      treemapRootIndex = i;
+      treemapStack = [];
+      treemapCurrentNode = treemapData[i];
+      document.querySelectorAll('.treemap-root-btn').forEach(function(b, j) {
+        b.classList.toggle('active', j === i);
+      });
+      renderTreemapCurrent();
+    });
+    picker.appendChild(btn);
+  });
+  // Insert before the breadcrumb
+  bc.parentNode.insertBefore(picker, bc);
 }
 
 function renderTreemapCurrent() {
@@ -83,13 +113,14 @@ function renderTreemapCurrent() {
     return;
   }
 
-  // Sort by size descending, then assign areas
+  // Sort by size (chunk count) descending, then assign areas
   children.sort(function(a, b) { return b.size - a.size; });
   var totalSize = children.reduce(function(s, c) { return s + c.size; }, 0) || 1;
   var totalArea = W * H;
-  children.forEach(function(c, i) {
-    c._area = (c.size / totalSize) * totalArea;
-    c._color = TM_PALETTE[i % TM_PALETTE.length];
+  children.forEach(function(c) {
+    // Give zero-chunk dirs a minimal area so they're still visible
+    c._area = (Math.max(c.size, 1) / Math.max(totalSize, 1)) * totalArea;
+    c._color = covColor(c);
     c._hasChildren = c.children && c.children.length > 0;
   });
 
@@ -144,7 +175,7 @@ function drawCell(svg, node, idx) {
       sub.setAttribute('class', 'treemap-label-sub');
       sub.setAttribute('x', r.x + pad);
       sub.setAttribute('y', r.y + pad + 16);
-      sub.textContent = fmtSize(node.size);
+      sub.textContent = fmtChunks(node.size);
       g.appendChild(sub);
     }
 
@@ -170,7 +201,7 @@ function drawCell(svg, node, idx) {
     g.style.cursor = 'pointer';
     g.setAttribute('tabindex', '0');
     g.setAttribute('role', 'button');
-    g.setAttribute('aria-label', node.name + ' — ' + fmtSize(node.size) + ' — click to drill down');
+    g.setAttribute('aria-label', node.name + ' — ' + fmtChunks(node.size) + ' — click to drill down');
     function drillIn() {
       treemapStack.push(treemapCurrentNode);
       treemapCurrentNode = node;
@@ -181,7 +212,7 @@ function drawCell(svg, node, idx) {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drillIn(); }
     });
   } else {
-    g.setAttribute('aria-label', node.name + ' — ' + fmtSize(node.size));
+    g.setAttribute('aria-label', node.name + ' — ' + fmtChunks(node.size));
   }
 
   // Hover tooltip
@@ -197,10 +228,12 @@ function drawCell(svg, node, idx) {
 function showTreemapTooltip(e, node) {
   var tip = document.getElementById('treemap-tooltip');
   if (!tip) return;
+  var covLabel = { full: '● Built', partial: '◐ In progress', failed: '✗ Failed', none: '○ Not built' };
   tip.innerHTML =
     '<strong>' + escapeHtml(node.name) + '</strong>' +
     '<span style="color:var(--muted)">' + escapeHtml(node.path) + '</span><br>' +
-    fmtSize(node.size) + (node.file_count ? ' &middot; ' + node.file_count.toLocaleString() + ' files' : '') +
+    fmtChunks(node.size) +
+    (node.coverage ? ' &middot; ' + escapeHtml(covLabel[node.coverage] || node.coverage) : '') +
     (node._hasChildren ? '<br><span style="color:var(--accent);font-size:11px">Click to drill down</span>' : '');
   tip.hidden = false;
   moveTreemapTooltip(e);

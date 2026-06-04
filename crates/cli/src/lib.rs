@@ -27,6 +27,33 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Build full context in one command: scan → deep embed → summarize.
+    ///
+    /// Equivalent to running `indexa scan`, `indexa deep`, and `indexa summarize`
+    /// in sequence. Use this for first-time setup or complete refreshes.
+    /// After it completes, run `indexa ask` or `indexa export`.
+    #[command(after_help = "Examples:
+  indexa index ~/code/my-repo
+  indexa index ~/Documents --passes 2
+  indexa index ~/Projects --embed-model nomic-embed-text:v1.5")]
+    Index {
+        /// Path(s) to index. Omit to index all existing roots.
+        #[arg(num_args = 0..)]
+        paths: Vec<String>,
+
+        /// Embedding model to use (overrides config).
+        #[arg(long)]
+        embed_model: Option<String>,
+
+        /// Summary storage mode: augment (default), compress, summaries-only.
+        #[arg(long, default_value = "augment")]
+        mode: String,
+
+        /// Refinement passes per summary. Default: 2 for new context, 1 for refresh.
+        #[arg(long)]
+        passes: Option<u32>,
+    },
+
     /// Build the surface context map of a path (fast — no AI calls).
     #[command(after_help = "Examples:
   indexa scan ~/Documents
