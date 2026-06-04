@@ -50,6 +50,8 @@ pub struct QaConfig {
     /// Apply a cross-encoder rerank pass after retrieval (default off). Currently
     /// a local LLM-listwise reranker; fails open (never errors `ask`).
     pub rerank: bool,
+    /// Apply importance weights (v0.8) as a multiplicative boost after RRF fusion.
+    pub use_weights: bool,
 }
 
 impl Default for QaConfig {
@@ -63,6 +65,7 @@ impl Default for QaConfig {
             summary_weight: 0.0,
             summary_depth_alpha: 0.15,
             rerank: false,
+            use_weights: true,
         }
     }
 }
@@ -94,6 +97,16 @@ pub(crate) fn retrieve(
             cfg.summary_weight,
             cfg.summary_depth_alpha,
         );
+    }
+    // v0.8: apply per-file/dir/category importance weight boosts (multiplicative).
+    if cfg.use_weights && !hits.is_empty() {
+        let _ = store.boost_with_weights(&mut hits);
+        // Re-sort after weight boost.
+        hits.sort_by(|a, b| {
+            b.rrf_score
+                .partial_cmp(&a.rrf_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
     Ok(hits)
 }

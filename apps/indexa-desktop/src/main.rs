@@ -206,7 +206,8 @@ async fn run_server(port: u16) -> anyhow::Result<()> {
         )?,
     );
 
-    indexa_web::serve(port, store, embedder, llm, cfg).await
+    // Desktop always binds to localhost — never expose on LAN without explicit CLI opt-in.
+    indexa_web::serve(port, "127.0.0.1", store, embedder, llm, cfg).await
 }
 
 /// Poll `127.0.0.1:port` until a TCP connection succeeds or `timeout` elapses.

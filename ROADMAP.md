@@ -103,7 +103,7 @@ Indexa suggests how to categorize regions of your disk. You confirm, correct, or
 
 ---
 
-## v0.8 — Importance weighting
+## v0.8 — Importance weighting  *(shipped — v0.16.0)*
 
 Tell Indexa which parts of your disk matter most. It adjusts everything accordingly.
 
@@ -126,7 +126,7 @@ Your context, sliced by subject — not by folder. Indexa detects that files and
 
 ---
 
-## v0.10 — Insights
+## v0.10 — Insights  *(shipped — v0.16.0)*
 
 Analytical reports over your context store.
 

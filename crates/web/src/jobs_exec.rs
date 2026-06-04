@@ -407,6 +407,12 @@ async fn run_deep_phase(
     let transcribe = state.config.parsers.audio.transcribe;
     let transcribe_binary = state.config.parsers.audio.transcribe_binary().to_owned();
     let transcribe_model = state.config.parsers.audio.model.clone();
+    // Optional video frame captioning (opt-in, v0.16).
+    let video_caption = state.config.parsers.video.caption;
+    let video_ffmpeg = state.config.parsers.video.ffmpeg_binary().to_owned();
+    let video_model = state.config.parsers.video.caption_model().to_owned();
+    let video_fps = state.config.parsers.video.fps();
+    let video_max_frames = state.config.parsers.video.max_frames();
 
     // Memory watchdog: checked before each Ollama call.
     let mut wdog = WatchdogState::new();
@@ -567,6 +573,72 @@ async fn run_deep_phase(
                             stage: "deep".to_owned(),
                             item_path: Some(path_str.clone()),
                             message: format!("transcription task panicked: {e}"),
+                            pressure: None,
+                        },
+                    ),
+                }
+            }
+
+            // Video frame captioning (opt-in): extract frames via ffmpeg then caption
+            // each frame with a local vision model, appending the combined caption as a
+            // chunk. Blocking ffmpeg subprocess + async vision calls → spawn_blocking.
+            if video_caption && extracted.mime.starts_with("video/") {
+                let ff = video_ffmpeg.clone();
+                let fps = video_fps;
+                let max_fr = video_max_frames;
+                let p = entry.path.clone();
+                let frames_result = tokio::task::spawn_blocking(move || {
+                    indexa_parsers::media::extract_video_frames(&p, &ff, fps, max_fr)
+                })
+                .await;
+                match frames_result {
+                    Ok(Ok((_dir, frame_paths))) if !frame_paths.is_empty() => {
+                        let mut captions: Vec<String> = Vec::new();
+                        for (i, fp) in frame_paths.iter().enumerate() {
+                            match &captioner {
+                                Some(llm) => {
+                                    match indexa_llm::caption_image_file(llm, &video_model, fp)
+                                        .await
+                                    {
+                                        Ok(c) if !c.trim().is_empty() => {
+                                            captions.push(format!("Frame {}: {c}", i + 1));
+                                        }
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            tracing::warn!("video frame caption failed: {e:#}");
+                                        }
+                                    }
+                                }
+                                None => break, // no vision LLM available
+                            }
+                        }
+                        if !captions.is_empty() {
+                            let seq = extracted.chunks.len();
+                            extracted.chunks.push(indexa_parsers::types::Chunk {
+                                source: entry.path.clone(),
+                                seq,
+                                heading: "video captions".to_owned(),
+                                text: captions.join("\n"),
+                                language: None,
+                            });
+                        }
+                    }
+                    Ok(Ok(_)) => {} // no frames extracted
+                    Ok(Err(e)) => push(
+                        handle,
+                        JobEvent::Warning {
+                            stage: "deep".to_owned(),
+                            item_path: Some(path_str.clone()),
+                            message: format!("video frame extraction failed: {e:#}"),
+                            pressure: None,
+                        },
+                    ),
+                    Err(e) => push(
+                        handle,
+                        JobEvent::Warning {
+                            stage: "deep".to_owned(),
+                            item_path: Some(path_str.clone()),
+                            message: format!("video frame task panicked: {e}"),
                             pressure: None,
                         },
                     ),

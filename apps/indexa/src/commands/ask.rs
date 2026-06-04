@@ -53,6 +53,7 @@ pub(crate) async fn cmd_ask(
         summary_weight: cfg.retrieval.summary_weight,
         summary_depth_alpha: cfg.retrieval.summary_depth_alpha,
         rerank: cfg.retrieval.rerank,
+        use_weights: cfg.retrieval.use_weights,
     };
 
     // `store` is no longer needed by the query path — `answer` opens its own

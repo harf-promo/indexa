@@ -357,6 +357,10 @@ async function loadFeatures() {
     if (imgModel && d.image_model) imgModel.value = d.image_model;
     if (audTx)   audTx.checked = !!d.audio_transcribe;
     if (audBin && d.audio_binary) audBin.value = d.audio_binary;
+    var vidCap = document.getElementById('feat-video-caption');
+    var vidModel = document.getElementById('feat-video-model');
+    if (vidCap)  vidCap.checked = !!d.video_caption;
+    if (vidModel && d.video_model) vidModel.value = d.video_model;
   } catch(_) {}
 }
 
@@ -369,6 +373,8 @@ async function saveFeatures() {
     image_model:      (document.getElementById('feat-image-model')?.value || '').trim() || null,
     audio_transcribe: document.getElementById('feat-audio-transcribe')?.checked,
     audio_binary:     (document.getElementById('feat-audio-binary')?.value || '').trim() || null,
+    video_caption:    document.getElementById('feat-video-caption')?.checked,
+    video_model:      (document.getElementById('feat-video-model')?.value || '').trim() || null,
   };
   try {
     var r = await fetch('/api/config/features', {

@@ -7,6 +7,7 @@ mod export;
 mod fingerprint;
 mod helpers;
 mod index;
+mod insights;
 mod map;
 mod mcp;
 mod pack;
@@ -17,6 +18,7 @@ mod status;
 mod summarize;
 mod update;
 mod watch;
+mod weight;
 mod worker;
 
 pub(crate) use ask::cmd_ask;
@@ -27,6 +29,7 @@ pub(crate) use doctor::cmd_doctor;
 pub(crate) use export::cmd_export;
 pub(crate) use fingerprint::cmd_fingerprint;
 pub(crate) use index::cmd_index;
+pub(crate) use insights::{cmd_insights_diff, cmd_insights_duplicates, cmd_insights_stale};
 pub(crate) use map::cmd_map;
 pub(crate) use mcp::cmd_mcp;
 pub(crate) use pack::{
@@ -40,4 +43,8 @@ pub(crate) use status::cmd_status;
 pub(crate) use summarize::cmd_summarize;
 pub(crate) use update::cmd_update;
 pub(crate) use watch::cmd_watch;
+pub(crate) use weight::{
+    cmd_weight_apply, cmd_weight_delete, cmd_weight_get, cmd_weight_list, cmd_weight_set,
+    cmd_weight_suggest,
+};
 pub(crate) use worker::cmd_worker;

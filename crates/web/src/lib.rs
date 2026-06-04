@@ -120,13 +120,19 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/14-watch.js"),
     include_str!("../assets/ui/js/15-update.js"),
     include_str!("../assets/ui/js/16-context-packs.js"),
+    include_str!("../assets/ui/js/17-weights.js"),
+    include_str!("../assets/ui/js/18-insights.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Start the web UI server on `port`. Runs until Ctrl-C or the process exits.
+/// Start the web UI server on `host:port`. Runs until Ctrl-C or the process exits.
+///
+/// `host` defaults to `"127.0.0.1"` (localhost-only). Pass `"0.0.0.0"` for LAN access.
+/// **Warning:** binding to 0.0.0.0 exposes all indexed files on your local network.
 pub async fn serve(
     port: u16,
+    host: &str,
     mut store: Store,
     embedder: Arc<dyn Embedder + Send + Sync + 'static>,
     llm: Arc<dyn Generator + Send + Sync + 'static>,
@@ -294,6 +300,16 @@ pub async fn serve(
         )
         .route("/api/packs/:name/export", get(api_packs_export))
         .route("/api/packs/:name/search", get(api_packs_search))
+        .route(
+            "/api/weights",
+            get(api_weights_list)
+                .post(api_weights_set)
+                .delete(api_weights_delete),
+        )
+        .route("/api/weights/suggest", get(api_weights_suggest))
+        .route("/api/insights/duplicates", get(api_insights_duplicates))
+        .route("/api/insights/stale", get(api_insights_stale))
+        .route("/api/insights/diff", get(api_insights_diff))
         .with_state(state)
         .layer(
             tower_http::cors::CorsLayer::new()
@@ -306,10 +322,27 @@ pub async fn serve(
                 .allow_headers([header::CONTENT_TYPE]),
         );
 
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("Indexa web UI listening on http://{addr}");
-    println!("Open http://localhost:{port} in your browser. Press Ctrl-C to stop.");
+
+    if host == "127.0.0.1" || host == "localhost" {
+        println!("Open http://localhost:{port} in your browser. Press Ctrl-C to stop.");
+    } else {
+        // LAN mode: print all non-loopback IPv4 addresses so the user knows what to connect to.
+        println!("Open http://localhost:{port} in your browser. Press Ctrl-C to stop.");
+        println!("⚠  LAN mode active — also accessible at:");
+        if let Ok(ifaces) = if_addrs::get_if_addrs() {
+            // crate: if-addrs
+            for iface in ifaces {
+                let ip = iface.ip();
+                if !ip.is_loopback() && ip.is_ipv4() {
+                    println!("   http://{}:{port}", ip);
+                }
+            }
+        }
+        println!("   Ensure your network is trusted before sharing this URL.");
+    }
 
     axum::serve(listener, app).await?;
     Ok(())

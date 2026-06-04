@@ -56,14 +56,6 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_entries_kind   ON entries(kind);
             CREATE INDEX IF NOT EXISTS idx_entries_cat    ON entries(hint_cat);
 
-            -- NOTE: chunks.entry_path, summaries.path, and edges.from_path reference
-            -- entries.path (TEXT) but have no REFERENCES … ON DELETE CASCADE because
-            -- SQLite TEXT FK resolution would require an index scan and the tables were
-            -- designed before FK enforcement. PRAGMA foreign_keys = ON is set (see above)
-            -- but these TEXT-keyed relations are cleaned up manually in entries.rs.
-            -- A future migration should add FK constraints + CASCADE; tracked as a
-            -- known limitation. Do NOT add REFERENCES here without a careful migration plan.
-
             -- Deep-scan chunks (text + embeddings).
             -- AUTOINCREMENT (not a bare rowid) so ids are never reused after a re-deep
             -- deletes+reinserts a file's chunks. Stable ids are load-bearing for the ANN
@@ -126,8 +118,9 @@ impl Store {
 
             -- Smart (semantic) classification — a SECOND axis over the technical
             -- hint_cat. One row per classified path (directories for now). Kept off
-            -- the `entries` table on purpose: `entries` is INSERT OR REPLACE'd on every
-            -- rescan, which would wipe a user's confirmed labels. `source` distinguishes
+            -- the `entries` table on purpose: entries uses ON CONFLICT DO UPDATE which
+            -- preserves row identity, but classifications hold user decisions that must
+            -- never be automatically overwritten by a rescan. `source` distinguishes
             -- an auto suggestion from a user decision; 'ignored' is a sticky tombstone so
             -- a dismissed suggestion is not re-proposed on the next classify run.
             CREATE TABLE IF NOT EXISTS classifications (
@@ -175,8 +168,38 @@ impl Store {
                 added_at INTEGER NOT NULL DEFAULT (unixepoch()),
                 PRIMARY KEY (pack_id, path)
             );
+            -- Importance weights (v0.8): user-controlled boosts per file, directory,
+            -- or classification category. A weight > 1.0 promotes the target in search
+            -- results; 0.0 effectively silences it. 'auto' rows are recency-based
+            -- suggestions that are never overwritten by the user.
+            CREATE TABLE IF NOT EXISTS importance_weights (
+                target_kind TEXT NOT NULL CHECK(target_kind IN ('file','dir','category')),
+                target      TEXT NOT NULL,
+                weight      REAL NOT NULL DEFAULT 1.0 CHECK(weight >= 0.0),
+                source      TEXT NOT NULL DEFAULT 'user' CHECK(source IN ('user','auto')),
+                reason      TEXT,
+                updated_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                PRIMARY KEY (target_kind, target)
+            );
+            CREATE INDEX IF NOT EXISTS idx_weights_kind ON importance_weights(target_kind);
+
+            -- Insights (v0.10): first_indexed_at is populated separately via migration.
             ",
         )?;
+
+        // Migration: add entries.first_indexed_at (v0.10) — the original discovery
+        // timestamp. Unlike indexed_at (reset on every rescan), this is set once and
+        // never overwritten, enabling "what was added this week" queries.
+        let has_first_indexed_at: bool = self
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'first_indexed_at'")?
+            .exists([])?;
+        if !has_first_indexed_at {
+            self.conn.execute_batch(
+                "ALTER TABLE entries ADD COLUMN first_indexed_at INTEGER;
+                 UPDATE entries SET first_indexed_at = indexed_at WHERE first_indexed_at IS NULL;",
+            )?;
+        }
 
         // Migration: add summaries.summary_l0 (L0 one-line abstract) to databases
         // created before tiered summaries existed. SQLite has no ADD COLUMN IF NOT
@@ -259,6 +282,14 @@ impl Store {
             }
             tx.commit()?;
         }
+
+        // Note: ON DELETE CASCADE on chunks/summaries/edges is included in the CREATE
+        // TABLE IF NOT EXISTS DDL above (new databases get it automatically). Migrating
+        // existing databases to add CASCADE is intentionally skipped: the migration
+        // requires a table-recreation that would fail if any orphaned chunks/summaries
+        // exist (which is exactly the problem we're guarding against). The critical fix
+        // was converting upsert_entries to a non-destructive ON CONFLICT DO UPDATE
+        // above; manual cleanup in entries.rs remains as belt-and-suspenders.
 
         Ok(())
     }

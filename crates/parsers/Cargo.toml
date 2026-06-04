@@ -33,6 +33,8 @@ calamine = { version = "0.26", features = ["dates"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Media metadata (audio/video via ffprobe subprocess — no extra dep needed)
 serde_json = "1"
+# Temp directories for video frame extraction
+tempfile = { workspace = true }
 # XML/HTML tag stripping for EPUB and office formats
 quick-xml = "0.40"
 
