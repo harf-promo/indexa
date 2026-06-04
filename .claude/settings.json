@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo fmt*)",
+      "Bash(cargo clippy*)",
+      "Bash(cargo test*)",
+      "Bash(cargo build*)",
+      "Bash(cargo run*)",
+      "Bash(cargo check*)",
+      "Bash(cargo deny*)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Bash(git show*)",
+      "Bash(git status*)",
+      "Bash(git branch*)",
+      "Bash(git fetch*)",
+      "Bash(git stash*)",
+      "Bash(git push --force-with-lease*)",
+      "Bash(git push --delete origin*)",
+      "Bash(git checkout*)",
+      "Bash(git rebase*)",
+      "Bash(git tag*)",
+      "Bash(sqlite3*index.db*)",
+      "Bash(curl -s * localhost:762*)",
+      "Bash(curl -s --max-time * http://localhost:762*)",
+      "Bash(indexa*)",
+      "Bash(ollama list*)",
+      "Bash(ollama pull*)",
+      "Bash(gh pr*)",
+      "Bash(gh api*)",
+      "Bash(gh run*)",
+      "Bash(lsof -i :7620*)",
+      "Bash(lsof -i :7621*)",
+      "Bash(ps aux | grep*indexa*)",
+      "Bash(kill *)"
+    ]
+  }
+}

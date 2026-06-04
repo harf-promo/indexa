@@ -39,8 +39,12 @@ For UI changes: `indexa serve` then visually confirm in browser at http://localh
 
 This is in the `harf-promo` org (private repo, free-tier Actions minutes). **Never push directly to `main`.** Always:
 1. `git checkout -b <short-feature-name>`
-2. Commit + push the branch
-3. Open a PR; squash-merge on green CI
+2. Commit with sign-off (`git commit -s`) — the DCO workflow requires `Signed-off-by` on every commit
+3. Push the branch; open a PR; squash-merge on green CI
+
+**If commits on a branch are missing sign-off:** `git rebase --signoff origin/main` then `git push --force-with-lease`.
+
+**Branch protection is active on main:** requires `fmt + clippy + test` (ubuntu/macos/windows), `License and advisory check`, and `DCO sign-off check`. Force-push and deletion are blocked.
 
 ## Multi-pass refinement defaults (v0.2.3+)
 
@@ -57,3 +61,36 @@ This is in the `harf-promo` org (private repo, free-tier Actions minutes). **Nev
 2. Extension hit (Linguist `EXTENSIONS` phf_map)
 3. Ambiguous extensions → `hyperpolyglot::detect(path)` (shebang + content heuristics)
 4. MIME fallback (`mime_guess`)
+
+## One-shot indexing
+
+`indexa index <path>` runs scan → deep → summarize in one command. Use this instead of the three-step pipeline for first-time builds or complete refreshes.
+
+## Desktop app
+
+The Tauri desktop app is **excluded from `cargo --workspace`** (webkit2gtk missing on CI runners). Build it separately:
+```bash
+cargo build --manifest-path apps/indexa-desktop/Cargo.toml
+```
+CI for the desktop uses the release workflow, not the standard CI workflow.
+
+## Index database path (macOS)
+
+```
+~/Library/Application Support/dev.indexa.Indexa/index.db
+```
+
+Quick queue health check:
+```bash
+sqlite3 "$HOME/Library/Application Support/dev.indexa.Indexa/index.db" \
+  "SELECT state, COUNT(*) FROM summary_queue GROUP BY state"
+```
+
+## Release procedure
+
+1. Branch: `git checkout -b bump-X.Y.Z`
+2. Bump `version = "X.Y.Z"` in **both** `Cargo.toml` (workspace root) and `apps/indexa-desktop/Cargo.toml`
+3. `git commit -s -m "chore: bump version to X.Y.Z"`
+4. PR → squash-merge on green CI
+5. `git checkout main && git pull && git tag vX.Y.Z && git push origin vX.Y.Z`
+6. Release CI auto-triggers: builds 5 binary targets + Apple Silicon Tauri `.dmg`
