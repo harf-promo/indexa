@@ -20,6 +20,34 @@ pub struct EdgeRecord {
     pub to_ref: String,
 }
 
+/// A node in the file-to-file call graph (v0.18 signature graph).
+#[derive(Debug, Clone)]
+pub struct CodeGraphNode {
+    pub path: String,
+    /// Number of distinct files this file calls into.
+    pub out_degree: usize,
+    /// Number of distinct files that call into this file.
+    pub in_degree: usize,
+}
+
+/// A directed file-to-file call edge: `from` calls a symbol that `to` defines.
+#[derive(Debug, Clone)]
+pub struct CodeGraphEdge {
+    pub from: String,
+    pub to: String,
+    /// Number of distinct shared symbols (call → define) between the two files.
+    pub weight: usize,
+}
+
+/// A scoped file-to-file call graph (nodes + directed edges).
+#[derive(Debug, Clone)]
+pub struct CodeGraph {
+    pub nodes: Vec<CodeGraphNode>,
+    pub edges: Vec<CodeGraphEdge>,
+    /// True when the edge count hit the requested cap (more edges exist).
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub chunk_id: i64,

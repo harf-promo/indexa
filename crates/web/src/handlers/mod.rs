@@ -7,6 +7,7 @@ mod classify;
 mod config;
 mod export;
 mod fs;
+mod graph;
 mod insights_handler;
 mod jobs;
 mod keys;
@@ -35,6 +36,7 @@ pub(crate) use config::{
 };
 pub(crate) use export::api_export;
 pub(crate) use fs::api_fs_ls;
+pub(crate) use graph::api_graph;
 pub(crate) use insights_handler::{api_insights_diff, api_insights_duplicates, api_insights_stale};
 pub(crate) use jobs::{
     api_job_deep, api_job_delete, api_job_estimate, api_job_get, api_job_index, api_job_scan,

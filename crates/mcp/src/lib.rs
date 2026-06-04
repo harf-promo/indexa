@@ -6,10 +6,11 @@
 //!
 //! **stdout is the protocol channel** — all logging must go to stderr.
 //!
-//! Tools (28): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
+//! Tools (29): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
 //! disclosure), `read_file`, `ask`, `dependencies` (a file's imports, defined symbols,
 //! and calls), `who_imports` (reverse code-graph lookup), `who_calls` (D2 — reverse
-//! call lookup), `blast_radius` (D2 — 1-hop call blast radius), `get_stats`,
+//! call lookup), `blast_radius` (D2 — 1-hop call blast radius), `code_graph` (file-to-file
+//! call graph for a scope), `get_stats`,
 //! `list_packs`, `get_pack`, `export_pack`, `create_pack`, `add_pack_paths`,
 //! `remove_pack_paths`, `delete_pack` (Context Packs),
 //! `list_classifications`, `confirm_classification`, `ignore_classification`
@@ -129,6 +130,15 @@ pub struct WhoCallsParams {
 pub struct BlastRadiusParams {
     /// Bare function or method name whose blast radius to compute.
     pub symbol: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CodeGraphParams {
+    /// Absolute path prefix to scope the graph to (e.g. a repo or crate directory).
+    pub scope: String,
+    /// Max edges to return, heaviest first (default 200).
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -488,6 +498,51 @@ impl IndexaMcp {
         Ok(ok_text(format!(
             "Blast radius of '{}' ({total} file(s)):\n{body}",
             params.0.symbol
+        )))
+    }
+
+    /// File-to-file call graph for a scope (the v0.18 signature graph, as text).
+    #[tool(
+        description = "Build the file-to-file call graph for files under a path scope: an edge 'A → B' means file A calls a function that file B defines. Returns the heaviest edges (most shared symbols) as a 'caller → callee [weight]' list, plus node/edge counts. Matching is on bare symbol names (case-sensitive); languages: Rust, Python, JS, TS, Go, Java."
+    )]
+    async fn code_graph(
+        &self,
+        params: Parameters<CodeGraphParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let CodeGraphParams { scope, limit } = params.0;
+        let limit = limit.unwrap_or(200).min(2000);
+        let store = self.store()?;
+        let graph = store.code_graph(&scope, limit).map_err(mcp_err)?;
+        if graph.edges.is_empty() {
+            return Ok(ok_text(format!(
+                "No call edges under '{scope}'. Run `indexa deep` on source files first."
+            )));
+        }
+        let body = graph
+            .edges
+            .iter()
+            .map(|e| {
+                let from = std::path::Path::new(&e.from)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| e.from.clone());
+                let to = std::path::Path::new(&e.to)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| e.to.clone());
+                format!("{from} → {to} [{}]", e.weight)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let trunc = if graph.truncated {
+            " (truncated — heaviest shown)"
+        } else {
+            ""
+        };
+        Ok(ok_text(format!(
+            "Call graph under '{scope}': {} files, {} edges{trunc}\n\n{body}",
+            graph.nodes.len(),
+            graph.edges.len()
         )))
     }
 
@@ -1315,7 +1370,7 @@ impl ServerHandler for IndexaMcp {
              named, cross-directory bundles ready to paste into any AI tool. \
              Smart classification: `list_classifications`/`confirm_classification`/\
 `ignore_classification`. \
-             Code graph: `dependencies`/`who_imports`/`who_calls`/`blast_radius`."
+             Code graph: `dependencies`/`who_imports`/`who_calls`/`blast_radius`/`code_graph`."
                 .to_owned(),
         )
     }

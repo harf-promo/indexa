@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-06-04
+
+### Added
+
+- **Signature graph — interactive call-graph visualization.** The code-relationship
+  graph (previously text-only over MCP) is now a visual: who-calls-whom across your files.
+  - **Web UI:** a new "Graph" sub-view in the Map tab — a force-directed view of the
+    file-to-file call graph (hand-rolled vanilla SVG, no libraries). Pick a scope, hover a
+    node to highlight its callers/callees, see node/edge counts and a truncation banner.
+  - **Store:** `Store::code_graph(prefix, max_edges)` joins `calls` edges to `defines` edges
+    (file A → file B when A calls a function B defines); edge weight = shared symbol count.
+    Generic names defined in >25 files (`new`, `from`, …) are excluded as noise, which also
+    bounds the JOIN on a whole-disk index. Scope is directory-normalized (`/proj` does not
+    match `/projector`).
+  - **REST API:** `GET /api/graph?scope=<path>&limit=<n>` (runs in `spawn_blocking` on a
+    fresh connection — never holds the shared store mutex).
+  - **MCP:** new `code_graph` tool (29 tools total).
+  - **CLI:** `indexa graph <dir> [--limit N]` prints the call-graph edge list.
+  - Call edges use bare-name matching (case-sensitive, 1-hop, Rust/Python/JS/TS/Go/Java) —
+    labeled honestly in the UI; see `docs/methodology.md`.
+
+### Changed
+
+- Docs refreshed to the current feature surface: `CLAUDE.md` gains a feature/CLI/MCP summary
+  and a web-UI build note; `README.md` MCP tool count corrected (10 → 29) and graph viz added;
+  `ROADMAP.md` marks the signature graph shipped.
+
 ## [0.17.0] — 2026-06-04
 
 A maturity pass: fixes bugs found in the v0.16 audit, adds the missing test

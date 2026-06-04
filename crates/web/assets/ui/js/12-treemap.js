@@ -296,7 +296,7 @@ var mapSubView = 'treemap';
 
 function switchMapView(view) {
   mapSubView = view;
-  ['treemap', 'table'].forEach(function(v) {
+  ['treemap', 'table', 'graph'].forEach(function(v) {
     var btn   = document.getElementById('map-tab-' + v);
     var panel = document.getElementById('map-panel-' + v);
     var active = v === view;
@@ -305,6 +305,7 @@ function switchMapView(view) {
   });
   if (view === 'treemap') loadTreemap();
   if (view === 'table')   loadMap();
+  if (view === 'graph' && typeof loadGraph === 'function') loadGraph();
 }
 
 /* ── Squarified treemap layout ─────────────────────────────────────────────── */

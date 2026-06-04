@@ -115,6 +115,7 @@
             <div class="map-sub-toggle" role="tablist" aria-label="Map view">
               <button id="map-tab-treemap" class="map-sub-tab active" role="tab" aria-selected="true" onclick="switchMapView('treemap')">Treemap</button>
               <button id="map-tab-table"   class="map-sub-tab"        role="tab" aria-selected="false" onclick="switchMapView('table')">Table</button>
+              <button id="map-tab-graph"   class="map-sub-tab"        role="tab" aria-selected="false" onclick="switchMapView('graph')">Graph</button>
             </div>
           </div>
           <!-- Treemap sub-view (default) -->
@@ -133,6 +134,17 @@
           <!-- Table sub-view -->
           <div id="map-panel-table" hidden>
             <table id="map-table"></table>
+          </div>
+          <!-- Graph sub-view (signature / call graph) -->
+          <div id="map-panel-graph" hidden>
+            <div class="graph-toolbar">
+              <label for="graph-scope" class="graph-scope-label">Scope</label>
+              <select id="graph-scope" class="graph-scope" aria-label="Graph scope root" onchange="loadGraph(this.value)"></select>
+              <span class="graph-meta" id="graph-meta"></span>
+            </div>
+            <svg id="graph-svg" class="graph-svg" role="group" aria-label="Code call graph — files as nodes, calls as edges. Hover a node to highlight its callers and callees."></svg>
+            <div class="graph-tooltip" id="graph-tooltip" role="tooltip" hidden></div>
+            <p class="graph-note">Call edges link a file to any in-scope file that <em>defines</em> a function it calls — matched by bare name (case-sensitive). Languages: Rust, Python, JS, TS, Go, Java.</p>
           </div>
         </div>
       </div>
