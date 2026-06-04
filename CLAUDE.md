@@ -6,7 +6,7 @@ Indexa is **the local context engine for AI**. The index is the substrate; conte
 
 Two audiences, one engine: it saves **cloud** AI tools (Claude Code, Cursor, Copilot) their paid token budget, *and* gives **local** models (Ollama, llama.cpp) the context they can't hold in a small window — by serving a retrieved slice instead of the whole repo (separates *working context* from *searchable context*; keeps the KV-cache bounded). Keep the local-model angle as honest as the cloud one — caveats live in `docs/methodology.md`, not the README hero.
 
-**Context Packs** (roadmap, v0.9) is the term for a subject-scoped bundle: files scattered across the disk that all belong to one topic, grouped into a named context and exported as one portable file (XML/Markdown, never HTML).
+**Context Packs** (shipped v0.14) is the term for a subject-scoped bundle: files scattered across the disk that all belong to one topic, grouped into a named context and exported as one portable file (XML/Markdown, never HTML).
 
 The name stays **Indexa** — the AI-"context" namespace is saturated (see `memory/feedback_naming_decision.md`); the tagline, not the name, carries "context."
 
@@ -24,6 +24,28 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
+## Current feature surface (v0.18)
+
+**CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize) · `scan` · `deep` ·
+`summarize` · `describe` · `map` · `worker` · `pack` (Context Packs) · `weight` (Importance
+weighting) · `insights` (duplicates/stale/diff) · `graph` (file-to-file call graph) · `export` ·
+`ask` · `watch` · `serve` (`--host 0.0.0.0` for LAN) · `mcp` · `status` · `rm` · `doctor` ·
+`fingerprint` · `classify` · `update`.
+
+**Major features by version:** Context Packs (v0.14) · Importance Weighting (v0.16, `importance_weights`
+table + `boost_with_weights` in QA) · Insights (v0.16, `find_*_duplicates`/`find_stale_entries`/
+`weekly_diff`) · video captioning (v0.16, `parsers.video`) · Plugin SDK (v0.15, `indexa_parsers::Registry`
++ `register()`) · LAN serve (v0.16) · **signature graph visualization** (v0.18, `store.code_graph` →
+`/api/graph` → Map tab "Graph" sub-view, force-directed SVG).
+
+**MCP server:** **29 tools** (`crates/mcp/src/lib.rs`). Code-graph tools: `dependencies` /
+`who_imports` / `who_calls` / `blast_radius` / `code_graph`. The call graph is bare-name matched
+(case-sensitive, 1-hop, 7 languages) — caveats in `docs/methodology.md`; label honestly in any UI.
+
+**Web UI:** pure vanilla JS + SVG (`createElementNS`), zero frontend libraries. JS/CSS are
+`include_str!`-concatenated in `crates/web/src/lib.rs` — a new `NN-name.js`/`.css` must be added to
+that concat list or it is dead. Bundle contains emoji → use `grep -a` when searching it.
+
 ## Verification before declaring done
 
 ```bash
@@ -33,7 +55,10 @@ cargo test --workspace
 cargo build --release
 ```
 
-For UI changes: `indexa serve` then visually confirm in browser at http://localhost:7620.
+For UI changes: `indexa serve` then visually confirm in browser at http://localhost:7620. When the
+Claude Chrome extension is unavailable, verify with a zero-dep headless-Chrome CDP harness (Node 24
+`WebSocket`+`fetch`, launches `--headless=new`, drives the page over CDP) — see
+`memory/feedback_browser_verification.md`.
 
 ## Git workflow
 

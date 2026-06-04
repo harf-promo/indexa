@@ -1408,3 +1408,120 @@ fn weekly_diff_reports_newly_added() {
     assert_eq!(diff.added_count, 1);
     assert!(diff.added.contains(&"/new.txt".to_owned()));
 }
+
+// ── Signature graph (v0.18) ───────────────────────────────────────────────────
+
+#[test]
+fn code_graph_links_callers_to_definers() {
+    let mut store = Store::open_in_memory().unwrap();
+    // /app.rs calls `run` and `parse`; /lib.rs defines `run`; /util.rs defines `parse`.
+    // /other.rs is outside the scope prefix and must be excluded.
+    store
+        .upsert_edges(&[
+            edge("/src/app.rs", "calls", "run"),
+            edge("/src/app.rs", "calls", "parse"),
+            edge("/src/lib.rs", "defines", "run"),
+            edge("/src/util.rs", "defines", "parse"),
+            edge("/other/x.rs", "calls", "run"),
+        ])
+        .unwrap();
+
+    let g = store.code_graph("/src", 400).unwrap();
+    assert!(!g.truncated);
+    // Two edges: app→lib (run), app→util (parse). /other excluded by scope.
+    assert_eq!(g.edges.len(), 2);
+    assert!(g
+        .edges
+        .iter()
+        .any(|e| e.from == "/src/app.rs" && e.to == "/src/lib.rs" && e.weight == 1));
+    assert!(g
+        .edges
+        .iter()
+        .any(|e| e.from == "/src/app.rs" && e.to == "/src/util.rs" && e.weight == 1));
+
+    // Node degrees: app out=2 in=0; lib in=1; util in=1.
+    let app = g.nodes.iter().find(|n| n.path == "/src/app.rs").unwrap();
+    assert_eq!((app.out_degree, app.in_degree), (2, 0));
+    let lib = g.nodes.iter().find(|n| n.path == "/src/lib.rs").unwrap();
+    assert_eq!((lib.out_degree, lib.in_degree), (0, 1));
+}
+
+#[test]
+fn code_graph_weight_counts_shared_symbols_and_excludes_self() {
+    let mut store = Store::open_in_memory().unwrap();
+    // /a.rs calls two symbols both defined in /b.rs → weight 2.
+    // /a.rs also defines and calls `helper` itself → self-edge excluded.
+    store
+        .upsert_edges(&[
+            edge("/a.rs", "calls", "foo"),
+            edge("/a.rs", "calls", "bar"),
+            edge("/a.rs", "calls", "helper"),
+            edge("/a.rs", "defines", "helper"),
+            edge("/b.rs", "defines", "foo"),
+            edge("/b.rs", "defines", "bar"),
+        ])
+        .unwrap();
+
+    let g = store.code_graph("/", 400).unwrap();
+    assert_eq!(g.edges.len(), 1, "only a→b (self-edge excluded)");
+    assert_eq!(g.edges[0].from, "/a.rs");
+    assert_eq!(g.edges[0].to, "/b.rs");
+    assert_eq!(g.edges[0].weight, 2, "foo + bar shared");
+}
+
+#[test]
+fn code_graph_truncates_at_cap() {
+    let mut store = Store::open_in_memory().unwrap();
+    // 3 distinct caller→callee edges; cap at 2 → truncated.
+    store
+        .upsert_edges(&[
+            edge("/a.rs", "calls", "s1"),
+            edge("/b.rs", "calls", "s2"),
+            edge("/c.rs", "calls", "s3"),
+            edge("/d.rs", "defines", "s1"),
+            edge("/d.rs", "defines", "s2"),
+            edge("/d.rs", "defines", "s3"),
+        ])
+        .unwrap();
+    let g = store.code_graph("/", 2).unwrap();
+    assert_eq!(g.edges.len(), 2);
+    assert!(g.truncated);
+}
+
+#[test]
+fn code_graph_excludes_over_common_symbols() {
+    let mut store = Store::open_in_memory().unwrap();
+    // `gen` is defined in 30 files (> the 25-file cap) → a generic name, excluded.
+    // `special` is defined in 1 file → kept.
+    let mut edges = Vec::new();
+    for i in 0..30 {
+        edges.push(edge(&format!("/def{i}.rs"), "defines", "gen"));
+    }
+    edges.push(edge("/special.rs", "defines", "special"));
+    edges.push(edge("/caller.rs", "calls", "gen"));
+    edges.push(edge("/caller.rs", "calls", "special"));
+    store.upsert_edges(&edges).unwrap();
+
+    let g = store.code_graph("/", 400).unwrap();
+    // Only the `special` edge survives; the 30 `gen` edges are filtered as noise.
+    assert!(g.edges.iter().all(|e| e.to == "/special.rs"));
+    assert_eq!(g.edges.len(), 1);
+}
+
+#[test]
+fn code_graph_scope_excludes_prefix_siblings() {
+    let mut store = Store::open_in_memory().unwrap();
+    // "/proj" must NOT match "/projector" (trailing-slash normalization).
+    store
+        .upsert_edges(&[
+            edge("/proj/a.rs", "calls", "run"),
+            edge("/proj/b.rs", "defines", "run"),
+            edge("/projector/x.rs", "calls", "run"),
+            edge("/projector/y.rs", "defines", "run"),
+        ])
+        .unwrap();
+    let g = store.code_graph("/proj", 400).unwrap();
+    assert_eq!(g.edges.len(), 1);
+    assert_eq!(g.edges[0].from, "/proj/a.rs");
+    assert_eq!(g.edges[0].to, "/proj/b.rs");
+}

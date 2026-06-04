@@ -41,8 +41,9 @@ pub use ann::AnnIndex;
 pub use entries::CoverageEntry;
 pub use insights::{DuplicateCluster, StaleEntry, WeeklyDiff};
 pub use types::{
-    ChunkRecord, ClassificationRecord, EdgeRecord, FailedQueueItem, PackRecord, QueueItem,
-    QueueStats, RegionSummary, SearchHit, SummaryRecord, TreeNode, WeightRecord,
+    ChunkRecord, ClassificationRecord, CodeGraph, CodeGraphEdge, CodeGraphNode, EdgeRecord,
+    FailedQueueItem, PackRecord, QueueItem, QueueStats, RegionSummary, SearchHit, SummaryRecord,
+    TreeNode, WeightRecord,
 };
 
 // `abstract_from` is part of the public surface (used by `indexa_core::store::abstract_from`).

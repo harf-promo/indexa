@@ -188,6 +188,9 @@ A real code graph kept in local SQLite (no Neo4j, no cloud), queryable over MCP:
 
 - **Phase 1** — imports / defines edges (file-level): `dependencies`, `who_imports` MCP tools *(shipped)*
 - **Phase 2** — call edges with cross-file resolution: `who_calls`, `blast_radius` MCP tools *(shipped)*
+- **Phase 3 — signature graph visualization** *(shipped — v0.18.0)*: interactive force-directed
+  view of the file-to-file call graph in the web Map tab ("Graph" sub-view), plus `store.code_graph`,
+  the `/api/graph` endpoint, the `code_graph` MCP tool, and the `indexa graph` CLI command.
 - Optional PageRank-style ranking and deeper reachability analysis — future iteration
 
 ---

@@ -186,6 +186,18 @@ pub enum Commands {
         action: InsightsAction,
     },
 
+    /// Show the file-to-file call graph for a directory (who calls whom).
+    #[command(after_help = "Examples:
+  indexa graph ~/code/myrepo
+  indexa graph ~/code/myrepo/src --limit 50")]
+    Graph {
+        /// Directory to scope the graph to.
+        path: String,
+        /// Max edges to print, heaviest first (default 100).
+        #[arg(long, default_value = "100")]
+        limit: usize,
+    },
+
     /// Export the hierarchical summary tree as XML, Markdown, or JSON for use as AI context.
     #[command(after_help = "Examples:
   indexa export ~/code/myrepo --format xml > .context.xml
