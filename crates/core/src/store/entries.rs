@@ -276,11 +276,11 @@ impl Store {
     /// `(total_dirs, built, partial, failed, none, total_chunks, total_files)`.
     pub fn coverage_stats(&self) -> Result<(u64, u64, u64, u64, u64, u64, u64)> {
         // rusqlite's FromSql is not implemented for u64; use i64 and cast.
-        let total_dirs = self.conn.query_row(
-            "SELECT COUNT(*) FROM entries WHERE kind = 'dir'",
-            [],
-            |r| r.get::<_, i64>(0),
-        )? as u64;
+        let total_dirs =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM entries WHERE kind = 'dir'", [], |r| {
+                    r.get::<_, i64>(0)
+                })? as u64;
         let total_files = self.conn.query_row(
             "SELECT COUNT(*) FROM entries WHERE kind = 'file'",
             [],

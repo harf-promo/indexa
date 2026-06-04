@@ -158,6 +158,7 @@ async function setModelRole(name, role) {
     const r = await fetch('/api/config/provider', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
     });
+    if (!r.ok) { toast('Failed to set model (' + r.status + ')', 'error'); return; }
     const d = await r.json();
     if (d.error) { toast(d.error, 'error'); return; }
     toast('Set ' + role + ' model → ' + name + (d.restart_required ? ' · restart indexa to apply' : ''), 'info');
@@ -231,6 +232,7 @@ async function setProvider(provider, model) {
     const r = await fetch('/api/config/provider', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
     });
+    if (!r.ok) { toast('Failed to set provider (' + r.status + ')', 'error'); return; }
     const d = await r.json();
     if (d.error) { toast(d.error, 'error'); return; }
     toast('Provider → ' + provider + (d.restart_required ? ' · restart indexa to apply' : ''), 'info');
@@ -248,6 +250,7 @@ async function saveEndpoint() {
     const r = await fetch('/api/config/provider', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({base_url: url})
     });
+    if (!r.ok) { toast('Failed to save endpoint (' + r.status + ')', 'error'); return; }
     const d = await r.json();
     if (d.error) { toast(d.error, 'error'); return; }
     toast('Ollama endpoint saved' + (d.restart_required ? ' · restart indexa to apply' : ''), 'info');
@@ -305,26 +308,32 @@ async function loadProviderStatus() {
 async function saveKey(provider) {
   const val = document.getElementById('key-' + provider).value.trim();
   if (!val) return clearKey(provider);
-  const r = await fetch('/api/keys', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({provider: provider, key: val})
-  });
-  const d = await r.json();
-  if (d.error) { toast(d.error, 'error'); return; }
-  document.getElementById('key-' + provider).value = '';
-  loadKeys();
+  try {
+    const r = await fetch('/api/keys', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider: provider, key: val})
+    });
+    if (!r.ok) { toast('Failed to save key (' + r.status + ')', 'error'); return; }
+    const d = await r.json();
+    if (d.error) { toast(d.error, 'error'); return; }
+    document.getElementById('key-' + provider).value = '';
+    loadKeys();
+  } catch(e) { toast('Error saving key: ' + e.message, 'error'); }
 }
 
 async function clearKey(provider) {
-  const r = await fetch('/api/keys', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({provider: provider, key: ''})
-  });
-  const d = await r.json();
-  if (d.error) { toast(d.error, 'error'); return; }
-  loadKeys();
+  try {
+    const r = await fetch('/api/keys', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider: provider, key: ''})
+    });
+    if (!r.ok) { toast('Failed to clear key (' + r.status + ')', 'error'); return; }
+    const d = await r.json();
+    if (d.error) { toast(d.error, 'error'); return; }
+    loadKeys();
+  } catch(e) { toast('Error clearing key: ' + e.message, 'error'); }
 }
 
 

@@ -7,6 +7,7 @@ async function showSummary(path) {
 
   try {
     var r = await fetch('/api/summary?path=' + encodeURIComponent(path));
+    if (!r.ok) throw new Error('Server error ' + r.status);
     var d = await r.json();
 
     if (d.error === 'no summary' || d.pending) {
@@ -144,6 +145,7 @@ function renderSummary(d) {
 }
 
 function toggleExportMenu(btn) {
+  if (!btn) return;
   var menu = btn.nextElementSibling;
   if (!menu) return;
   var isHidden = menu.hidden;
@@ -162,6 +164,11 @@ function toggleExportMenu(btn) {
 }
 
 function doExport(path, format) {
+  if (!path || typeof path !== 'string') {
+    toast('Select a folder first', 'warn');
+    document.querySelectorAll('.export-menu').forEach(function(m) { m.hidden = true; });
+    return;
+  }
   var url = '/api/export?format=' + encodeURIComponent(format) + '&path=' + encodeURIComponent(path);
   window.open(url, '_blank');
   document.querySelectorAll('.export-menu').forEach(function(m) { m.hidden = true; });

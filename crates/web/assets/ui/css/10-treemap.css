@@ -97,6 +97,13 @@
   opacity: 0.85;
 }
 
+/* Visible keyboard focus ring for SVG cells (tabindex=0 interactive cells) */
+.treemap-cell:focus-visible > rect {
+  outline: none;
+  stroke: var(--accent, #3b82f6);
+  stroke-width: 2px;
+}
+
 .treemap-label {
   pointer-events: none;
   font-family: var(--font-mono, 'JetBrains Mono', monospace);
