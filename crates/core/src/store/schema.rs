@@ -293,13 +293,20 @@ impl Store {
             tx.commit()?;
         }
 
-        // Note: ON DELETE CASCADE on chunks/summaries/edges is included in the CREATE
-        // TABLE IF NOT EXISTS DDL above (new databases get it automatically). Migrating
-        // existing databases to add CASCADE is intentionally skipped: the migration
-        // requires a table-recreation that would fail if any orphaned chunks/summaries
-        // exist (which is exactly the problem we're guarding against). The critical fix
-        // was converting upsert_entries to a non-destructive ON CONFLICT DO UPDATE
-        // above; manual cleanup in entries.rs remains as belt-and-suspenders.
+        // Referential integrity for chunks/summaries/edges → entries is maintained by
+        // MANUAL multi-table cleanup in entries.rs (delete_entry / delete_subtree /
+        // delete_path_artifacts_exact), NOT by a database FK. There is deliberately no
+        // `REFERENCES entries(path) ON DELETE CASCADE` on those tables because Indexa's
+        // data model intentionally allows chunks/summaries to exist with no `entries`
+        // row: `indexa deep <file>` and `indexa summarize <path>` run without a prior
+        // `scan`, and `chunks_current_for_mtime` is documented to hold "for a file with
+        // no entries row". A strict FK would reject those legitimate writes.
+        //
+        // The integrity contract (every entry-delete path clears all child rows) is
+        // locked by `delete_entry_leaves_no_orphans` / `delete_subtree_leaves_no_orphans`
+        // in store::tests — add any new entry-keyed child table to both the cleanup
+        // statements and those tests. (`importance_weights` is intentionally exempt:
+        // weights persist across entry removal by design — see store::weights.)
 
         Ok(())
     }

@@ -1,5 +1,13 @@
 //! Importance weights (v0.8): per-file, per-directory, or per-category boosts
 //! that are applied multiplicatively to search-hit RRF scores.
+//!
+//! **Weights persist across entry removal by design.** Unlike chunks/summaries/edges/
+//! classifications (which the entries.rs delete paths clear when their entry is removed),
+//! `importance_weights` rows are NOT deleted with their entry. A weight is a standing user
+//! intent that can legitimately precede or outlive an `entries` row — `weight set` even warns
+//! that a weight on a not-yet-indexed path is "stored anyway, will activate if the path is
+//! created". So a temporarily-removed-then-reindexed path keeps its weight. This asymmetry
+//! with `classifications` is intentional; see the integrity note in store::schema.
 
 use super::{Store, WeightRecord};
 use anyhow::Result;
