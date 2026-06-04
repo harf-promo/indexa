@@ -203,6 +203,25 @@ function dismissSelectedJob() {
   updateJobsTabBadge();
 }
 
+async function cancelSelectedJob() {
+  if (!selectedJobId) return;
+  const cancelBtn = document.getElementById('jd-cancel-btn');
+  if (cancelBtn) { cancelBtn.disabled = true; cancelBtn.textContent = 'Cancelling…'; }
+  try {
+    const r = await fetch('/api/jobs/' + selectedJobId, { method: 'DELETE' });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      toast(d.error || 'Cancel failed (' + r.status + ')', 'error');
+      if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.innerHTML = '&#x25A0; Cancel'; }
+    }
+    // On success the job's SSE stream will emit a Done event; renderJobDetail() will
+    // hide the cancel button once status transitions away from 'running'.
+  } catch(e) {
+    toast('Cancel error: ' + e.message, 'error');
+    if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.innerHTML = '&#x25A0; Cancel'; }
+  }
+}
+
 function selectJob(jobId) {
   selectedJobId = jobId;
   document.querySelectorAll('.jobs-card').forEach(function(c) {
@@ -362,6 +381,14 @@ function renderJobDetail(jobId) {
   }
 
   if (copyBtn) copyBtn.style.display = j.failedEvent ? '' : 'none';
+
+  // Cancel button — only visible (and enabled) while the job is running
+  const cancelBtn = document.getElementById('jd-cancel-btn');
+  if (cancelBtn) {
+    const isRunning = j.status === 'running' || j.status === 'reconnecting';
+    cancelBtn.style.display = isRunning ? '' : 'none';
+    cancelBtn.disabled = false; // reset in case it was disabled by a previous click
+  }
 
   // Elapsed timer
   clearInterval(_elapsedInterval);
@@ -527,6 +554,7 @@ function applyWarnFilter() {
 
 function toggleDetailAi() {
   detailAiOpen = !detailAiOpen;
+  localStorage.setItem('indexa.aiDetailOpen', detailAiOpen);
   const btn = document.getElementById('jd-ai-toggle');
   const pre = document.getElementById('jd-ai-pre');
   if (pre) pre.hidden = !detailAiOpen;

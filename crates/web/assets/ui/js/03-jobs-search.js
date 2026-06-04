@@ -307,7 +307,8 @@ var selectedJobId = null;
 var jobsFilter = 'all';
 
 /** Whether the AI output panel in the detail pane is open. */
-var detailAiOpen = false;
+// Restore from localStorage so the "Show AI output" preference survives page reloads.
+var detailAiOpen = localStorage.getItem('indexa.aiDetailOpen') === 'true';
 
 /* rAF batching for high-frequency updates */
 var _dirtyJobs = {};   // jobId → true when state changed

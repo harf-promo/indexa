@@ -60,6 +60,12 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
+        Commands::Index {
+            paths,
+            embed_model,
+            mode,
+            passes,
+        } => commands::cmd_index(paths, embed_model, mode, passes, &cfg).await,
         Commands::Scan { paths, all } => commands::cmd_scan(paths, all).await,
         Commands::Deep {
             paths,
