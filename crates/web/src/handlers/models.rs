@@ -195,7 +195,10 @@ pub(crate) async fn api_models_catalog_refresh(State(s): State<AppState>) -> Res
             Json(serde_json::json!({ "refreshed": true, "source": url, "count": count }))
                 .into_response()
         }
-        Err(e) => Json(serde_json::json!({ "refreshed": false, "error": e })).into_response(),
+        Err(e) => err_json(
+            StatusCode::BAD_GATEWAY,
+            format!("catalog refresh failed: {e}"),
+        ),
     }
 }
 

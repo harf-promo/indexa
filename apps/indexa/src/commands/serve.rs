@@ -10,6 +10,15 @@ pub(crate) async fn cmd_serve(
     llm_model_flag: Option<String>,
     cfg: &Config,
 ) -> Result<()> {
+    // Enable the web "Update now" button for CLI serve users.
+    // The update replaces the binary on disk; the user must restart `indexa serve` manually
+    // (unlike the desktop app which calls app.restart()). Gated on this var so the endpoint
+    // stays disabled in headless/library contexts that embed indexa_web::serve directly.
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var("INDEXA_WEB_ALLOW_UPDATE", "1");
+    }
+
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };

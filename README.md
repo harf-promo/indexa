@@ -18,7 +18,7 @@ claude "given @.context.xml, find the auth flow and add MFA"
 
 *The index is the substrate; context is the product. Local-first · model-agnostic · Apache-2.0.*
 
-> **Status — v0.11.0.** Eleven releases of shipped features, built in the open. The full flow works today — scan → deep context → hierarchical summaries → ask, plus a local web workspace and an MCP server for AI agents. A daily-driver for a single repo; very large whole-disk runs are still getting faster, and the storage format may move before 1.0. New here? Start with the **[Usage Guide](USAGE.md)** or **[Quickstart](docs/quickstart.md)**.
+> **Status — v0.12.3.** Thirteen releases of shipped features, built in the open. The full flow works today — scan → deep context → hierarchical summaries → ask, plus a local web workspace, a native desktop app (macOS), and an MCP server for AI agents. A daily-driver for a single repo; very large whole-disk runs are still getting faster, and the storage format may move before 1.0. New here? Start with the **[Usage Guide](USAGE.md)** or **[Quickstart](docs/quickstart.md)**.
 
 ---
 
@@ -76,13 +76,13 @@ indexa mcp                                                 # or expose the live 
 
 ---
 
-## What ships today (v0.11.0)
+## What ships today (v0.12.3)
 
 - **Two-phase context** — an instant surface scan (zero AI, classifies code vs media vs build artifacts) then deep context: parse → chunk → embed → LLM file summaries rolled up bottom-up into a hierarchical context graph, with **L0 / L1 / L2 progressive disclosure** (one-line abstract → full summary → raw content).
 - **Hybrid retrieval** — keyword (BM25) + semantic (vector) fused with RRF, plus an **opt-in ANN index** that keeps dense search fast on 50K-plus-chunk corpora.
 - **Local multimodal** *(opt-in, on-device)* — caption images with a local vision model and transcribe audio with a local whisper CLI, so you can find media by what's *in* it, not just its filename.
-- **Code intelligence** — a code-relationship graph (imports + defined symbols) across Rust, Python, JS/TS, Go, and Java, queryable over MCP.
-- **Three interfaces** — a CLI, a local web workspace with a live **Engine** status bar, and a native **MCP** server (10 tools) for AI agents.
+- **Code intelligence** — a code-relationship graph (imports + defined symbols + call edges) across Rust, Python, JS/TS, Go, and Java, plus `who_calls` and `blast_radius` for impact analysis — all queryable over MCP.
+- **Four interfaces** — a CLI, a local web workspace with a live **Engine** status bar, a **native macOS desktop app** (auto-updating, menu-bar tray), and a native **MCP** server (10 tools) for AI agents.
 - **Resource-aware** — a memory watchdog that won't freeze your machine, and a hardware-aware model picker that annotates every model with its memory footprint, fit against your live RAM, and a per-job ETA.
 - **Use your Claude subscription** — the `claude-code` provider runs summaries and answers on your Claude Pro/Max plan (no per-token billing); embeddings always stay local.
 - **Export** — XML (the format Anthropic's own docs recommend for context windows), Markdown, or JSON. **Watch** keeps the context current as files change.
@@ -91,11 +91,12 @@ indexa mcp                                                 # or expose the live 
 
 ## Three ways in
 
-- **CLI** — `scan · deep · summarize · ask · export · watch · serve · mcp · doctor · classify`. Scriptable, pipeable, zero services.
+- **CLI** — `scan · deep · summarize · ask · export · watch · serve · mcp · doctor · classify · update`. Scriptable, pipeable, zero services.
 - **Web workspace** — `indexa serve` → `http://localhost:7620`. A live Engine status bar shows what the machine is doing while it builds:
   ```
   Engine  Building · 42 files/s · ETA 1m12s · gemma3:4b    CPU 38%   RAM 9.1 / 16 GB   pressure: ok
   ```
+- **Desktop app** — a native macOS app (Apple Silicon; Intel via CLI) that lives in the menu bar. Auto-updates silently. Bundles the web workspace — no separate `indexa serve` needed.
 - **MCP server** — `indexa mcp` exposes the live index to any [MCP](https://modelcontextprotocol.io) client (Claude Desktop, Cursor, Claude Code) over **10 tools**:
   `search · browse_tree · get_summary · read_file · ask · dependencies · who_imports · who_calls · blast_radius · get_stats`.
 
