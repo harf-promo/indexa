@@ -106,3 +106,16 @@ pub(crate) async fn api_classifications_ignore(
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
 }
+
+/// Reset (undo) a classification — deletes the row entirely so the path reverts to
+/// "no suggestion". Re-running `indexa classify` will re-surface the auto suggestion.
+pub(crate) async fn api_classifications_reset(
+    State(state): State<AppState>,
+    Json(body): Json<IgnoreRequest>, // only needs `path`
+) -> Response {
+    let mut store = state.store.lock().await;
+    match store.delete_classification(&body.path) {
+        Ok(()) => Json(serde_json::json!({ "reset": true })).into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
+}

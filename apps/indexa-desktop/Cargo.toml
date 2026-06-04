@@ -1,6 +1,6 @@
 [package]
 name = "indexa-desktop"
-version = "0.12.3"
+version = "0.13.0"
 edition = "2021"
 authors = ["Harf Promo <ahmed541991@gmail.com>"]
 license = "Apache-2.0"

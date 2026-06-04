@@ -24,6 +24,7 @@ mod watch;
 pub(crate) use ask::{api_ask, api_ask_stream};
 pub(crate) use classify::{
     api_classifications_confirm, api_classifications_ignore, api_classifications_list,
+    api_classifications_reset,
 };
 pub(crate) use config::{
     api_config_features_get, api_config_features_set, api_config_get, api_config_passes,
