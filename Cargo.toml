@@ -60,6 +60,8 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Platform paths
 directories = "5"
+# Network interface enumeration (LAN serve)
+if-addrs = "0.15"
 
 # Async traits
 async-trait = "0.1"

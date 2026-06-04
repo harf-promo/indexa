@@ -18,6 +18,7 @@ pub(crate) async fn cmd_weight_set(
     let mut store = Store::open(&db_path)?;
 
     // Auto-detect kind from path if not explicitly specified.
+    let looks_like_path = target.contains('/') || target.contains('\\');
     let resolved_kind = if kind == "auto" {
         let p = std::path::Path::new(&target);
         if p.is_dir() {
@@ -26,7 +27,7 @@ pub(crate) async fn cmd_weight_set(
             "file"
         } else {
             // Treat as category if it doesn't look like a path.
-            if target.contains('/') || target.contains('\\') {
+            if looks_like_path {
                 "file"
             } else {
                 "category"
@@ -35,6 +36,18 @@ pub(crate) async fn cmd_weight_set(
     } else {
         kind.as_str()
     };
+
+    // Warn (don't block) if a path-like target doesn't exist on disk: the weight is still
+    // stored and will activate if the path is created later, but a typo is the likely cause.
+    if (resolved_kind == "file" || resolved_kind == "dir")
+        && looks_like_path
+        && !std::path::Path::new(&target).exists()
+    {
+        eprintln!(
+            "  ⚠  \"{target}\" does not exist on disk — storing the weight anyway \
+             (it will apply if the path is created). Check for a typo."
+        );
+    }
 
     store.set_weight(resolved_kind, &target, weight, "user", None)?;
     println!("Set {resolved_kind} weight for \"{target}\" = {weight:.2}");

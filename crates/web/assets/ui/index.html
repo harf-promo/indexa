@@ -331,10 +331,14 @@
       <div class="settings-section" id="section-insights">
         <h2>Insights</h2>
         <p class="settings-note" style="margin-bottom:10px">Analyse your index for duplicate files, inactive projects, and recent changes.</p>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
           <button class="btn-sm" onclick="runInsights('duplicates')">Find duplicates</button>
           <button class="btn-sm" onclick="runInsights('stale')">Stale projects</button>
+          <label style="font-size:11px;color:var(--muted)">older than
+            <input type="number" id="insights-stale-days" min="1" step="30" value="365" style="width:60px;font-size:11px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:1px 4px" aria-label="Stale threshold in days"> days</label>
           <button class="btn-sm" onclick="runInsights('diff')">Weekly diff</button>
+          <label style="font-size:11px;color:var(--muted)">last
+            <input type="number" id="insights-diff-days" min="1" step="1" value="7" style="width:50px;font-size:11px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:1px 4px" aria-label="Diff window in days"> days</label>
         </div>
         <div id="insights-results" style="display:none;max-height:300px;overflow-y:auto;font-size:12px;background:var(--surface2);border-radius:6px;padding:10px"></div>
       </div>

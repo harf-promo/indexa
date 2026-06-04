@@ -40,12 +40,21 @@ pub(crate) async fn api_insights_duplicates(
     let threshold = q.threshold.unwrap_or(0.95).clamp(0.0, 1.0);
     let exact = q.exact.unwrap_or(false);
 
-    let store = state.store.lock().await;
-    let result = if exact {
-        store.find_exact_duplicates()
-    } else {
-        store.find_near_duplicates(threshold)
-    };
+    // Duplicate detection (esp. the O(n²) near-dup scan) can take seconds-to-minutes
+    // on a large index. Run it on a fresh, short-lived Store connection inside
+    // spawn_blocking so it never holds the shared Store mutex (which would block every
+    // other API request) and never stalls the async runtime.
+    let db_path = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let store = indexa_core::store::Store::open(&db_path)?;
+        if exact {
+            store.find_exact_duplicates()
+        } else {
+            store.find_near_duplicates(threshold)
+        }
+    })
+    .await
+    .unwrap_or_else(|e| Err(anyhow::anyhow!("duplicate-scan task panicked: {e}")));
 
     match result {
         Ok(clusters) => {

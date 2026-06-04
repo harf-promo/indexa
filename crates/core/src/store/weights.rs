@@ -166,9 +166,89 @@ impl Store {
     }
 
     /// Apply importance weight boosts to a list of search hits (multiplicative on rrf_score).
+    ///
+    /// Pre-loads the whole `importance_weights` table into in-memory maps once (the table is
+    /// small — user-curated) so resolving each hit needs no per-hit SQL for file/dir weights.
+    /// Previously this fired up to `depth`-many ancestor queries per hit (≈200 round-trips for
+    /// a 20-hit answer over an 8-deep tree). Category weights still consult `classifications`,
+    /// but only when category weights exist, and the result is cached per path within the call.
     pub fn boost_with_weights(&self, hits: &mut [super::SearchHit]) -> Result<()> {
+        use std::collections::HashMap;
+
+        // Load the (small) weights table once into kind-specific maps.
+        let mut file_w: HashMap<String, f32> = HashMap::new();
+        let mut dir_w: HashMap<String, f32> = HashMap::new();
+        let mut cat_w: HashMap<String, f32> = HashMap::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT target_kind, target, weight FROM importance_weights")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, f32>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (kind, target, w) = row?;
+                match kind.as_str() {
+                    "file" => drop(file_w.insert(target, w)),
+                    "dir" => drop(dir_w.insert(target, w)),
+                    "category" => drop(cat_w.insert(target, w)),
+                    _ => {}
+                }
+            }
+        }
+        // No weights set → nothing to do (the common case is now a single SELECT).
+        if file_w.is_empty() && dir_w.is_empty() && cat_w.is_empty() {
+            return Ok(());
+        }
+
+        // Cache classifications category lookups per path within this call.
+        let mut cat_cache: HashMap<String, Option<String>> = HashMap::new();
+
         for hit in hits.iter_mut() {
-            let w = self.weight_for(&hit.entry_path)?;
+            let path = &hit.entry_path;
+            // 1. Exact file weight.
+            let w = if let Some(&w) = file_w.get(path) {
+                Some(w)
+            } else {
+                // 2. Nearest ancestor directory weight (longest prefix).
+                let mut found = None;
+                let mut p = std::path::Path::new(path);
+                while let Some(parent) = p.parent() {
+                    if let Some(&w) = dir_w.get(parent.to_string_lossy().as_ref()) {
+                        found = Some(w);
+                        break;
+                    }
+                    p = parent;
+                }
+                found
+            };
+            // 3. Category weight (only if category weights exist).
+            let w = match w {
+                Some(w) => w,
+                None if !cat_w.is_empty() => {
+                    let category = if let Some(c) = cat_cache.get(path) {
+                        c.clone()
+                    } else {
+                        let c: Option<String> = self
+                            .conn
+                            .query_row(
+                                "SELECT category FROM classifications \
+                                 WHERE path=?1 AND source != 'ignored'",
+                                params![path],
+                                |r| r.get::<_, String>(0),
+                            )
+                            .optional()?;
+                        cat_cache.insert(path.clone(), c.clone());
+                        c
+                    };
+                    category.and_then(|c| cat_w.get(&c).copied()).unwrap_or(1.0)
+                }
+                None => 1.0,
+            };
             if (w - 1.0f32).abs() > f32::EPSILON {
                 hit.rrf_score *= w as f64;
             }
