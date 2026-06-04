@@ -82,9 +82,13 @@ async fn main() -> Result<()> {
         Commands::Describe { path } => commands::cmd_describe(path).await,
         Commands::Worker { concurrency } => commands::cmd_worker(concurrency, &cfg).await,
         Commands::Pack { action } => match action {
-            PackAction::Create { name, description } => {
-                commands::cmd_pack_create(name, description).await
-            }
+            PackAction::Create {
+                name,
+                description,
+                auto,
+                yes,
+                limit,
+            } => commands::cmd_pack_create(name, description, auto, yes, limit, &cfg).await,
             PackAction::Add { name, paths } => commands::cmd_pack_add(name, paths).await,
             PackAction::Remove { name, paths } => commands::cmd_pack_remove(name, paths).await,
             PackAction::List => commands::cmd_pack_list().await,

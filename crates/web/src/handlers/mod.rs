@@ -11,6 +11,7 @@ mod jobs;
 mod keys;
 mod misc;
 mod models;
+mod packs;
 mod providers;
 mod queue;
 mod stats;
@@ -40,6 +41,10 @@ pub(crate) use keys::{api_keys_get, api_keys_set};
 pub(crate) use misc::{api_delete_entry, api_logs_tail, api_version};
 pub(crate) use models::{
     api_models, api_models_catalog_refresh, api_models_installed, api_models_pull,
+};
+pub(crate) use packs::{
+    api_packs_create, api_packs_delete, api_packs_export, api_packs_list, api_packs_paths_add,
+    api_packs_paths_get, api_packs_paths_remove, api_packs_suggest,
 };
 pub(crate) use providers::api_providers_status;
 pub(crate) use queue::{api_queue_failed, api_queue_retry, api_queue_stats};

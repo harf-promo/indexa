@@ -6,10 +6,11 @@
 //!
 //! **stdout is the protocol channel** — all logging must go to stderr.
 //!
-//! Tools (10): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
+//! Tools (13): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
 //! disclosure), `read_file`, `ask`, `dependencies` (a file's imports, defined symbols,
 //! and calls), `who_imports` (reverse code-graph lookup), `who_calls` (D2 — reverse
-//! call lookup), `blast_radius` (D2 — 1-hop call blast radius), `get_stats`.
+//! call lookup), `blast_radius` (D2 — 1-hop call blast radius), `get_stats`,
+//! `list_packs`, `get_pack`, `export_pack` (Context Packs).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -111,6 +112,24 @@ pub struct WhoCallsParams {
 pub struct BlastRadiusParams {
     /// Bare function or method name whose blast radius to compute.
     pub symbol: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetPackParams {
+    /// Name of the Context Pack to retrieve (case-insensitive).
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ExportPackParams {
+    /// Name of the Context Pack to export (case-insensitive).
+    pub name: String,
+    /// Output format: `xml` (default), `md`, or `json`.
+    #[serde(default)]
+    pub format: Option<String>,
+    /// Maximum tree depth per path (0 = top summary only). Omit for full depth.
+    #[serde(default)]
+    pub depth: Option<usize>,
 }
 
 fn mcp_err(e: impl std::fmt::Display) -> ErrorData {
@@ -481,6 +500,142 @@ impl IndexaMcp {
         Ok(ok_text(out))
     }
 
+    /// List all Context Packs with their path counts.
+    #[tool(
+        description = "List all Context Packs — named, cross-directory context bundles. \
+                       Returns each pack's name, description, and path count. \
+                       Use `get_pack` to see the paths inside a specific pack, \
+                       or `export_pack` to render its content for an AI tool."
+    )]
+    async fn list_packs(&self) -> Result<CallToolResult, ErrorData> {
+        let store = self.store()?;
+        let packs = store.list_packs().map_err(mcp_err)?;
+        if packs.is_empty() {
+            return Ok(ok_text(
+                "No Context Packs yet. Create one with: indexa pack create \"<name>\"",
+            ));
+        }
+        let lines: Vec<String> = packs
+            .iter()
+            .map(|p| {
+                let desc = p
+                    .description
+                    .as_deref()
+                    .map(|d| format!(" — {d}"))
+                    .unwrap_or_default();
+                format!("{}{} ({} paths)", p.name, desc, p.path_count)
+            })
+            .collect();
+        Ok(ok_text(format!(
+            "{} pack(s):\n\n{}",
+            packs.len(),
+            lines.join("\n")
+        )))
+    }
+
+    /// Show the paths inside a named Context Pack.
+    #[tool(
+        description = "Show the file/directory paths contained in a named Context Pack. \
+                       Use `export_pack` to render the full summarised content."
+    )]
+    async fn get_pack(
+        &self,
+        params: Parameters<GetPackParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let GetPackParams { name } = params.0;
+        let store = self.store()?;
+        let pack = store
+            .pack_by_name(&name)
+            .map_err(mcp_err)?
+            .ok_or_else(|| mcp_err(format!("no pack named \"{name}\"")))?;
+        let paths = store.pack_paths(&pack.id).map_err(mcp_err)?;
+        if paths.is_empty() {
+            return Ok(ok_text(format!(
+                "Pack \"{name}\" is empty. Add paths with: indexa pack add \"{name}\" <paths…>"
+            )));
+        }
+        Ok(ok_text(format!(
+            "Pack \"{name}\" ({} paths):\n\n{}",
+            paths.len(),
+            paths.join("\n")
+        )))
+    }
+
+    /// Export a Context Pack as XML, Markdown, or JSON — ready to paste into any AI tool.
+    #[tool(
+        description = "Export a Context Pack as a self-contained context file (XML by default, \
+                       also Markdown or JSON). Each path in the pack is rendered with its \
+                       hierarchical summary tree. Ideal for giving an AI tool focused context \
+                       on a specific topic (e.g. 'Auth', 'Tax 2025', 'Client X')."
+    )]
+    async fn export_pack(
+        &self,
+        params: Parameters<ExportPackParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        use indexa_query::{build_tree, render_json, render_markdown, render_xml};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let ExportPackParams {
+            name,
+            format,
+            depth,
+        } = params.0;
+        let format = format.as_deref().unwrap_or("xml");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_else(|_| "0".to_owned());
+
+        let store = self.store()?;
+        let pack = store
+            .pack_by_name(&name)
+            .map_err(mcp_err)?
+            .ok_or_else(|| mcp_err(format!("no pack named \"{name}\"")))?;
+        let paths = store.pack_paths(&pack.id).map_err(mcp_err)?;
+        if paths.is_empty() {
+            return Err(mcp_err(format!(
+                "pack \"{name}\" is empty — add paths first with: \
+                 indexa pack add \"{name}\" <paths…>"
+            )));
+        }
+
+        let is_xml = format != "md" && format != "markdown" && format != "json";
+        let mut buf = String::new();
+        if is_xml {
+            buf.push_str("<context pack=\"");
+            buf.push_str(&xml_escape_mcp(&name));
+            buf.push_str("\" generated=\"");
+            buf.push_str(&now);
+            buf.push_str("\">\n");
+        }
+
+        let mut exported = 0usize;
+        for root_path in &paths {
+            let tree = build_tree(&store, root_path, depth).map_err(mcp_err)?;
+            let Some(tree) = tree else { continue };
+            let rendered = match format {
+                "md" | "markdown" => render_markdown(&tree),
+                "json" => render_json(&tree),
+                _ => render_xml(&tree, &now),
+            };
+            buf.push_str(&rendered);
+            buf.push('\n');
+            exported += 1;
+        }
+        if is_xml {
+            buf.push_str("</context>\n");
+        }
+
+        if exported == 0 {
+            return Err(mcp_err(format!(
+                "no paths in pack \"{name}\" have summaries yet \
+                 — run `indexa summarize <path>` or `indexa index <path>` first"
+            )));
+        }
+
+        Ok(ok_text(buf))
+    }
+
     /// Index statistics (entry + chunk counts).
     #[tool(description = "Return index statistics: total indexed entries and embedded chunks.")]
     async fn get_stats(&self) -> Result<CallToolResult, ErrorData> {
@@ -542,7 +697,9 @@ impl ServerHandler for IndexaMcp {
             "Indexa is a local context engine: a hierarchically-summarized index of your files. \
              Navigate with `browse_tree` and `search`; call `get_summary` with tier=l0 (one-line \
              abstract) to scan cheaply, then drill to l1 (full summary) or l2 (raw content). Use \
-             `read_file` for raw text and `ask` for grounded question-answering over the index."
+             `read_file` for raw text and `ask` for grounded question-answering over the index. \
+             Use `list_packs` / `get_pack` / `export_pack` to work with Context Packs — named, \
+             cross-directory context bundles ready to paste into any AI tool."
                 .to_owned(),
         )
     }
@@ -562,6 +719,13 @@ pub async fn serve_mcp(
     let service = handler.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+fn xml_escape_mcp(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// True if `requested` lies within any of the (canonicalized) indexed `roots`.

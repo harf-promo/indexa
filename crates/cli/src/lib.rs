@@ -368,13 +368,28 @@ pub enum Commands {
 /// Sub-commands for `indexa pack`.
 #[derive(clap::Subcommand, Debug)]
 pub enum PackAction {
-    /// Create a new (empty) Context Pack.
+    /// Create a new Context Pack.
+    #[command(after_help = "Examples:
+  indexa pack create \"Auth\"
+  indexa pack create \"Auth\" --auto
+  indexa pack create \"Auth\" --auto --yes --limit 30")]
     Create {
         /// Pack name (must be unique).
         name: String,
         /// Optional short description.
         #[arg(long, short)]
         description: Option<String>,
+        /// Auto-suggest paths by finding summaries semantically related to the
+        /// pack name. Requires an indexed + summarised subtree with embeddings.
+        /// Falls back to keyword search when embeddings are unavailable.
+        #[arg(long, short)]
+        auto: bool,
+        /// Skip the confirmation prompt when using --auto.
+        #[arg(long, short)]
+        yes: bool,
+        /// Number of paths to suggest when using --auto (default: 20).
+        #[arg(long, default_value = "20")]
+        limit: usize,
     },
     /// Add one or more paths to an existing pack.
     Add {

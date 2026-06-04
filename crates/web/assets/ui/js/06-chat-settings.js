@@ -133,6 +133,7 @@ async function loadSettings() {
   loadPasses();
   loadResource();
   if (typeof loadFeatures === 'function') loadFeatures();
+  if (typeof loadPacks === 'function') loadPacks();
 }
 async function loadPasses() {
   try {

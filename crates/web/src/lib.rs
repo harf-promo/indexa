@@ -119,6 +119,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/13-classify.js"),
     include_str!("../assets/ui/js/14-watch.js"),
     include_str!("../assets/ui/js/15-update.js"),
+    include_str!("../assets/ui/js/16-context-packs.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -282,6 +283,16 @@ pub async fn serve(
         .route("/api/watch/status", get(api_watch_status))
         .route("/api/watch/start", post(api_watch_start))
         .route("/api/watch/stop", post(api_watch_stop))
+        .route("/api/packs", get(api_packs_list).post(api_packs_create))
+        .route("/api/packs/suggest", post(api_packs_suggest))
+        .route("/api/packs/:name", delete(api_packs_delete))
+        .route(
+            "/api/packs/:name/paths",
+            get(api_packs_paths_get)
+                .post(api_packs_paths_add)
+                .delete(api_packs_paths_remove),
+        )
+        .route("/api/packs/:name/export", get(api_packs_export))
         .with_state(state)
         .layer(
             tower_http::cors::CorsLayer::new()

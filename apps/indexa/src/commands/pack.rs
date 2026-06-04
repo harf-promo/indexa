@@ -1,8 +1,11 @@
 use anyhow::{bail, Result};
-use indexa_core::store::Store;
+use indexa_core::{
+    config::{Config, HybridMode},
+    store::Store,
+};
 use indexa_query::{build_tree, render_json, render_markdown, render_xml};
 
-use super::helpers::require_index_db;
+use super::helpers::{build_embedder, require_index_db};
 
 /// Resolve and expand a path, canonicalizing `~` prefixes.
 fn expand(p: &str) -> String {
@@ -17,15 +20,114 @@ fn now_str() -> String {
         .unwrap_or_else(|_| "0".to_owned())
 }
 
-pub(crate) async fn cmd_pack_create(name: String, description: Option<String>) -> Result<()> {
+pub(crate) async fn cmd_pack_create(
+    name: String,
+    description: Option<String>,
+    auto: bool,
+    yes: bool,
+    limit: usize,
+    cfg: &Config,
+) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };
     let mut store = Store::open(&db_path)?;
     let id = store.create_pack(&name, description.as_deref())?;
     println!("Created pack \"{name}\" (id: {id})");
-    println!("Add paths with: indexa pack add \"{name}\" <paths…>");
+
+    if !auto {
+        println!("Add paths with: indexa pack add \"{name}\" <paths…>");
+        return Ok(());
+    }
+
+    // ── Auto-suggest paths ────────────────────────────────────────────────────
+    println!("Searching for paths related to \"{name}\"…");
+
+    // Try semantic search (requires embedder + summarised tree with embeddings).
+    let candidates: Vec<String> = match build_embedder(cfg, None) {
+        Ok(embedder) => match embedder.embed(&name).await {
+            Ok(embedding) => {
+                let hits = store.summary_cosine_search(&embedding, limit, 0.15)?;
+                if hits.is_empty() {
+                    eprintln!("  (no summary embeddings found — falling back to keyword search)");
+                    keyword_suggest(&store, &name, limit)?
+                } else {
+                    println!("  [semantic match — {} candidates]", hits.len());
+                    hits.into_iter().map(|(path, _score)| path).collect()
+                }
+            }
+            Err(e) => {
+                eprintln!("  (embedding failed: {e:#} — falling back to keyword search)");
+                keyword_suggest(&store, &name, limit)?
+            }
+        },
+        Err(e) => {
+            eprintln!("  (embedder unavailable: {e:#} — falling back to keyword search)");
+            keyword_suggest(&store, &name, limit)?
+        }
+    };
+
+    if candidates.is_empty() {
+        println!("No related paths found. Add manually with: indexa pack add \"{name}\" <paths…>");
+        return Ok(());
+    }
+
+    println!("\nSuggested paths ({}):", candidates.len());
+    for p in &candidates {
+        println!("  {p}");
+    }
+
+    // ── Confirm ───────────────────────────────────────────────────────────────
+    let confirmed = if yes {
+        true
+    } else {
+        use std::io::IsTerminal as _;
+        if std::io::stdin().is_terminal() {
+            print!(
+                "\nAdd all {} paths to pack \"{name}\"? [Y/n] ",
+                candidates.len()
+            );
+            use std::io::Write as _;
+            let _ = std::io::stdout().flush();
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            input.trim().is_empty() || input.trim().to_lowercase() == "y"
+        } else {
+            true // non-interactive: accept
+        }
+    };
+
+    if !confirmed {
+        println!("Skipped. Add manually with: indexa pack add \"{name}\" <paths…>");
+        return Ok(());
+    }
+
+    store.add_pack_paths(&id, &candidates)?;
+    println!(
+        "Added {} path{} to \"{name}\".",
+        candidates.len(),
+        if candidates.len() == 1 { "" } else { "s" }
+    );
     Ok(())
+}
+
+/// Keyword fallback for `--auto` when embeddings are unavailable.
+fn keyword_suggest(store: &Store, query: &str, limit: usize) -> Result<Vec<String>> {
+    let hits = store.hybrid_search(query, None, &HybridMode::Sparse, None, limit * 3, 0.0)?;
+    println!("  [keyword match — {} chunk hits]", hits.len());
+    let mut seen = std::collections::HashSet::new();
+    let paths: Vec<String> = hits
+        .into_iter()
+        .filter_map(|h| {
+            if seen.insert(h.entry_path.clone()) {
+                Some(h.entry_path)
+            } else {
+                None
+            }
+        })
+        .take(limit)
+        .collect();
+    Ok(paths)
 }
 
 pub(crate) async fn cmd_pack_add(name: String, paths: Vec<String>) -> Result<()> {
