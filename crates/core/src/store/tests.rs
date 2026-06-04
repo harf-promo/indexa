@@ -926,6 +926,181 @@ fn subtree_has_unfinished_guards_prefix_siblings() {
     assert!(!store.subtree_has_unfinished("/proj", 1).unwrap());
 }
 
+// ── Context Packs ─────────────────────────────────────────────────────────────
+
+#[test]
+fn pack_create_and_lookup_by_name() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store
+        .create_pack("Auth", Some("authentication files"))
+        .unwrap();
+    assert!(!id.is_empty(), "generated id must be non-empty");
+
+    let rec = store.pack_by_name("Auth").unwrap().unwrap();
+    assert_eq!(rec.name, "Auth");
+    assert_eq!(rec.description.as_deref(), Some("authentication files"));
+    assert_eq!(rec.id, id);
+    assert_eq!(rec.path_count, 0);
+}
+
+#[test]
+fn pack_lookup_is_case_insensitive() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.create_pack("Auth", None).unwrap();
+
+    assert!(store.pack_by_name("auth").unwrap().is_some());
+    assert!(store.pack_by_name("AUTH").unwrap().is_some());
+    assert!(store.pack_by_name("aUtH").unwrap().is_some());
+}
+
+#[test]
+fn pack_lookup_missing_returns_none() {
+    let store = Store::open_in_memory().unwrap();
+    assert!(store.pack_by_name("nonexistent").unwrap().is_none());
+}
+
+#[test]
+fn pack_create_duplicate_name_errors() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.create_pack("Dup", None).unwrap();
+    assert!(
+        store.create_pack("Dup", None).is_err(),
+        "duplicate name must fail the UNIQUE constraint"
+    );
+}
+
+#[test]
+fn pack_add_paths_and_list() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store.create_pack("Tax", Some("tax docs")).unwrap();
+    store
+        .add_pack_paths(
+            &id,
+            &[
+                "/docs/tax/2024.pdf".to_owned(),
+                "/docs/tax/2025.pdf".to_owned(),
+            ],
+        )
+        .unwrap();
+
+    let paths = store.pack_paths(&id).unwrap();
+    assert_eq!(paths.len(), 2);
+    assert!(paths.contains(&"/docs/tax/2024.pdf".to_owned()));
+    assert!(paths.contains(&"/docs/tax/2025.pdf".to_owned()));
+
+    // list_packs reflects the count
+    let packs = store.list_packs().unwrap();
+    let rec = packs.iter().find(|p| p.name == "Tax").unwrap();
+    assert_eq!(rec.path_count, 2);
+}
+
+#[test]
+fn pack_add_paths_is_idempotent() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store.create_pack("Idem", None).unwrap();
+    let path = "/a/b.txt".to_owned();
+    store.add_pack_paths(&id, &[path.clone()]).unwrap();
+    store.add_pack_paths(&id, &[path.clone()]).unwrap(); // must not error or double-count
+    assert_eq!(store.pack_paths(&id).unwrap().len(), 1);
+}
+
+#[test]
+fn pack_remove_paths() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store.create_pack("Rem", None).unwrap();
+    store
+        .add_pack_paths(
+            &id,
+            &[
+                "/x/a.txt".to_owned(),
+                "/x/b.txt".to_owned(),
+                "/x/c.txt".to_owned(),
+            ],
+        )
+        .unwrap();
+    store
+        .remove_pack_paths(&id, &["/x/b.txt".to_owned()])
+        .unwrap();
+
+    let paths = store.pack_paths(&id).unwrap();
+    assert_eq!(paths.len(), 2);
+    assert!(!paths.contains(&"/x/b.txt".to_owned()));
+}
+
+#[test]
+fn pack_remove_nonexistent_path_is_harmless() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store.create_pack("Safe", None).unwrap();
+    store
+        .add_pack_paths(&id, &["/real.txt".to_owned()])
+        .unwrap();
+    // Removing a path that is not in the pack must not error.
+    store
+        .remove_pack_paths(&id, &["/ghost.txt".to_owned()])
+        .unwrap();
+    assert_eq!(store.pack_paths(&id).unwrap().len(), 1);
+}
+
+#[test]
+fn pack_list_ordered_by_name() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.create_pack("Zebra", None).unwrap();
+    store.create_pack("Alpha", None).unwrap();
+    store.create_pack("Mango", None).unwrap();
+
+    let names: Vec<_> = store
+        .list_packs()
+        .unwrap()
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(names, vec!["Alpha", "Mango", "Zebra"]);
+}
+
+#[test]
+fn pack_delete_removes_pack_and_paths() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store.create_pack("Gone", None).unwrap();
+    store
+        .add_pack_paths(&id, &["/a.txt".to_owned(), "/b.txt".to_owned()])
+        .unwrap();
+    assert_eq!(store.pack_paths(&id).unwrap().len(), 2);
+
+    store.delete_pack(&id).unwrap();
+
+    // Pack is gone.
+    assert!(store.pack_by_name("Gone").unwrap().is_none());
+    // Cascade removed all pack_paths rows.
+    assert!(store.pack_paths(&id).unwrap().is_empty());
+    // list_packs returns nothing.
+    assert!(store.list_packs().unwrap().is_empty());
+}
+
+#[test]
+fn pack_delete_nonexistent_is_harmless() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.delete_pack("no-such-id").unwrap();
+}
+
+#[test]
+fn pack_paths_ordered_alphabetically() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store.create_pack("Order", None).unwrap();
+    store
+        .add_pack_paths(
+            &id,
+            &[
+                "/z.txt".to_owned(),
+                "/a.txt".to_owned(),
+                "/m.txt".to_owned(),
+            ],
+        )
+        .unwrap();
+
+    let paths = store.pack_paths(&id).unwrap();
+    assert_eq!(paths, vec!["/a.txt", "/m.txt", "/z.txt"]);
+}
+
 fn edge(from: &str, kind: &str, to: &str) -> EdgeRecord {
     EdgeRecord {
         from_path: from.into(),
