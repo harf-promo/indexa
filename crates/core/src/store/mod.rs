@@ -85,4 +85,10 @@ impl Store {
     pub fn db_path(&self) -> &Path {
         &self.db_path
     }
+
+    /// Raw connection access for diagnostic / doctor tooling.
+    /// Prefer dedicated store methods for all non-diagnostic use.
+    pub fn db_connection(&self) -> &Connection {
+        &self.conn
+    }
 }

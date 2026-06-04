@@ -181,6 +181,31 @@ function doExportPack(name, format) {
     });
 }
 
+function searchCurrentPack() {  // eslint-disable-line no-unused-vars
+  if (!_currentPackName) return;
+  var input     = document.getElementById('pack-search-query');
+  var resultsEl = document.getElementById('pack-search-results');
+  var q = (input ? input.value : '').trim();
+  if (!q || !resultsEl) return;
+  resultsEl.style.display = '';
+  resultsEl.textContent = 'Searching…';
+  fetch('/api/packs/' + encodeURIComponent(_currentPackName) + '/search?q=' + encodeURIComponent(q) + '&limit=10')
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      var hits = d.hits || [];
+      if (hits.length === 0) {
+        resultsEl.textContent = 'No results.';
+        return;
+      }
+      resultsEl.innerHTML = hits.map(function (h) {
+        var heading = h.heading ? ' <span style="color:var(--muted)">[' + esc(h.heading) + ']</span>' : '';
+        return '<div style="margin-bottom:6px"><strong style="color:var(--accent)">' + esc(h.path) + '</strong>' + heading
+          + '<div style="color:var(--muted);margin-top:2px">' + esc(h.snippet.slice(0, 160)) + '</div></div>';
+      }).join('');
+    })
+    .catch(function (e) { resultsEl.textContent = 'Error: ' + e.message; });
+}
+
 // HTML-escape helper (shared pattern used across the UI).
 function esc(s) {
   return String(s)

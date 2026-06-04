@@ -6,11 +6,15 @@
 //!
 //! **stdout is the protocol channel** — all logging must go to stderr.
 //!
-//! Tools (13): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
+//! Tools (22): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
 //! disclosure), `read_file`, `ask`, `dependencies` (a file's imports, defined symbols,
 //! and calls), `who_imports` (reverse code-graph lookup), `who_calls` (D2 — reverse
 //! call lookup), `blast_radius` (D2 — 1-hop call blast radius), `get_stats`,
-//! `list_packs`, `get_pack`, `export_pack` (Context Packs).
+//! `list_packs`, `get_pack`, `export_pack`, `create_pack`, `add_pack_paths`,
+//! `remove_pack_paths`, `delete_pack` (Context Packs),
+//! `list_classifications`, `confirm_classification`, `ignore_classification`
+//! (Smart classification), `trigger_index` (indexing trigger),
+//! `search_pack` (scoped content search within a pack).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -58,6 +62,10 @@ pub struct SearchParams {
     /// Scope results to this path prefix (optional).
     #[serde(default)]
     pub scope: Option<String>,
+    /// Retrieval mode: `rrf` (default — hybrid BM25 + vector), `sparse` (BM25 only, no
+    /// embedder needed), `dense` (vector only, requires embeddings).
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -87,6 +95,13 @@ pub struct ReadFileParams {
 pub struct AskParams {
     /// Natural-language question answered against the indexed context.
     pub question: String,
+    /// Restrict retrieval to this path prefix (e.g. `~/code/myproject`). Omit for whole index.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Retrieval mode: `rrf` (default — hybrid BM25 + vector), `sparse` (BM25 only),
+    /// `dense` (vector only).
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -132,6 +147,70 @@ pub struct ExportPackParams {
     pub depth: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreatePackMcpParams {
+    /// Pack name (must be unique).
+    pub name: String,
+    /// Optional short description.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PackPathsParams {
+    /// Pack name (case-insensitive).
+    pub name: String,
+    /// List of absolute file or directory paths.
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeletePackMcpParams {
+    /// Pack name to delete (case-insensitive). Does not remove indexed files.
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SearchPackParams {
+    /// Pack name to search within (case-insensitive).
+    pub name: String,
+    /// Keyword / semantic query.
+    pub query: String,
+    /// Max results (default 20).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListClassificationsParams {
+    /// Source filter: `auto`, `user`, or `ignored`. Omit to return all.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Max rows to return (default 200).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ConfirmClassificationParams {
+    /// Absolute path of the file or directory.
+    pub path: String,
+    /// Category to assign (e.g. `work`, `personal`, `code`, `media`).
+    pub category: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct IgnoreClassificationParams {
+    /// Absolute path of the file or directory to suppress from suggestions.
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TriggerIndexParams {
+    /// Absolute path to scan, deep-index, and summarize.
+    pub path: String,
+}
+
 fn mcp_err(e: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
 }
@@ -173,24 +252,23 @@ impl IndexaMcp {
             query,
             limit,
             scope,
+            mode,
         } = params.0;
         let limit = limit.unwrap_or(20).min(100);
         let scope = scope.as_deref().filter(|s| !s.is_empty());
+        let mode = parse_hybrid_mode(mode.as_deref());
 
         // Try to embed the query for the dense arm; fall back to sparse if the embedder is
         // unavailable or the index has no embeddings.
-        let embedding = self.embedder.embed(&query).await.ok();
+        let embedding = if matches!(mode, HybridMode::Sparse) {
+            None
+        } else {
+            self.embedder.embed(&query).await.ok()
+        };
 
         let store = self.store()?;
         let hits = store
-            .hybrid_search(
-                &query,
-                embedding.as_deref(),
-                &HybridMode::Rrf,
-                scope,
-                limit,
-                60.0,
-            )
+            .hybrid_search(&query, embedding.as_deref(), &mode, scope, limit, 60.0)
             .map_err(mcp_err)?;
 
         if hits.is_empty() {
@@ -465,16 +543,23 @@ impl IndexaMcp {
         description = "Answer a natural-language question using the indexed context (hybrid retrieval + local LLM synthesis). Returns an answer with source paths."
     )]
     async fn ask(&self, params: Parameters<AskParams>) -> Result<CallToolResult, ErrorData> {
-        let question = params.0.question;
+        let AskParams {
+            question,
+            scope,
+            mode,
+        } = params.0;
         let cfg = QaConfig {
             top_k: self.config.retrieval.top_k,
-            mode: self.config.retrieval.hybrid.clone(),
+            mode: mode
+                .as_deref()
+                .map(|m| parse_hybrid_mode(Some(m)))
+                .unwrap_or_else(|| self.config.retrieval.hybrid.clone()),
+            scope: scope.filter(|s| !s.is_empty()),
             context_budget: self.config.retrieval.context_budget,
             rrf_k: self.config.retrieval.rrf_k as f32,
             summary_weight: self.config.retrieval.summary_weight,
             summary_depth_alpha: self.config.retrieval.summary_depth_alpha,
             rerank: self.config.retrieval.rerank,
-            ..QaConfig::default()
         };
 
         // Single shared, Send-safe pipeline (embed → scoped retrieve → optional
@@ -636,6 +721,290 @@ impl IndexaMcp {
         Ok(ok_text(buf))
     }
 
+    /// Trigger a full scan → deep-index → summarize pipeline on a path.
+    #[tool(
+        description = "Start an `indexa index <path>` run: scan files, compute embeddings, \
+                       and generate summaries. Runs as a background subprocess and returns \
+                       when indexing is complete. Use before asking questions about new or \
+                       changed files."
+    )]
+    async fn trigger_index(
+        &self,
+        params: Parameters<TriggerIndexParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let path = params.0.path;
+        // Spawn `indexa index <path>` as a subprocess. The indexa binary is on PATH
+        // (the same binary serving this MCP session). Both processes open the same DB
+        // via WAL + 5s busy_timeout, which handles contention safely.
+        let output = tokio::process::Command::new("indexa")
+            .args(["index", &path])
+            .output()
+            .await
+            .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if output.status.success() {
+            let summary = if stdout.trim().is_empty() {
+                format!("indexa index {path} completed successfully.")
+            } else {
+                stdout.trim().to_owned()
+            };
+            Ok(ok_text(summary))
+        } else {
+            Err(mcp_err(format!(
+                "indexa index {path} failed (exit {:?}):\n{}",
+                output.status.code(),
+                if stderr.trim().is_empty() {
+                    &stdout
+                } else {
+                    &stderr
+                }
+                .trim()
+            )))
+        }
+    }
+
+    // ── Context Pack mutations ─────────────────────────────────────────────────
+
+    /// Create a new (empty) Context Pack.
+    #[tool(
+        description = "Create a new named Context Pack. Packs are cross-directory context \
+                       bundles you can populate with `add_pack_paths` and export for any AI tool."
+    )]
+    async fn create_pack(
+        &self,
+        params: Parameters<CreatePackMcpParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let CreatePackMcpParams { name, description } = params.0;
+        let mut store = Store::open(&self.db_path).map_err(mcp_err)?;
+        let id = store
+            .create_pack(&name, description.as_deref())
+            .map_err(mcp_err)?;
+        Ok(ok_text(format!(
+            "Created pack \"{name}\" (id: {id}). \
+             Add paths with `add_pack_paths`."
+        )))
+    }
+
+    /// Add paths to an existing Context Pack.
+    #[tool(
+        description = "Add one or more file or directory paths to a named Context Pack. \
+                       Duplicate paths are silently ignored (idempotent)."
+    )]
+    async fn add_pack_paths(
+        &self,
+        params: Parameters<PackPathsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let PackPathsParams { name, paths } = params.0;
+        let mut store = Store::open(&self.db_path).map_err(mcp_err)?;
+        let pack = store
+            .pack_by_name(&name)
+            .map_err(mcp_err)?
+            .ok_or_else(|| mcp_err(format!("no pack named \"{name}\"")))?;
+        let count = paths.len();
+        store.add_pack_paths(&pack.id, &paths).map_err(mcp_err)?;
+        Ok(ok_text(format!(
+            "Added {count} path{} to pack \"{name}\".",
+            if count == 1 { "" } else { "s" }
+        )))
+    }
+
+    /// Remove paths from a Context Pack.
+    #[tool(description = "Remove specific paths from a named Context Pack. \
+                       Non-existent paths are silently ignored. Indexed files are not deleted.")]
+    async fn remove_pack_paths(
+        &self,
+        params: Parameters<PackPathsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let PackPathsParams { name, paths } = params.0;
+        let mut store = Store::open(&self.db_path).map_err(mcp_err)?;
+        let pack = store
+            .pack_by_name(&name)
+            .map_err(mcp_err)?
+            .ok_or_else(|| mcp_err(format!("no pack named \"{name}\"")))?;
+        let count = paths.len();
+        store.remove_pack_paths(&pack.id, &paths).map_err(mcp_err)?;
+        Ok(ok_text(format!(
+            "Removed {count} path{} from pack \"{name}\".",
+            if count == 1 { "" } else { "s" }
+        )))
+    }
+
+    /// Delete a Context Pack (indexed files are untouched).
+    #[tool(description = "Delete a Context Pack and all its path associations. \
+                       Does not remove indexed files from the index.")]
+    async fn delete_pack(
+        &self,
+        params: Parameters<DeletePackMcpParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let DeletePackMcpParams { name } = params.0;
+        let mut store = Store::open(&self.db_path).map_err(mcp_err)?;
+        let pack = store
+            .pack_by_name(&name)
+            .map_err(mcp_err)?
+            .ok_or_else(|| mcp_err(format!("no pack named \"{name}\"")))?;
+        store.delete_pack(&pack.id).map_err(mcp_err)?;
+        Ok(ok_text(format!("Deleted pack \"{name}\".")))
+    }
+
+    /// Search indexed content scoped to the paths in a Context Pack.
+    #[tool(
+        description = "Search chunk content restricted to the file/directory paths inside a \
+                       named Context Pack. Returns matching chunks with path, heading, and snippet. \
+                       Ideal for querying focused topic bundles (e.g. 'Auth', 'Tax 2025')."
+    )]
+    async fn search_pack(
+        &self,
+        params: Parameters<SearchPackParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let SearchPackParams { name, query, limit } = params.0;
+        let limit = limit.unwrap_or(20).min(100);
+
+        let embedding = self.embedder.embed(&query).await.ok();
+        let store = self.store()?;
+
+        let pack = store
+            .pack_by_name(&name)
+            .map_err(mcp_err)?
+            .ok_or_else(|| mcp_err(format!("no pack named \"{name}\"")))?;
+        let paths = store.pack_paths(&pack.id).map_err(mcp_err)?;
+        if paths.is_empty() {
+            return Ok(ok_text(format!("Pack \"{name}\" is empty.")));
+        }
+
+        // Search once per pack path prefix, then merge by RRF score.
+        let per_scope = (limit * 2).max(10);
+        let mut all_hits: Vec<indexa_core::store::SearchHit> = Vec::new();
+        for root in &paths {
+            let scope = root.as_str();
+            if let Ok(mut hits) = store.hybrid_search(
+                &query,
+                embedding.as_deref(),
+                &HybridMode::Rrf,
+                Some(scope),
+                per_scope,
+                60.0,
+            ) {
+                all_hits.append(&mut hits);
+            }
+        }
+
+        // Deduplicate by (entry_path, seq) keeping highest rrf_score, then take top limit.
+        all_hits.sort_by(|a, b| {
+            b.rrf_score
+                .partial_cmp(&a.rrf_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut seen = std::collections::HashSet::new();
+        let hits: Vec<_> = all_hits
+            .into_iter()
+            .filter(|h| seen.insert(format!("{}:{}", h.entry_path, h.seq)))
+            .take(limit)
+            .collect();
+
+        if hits.is_empty() {
+            return Ok(ok_text(format!(
+                "No results for '{query}' within pack \"{name}\"."
+            )));
+        }
+        let body = hits
+            .iter()
+            .map(|h| {
+                let heading = if h.heading.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", h.heading)
+                };
+                let snippet: String = h.text.chars().take(120).collect();
+                format!("{}{}\n  {}", h.entry_path, heading, snippet)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        Ok(ok_text(format!(
+            "{} result(s) in pack \"{name}\":\n\n{body}",
+            hits.len()
+        )))
+    }
+
+    // ── Smart classification ───────────────────────────────────────────────────
+
+    /// List auto-suggested or user-confirmed classifications.
+    #[tool(
+        description = "List Smart classification records — auto-detected or user-confirmed \
+                       category labels for files and directories. Filter by source: `auto`, \
+                       `user`, or `ignored`."
+    )]
+    async fn list_classifications(
+        &self,
+        params: Parameters<ListClassificationsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ListClassificationsParams { source, limit } = params.0;
+        let limit = limit.unwrap_or(200);
+        let store = self.store()?;
+        let recs = store
+            .list_classifications(source.as_deref(), limit)
+            .map_err(mcp_err)?;
+        if recs.is_empty() {
+            return Ok(ok_text("No classifications found."));
+        }
+        let lines: Vec<String> = recs
+            .iter()
+            .map(|r| {
+                format!(
+                    "[{}] {} → {} (confidence: {:.0}%)",
+                    r.source,
+                    r.path,
+                    r.category,
+                    r.confidence * 100.0
+                )
+            })
+            .collect();
+        Ok(ok_text(format!(
+            "{} classification(s):\n\n{}",
+            recs.len(),
+            lines.join("\n")
+        )))
+    }
+
+    /// Confirm (or correct) a Smart classification — sets source to 'user'.
+    #[tool(
+        description = "Confirm or correct a Smart classification. Sets the source to 'user' \
+                       so it persists across re-classify runs. \
+                       A later auto pass will not overwrite a user decision."
+    )]
+    async fn confirm_classification(
+        &self,
+        params: Parameters<ConfirmClassificationParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ConfirmClassificationParams { path, category } = params.0;
+        let store = self.store()?;
+        store
+            .confirm_classification(&path, &category)
+            .map_err(mcp_err)?;
+        Ok(ok_text(format!(
+            "Classification for \"{path}\" confirmed as \"{category}\"."
+        )))
+    }
+
+    /// Ignore a classification — sets a sticky tombstone so it is not re-proposed.
+    #[tool(
+        description = "Suppress a Smart classification suggestion permanently. \
+                       Sets source='ignored' — a tombstone that prevents the path from \
+                       being re-proposed on the next classify run."
+    )]
+    async fn ignore_classification(
+        &self,
+        params: Parameters<IgnoreClassificationParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let IgnoreClassificationParams { path } = params.0;
+        let store = self.store()?;
+        store.ignore_classification(&path).map_err(mcp_err)?;
+        Ok(ok_text(format!(
+            "Classification for \"{path}\" suppressed."
+        )))
+    }
+
     /// Index statistics (entry + chunk counts).
     #[tool(description = "Return index statistics: total indexed entries and embedded chunks.")]
     async fn get_stats(&self) -> Result<CallToolResult, ErrorData> {
@@ -696,10 +1065,15 @@ impl ServerHandler for IndexaMcp {
             .with_instructions(
             "Indexa is a local context engine: a hierarchically-summarized index of your files. \
              Navigate with `browse_tree` and `search`; call `get_summary` with tier=l0 (one-line \
-             abstract) to scan cheaply, then drill to l1 (full summary) or l2 (raw content). Use \
-             `read_file` for raw text and `ask` for grounded question-answering over the index. \
-             Use `list_packs` / `get_pack` / `export_pack` to work with Context Packs — named, \
-             cross-directory context bundles ready to paste into any AI tool."
+             abstract) to scan cheaply, then drill to l1 (full summary) or l2 (raw content). \
+             Use `read_file` for raw text; `ask` for grounded RAG answers (supports scope + mode). \
+             Use `trigger_index` to index new or changed files. \
+             Context Packs: `list_packs`/`get_pack`/`create_pack`/`add_pack_paths`/\
+`remove_pack_paths`/`delete_pack`/`export_pack`/`search_pack` — \
+             named, cross-directory bundles ready to paste into any AI tool. \
+             Smart classification: `list_classifications`/`confirm_classification`/\
+`ignore_classification`. \
+             Code graph: `dependencies`/`who_imports`/`who_calls`/`blast_radius`."
                 .to_owned(),
         )
     }
@@ -719,6 +1093,16 @@ pub async fn serve_mcp(
     let service = handler.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+/// Parse a user-supplied mode string into a `HybridMode`.
+/// Accepts `"sparse"`, `"dense"`, `"rrf"` (default).
+fn parse_hybrid_mode(s: Option<&str>) -> HybridMode {
+    match s.unwrap_or("rrf").to_lowercase().as_str() {
+        "sparse" => HybridMode::Sparse,
+        "dense" => HybridMode::Dense,
+        _ => HybridMode::Rrf,
+    }
 }
 
 fn xml_escape_mcp(s: &str) -> String {

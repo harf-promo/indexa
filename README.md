@@ -166,7 +166,8 @@ Defaults: `nomic-embed-text` (embeddings) · `gemma3:4b` (file context) · `gemm
 
 ## What's coming
 
-- **Context Packs** — name and save a subject-scoped set of files scattered across your disk ("Auth", "Tax 2025", "Client X project"), and export them as one portable context bundle. The context you need, at hand, in one click.
+- **Importance weighting (v0.8)** — tell Indexa which parts of your disk matter most. User-controlled weights per file, folder, or category feed into search ranking and Q&A quality. Auto-suggested from recency and access frequency.
+- **Insights (v0.10)** — analytical reports: duplicate-cluster detection, stale project detection, weekly diff summary.
 - **Plugin SDK** — custom parsers and adapters. Extend Indexa for your own file types and data sources without forking the core.
 
 Ideas and votes in [Discussions](../../discussions/categories/ideas). Full detail in [ROADMAP.md](ROADMAP.md).

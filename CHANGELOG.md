@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-06-04
+
+### Added
+
+- **Context Packs (v0.9).** Named, cross-directory context bundles — group files from
+  anywhere on your disk into a topic and export them as one self-contained XML, Markdown,
+  or JSON file for any AI tool.
+  - `indexa pack create "Auth" [--auto] [--yes] [--limit N]` · `add` · `remove` · `list`
+    · `show` · `export` · `delete`
+  - `--auto` embeds the pack name, finds semantically related summaries via
+    `summary_cosine_search`, shows candidates with a confirm prompt, and falls back to
+    BM25 keyword search when embeddings are unavailable.
+  - **REST API** — 8 new endpoints: `GET/POST /api/packs`, `DELETE /api/packs/:name`,
+    `GET/POST/DELETE /api/packs/:name/paths`, `GET /api/packs/:name/export`,
+    `POST /api/packs/suggest`. Duplicate name → 409; missing pack → 404;
+    unsummarised pack → 422.
+  - **Web UI** — "Context Packs" section in the Settings drawer: pack list with path
+    counts, create form, per-pack edit/export/delete, inline path editor with
+    add/remove, XML/Markdown/JSON export download.
+  - **MCP tools** — `list_packs`, `get_pack`, `export_pack` (10 → 13 tools).
+  - **12 store-layer tests** covering the full CRUD surface.
+
 ## [0.13.0] — 2026-06-04
 
 ### Added

@@ -230,6 +230,106 @@ pub(crate) async fn cmd_doctor(
     println!();
     println!("  Pass `--files N --chunks M` to customise for your index size.");
     println!("  Run `indexa status` to see how many files are currently indexed.");
+    println!();
+
+    // ── Index integrity ──────────────────────────────────────────────────────
+    println!("Index integrity");
+    match super::helpers::index_db_path() {
+        Err(e) => println!("  ⚠️   could not determine DB path: {e:#}"),
+        Ok(db_path) if !db_path.exists() => {
+            println!(
+                "  ℹ️   No index found at {} — run `indexa scan <path>` first.",
+                db_path.display()
+            );
+        }
+        Ok(db_path) => {
+            match indexa_core::store::Store::open(&db_path) {
+                Err(e) => println!("  ❌  Could not open index: {e:#}"),
+                Ok(store) => {
+                    // SQLite integrity check
+                    let integrity: Result<String, _> =
+                        store
+                            .db_connection()
+                            .query_row("PRAGMA integrity_check", [], |r| r.get(0));
+                    match integrity {
+                        Ok(ref s) if s == "ok" => println!("  ✅  PRAGMA integrity_check → ok"),
+                        Ok(ref s) => println!("  ❌  PRAGMA integrity_check → {s}"),
+                        Err(e) => println!("  ⚠️   integrity_check failed: {e:#}"),
+                    }
+                    // Orphan chunks (no matching entry)
+                    let orphans: Result<i64, _> = store.db_connection().query_row(
+                        "SELECT COUNT(*) FROM chunks WHERE entry_path NOT IN (SELECT path FROM entries)",
+                        [],
+                        |r| r.get(0),
+                    );
+                    match orphans {
+                        Ok(0) => println!("  ✅  No orphaned chunks"),
+                        Ok(n) => println!("  ⚠️   {n} orphaned chunk(s) (no matching entry) — run `indexa scan` to repair"),
+                        Err(e) => println!("  ⚠️   orphan check failed: {e:#}"),
+                    }
+                    // Queue health
+                    let stalled: Result<i64, _> = store.db_connection().query_row(
+                        "SELECT COUNT(*) FROM summary_queue \
+                         WHERE state = 'in_flight' \
+                           AND updated_at < (unixepoch() - 600)",
+                        [],
+                        |r| r.get(0),
+                    );
+                    match stalled {
+                        Ok(0) => println!("  ✅  No stalled queue items (in_flight > 10 min)"),
+                        Ok(n) => println!(
+                            "  ⚠️   {n} queue item(s) stuck in_flight for >10 min — \
+                             likely a crashed worker. Run `indexa worker` to recover."
+                        ),
+                        Err(e) => println!("  ⚠️   queue stall check failed: {e:#}"),
+                    }
+                    // Pending queue count
+                    let pending: Result<i64, _> = store.db_connection().query_row(
+                        "SELECT COUNT(*) FROM summary_queue WHERE state = 'pending'",
+                        [],
+                        |r| r.get(0),
+                    );
+                    if let Ok(n) = pending {
+                        if n > 0 {
+                            println!("  ℹ️   {n} pending summary job(s) in queue — run `indexa worker` to drain.");
+                        }
+                    }
+                    println!("  ℹ️   DB path: {}", db_path.display());
+                }
+            }
+        }
+    }
+    println!();
+
+    // ── macOS binary codesign health ─────────────────────────────────────────
+    #[cfg(target_os = "macos")]
+    {
+        println!("Binary code-signing (macOS)");
+        match std::env::current_exe() {
+            Err(e) => println!("  ⚠️   could not determine current binary path: {e}"),
+            Ok(exe) => {
+                let out = std::process::Command::new("codesign")
+                    .args(["--verify", "--verbose=1", exe.to_str().unwrap_or("?")])
+                    .output();
+                match out {
+                    Ok(o) if o.status.success() => {
+                        println!("  ✅  {} — signature valid", exe.display());
+                    }
+                    Ok(o) => {
+                        let err = String::from_utf8_lossy(&o.stderr);
+                        println!(
+                            "  ❌  {} — signature INVALID: {}",
+                            exe.display(),
+                            err.trim()
+                        );
+                        println!("  ↳  Fix: codesign --force --sign - {}", exe.display());
+                    }
+                    Err(e) => println!("  ⚠️   could not run codesign (install Xcode CLT): {e}"),
+                }
+            }
+        }
+        println!();
+    }
 
     Ok(())
 }

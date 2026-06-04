@@ -8,6 +8,7 @@
 //!   POST   /api/packs/:name/paths      — add paths     { paths: [...] }
 //!   DELETE /api/packs/:name/paths      — remove paths  { paths: [...] }
 //!   GET    /api/packs/:name/export     — export as XML/MD/JSON  ?format=&depth=
+//!   GET    /api/packs/:name/search     — search chunk content within the pack  ?q=&limit=
 //!   POST   /api/packs/suggest          — suggest paths for a query { query, limit? }
 
 use axum::{
@@ -51,6 +52,20 @@ pub(crate) struct ExportQuery {
 pub(crate) struct SuggestBody {
     query: String,
     limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PackSearchQuery {
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct SearchHitDto {
+    path: String,
+    heading: String,
+    snippet: String,
+    score: f64,
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
@@ -297,6 +312,75 @@ pub(crate) async fn api_packs_suggest(
         }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
+}
+
+pub(crate) async fn api_packs_search(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<PackSearchQuery>,
+) -> Response {
+    use indexa_core::config::HybridMode;
+
+    let query = match q.q.as_deref().filter(|s| !s.is_empty()) {
+        Some(s) => s.to_owned(),
+        None => return err_json(StatusCode::BAD_REQUEST, "q parameter is required"),
+    };
+    let limit = q.limit.unwrap_or(20).min(100);
+
+    let store = state.store.lock().await;
+    let pack = match store.pack_by_name(&name) {
+        Ok(Some(p)) => p,
+        Ok(None) => return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\"")),
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    };
+    let paths = match store.pack_paths(&pack.id) {
+        Ok(p) => p,
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    };
+    if paths.is_empty() {
+        return Json(serde_json::json!({ "hits": [] })).into_response();
+    }
+
+    // Embed via the embedder in AppState; fall back to sparse on failure.
+    let embedding = state.embedder.embed(&query).await.ok();
+
+    let per_scope = (limit * 2).max(10);
+    let mut all_hits: Vec<indexa_core::store::SearchHit> = Vec::new();
+    for root in &paths {
+        if let Ok(mut hits) = store.hybrid_search(
+            &query,
+            embedding.as_deref(),
+            &HybridMode::Rrf,
+            Some(root.as_str()),
+            per_scope,
+            60.0,
+        ) {
+            all_hits.append(&mut hits);
+        }
+    }
+
+    all_hits.sort_by(|a, b| {
+        b.rrf_score
+            .partial_cmp(&a.rrf_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut seen = std::collections::HashSet::new();
+    let hits: Vec<SearchHitDto> = all_hits
+        .into_iter()
+        .filter(|h| seen.insert(format!("{}:{}", h.entry_path, h.seq)))
+        .take(limit)
+        .map(|h| {
+            let snippet: String = h.text.chars().take(200).collect();
+            SearchHitDto {
+                path: h.entry_path,
+                heading: h.heading,
+                snippet,
+                score: h.rrf_score,
+            }
+        })
+        .collect();
+
+    Json(serde_json::json!({ "name": name, "query": query, "hits": hits })).into_response()
 }
 
 fn xml_escape(s: &str) -> String {

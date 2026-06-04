@@ -56,6 +56,14 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_entries_kind   ON entries(kind);
             CREATE INDEX IF NOT EXISTS idx_entries_cat    ON entries(hint_cat);
 
+            -- NOTE: chunks.entry_path, summaries.path, and edges.from_path reference
+            -- entries.path (TEXT) but have no REFERENCES … ON DELETE CASCADE because
+            -- SQLite TEXT FK resolution would require an index scan and the tables were
+            -- designed before FK enforcement. PRAGMA foreign_keys = ON is set (see above)
+            -- but these TEXT-keyed relations are cleaned up manually in entries.rs.
+            -- A future migration should add FK constraints + CASCADE; tracked as a
+            -- known limitation. Do NOT add REFERENCES here without a careful migration plan.
+
             -- Deep-scan chunks (text + embeddings).
             -- AUTOINCREMENT (not a bare rowid) so ids are never reused after a re-deep
             -- deletes+reinserts a file's chunks. Stable ids are load-bearing for the ANN
@@ -148,7 +156,8 @@ impl Store {
                 to_ref    TEXT NOT NULL,
                 PRIMARY KEY (from_path, kind, to_ref)
             ) WITHOUT ROWID;
-            CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(kind, to_ref);
+            CREATE INDEX IF NOT EXISTS idx_edges_to   ON edges(kind, to_ref);
+            CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_path);
 
             -- Context Packs (v0.9): named, cross-directory context bundles.
             -- A pack is a user-curated set of paths that form a coherent topic

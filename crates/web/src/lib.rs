@@ -293,6 +293,7 @@ pub async fn serve(
                 .delete(api_packs_paths_remove),
         )
         .route("/api/packs/:name/export", get(api_packs_export))
+        .route("/api/packs/:name/search", get(api_packs_search))
         .with_state(state)
         .layer(
             tower_http::cors::CorsLayer::new()
