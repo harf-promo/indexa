@@ -9,11 +9,20 @@ async function fireJob(kind, path) {
     if (choice === null) return; // user cancelled the build
     modelParams = choice; // '' (configured) or a recommended-model override
   }
-  const r = await fetch('/api/jobs/' + kind + '?path=' + encodeURIComponent(path) + modelParams, { method: 'POST' });
-  const d = await r.json();
-  subscribeJob(d.job_id, path, kind);
-  // Switch to jobs tab so user can watch progress
-  switchTab('jobs');
+  try {
+    const r = await fetch('/api/jobs/' + kind + '?path=' + encodeURIComponent(path) + modelParams, { method: 'POST' });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      toast((err.error || 'Failed to start job') + ' (' + r.status + ')', 'error');
+      return;
+    }
+    const d = await r.json();
+    subscribeJob(d.job_id, path, kind);
+    // Switch to jobs tab so user can watch progress
+    switchTab('jobs');
+  } catch (e) {
+    toast('Network error starting job: ' + e.message, 'error');
+  }
 }
 
 /* Calm, STATIC per-row context-coverage glyph. Replaces the old per-row pending

@@ -23,11 +23,25 @@ fn main() {
     // before we spawn our server, we refuse to start rather than silently
     // attaching the webview to a foreign service.
     if std::net::TcpStream::connect(format!("127.0.0.1:{PORT}")).is_ok() {
-        eprintln!(
-            "[indexa-desktop] port {PORT} is already in use. \
-             Stop any existing `indexa serve` process and try again."
+        let msg = format!(
+            "Port {PORT} is already in use.\n\n\
+             Another `indexa serve` process may be running. \
+             Quit it and relaunch Indexa."
         );
+        eprintln!("[indexa-desktop] {msg}");
+        show_error_dialog("Indexa — Port Conflict", &msg);
         std::process::exit(1);
+    }
+
+    // Tell the embedded web server that it is running inside the desktop app:
+    //   INDEXA_DESKTOP=1    — enables `relaunch:"desktop"` in the update handler
+    //   INDEXA_WEB_ALLOW_UPDATE=1 — un-gates the POST /api/update/apply endpoint
+    //
+    // Safety: set before any threads read these vars.
+    #[allow(unused_unsafe)] // stable Rust pre-1.80 doesn't need unsafe; 1.80+ does
+    unsafe {
+        std::env::set_var("INDEXA_DESKTOP", "1");
+        std::env::set_var("INDEXA_WEB_ALLOW_UPDATE", "1");
     }
 
     // Start the embedded web server on a background Tokio runtime so Tauri's
@@ -82,6 +96,18 @@ fn main() {
                 })
                 .build(app)?;
 
+            // Hide the window instead of closing when the user clicks ✕.
+            // The app stays alive in the menu bar; "Quit" in the tray menu exits.
+            if let Some(window) = app.get_webview_window("main") {
+                let win = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = win.hide();
+                    }
+                });
+            }
+
             // Kick off a background update check on every launch.
             run_update_check(app.handle().clone());
 
@@ -91,9 +117,8 @@ fn main() {
         .expect("error while running Indexa desktop app");
 }
 
-/// Spawn an async update check. If a newer release is available it is
-/// downloaded, installed, and the app restarted — all silently. Errors are
-/// logged to stderr and the app keeps running normally.
+/// Spawn an async update check. If a newer release is available it downloads and
+/// installs it, then shows a native dialog asking the user to restart.
 fn run_update_check(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let updater = match app.updater() {
@@ -107,17 +132,14 @@ fn run_update_check(app: tauri::AppHandle) {
             Ok(Some(u)) => u,
             Ok(None) => return, // already up to date
             Err(e) => {
-                // Network errors (offline, GitHub unavailable) are expected;
-                // log at debug level so they don't alarm users.
+                // Network errors (offline, GitHub unavailable) are expected.
                 eprintln!("[indexa-desktop] update check skipped: {e:#}");
                 return;
             }
         };
 
-        eprintln!(
-            "[indexa-desktop] update available: {} — downloading…",
-            update.version
-        );
+        let version = update.version.clone();
+        eprintln!("[indexa-desktop] update available: {version} — downloading…");
 
         if let Err(e) = update
             .download_and_install(|_chunk, _total| {}, || {})
@@ -127,8 +149,16 @@ fn run_update_check(app: tauri::AppHandle) {
             return;
         }
 
-        eprintln!("[indexa-desktop] update installed — restarting");
-        app.restart();
+        eprintln!("[indexa-desktop] update installed — prompting restart");
+
+        // Ask the user before restarting so they aren't surprised.
+        let msg = format!(
+            "Indexa {version} has been installed.\n\nRestart now to apply the update?"
+        );
+        let wants_restart = show_confirm_dialog("Indexa Update Ready", &msg);
+        if wants_restart {
+            app.restart();
+        }
     });
 }
 
@@ -191,5 +221,47 @@ fn wait_for_port(port: u16, timeout: Duration) -> bool {
             return false;
         }
         std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
+/// Show a native OS error alert. Falls back to a no-op on unsupported platforms.
+fn show_error_dialog(title: &str, message: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(format!(
+                "display alert {title:?} message {message:?} as critical \
+                 buttons {{\"OK\"}} default button \"OK\""
+            ))
+            .status();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (title, message); // suppress unused warnings
+    }
+}
+
+/// Show a native OS confirmation dialog. Returns `true` if the user clicks the
+/// primary (OK/Yes) button. Falls back to `true` on unsupported platforms.
+fn show_confirm_dialog(title: &str, message: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(format!(
+                "display alert {title:?} message {message:?} \
+                 buttons {{\"Later\", \"Restart Now\"}} default button \"Restart Now\""
+            ))
+            .output();
+        match output {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).contains("Restart Now"),
+            Err(_) => true, // can't show dialog → restart anyway
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (title, message);
+        true
     }
 }

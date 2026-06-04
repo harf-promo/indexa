@@ -9,8 +9,8 @@ use crate::dto::{
     err_json, file_name_of, CoverageStats, RootResponse, SearchQuery, StatsResponse,
     TreeNodeResponse, TreemapNodeDto,
 };
-use indexa_core::store::CoverageEntry;
 use crate::AppState;
+use indexa_core::store::CoverageEntry;
 
 pub(crate) async fn api_stats(State(state): State<AppState>) -> Response {
     let store = state.store.lock().await;
