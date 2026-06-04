@@ -114,7 +114,7 @@ Tell Indexa which parts of your disk matter most. It adjusts everything accordin
 
 ---
 
-## v0.9 — Context Packs
+## v0.9 — Context Packs  *(shipped — v0.14.0)*
 
 Your context, sliced by subject — not by folder. Indexa detects that files and folders scattered across your disk all belong to one topic, bundles them into a named **Context Pack**, and lets you export it as a single portable file for any AI tool or teammate.
 

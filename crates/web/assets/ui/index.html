@@ -341,6 +341,12 @@
             <button class="btn-sm" onclick="addPackPath()">Add path</button>
           </div>
           <span id="pack-path-status" style="font-size:12px;color:var(--muted);display:block;margin-top:4px;min-height:14px"></span>
+          <!-- search within this pack -->
+          <div style="display:flex;gap:6px;align-items:center;margin-top:8px">
+            <input type="text" class="key-input" id="pack-search-query" placeholder="Search content in this pack…" autocomplete="off" aria-label="Search within pack" style="flex:1" onkeydown="if(event.key==='Enter')searchCurrentPack()">
+            <button class="btn-sm" onclick="searchCurrentPack()">Search</button>
+          </div>
+          <div id="pack-search-results" style="display:none;margin-top:6px;max-height:180px;overflow-y:auto;font-size:11px;background:var(--surface);border-radius:4px;padding:6px"></div>
           <div style="display:flex;gap:6px;align-items:center;margin-top:10px">
             <label style="font-size:12px;color:var(--muted)">Export:</label>
             <select id="pack-export-format" aria-label="Export format" style="font-size:12px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px">

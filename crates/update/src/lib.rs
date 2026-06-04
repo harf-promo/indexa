@@ -207,12 +207,41 @@ pub async fn apply(tag: &str) -> anyhow::Result<String> {
         // binary at a known path is overwritten, even with an identical ad-hoc
         // signature. Re-signing forces a fresh evaluation so the new binary
         // actually runs. The `codesign` tool ships with Xcode Command Line
-        // Tools; we fail silently if it is absent.
+        // Tools; we warn (but don't abort) if it is absent or returns non-zero,
+        // because a missing re-sign means the binary will fail to launch on
+        // macOS 26+ — a user-visible failure that was previously silently swallowed.
         #[cfg(target_os = "macos")]
         if let Some(path_str) = exe_clone.to_str() {
-            let _ = std::process::Command::new("codesign")
+            match std::process::Command::new("codesign")
                 .args(["--force", "--sign", "-", path_str])
-                .output();
+                .output()
+            {
+                Ok(out) if out.status.success() => {
+                    tracing::debug!("codesign re-sign succeeded for {path_str}");
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    tracing::warn!(
+                        path = path_str,
+                        exit_code = ?out.status.code(),
+                        stderr = %stderr.trim(),
+                        "codesign re-sign failed after update; \
+                         the new binary may not launch on macOS 26+ \
+                         (Code Signing Monitor). \
+                         Run: codesign --force --sign - {}",
+                        path_str
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = path_str,
+                        error = %e,
+                        "could not run `codesign` after update; \
+                         install Xcode Command Line Tools if you see \
+                         a 'killed' error on next launch."
+                    );
+                }
+            }
         }
 
         Ok(())
