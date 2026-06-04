@@ -999,8 +999,8 @@ fn pack_add_paths_is_idempotent() {
     let mut store = Store::open_in_memory().unwrap();
     let id = store.create_pack("Idem", None).unwrap();
     let path = "/a/b.txt".to_owned();
-    store.add_pack_paths(&id, &[path.clone()]).unwrap();
-    store.add_pack_paths(&id, &[path.clone()]).unwrap(); // must not error or double-count
+    store.add_pack_paths(&id, std::slice::from_ref(&path)).unwrap();
+    store.add_pack_paths(&id, std::slice::from_ref(&path)).unwrap(); // must not error or double-count
     assert_eq!(store.pack_paths(&id).unwrap().len(), 1);
 }
 
