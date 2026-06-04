@@ -1525,3 +1525,97 @@ fn code_graph_scope_excludes_prefix_siblings() {
     assert_eq!(g.edges[0].from, "/proj/a.rs");
     assert_eq!(g.edges[0].to, "/proj/b.rs");
 }
+
+// ── Entry-cleanup integrity contract ──────────────────────────────────────────
+// These lock the invariant that deleting an entry leaves NO orphaned rows in any
+// entry-keyed child table. There is intentionally no FK ON DELETE CASCADE (the model
+// allows entry-less chunks/summaries — deep/summarize without scan), so this manual
+// contract is the integrity guarantee. Add any new entry-keyed child table here.
+
+/// Count rows still referencing `path` across every child table that delete_entry /
+/// delete_subtree are responsible for clearing. importance_weights is deliberately
+/// excluded (weights persist across entry removal by design).
+fn orphan_rows_for(store: &Store, path: &str) -> i64 {
+    let c = store.db_connection();
+    let q = |sql: &str| -> i64 { c.query_row(sql, [path], |r| r.get(0)).unwrap() };
+    q("SELECT COUNT(*) FROM chunks WHERE entry_path = ?1")
+        + q("SELECT COUNT(*) FROM chunks_fts WHERE entry_path = ?1")
+        + q("SELECT COUNT(*) FROM edges WHERE from_path = ?1")
+        + q("SELECT COUNT(*) FROM summaries WHERE path = ?1")
+        + q("SELECT COUNT(*) FROM summary_queue WHERE path = ?1")
+        + q("SELECT COUNT(*) FROM classifications WHERE path = ?1")
+}
+
+/// Populate every entry-keyed child table for `path`, then return the store.
+fn seed_full_entry(store: &mut Store, path: &str) {
+    store
+        .upsert_entries(&[dummy_entry(path, EntryKind::File, 100)])
+        .unwrap();
+    store
+        .upsert_chunks(&[dummy_chunk(path, 0, "hello world")])
+        .unwrap();
+    store
+        .upsert_summary(&dummy_summary(path, "file", Some("/"), 1))
+        .unwrap();
+    store
+        .upsert_edges(&[
+            edge(path, "imports", "std::fs"),
+            edge(path, "defines", "run"),
+        ])
+        .unwrap();
+    store
+        .enqueue_summary_items(&[(path.to_owned(), "file".to_owned(), 1)])
+        .unwrap();
+    store
+        .upsert_auto_classifications(&[(path.into(), "file".into(), "code".into(), 0.9)])
+        .unwrap();
+}
+
+#[test]
+fn delete_entry_leaves_no_orphans() {
+    let mut store = Store::open_in_memory().unwrap();
+    seed_full_entry(&mut store, "/proj/a.rs");
+    // Sanity: every child table has a row before deletion.
+    assert!(orphan_rows_for(&store, "/proj/a.rs") >= 6);
+
+    let removed = store.delete_entry("/proj/a.rs").unwrap();
+    assert_eq!(removed, 1);
+    assert_eq!(
+        orphan_rows_for(&store, "/proj/a.rs"),
+        0,
+        "delete_entry must clear chunks/fts/edges/summaries/queue/classifications"
+    );
+    assert_eq!(store.entry_count().unwrap(), 0);
+}
+
+#[test]
+fn delete_subtree_leaves_no_orphans() {
+    let mut store = Store::open_in_memory().unwrap();
+    seed_full_entry(&mut store, "/proj/sub/a.rs");
+    seed_full_entry(&mut store, "/proj/sub/b.rs");
+    // A sibling outside the deleted prefix must survive.
+    seed_full_entry(&mut store, "/other/keep.rs");
+
+    store.delete_subtree("/proj/sub").unwrap();
+
+    assert_eq!(orphan_rows_for(&store, "/proj/sub/a.rs"), 0);
+    assert_eq!(orphan_rows_for(&store, "/proj/sub/b.rs"), 0);
+    // The out-of-scope sibling is untouched.
+    assert!(orphan_rows_for(&store, "/other/keep.rs") >= 6);
+}
+
+#[test]
+fn importance_weights_persist_across_entry_delete() {
+    // Documented design: weights are NOT cleared with the entry (unlike classifications).
+    let mut store = Store::open_in_memory().unwrap();
+    seed_full_entry(&mut store, "/proj/weighted.rs");
+    store
+        .set_weight("file", "/proj/weighted.rs", 2.0, "user", None)
+        .unwrap();
+
+    store.delete_entry("/proj/weighted.rs").unwrap();
+
+    // Entry + all child rows gone, but the weight remains.
+    assert_eq!(orphan_rows_for(&store, "/proj/weighted.rs"), 0);
+    assert!((store.weight_for("/proj/weighted.rs").unwrap() - 2.0).abs() < 1e-6);
+}
