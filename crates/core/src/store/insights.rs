@@ -37,6 +37,11 @@ pub struct WeeklyDiff {
 }
 
 impl Store {
+    /// Cap on candidate files for the O(n²) near-duplicate scan. 5000 files → ~12.5M
+    /// pairwise comparisons, which stays well under a second. Beyond this, exact-hash
+    /// duplicate detection scales fine; near-dup is best run on a scoped subtree.
+    const NEAR_DUP_MAX_FILES: i64 = 5000;
+
     // ── Duplicate detection ───────────────────────────────────────────────────
 
     /// Find files with identical content fingerprints (exact duplicates).
@@ -71,13 +76,21 @@ impl Store {
     /// Find near-duplicate files by summary embedding cosine similarity.
     /// Returns clusters of paths where pairwise similarity ≥ `threshold`.
     /// Operates on summary embeddings (file-level, not chunk-level).
+    ///
+    /// The pairwise comparison is O(n²), so the candidate set is capped at
+    /// [`Self::NEAR_DUP_MAX_FILES`] files (newest summaries first) to keep this bounded
+    /// on whole-disk indexes. Exact-duplicate detection (`find_exact_duplicates`) has no
+    /// such cap because it groups by hash in SQL.
     pub fn find_near_duplicates(&self, threshold: f32) -> Result<Vec<DuplicateCluster>> {
-        // Load all file summaries that have embeddings.
+        // Load file summaries that have embeddings, capped to bound the O(n²) scan.
         let mut stmt = self.conn.prepare(
-            "SELECT path, embedding FROM summaries WHERE kind='file' AND embedding IS NOT NULL",
+            "SELECT path, embedding FROM summaries
+             WHERE kind='file' AND embedding IS NOT NULL
+             ORDER BY generated_at DESC
+             LIMIT ?1",
         )?;
         let items: Vec<(String, Vec<f32>)> = stmt
-            .query_map([], |r| {
+            .query_map([Self::NEAR_DUP_MAX_FILES], |r| {
                 let path: String = r.get(0)?;
                 let blob: Vec<u8> = r.get(1)?;
                 Ok((path, blob))

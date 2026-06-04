@@ -91,7 +91,8 @@ impl Registry {
         dispatch(&self.parsers, path, &mime)
     }
 
-    /// Parse `path` with size and panic guards (see [`parse_guarded`]).
+    /// Parse `path` with size and panic guards (see [`parse_guarded`]), using this
+    /// registry's parsers (including any registered via [`Registry::register`]).
     pub fn parse_guarded(&self, path: &Path, size_bytes: u64, max_bytes: u64) -> Result<Extracted> {
         if max_bytes > 0 && size_bytes > max_bytes {
             bail!(
@@ -99,12 +100,9 @@ impl Registry {
                 path.display()
             );
         }
-        let path2 = path.to_path_buf();
-        // SAFETY: the closure captures no non-UnwindSafe data.
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Re-run the full dispatch inline so we don't need to capture `self`.
-            parse(&path2)
-        })) {
+        // Dispatch against THIS registry (not the free `parse`) so custom parsers are
+        // honoured on the guarded path too. catch_unwind isolates a panicking parser.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.parse(path))) {
             Ok(result) => result,
             Err(_) => bail!("parser panicked on {}", path.display()),
         }
@@ -258,5 +256,105 @@ mod tests {
         assert!(parse_guarded(&p, size, 0).is_ok());
         // A generous cap → parses fine.
         assert!(parse_guarded(&p, size, 10_000_000).is_ok());
+    }
+
+    // ── Plugin SDK: Registry ──────────────────────────────────────────────────
+
+    /// A custom plugin parser claiming the `.mydata` extension.
+    struct MyDataParser;
+    impl Parser for MyDataParser {
+        fn accepts_path(&self, path: &Path) -> bool {
+            path.extension().and_then(|e| e.to_str()) == Some("mydata")
+        }
+        fn accepts_mime(&self, _mime: &str) -> bool {
+            false
+        }
+        fn parse(&self, path: &Path) -> Result<Extracted> {
+            Ok(Extracted {
+                source: path.to_path_buf(),
+                mime: "application/x-mydata".to_owned(),
+                chunks: vec![crate::types::Chunk {
+                    source: path.to_path_buf(),
+                    seq: 0,
+                    heading: String::new(),
+                    text: "CUSTOM-PARSED".to_owned(),
+                    language: None,
+                }],
+                edges: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn registry_register_routes_to_custom_parser() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sample.mydata");
+        std::fs::write(&p, "raw bytes the custom parser ignores").unwrap();
+
+        // Default registry has no parser claiming .mydata → falls back to text sniff.
+        let default_reg = Registry::new();
+        let ex_default = default_reg.parse(&p).unwrap();
+        assert_ne!(ex_default.chunks[0].text, "CUSTOM-PARSED");
+
+        // After registering the plugin, .mydata routes to it.
+        let mut reg = Registry::new();
+        reg.register(Box::new(MyDataParser));
+        let ex = reg.parse(&p).unwrap();
+        assert_eq!(ex.chunks[0].text, "CUSTOM-PARSED");
+        assert_eq!(ex.mime, "application/x-mydata");
+    }
+
+    #[test]
+    fn registry_custom_parser_takes_precedence_over_builtins() {
+        // A custom parser claiming .txt must win over the built-in TextParser,
+        // because register() inserts before the built-ins.
+        struct TxtClaimer;
+        impl Parser for TxtClaimer {
+            fn accepts_path(&self, path: &Path) -> bool {
+                path.extension().and_then(|e| e.to_str()) == Some("txt")
+            }
+            fn accepts_mime(&self, _mime: &str) -> bool {
+                false
+            }
+            fn parse(&self, path: &Path) -> Result<Extracted> {
+                Ok(Extracted {
+                    source: path.to_path_buf(),
+                    mime: "text/x-claimed".to_owned(),
+                    chunks: vec![crate::types::Chunk {
+                        source: path.to_path_buf(),
+                        seq: 0,
+                        heading: String::new(),
+                        text: "CLAIMED".to_owned(),
+                        language: None,
+                    }],
+                    edges: Vec::new(),
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("note.txt");
+        std::fs::write(&p, "hello").unwrap();
+
+        let mut reg = Registry::new();
+        reg.register(Box::new(TxtClaimer));
+        let ex = reg.parse(&p).unwrap();
+        assert_eq!(
+            ex.chunks[0].text, "CLAIMED",
+            "custom parser must beat built-in TextParser"
+        );
+    }
+
+    #[test]
+    fn registry_parse_guarded_honours_custom_parser() {
+        // The guarded path must also route to registered parsers (not the free `parse`).
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sample.mydata");
+        std::fs::write(&p, "ignored").unwrap();
+        let size = std::fs::metadata(&p).unwrap().len();
+
+        let mut reg = Registry::new();
+        reg.register(Box::new(MyDataParser));
+        let ex = reg.parse_guarded(&p, size, 0).unwrap();
+        assert_eq!(ex.chunks[0].text, "CUSTOM-PARSED");
     }
 }

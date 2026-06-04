@@ -17,6 +17,7 @@ pub(crate) async fn cmd_status(show_unknown: bool, cfg: &Config) -> Result<()> {
 
     let config_path = config::default_config_path().to_string_lossy().into_owned();
 
+    println!("Indexa:   v{}", env!("CARGO_PKG_VERSION"));
     println!("Index:    {} ({})", db_path.display(), format_size(db_size));
     println!("Entries:  {entries} total");
     println!(

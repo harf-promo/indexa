@@ -50,7 +50,11 @@ impl Store {
                 hint_label  TEXT,
                 hint_cat    TEXT,
                 deep_policy TEXT,
-                indexed_at  INTEGER NOT NULL DEFAULT (unixepoch())
+                indexed_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                -- first_indexed_at (v0.10): original discovery time, never reset on rescan.
+                -- In the base DDL so fresh DBs skip the ALTER migration below — and so the
+                -- concurrent-open path never races on adding the column.
+                first_indexed_at INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_entries_parent ON entries(parent_path);
             CREATE INDEX IF NOT EXISTS idx_entries_kind   ON entries(kind);
@@ -190,6 +194,12 @@ impl Store {
         // Migration: add entries.first_indexed_at (v0.10) — the original discovery
         // timestamp. Unlike indexed_at (reset on every rescan), this is set once and
         // never overwritten, enabling "what was added this week" queries.
+        //
+        // Note: for databases that predate this column, the backfill below seeds
+        // first_indexed_at from indexed_at (the last-rescan time), which may be recent.
+        // So the FIRST weekly-diff after upgrading an old DB can over-report files as
+        // "added this week." This self-corrects: every subsequent insert stamps a true
+        // discovery time. Fresh DBs get the column from the base DDL and are unaffected.
         let has_first_indexed_at: bool = self
             .conn
             .prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'first_indexed_at'")?

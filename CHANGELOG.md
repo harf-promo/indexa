@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-06-04
+
+A maturity pass: fixes bugs found in the v0.16 audit, adds the missing test
+coverage, and polishes the new-user experience.
+
+### Fixed
+
+- **Video captioning now works when only `parsers.video.caption` is enabled.**
+  The vision-model handle was built only for image captioning, so enabling just
+  video captioning silently extracted frames and captioned nothing. The handle is
+  now built when either image or video captioning is on, with a loud warning if no
+  vision model is available.
+- **Duplicate-detection no longer blocks other requests.** `/api/insights/duplicates`
+  ran its O(n²) near-duplicate scan while holding the shared store mutex, stalling
+  every other API call. It now runs on a fresh, short-lived connection inside
+  `spawn_blocking`. Near-duplicate detection is also capped at 5000 candidate files
+  to bound the scan on whole-disk indexes.
+- **`indexa` with no arguments now prints help** instead of a bare usage error.
+- **`indexa status` shows the running version** (`Indexa: vX.Y.Z`) as its first line.
+- **`indexa weight set` warns when a path-like target does not exist on disk** — the
+  weight is still stored, but a likely typo is surfaced.
+- **JS bundle: renamed the duplicated `esc()` helper** in `17-weights.js` to `escW()`
+  to avoid silently overriding the identically-named helper in `16-context-packs.js`.
+- **`importance_weights` boost is no longer per-hit-SQL.** `boost_with_weights` now
+  pre-loads the (small) weights table into memory once per query instead of firing
+  up to ~200 SQL round-trips for a typical answer.
+
+### Added
+
+- **Web Insights: configurable thresholds.** The Insights panel now has "older than N
+  days" (stale) and "last N days" (weekly diff) inputs instead of hardcoded 365/7.
+- **Tests** for all v0.16 store logic: importance weights (set/resolve/boost/recency)
+  and insights (exact + near duplicates, stale, weekly diff), plus the parser
+  `Registry::register()` plugin-dispatch contract.
+
+### Changed
+
+- `first_indexed_at` is now part of the base `entries` schema (was migration-only),
+  so fresh databases skip the column-add migration entirely — eliminating a
+  concurrent-open race.
+- `if-addrs` moved to `[workspace.dependencies]`; removed the redundant `tempfile`
+  dev-dependency in `indexa-parsers`.
+- README "What's coming" updated — v0.8 / v0.10 moved to shipped; next milestones are
+  the mobile companion, plugin marketplace, and graph visualization.
+
 ## [0.16.0] — 2026-06-04
 
 ### Added

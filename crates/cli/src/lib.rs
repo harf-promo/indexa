@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "indexa",
     version,
+    arg_required_else_help = true,
     about = "The local context engine for AI — index your disk once, hand grounded context to any AI.",
     long_about = "Indexa reads your code or your disk once, builds a hierarchical context graph \
 (files → summaries → folder roll-ups), and serves it to AI tools on demand.\n\n\

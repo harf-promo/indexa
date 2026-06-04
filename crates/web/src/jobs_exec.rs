@@ -392,8 +392,15 @@ async fn run_deep_phase(
         None
     };
 
+    // Optional video frame captioning (opt-in, v0.16).
+    let video_caption = state.config.parsers.video.caption;
     // Optional image captioning (opt-in): a vision model adds a caption chunk per image.
-    let captioner: Option<OllamaLlm> = if state.config.parsers.image.caption {
+    // The same OllamaLlm handle drives BOTH image and video captioning, so build it when
+    // EITHER is enabled — otherwise enabling only `video.caption` would silently no-op
+    // (frames extracted, nothing captioned). The image caption model is used as the handle's
+    // default; per-frame video calls pass `video_model` explicitly.
+    let image_caption = state.config.parsers.image.caption;
+    let captioner: Option<OllamaLlm> = if image_caption || video_caption {
         let base_url = OllamaLlm::resolve_base_url(Some(&cfg.base_url));
         Some(
             OllamaLlm::new(&base_url, state.config.parsers.image.caption_model())
@@ -407,8 +414,6 @@ async fn run_deep_phase(
     let transcribe = state.config.parsers.audio.transcribe;
     let transcribe_binary = state.config.parsers.audio.transcribe_binary().to_owned();
     let transcribe_model = state.config.parsers.audio.model.clone();
-    // Optional video frame captioning (opt-in, v0.16).
-    let video_caption = state.config.parsers.video.caption;
     let video_ffmpeg = state.config.parsers.video.ffmpeg_binary().to_owned();
     let video_model = state.config.parsers.video.caption_model().to_owned();
     let video_fps = state.config.parsers.video.fps();
@@ -498,39 +503,45 @@ async fn run_deep_phase(
 
             // Image captioning (opt-in): append a vision-model caption chunk alongside the
             // EXIF chunk. Watchdog-gated (the vision model is heavy); failure only warns.
-            if let Some(cap) = &captioner {
-                if extracted.mime.starts_with("image/") {
-                    run_watchdog_check(
-                        &mut wdog,
-                        &spec,
-                        headroom,
-                        handle,
-                        "deep",
-                        Some(state.embedder.as_ref()),
-                        Some(cap as &(dyn Describer + Send + Sync)),
-                    )
-                    .await;
-                    match indexa_llm::caption_image_file(cap, &caption_model, &entry.path).await {
-                        Ok(text) if !text.trim().is_empty() => {
-                            let seq = extracted.chunks.len();
-                            extracted.chunks.push(indexa_parsers::types::Chunk {
-                                source: entry.path.clone(),
-                                seq,
-                                heading: "caption".to_owned(),
-                                text,
-                                language: None,
-                            });
-                        }
-                        Ok(_) => {}
-                        Err(e) => push(
+            // Gate on `image_caption` specifically: the shared `captioner` handle is also
+            // built when only video captioning is enabled, so without this guard images
+            // would be captioned without the user opting in.
+            if image_caption {
+                if let Some(cap) = &captioner {
+                    if extracted.mime.starts_with("image/") {
+                        run_watchdog_check(
+                            &mut wdog,
+                            &spec,
+                            headroom,
                             handle,
-                            JobEvent::Warning {
-                                stage: "deep".to_owned(),
-                                item_path: Some(path_str.clone()),
-                                message: format!("caption failed: {e:#}"),
-                                pressure: None,
-                            },
-                        ),
+                            "deep",
+                            Some(state.embedder.as_ref()),
+                            Some(cap as &(dyn Describer + Send + Sync)),
+                        )
+                        .await;
+                        match indexa_llm::caption_image_file(cap, &caption_model, &entry.path).await
+                        {
+                            Ok(text) if !text.trim().is_empty() => {
+                                let seq = extracted.chunks.len();
+                                extracted.chunks.push(indexa_parsers::types::Chunk {
+                                    source: entry.path.clone(),
+                                    seq,
+                                    heading: "caption".to_owned(),
+                                    text,
+                                    language: None,
+                                });
+                            }
+                            Ok(_) => {}
+                            Err(e) => push(
+                                handle,
+                                JobEvent::Warning {
+                                    stage: "deep".to_owned(),
+                                    item_path: Some(path_str.clone()),
+                                    message: format!("caption failed: {e:#}"),
+                                    pressure: None,
+                                },
+                            ),
+                        }
                     }
                 }
             }
@@ -609,7 +620,24 @@ async fn run_deep_phase(
                                         }
                                     }
                                 }
-                                None => break, // no vision LLM available
+                                None => {
+                                    // Should not happen now that the captioner is built when
+                                    // video_caption is on — but warn loudly rather than silently
+                                    // dropping every frame if it ever does.
+                                    push(
+                                        handle,
+                                        JobEvent::Warning {
+                                            stage: "deep".to_owned(),
+                                            item_path: Some(path_str.clone()),
+                                            message: "video captioning is enabled but no vision \
+                                                      model is available — set parsers.video.model \
+                                                      and ensure Ollama is running"
+                                                .to_owned(),
+                                            pressure: None,
+                                        },
+                                    );
+                                    break;
+                                }
                             }
                         }
                         if !captions.is_empty() {

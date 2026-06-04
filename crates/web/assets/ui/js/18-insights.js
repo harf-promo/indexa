@@ -6,10 +6,12 @@ function runInsights(kind) {  // eslint-disable-line no-unused-vars
   el.style.display = '';
   el.textContent = 'Running ' + kind + ' analysis…';
 
+  var staleDays = parseInt((document.getElementById('insights-stale-days') || {}).value, 10) || 365;
+  var diffDays  = parseInt((document.getElementById('insights-diff-days')  || {}).value, 10) || 7;
   var url = '/api/insights/' + kind;
   if (kind === 'duplicates') url += '?threshold=0.90';
-  if (kind === 'stale')      url += '?days=365';
-  if (kind === 'diff')       url += '?days=7';
+  if (kind === 'stale')      url += '?days=' + staleDays;
+  if (kind === 'diff')       url += '?days=' + diffDays;
 
   fetch(url)
     .then(function (r) { return r.json(); })
@@ -37,7 +39,7 @@ function renderInsightsResult(kind, d, el) {
       el.innerHTML = '<span style="color:var(--muted)">No stale projects found.</span>';
       return;
     }
-    el.innerHTML = '<strong>' + entries.length + ' stale director(ies) (not modified in 365+ days):</strong>'
+    el.innerHTML = '<strong>' + entries.length + ' stale director(ies) (not modified in ' + (d.days || 365) + '+ days):</strong>'
       + '<table style="width:100%;border-collapse:collapse;margin-top:6px">'
       + entries.map(function (e) {
         return '<tr style="border-top:1px solid var(--border)">'
@@ -49,7 +51,7 @@ function renderInsightsResult(kind, d, el) {
   } else if (kind === 'diff') {
     var added = d.added || [];
     var modified = d.modified || [];
-    el.innerHTML = '<strong>Last 7 days:</strong>'
+    el.innerHTML = '<strong>Last ' + (d.days || 7) + ' day(s):</strong>'
       + '<div style="margin-top:6px"><em>Added (' + d.added_count + '):</em>'
       + (added.length === 0 ? ' <span style="color:var(--muted)">none</span>' : '<ul style="margin:2px 0 0 16px;padding:0">' + added.map(function (p) { return '<li style="list-style:circle;color:var(--green)">+ ' + escI(p) + '</li>'; }).join('') + '</ul>')
       + '</div><div style="margin-top:6px"><em>Modified (' + d.modified_count + '):</em>'

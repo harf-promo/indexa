@@ -166,9 +166,11 @@ Defaults: `nomic-embed-text` (embeddings) · `gemma3:4b` (file context) · `gemm
 
 ## What's coming
 
-- **Importance weighting (v0.8)** — tell Indexa which parts of your disk matter most. User-controlled weights per file, folder, or category feed into search ranking and Q&A quality. Auto-suggested from recency and access frequency.
-- **Insights (v0.10)** — analytical reports: duplicate-cluster detection, stale project detection, weekly diff summary.
-- **Plugin SDK** — custom parsers and adapters. Extend Indexa for your own file types and data sources without forking the core.
+- **Mobile companion (v0.12)** — browse your index from a phone on the same network. The read-only API is already LAN-ready (`indexa serve --host 0.0.0.0`); a native client is next.
+- **Plugin marketplace (v0.13)** — the parser SDK is shipped (`indexa_parsers::Registry`); next is discovery and distribution of third-party parsers.
+- **Signature graph visualization** — render the code-relationship graph and the context treemap as the brand visual, surfacing calls/imports/blast-radius interactively.
+
+Recently shipped: **Importance weighting**, **Insights** (duplicates / stale / weekly diff), **video captioning**, **Plugin SDK**, **LAN serve**.
 
 Ideas and votes in [Discussions](../../discussions/categories/ideas). Full detail in [ROADMAP.md](ROADMAP.md).
 

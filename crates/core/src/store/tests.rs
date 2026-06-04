@@ -1201,3 +1201,210 @@ fn delete_entry_also_removes_edges() {
     assert!(store.edges_from("/gone.rs").unwrap().is_empty());
     assert!(store.edges_to("imports", "std::fs").unwrap().is_empty());
 }
+
+// ── Importance weights (v0.8) ─────────────────────────────────────────────────
+
+fn hit(path: &str, score: f64) -> SearchHit {
+    SearchHit {
+        chunk_id: 1,
+        entry_path: path.to_owned(),
+        seq: 0,
+        heading: String::new(),
+        text: String::new(),
+        rrf_score: score,
+    }
+}
+
+#[test]
+fn weight_set_and_resolve_exact_file() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set_weight("file", "/a/b.txt", 2.5, "user", None)
+        .unwrap();
+    assert!((store.weight_for("/a/b.txt").unwrap() - 2.5).abs() < 1e-6);
+    // Unknown path → neutral 1.0.
+    assert!((store.weight_for("/x/y.txt").unwrap() - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn weight_for_uses_nearest_ancestor_dir() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.set_weight("dir", "/proj", 0.5, "user", None).unwrap();
+    store
+        .set_weight("dir", "/proj/active", 3.0, "user", None)
+        .unwrap();
+    // Deepest matching ancestor wins.
+    assert!((store.weight_for("/proj/active/main.rs").unwrap() - 3.0).abs() < 1e-6);
+    // Falls back to the shallower dir for siblings.
+    assert!((store.weight_for("/proj/old/legacy.rs").unwrap() - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn weight_for_falls_back_to_category() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_auto_classifications(&[(
+            "/docs/tax.pdf".into(),
+            "file".into(),
+            "finance".into(),
+            0.9,
+        )])
+        .unwrap();
+    store
+        .set_weight("category", "finance", 4.0, "user", None)
+        .unwrap();
+    // No file/dir weight → category weight applies.
+    assert!((store.weight_for("/docs/tax.pdf").unwrap() - 4.0).abs() < 1e-6);
+}
+
+#[test]
+fn weight_set_is_upsert() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set_weight("file", "/a.txt", 2.0, "user", None)
+        .unwrap();
+    store
+        .set_weight("file", "/a.txt", 5.0, "user", None)
+        .unwrap();
+    assert!((store.weight_for("/a.txt").unwrap() - 5.0).abs() < 1e-6);
+    assert_eq!(store.list_weights(None).unwrap().len(), 1);
+}
+
+#[test]
+fn weight_list_and_delete() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set_weight("file", "/a.txt", 2.0, "user", None)
+        .unwrap();
+    store.set_weight("dir", "/proj", 1.5, "user", None).unwrap();
+    assert_eq!(store.list_weights(None).unwrap().len(), 2);
+    assert_eq!(store.list_weights(Some("file")).unwrap().len(), 1);
+
+    store.delete_weight("file", "/a.txt").unwrap();
+    assert_eq!(store.list_weights(None).unwrap().len(), 1);
+}
+
+#[test]
+fn boost_with_weights_multiplies_and_is_noop_when_empty() {
+    let mut store = Store::open_in_memory().unwrap();
+    // No weights → unchanged scores.
+    let mut hits = vec![hit("/a.txt", 1.0), hit("/b.txt", 2.0)];
+    store.boost_with_weights(&mut hits).unwrap();
+    assert!((hits[0].rrf_score - 1.0).abs() < 1e-9);
+    assert!((hits[1].rrf_score - 2.0).abs() < 1e-9);
+
+    // Boost /a.txt 3x, suppress everything under /arch to 0.1.
+    store
+        .set_weight("file", "/a.txt", 3.0, "user", None)
+        .unwrap();
+    store.set_weight("dir", "/arch", 0.1, "user", None).unwrap();
+    let mut hits = vec![hit("/a.txt", 1.0), hit("/arch/old.txt", 2.0)];
+    store.boost_with_weights(&mut hits).unwrap();
+    // Tolerance 1e-6 (not tighter): weights are stored as f32, so 2.0 * 0.1f32 carries
+    // ~3e-9 of representation error once widened to f64.
+    assert!(
+        (hits[0].rrf_score - 3.0).abs() < 1e-6,
+        "file weight applied"
+    );
+    assert!(
+        (hits[1].rrf_score - 0.2).abs() < 1e-6,
+        "ancestor dir weight applied"
+    );
+}
+
+#[test]
+fn suggest_weights_by_recency_tiers_by_age() {
+    let mut store = Store::open_in_memory().unwrap();
+    // dummy_entry sets modified=None; insert then patch modified_s to a recent value.
+    store
+        .upsert_entries(&[dummy_entry("/recent.txt", EntryKind::File, 10)])
+        .unwrap();
+    let now: i64 = store
+        .db_connection()
+        .query_row("SELECT unixepoch()", [], |r| r.get(0))
+        .unwrap();
+    store
+        .db_connection()
+        .execute(
+            "UPDATE entries SET modified_s = ?1 WHERE path = '/recent.txt'",
+            [now - 2 * 86400],
+        )
+        .unwrap();
+    let suggestions = store.suggest_weights_by_recency(30).unwrap();
+    assert_eq!(suggestions.len(), 1);
+    // Modified 2 days ago → top tier weight 2.0.
+    assert!((suggestions[0].1 - 2.0).abs() < 1e-6);
+}
+
+// ── Insights (v0.10) ──────────────────────────────────────────────────────────
+
+#[test]
+fn find_exact_duplicates_groups_by_source_hash() {
+    let mut store = Store::open_in_memory().unwrap();
+    let mut a = dummy_summary("/a.txt", "file", Some("/"), 1);
+    a.source_hash = "HASH1".to_owned();
+    let mut b = dummy_summary("/dup/a.txt", "file", Some("/dup"), 2);
+    b.source_hash = "HASH1".to_owned();
+    let mut c = dummy_summary("/unique.txt", "file", Some("/"), 1);
+    c.source_hash = "HASH2".to_owned();
+    store.upsert_summary(&a).unwrap();
+    store.upsert_summary(&b).unwrap();
+    store.upsert_summary(&c).unwrap();
+
+    let clusters = store.find_exact_duplicates().unwrap();
+    assert_eq!(clusters.len(), 1, "only HASH1 has 2 members");
+    assert_eq!(clusters[0].paths.len(), 2);
+    assert!(clusters[0].exact);
+}
+
+#[test]
+fn find_near_duplicates_clusters_similar_embeddings() {
+    let mut store = Store::open_in_memory().unwrap();
+    let mut a = dummy_summary("/a.txt", "file", Some("/"), 1);
+    a.embedding = Some(vec![1.0, 0.0, 0.0]);
+    let mut b = dummy_summary("/b.txt", "file", Some("/"), 1);
+    b.embedding = Some(vec![1.0, 0.0, 0.0]); // identical → cosine 1.0
+    let mut c = dummy_summary("/c.txt", "file", Some("/"), 1);
+    c.embedding = Some(vec![0.0, 1.0, 0.0]); // orthogonal → not in cluster
+    store.upsert_summary(&a).unwrap();
+    store.upsert_summary(&b).unwrap();
+    store.upsert_summary(&c).unwrap();
+
+    let clusters = store.find_near_duplicates(0.9).unwrap();
+    assert_eq!(clusters.len(), 1);
+    assert_eq!(clusters[0].paths, vec!["/a.txt", "/b.txt"]);
+    assert!(!clusters[0].exact);
+}
+
+#[test]
+fn find_stale_entries_returns_old_dirs() {
+    let mut store = Store::open_in_memory().unwrap();
+    // dummy_entry dirs have modified_s = NULL → counted as stale.
+    store
+        .upsert_entries(&[
+            dummy_entry("/old/proj", EntryKind::Dir, 0),
+            dummy_entry("/old/proj/file.txt", EntryKind::File, 10),
+        ])
+        .unwrap();
+    let stale = store.find_stale_entries(365).unwrap();
+    // Only the dir is reported (files excluded).
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0].path, "/old/proj");
+    assert_eq!(stale[0].kind, "dir");
+}
+
+#[test]
+fn weekly_diff_reports_newly_added() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[dummy_entry("/new.txt", EntryKind::File, 10)])
+        .unwrap();
+    let now: i64 = store
+        .db_connection()
+        .query_row("SELECT unixepoch()", [], |r| r.get(0))
+        .unwrap();
+    // Window covers the just-inserted entry (first_indexed_at = now).
+    let diff = store.weekly_diff(now - 7 * 86400).unwrap();
+    assert_eq!(diff.added_count, 1);
+    assert!(diff.added.contains(&"/new.txt".to_owned()));
+}
