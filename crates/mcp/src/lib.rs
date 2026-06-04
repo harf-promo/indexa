@@ -22,7 +22,10 @@ use rmcp::{
 };
 use serde::Deserialize;
 
-use indexa_core::{config::Config, store::Store};
+use indexa_core::{
+    config::{Config, HybridMode},
+    store::Store,
+};
 use indexa_embed::Embedder;
 use indexa_llm::Generator;
 use indexa_query::QaConfig;
@@ -46,11 +49,14 @@ pub struct IndexaMcp {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchParams {
-    /// Text to search for across indexed file paths and content.
+    /// Keyword query to search across file **content** (chunk text + headings, BM25 + vector).
     pub query: String,
     /// Max results to return (default 20).
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Scope results to this path prefix (optional).
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -137,24 +143,55 @@ impl IndexaMcp {
         Store::open(&self.db_path).map_err(mcp_err)
     }
 
-    /// Search indexed paths/content; returns the top matches with kind and path.
+    /// Hybrid keyword + semantic search over indexed **chunk content** (BM25 + vector RRF).
+    /// Returns matching chunks with their file path, heading, and a text snippet.
+    /// Use `scope` to restrict to a subtree. For path-name browsing, prefer `browse_tree`.
     #[tool(
-        description = "Search the index by keyword across file paths and content. Returns matching paths with their kind. Use this to locate where something lives."
+        description = "Search indexed chunk content by keyword (BM25 + vector hybrid). Returns matching chunks with path, heading, and snippet — richer than path-name search. Optionally scope to a path prefix."
     )]
     async fn search(&self, params: Parameters<SearchParams>) -> Result<CallToolResult, ErrorData> {
-        let SearchParams { query, limit } = params.0;
+        let SearchParams {
+            query,
+            limit,
+            scope,
+        } = params.0;
         let limit = limit.unwrap_or(20).min(100);
+        let scope = scope.as_deref().filter(|s| !s.is_empty());
+
+        // Try to embed the query for the dense arm; fall back to sparse if the embedder is
+        // unavailable or the index has no embeddings.
+        let embedding = self.embedder.embed(&query).await.ok();
+
         let store = self.store()?;
-        let hits = store.search_paths(&query, limit).map_err(mcp_err)?;
+        let hits = store
+            .hybrid_search(
+                &query,
+                embedding.as_deref(),
+                &HybridMode::Rrf,
+                scope,
+                limit,
+                60.0,
+            )
+            .map_err(mcp_err)?;
+
         if hits.is_empty() {
-            return Ok(ok_text(format!("No paths matched '{query}'.")));
+            return Ok(ok_text(format!("No results for '{query}'.")));
         }
+
         let body = hits
             .iter()
-            .map(|n| format!("{} {}", if n.kind == "dir" { "📁" } else { "📄" }, n.path))
+            .map(|h| {
+                let heading = if h.heading.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", h.heading)
+                };
+                let snippet: String = h.text.chars().take(120).collect();
+                format!("{}{}\n  {}", h.entry_path, heading, snippet)
+            })
             .collect::<Vec<_>>()
-            .join("\n");
-        Ok(ok_text(format!("{} result(s):\n{body}", hits.len())))
+            .join("\n\n");
+        Ok(ok_text(format!("{} result(s):\n\n{body}", hits.len())))
     }
 
     /// List a code file's dependencies from the code graph (imports + defined symbols).

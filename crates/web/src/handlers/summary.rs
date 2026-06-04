@@ -24,7 +24,13 @@ pub(crate) async fn api_summary(
     let rec = match store.summary_by_path(&path) {
         Ok(Some(r)) => r,
         Ok(None) => {
-            return Json(serde_json::json!({"error":"no summary","pending":true})).into_response()
+            // 404 so HTTP clients can distinguish "not yet summarized" from a 500.
+            // The JSON body preserves backward compat (`d.pending` check in JS).
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "no summary", "pending": true})),
+            )
+                .into_response();
         }
         Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     };

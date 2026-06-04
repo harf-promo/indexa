@@ -7,7 +7,8 @@ async function showSummary(path) {
 
   try {
     var r = await fetch('/api/summary?path=' + encodeURIComponent(path));
-    if (!r.ok) throw new Error('Server error ' + r.status);
+    // 404 = "no summary yet" (not an error — parse the body for pending state)
+    if (!r.ok && r.status !== 404) throw new Error('Server error ' + r.status);
     var d = await r.json();
 
     if (d.error === 'no summary' || d.pending) {

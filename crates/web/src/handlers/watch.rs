@@ -183,6 +183,19 @@ pub(crate) async fn api_watch_start(
         },
     );
 
+    // Watchdog: remove the session entry when the task finishes (normally, panics, or is
+    // aborted). Without this, a crashed watcher leaves a zombie entry so the UI shows
+    // "watching" forever even though no events are flowing.
+    {
+        let sessions_weak = state.watch_sessions.clone();
+        let cleanup_path = path.clone();
+        tokio::spawn(async move {
+            let _ = task.await; // await completion/panic/abort
+            sessions_weak.lock().await.remove(&cleanup_path);
+            tracing::debug!("watch: session cleaned up for {cleanup_path}");
+        });
+    }
+
     Json(serde_json::json!({ "watching": true, "path": path })).into_response()
 }
 

@@ -150,7 +150,8 @@ function renderModelRow(m) {
 
 async function setModelRole(name, role) {
   if (role === 'embed') {
-    if (!confirm('Set the embedding model to "' + name + '"?\n\nThis applies on the next re-embed (indexa deep). An embedder with a different vector dimension makes your existing index incompatible — search stays wrong until a full re-embed.')) return;
+    const msg = 'Set the embedding model to "' + name + '"?\n\nThis applies on the next re-embed (indexa deep). An embedder with a different vector dimension makes your existing index incompatible — search stays wrong until a full re-embed.';
+    if (!(await confirmModal(msg, 'Set embedder'))) return;
   }
   const field = role === 'file' ? 'file_model' : role === 'dir' ? 'dir_model' : 'embed_model';
   const body = {}; body[field] = name;
@@ -171,7 +172,8 @@ async function refreshCatalog() {
   if (btn) btn.disabled = true;
   try {
     const r = await fetch('/api/models/catalog/refresh', {method: 'POST'});
-    const d = await r.json();
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { toast(d.error || 'Catalog refresh failed (' + r.status + ')', 'error'); return; }
     if (d.refreshed) toast('Catalog refreshed (' + (d.count || 0) + ' models)', 'info');
     else toast(d.reason || d.error || 'Catalog not refreshed', 'warn');
     loadModels();
