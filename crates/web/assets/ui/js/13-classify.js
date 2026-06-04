@@ -31,7 +31,8 @@ function renderClassificationChip(rec, path) {
       '<button class="btn-sm classify-undo-btn" onclick="undoClassification(' + JSON.stringify(path) + ')">Undo</button>';
   } else {
     // auto — show confirm/ignore options with a category selector
-    var categories = ['code','documents','media','archive','personal','work','system','other'];
+    // Categories must match SemanticCategory enum in crates/core/src/smart_classify.rs
+    var categories = ['code','media','archive','personal','work','system','other'];
     var opts = categories.map(function(c) {
       return '<option value="' + c + '"' + (c === rec.category ? ' selected' : '') + '>' +
         c.charAt(0).toUpperCase() + c.slice(1) + '</option>';
@@ -75,16 +76,16 @@ async function ignoreClassification(path) {
 }
 
 async function undoClassification(path) {
-  // Re-run the auto classify via a delete of user decision — not in store API yet,
-  // so we use confirm with the original auto category as a best-effort "reset"
-  // by fetching current, then re-fetching to clear. Simplest: just hide the chip.
+  // Delete the classification row entirely — reverts to "no suggestion".
+  // Re-running `indexa classify` will re-surface the auto suggestion.
   try {
-    await fetch('/api/classifications/ignore', {
+    var r = await fetch('/api/classifications/reset', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ path: path })
     });
-    toast('Label reset to ignored — re-run `indexa classify` to regenerate', 'info');
+    if (!r.ok) { toast('Reset failed (' + r.status + ')', 'error'); return; }
+    toast('Label cleared — run `indexa classify` to regenerate a suggestion', 'info');
     loadClassificationForPath(path);
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }

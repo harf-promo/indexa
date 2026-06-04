@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-06-04
+
 ### Added
 
 - **`indexa index` — one-shot context build.** `indexa index <path>` replaces the
@@ -80,6 +82,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (README is now evergreen; version info belongs in CHANGELOG). The "Why it's
   defensible" competitor comparison table replaced with a bold "The only tool of its
   kind" section.
+- **Smart classification Undo now actually resets.** The "Undo" button in the Smart
+  label chip previously re-posted to `/ignore` (a no-op stub). It now calls
+  `POST /api/classifications/reset` which deletes the classification row entirely,
+  reverting the path to "no suggestion." Re-running `indexa classify` re-surfaces the
+  auto suggestion. Adds `Store::delete_classification` and the `/reset` endpoint.
+- **Smart label category dropdown synced to core enum.** The `documents` option was
+  offered in the web UI dropdown but has no corresponding `SemanticCategory` variant
+  in the core — confirming it persisted an invalid category. Removed from the dropdown;
+  valid options are now: code, media, archive, personal, work, system, other.
 
 ## [0.12.3] — 2026-06-03
 

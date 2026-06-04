@@ -160,4 +160,14 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM classifications", [], |r| r.get(0))?;
         Ok(n as u64)
     }
+
+    /// Delete a classification row entirely, reverting the path to "no suggestion".
+    ///
+    /// Used by the Undo action: after deletion, the next `indexa classify` run will
+    /// re-surface the Tier-0 auto suggestion as a fresh `source='auto'` row.
+    pub fn delete_classification(&mut self, path: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM classifications WHERE path = ?1", params![path])?;
+        Ok(())
+    }
 }
