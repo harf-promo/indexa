@@ -279,6 +279,8 @@ pub(crate) struct FeaturesResponse {
     pub(crate) image_model: Option<String>,
     pub(crate) audio_transcribe: bool,
     pub(crate) audio_binary: Option<String>,
+    pub(crate) video_caption: bool,
+    pub(crate) video_model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -289,6 +291,8 @@ pub(crate) struct FeaturesRequest {
     pub(crate) image_model: Option<String>,
     pub(crate) audio_transcribe: Option<bool>,
     pub(crate) audio_binary: Option<String>,
+    pub(crate) video_caption: Option<bool>,
+    pub(crate) video_model: Option<String>,
 }
 
 #[derive(Deserialize)]

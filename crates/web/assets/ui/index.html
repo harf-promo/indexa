@@ -309,12 +309,57 @@
             <input type="text" class="key-input" id="feat-audio-binary" placeholder="whisper-cli (default)" autocomplete="off" aria-label="whisper-cli binary path or name">
           </div>
           <p class="settings-note" style="margin-top:0">Requires <code>whisper-cli</code> (whisper.cpp) installed separately. Applies on the next <code>indexa deep</code> run.</p>
+          <!-- Video captions -->
+          <div class="key-row" style="margin-top:8px">
+            <span class="key-label">Video captions</span>
+            <label class="toggle-label">
+              <input type="checkbox" id="feat-video-caption" aria-label="Caption video files with frame sampling and a vision model">
+              <span class="toggle-text">Caption videos by sampling frames with a local vision model</span>
+            </label>
+          </div>
+          <div class="key-row">
+            <span class="key-label">Vision model</span>
+            <input type="text" class="key-input" id="feat-video-model" placeholder="llama3.2-vision (default)" autocomplete="off" aria-label="Video vision model name">
+          </div>
+          <p class="settings-note" style="margin-top:0">Requires <code>ffmpeg</code> (frame extraction) + an Ollama vision model. Samples 1 frame/2s, max 8 frames per video. Not yet counted by memory watchdog — enable only with headroom.</p>
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
           <button class="btn-sm" onclick="saveFeatures()">Save features</button>
           <span id="features-status" style="font-size:12px;color:var(--muted)"></span>
         </div>
       </div>
+      <div class="settings-section" id="section-insights">
+        <h2>Insights</h2>
+        <p class="settings-note" style="margin-bottom:10px">Analyse your index for duplicate files, inactive projects, and recent changes.</p>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+          <button class="btn-sm" onclick="runInsights('duplicates')">Find duplicates</button>
+          <button class="btn-sm" onclick="runInsights('stale')">Stale projects</button>
+          <button class="btn-sm" onclick="runInsights('diff')">Weekly diff</button>
+        </div>
+        <div id="insights-results" style="display:none;max-height:300px;overflow-y:auto;font-size:12px;background:var(--surface2);border-radius:6px;padding:10px"></div>
+      </div>
+
+      <div class="settings-section" id="section-weights">
+        <h2>Importance Weights</h2>
+        <p class="settings-note" style="margin-bottom:10px">Boost or suppress files, directories, or classification categories in search results. Weight 2.0 = double score; 0.1 = almost hidden; 1.0 = neutral.</p>
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
+          <select id="weight-kind" aria-label="Weight kind" style="font-size:12px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px">
+            <option value="file">File</option>
+            <option value="dir">Directory</option>
+            <option value="category">Category</option>
+          </select>
+          <input type="text" class="key-input" id="weight-target" placeholder="/path or category name" autocomplete="off" aria-label="Path or category" style="flex:1;min-width:160px">
+          <input type="number" id="weight-value" min="0" max="10" step="0.1" value="2.0" style="width:60px;font-size:12px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px" aria-label="Weight value">
+          <button class="btn-sm" onclick="setWeight()">Set</button>
+        </div>
+        <span id="weight-status" style="font-size:12px;color:var(--muted);display:block;margin-bottom:8px;min-height:14px"></span>
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <button class="btn-sm" onclick="loadWeights()">Refresh list</button>
+          <button class="btn-sm" onclick="suggestWeights()">Suggest recency</button>
+        </div>
+        <div id="weights-list" style="max-height:220px;overflow-y:auto;font-size:12px"></div>
+      </div>
+
       <div class="settings-section" id="section-packs">
         <h2>Context Packs</h2>
         <p class="settings-note" style="margin-bottom:10px">Named bundles of files and folders from anywhere on your disk. Export as a single XML, Markdown, or JSON file to paste into any AI tool.</p>

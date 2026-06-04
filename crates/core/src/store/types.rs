@@ -117,6 +117,17 @@ pub struct ClassificationRecord {
     pub created_at: i64,
 }
 
+/// An importance weight record (v0.8).
+#[derive(Debug, Clone)]
+pub struct WeightRecord {
+    pub target_kind: String, // "file" | "dir" | "category"
+    pub target: String,      // absolute path or category name
+    pub weight: f32,
+    pub source: String, // "user" | "auto"
+    pub reason: Option<String>,
+    pub updated_at: i64,
+}
+
 /// A named Context Pack — a user-curated set of cross-directory paths that
 /// form a coherent topic (e.g. "Auth", "Tax 2025", "Client X").
 #[derive(Debug, Clone)]

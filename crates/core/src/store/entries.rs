@@ -50,14 +50,30 @@ fn delete_path_artifacts_exact(tx: &Transaction, path: &str) -> rusqlite::Result
 impl Store {
     // ── Surface-scan writes ───────────────────────────────────────────────────
 
-    /// Insert or replace a batch of walker entries.
+    /// Insert or update a batch of walker entries.
+    ///
+    /// Uses a non-destructive `ON CONFLICT … DO UPDATE` so the row's implicit
+    /// rowid is preserved across rescans. This matters because `ON DELETE CASCADE`
+    /// constraints on `chunks`, `summaries`, and `edges` would fire on every
+    /// rescan if the old `INSERT OR REPLACE` (= DELETE + INSERT) were kept.
     pub fn upsert_entries(&mut self, entries: &[Entry]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
+            // first_indexed_at is set once on INSERT and never overwritten on rescan.
             let mut stmt = tx.prepare_cached(
-                "INSERT OR REPLACE INTO entries
-                 (path, parent_path, kind, size, modified_s, hint_label, hint_cat, deep_policy)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO entries
+                 (path, parent_path, kind, size, modified_s, hint_label, hint_cat, deep_policy,
+                  first_indexed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch())
+                 ON CONFLICT(path) DO UPDATE SET
+                     parent_path = excluded.parent_path,
+                     kind        = excluded.kind,
+                     size        = excluded.size,
+                     modified_s  = excluded.modified_s,
+                     hint_label  = excluded.hint_label,
+                     hint_cat    = excluded.hint_cat,
+                     deep_policy = excluded.deep_policy,
+                     indexed_at  = unixepoch()",
             )?;
 
             for e in entries {

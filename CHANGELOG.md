@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-06-04
+
+### Added
+
+- **v0.8 Importance weighting.** Per-file, per-directory, and per-category boosts
+  applied multiplicatively to search RRF scores.
+  - `indexa weight set/get/list/delete/suggest/apply` — full CLI surface.
+  - `--auto` recency-based suggestions (files modified in last N days).
+  - REST API: `GET/POST/DELETE /api/weights`, `GET /api/weights/suggest`.
+  - Web UI: "Importance Weights" section in Settings drawer.
+  - MCP tools: `list_weights`, `set_weight`, `delete_weight`.
+  - Config: `[retrieval] use_weights = true` enables the boost in Q&A.
+
+- **v0.10 Insights.** Analytical reports over the index.
+  - `indexa insights duplicates [--exact] [--threshold]` — exact (content hash)
+    or near-duplicate (embedding cosine) cluster detection.
+  - `indexa insights stale [--days 365]` — directories not modified for N days.
+  - `indexa insights diff [--days 7]` — what was added or modified this week.
+  - REST API: `GET /api/insights/duplicates`, `/stale`, `/diff`.
+  - Web UI: "Insights" section in Settings drawer (run on demand).
+  - MCP tools: `insights_duplicates`, `insights_stale`, `insights_diff`.
+  - DB migration: `entries.first_indexed_at` — stable discovery timestamp
+    (never reset on rescan; enables "what was added this week" queries).
+
+- **Video frame captioning (opt-in).** `[parsers.video] caption = true` samples
+  frames via ffmpeg and captions each with a local Ollama vision model.
+  Requires `ffmpeg` on PATH; configurable `fps_sample` (default 0.5) and
+  `max_frames` (default 8). Video toggle added to the Advanced Features Settings
+  UI alongside image and audio options.
+
+- **Plugin SDK — extensible parser registry.**
+  - `indexa_parsers::Registry` struct with `new()`, `register(Box<dyn Parser>)`,
+    and `parse()`. Custom parsers inserted before built-ins take precedence.
+  - All plugin types (`Parser`, `Chunk`, `Extracted`, `Edge`) are public stable API.
+  - `crates/parsers/examples/custom_parser.rs` — minimal reference implementation.
+  - Existing `parse()` / `parse_guarded()` free functions unchanged.
+
+- **LAN serve.** `indexa serve --host 0.0.0.0` exposes the web UI on all interfaces
+  for mobile or second-device access. Prints all local IPv4 addresses on startup.
+  Desktop app always binds to 127.0.0.1 (no change). Config: `[serve] host`.
+
+### Fixed
+
+- **`upsert_entries` non-destructive upsert.** Replaced `INSERT OR REPLACE INTO
+  entries` (which DELETE+INSERTs on conflict, resetting the implicit rowid and
+  breaking any future FK CASCADE) with `ON CONFLICT(path) DO UPDATE SET …`.
+  The row identity is now stable across rescans.
+
+## [0.15.0] — 2026-06-04
+
+See PR #147. MCP completeness (22 tools), pack scoped search, `indexa doctor`
+integrity/queue/codesign checks, `idx_edges_from` index, CHANGELOG v0.14.0 entry.
+
 ## [0.14.0] — 2026-06-04
 
 ### Added

@@ -160,6 +160,31 @@ pub enum Commands {
         action: PackAction,
     },
 
+    /// Manage importance weights — boost or suppress files, folders, or categories in search.
+    #[command(after_help = "Examples:
+  indexa weight set ~/Work/activeproject 2.0   # boost an active project
+  indexa weight set ~/Archive 0.1              # suppress an archive folder
+  indexa weight set --kind category code 1.5   # boost all 'code' classified dirs
+  indexa weight get ~/Work/activeproject
+  indexa weight list
+  indexa weight suggest --days 30              # show recency-based suggestions
+  indexa weight apply --days 7                 # auto-apply recency boosts")]
+    Weight {
+        #[command(subcommand)]
+        action: WeightAction,
+    },
+
+    /// Analyse the index for duplicate files, stale projects, and recent changes.
+    #[command(after_help = "Examples:
+  indexa insights duplicates
+  indexa insights duplicates --exact
+  indexa insights stale --days 365
+  indexa insights diff --days 7")]
+    Insights {
+        #[command(subcommand)]
+        action: InsightsAction,
+    },
+
     /// Export the hierarchical summary tree as XML, Markdown, or JSON for use as AI context.
     #[command(after_help = "Examples:
   indexa export ~/code/myrepo --format xml > .context.xml
@@ -236,10 +261,16 @@ pub enum Commands {
     /// Start the local web UI at http://localhost:<port>.
     #[command(after_help = "Examples:
   indexa serve
-  indexa serve --port 8080")]
+  indexa serve --port 8080
+  indexa serve --host 0.0.0.0          # LAN access (⚠ exposes all indexed files on network)")]
     Serve {
         #[arg(short, long, default_value_t = 7620)]
         port: u16,
+
+        /// Bind host address. Default 127.0.0.1 (localhost only).
+        /// Use 0.0.0.0 to expose on all interfaces (LAN access).
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
 
         /// Embedding model to use (overrides config).
         #[arg(long)]
@@ -436,6 +467,81 @@ pub enum PackAction {
     Delete {
         /// Pack name.
         name: String,
+    },
+}
+
+/// Sub-commands for `indexa weight`.
+#[derive(clap::Subcommand, Debug)]
+pub enum WeightAction {
+    /// Set an importance weight for a file, directory, or category.
+    Set {
+        /// Target path or category name.
+        target: String,
+        /// Weight value (0.0 = silence, 1.0 = neutral, >1.0 = boost).
+        weight: f32,
+        /// Target kind: file, dir, or category (default: auto-detect from path).
+        #[arg(long, default_value = "auto")]
+        kind: String,
+    },
+    /// Show the resolved weight for a path.
+    Get {
+        /// Absolute path to look up.
+        path: String,
+    },
+    /// List all stored importance weights.
+    List {
+        /// Filter by kind: file, dir, or category.
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Remove a stored weight.
+    Delete {
+        /// Target path or category name.
+        target: String,
+        /// Target kind: file, dir, or category.
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Show auto-recency weight suggestions (does not apply them).
+    Suggest {
+        /// Consider files modified within this many days.
+        #[arg(long, default_value = "30")]
+        days: i64,
+    },
+    /// Apply auto-recency weights to the store.
+    Apply {
+        /// Consider files modified within this many days.
+        #[arg(long, default_value = "30")]
+        days: i64,
+        /// Skip confirmation prompt.
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+/// Sub-commands for `indexa insights`.
+#[derive(clap::Subcommand, Debug)]
+pub enum InsightsAction {
+    /// Find duplicate or near-duplicate files.
+    Duplicates {
+        /// Similarity threshold for near-duplicate detection (0.0–1.0).
+        #[arg(long, default_value = "0.95")]
+        threshold: f32,
+        /// Find exact duplicates only (by content hash, no embedder required).
+        #[arg(long)]
+        exact: bool,
+    },
+    /// Find projects not modified for a long time.
+    Stale {
+        /// Report directories not modified in this many days.
+        #[arg(long, default_value = "365")]
+        days: i64,
+    },
+    /// Show what changed in the index over the past N days.
+    Diff {
+        /// Look back this many days.
+        #[arg(long, default_value = "7")]
+        days: i64,
     },
 }
 

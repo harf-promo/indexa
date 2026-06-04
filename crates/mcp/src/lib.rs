@@ -6,7 +6,7 @@
 //!
 //! **stdout is the protocol channel** — all logging must go to stderr.
 //!
-//! Tools (22): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
+//! Tools (28): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
 //! disclosure), `read_file`, `ask`, `dependencies` (a file's imports, defined symbols,
 //! and calls), `who_imports` (reverse code-graph lookup), `who_calls` (D2 — reverse
 //! call lookup), `blast_radius` (D2 — 1-hop call blast radius), `get_stats`,
@@ -14,7 +14,9 @@
 //! `remove_pack_paths`, `delete_pack` (Context Packs),
 //! `list_classifications`, `confirm_classification`, `ignore_classification`
 //! (Smart classification), `trigger_index` (indexing trigger),
-//! `search_pack` (scoped content search within a pack).
+//! `search_pack` (scoped content search within a pack),
+//! `list_weights`, `set_weight`, `delete_weight` (v0.8 Importance weighting),
+//! `insights_duplicates`, `insights_stale`, `insights_diff` (v0.10 Insights).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -209,6 +211,44 @@ pub struct IgnoreClassificationParams {
 pub struct TriggerIndexParams {
     /// Absolute path to scan, deep-index, and summarize.
     pub path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetWeightParams {
+    /// Target kind: `file`, `dir`, or `category`.
+    pub target_kind: String,
+    /// Absolute path or category name.
+    pub target: String,
+    /// Weight value: 0.0 = silence, 1.0 = neutral, >1.0 = boost.
+    pub weight: f32,
+    /// Optional human-readable reason for this weight.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteWeightParams {
+    /// Target kind: `file`, `dir`, or `category`.
+    pub target_kind: String,
+    /// Absolute path or category name.
+    pub target: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InsightsDuplicatesParams {
+    /// Similarity threshold for near-duplicate detection (default 0.95).
+    #[serde(default)]
+    pub threshold: Option<f32>,
+    /// Find exact duplicates only (by content hash, no embedder required).
+    #[serde(default)]
+    pub exact: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InsightsDaysParams {
+    /// Number of days for the look-back window.
+    #[serde(default)]
+    pub days: Option<i64>,
 }
 
 fn mcp_err(e: impl std::fmt::Display) -> ErrorData {
@@ -560,6 +600,7 @@ impl IndexaMcp {
             summary_weight: self.config.retrieval.summary_weight,
             summary_depth_alpha: self.config.retrieval.summary_depth_alpha,
             rerank: self.config.retrieval.rerank,
+            use_weights: self.config.retrieval.use_weights,
         };
 
         // Single shared, Send-safe pipeline (embed → scoped retrieve → optional
@@ -1002,6 +1043,207 @@ impl IndexaMcp {
         store.ignore_classification(&path).map_err(mcp_err)?;
         Ok(ok_text(format!(
             "Classification for \"{path}\" suppressed."
+        )))
+    }
+
+    // ── Importance weights (v0.8) ──────────────────────────────────────────────
+
+    /// List all importance weights stored in the index.
+    #[tool(
+        description = "List all importance weights (v0.8). Each weight boosts or suppresses \
+                       a file, directory, or classification category in search results. \
+                       weight > 1.0 = boost; weight < 1.0 = suppress; 1.0 = neutral."
+    )]
+    async fn list_weights(&self) -> Result<CallToolResult, ErrorData> {
+        let store = self.store()?;
+        let weights = store.list_weights(None).map_err(mcp_err)?;
+        if weights.is_empty() {
+            return Ok(ok_text(
+                "No importance weights set. Use `set_weight` to add one.",
+            ));
+        }
+        let lines: Vec<String> = weights
+            .iter()
+            .map(|w| {
+                format!(
+                    "[{}] {} → {} (weight: {:.2}, source: {})",
+                    w.target_kind, w.target, w.weight, w.weight, w.source
+                )
+            })
+            .collect();
+        Ok(ok_text(format!(
+            "{} weight(s):\n\n{}",
+            weights.len(),
+            lines.join("\n")
+        )))
+    }
+
+    /// Set an importance weight for a file, directory, or category.
+    #[tool(
+        description = "Set an importance weight (v0.8) for a file path, directory path, or \
+                       classification category. weight=2.0 boosts; weight=0.1 suppresses. \
+                       Applied multiplicatively to search RRF scores."
+    )]
+    async fn set_weight(
+        &self,
+        params: Parameters<SetWeightParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let SetWeightParams {
+            target_kind,
+            target,
+            weight,
+            reason,
+        } = params.0;
+        if weight < 0.0 {
+            return Err(mcp_err("weight must be ≥ 0.0"));
+        }
+        let mut store = Store::open(&self.db_path).map_err(mcp_err)?;
+        store
+            .set_weight(&target_kind, &target, weight, "user", reason.as_deref())
+            .map_err(mcp_err)?;
+        Ok(ok_text(format!(
+            "Set {target_kind} weight for \"{target}\" = {weight:.2}"
+        )))
+    }
+
+    /// Remove an importance weight.
+    #[tool(
+        description = "Remove an importance weight for a file, directory, or category, \
+                       restoring it to neutral (1.0)."
+    )]
+    async fn delete_weight(
+        &self,
+        params: Parameters<DeleteWeightParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let DeleteWeightParams {
+            target_kind,
+            target,
+        } = params.0;
+        let mut store = Store::open(&self.db_path).map_err(mcp_err)?;
+        store
+            .delete_weight(&target_kind, &target)
+            .map_err(mcp_err)?;
+        Ok(ok_text(format!("Deleted weight for \"{target}\".")))
+    }
+
+    // ── Insights (v0.10) ───────────────────────────────────────────────────────
+
+    /// Find duplicate or near-duplicate files in the index.
+    #[tool(description = "Find duplicate files (v0.10 Insights). \
+                       With exact=true, groups files with identical content hashes. \
+                       With exact=false (default), groups files with similar summary embeddings \
+                       above the similarity threshold.")]
+    async fn insights_duplicates(
+        &self,
+        params: Parameters<InsightsDuplicatesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let InsightsDuplicatesParams { threshold, exact } = params.0;
+        let exact = exact.unwrap_or(false);
+        let threshold = threshold.unwrap_or(0.95).clamp(0.0, 1.0);
+        let store = self.store()?;
+        let clusters = if exact {
+            store.find_exact_duplicates().map_err(mcp_err)?
+        } else {
+            store.find_near_duplicates(threshold).map_err(mcp_err)?
+        };
+        if clusters.is_empty() {
+            return Ok(ok_text("No duplicates found."));
+        }
+        let lines: Vec<String> = clusters
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                format!(
+                    "Cluster {} ({} files, similarity {:.2}):\n{}",
+                    i + 1,
+                    c.paths.len(),
+                    c.similarity,
+                    c.paths
+                        .iter()
+                        .map(|p| format!("  {p}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            })
+            .collect();
+        Ok(ok_text(format!(
+            "{} duplicate cluster(s):\n\n{}",
+            clusters.len(),
+            lines.join("\n\n")
+        )))
+    }
+
+    /// Find stale directories (not modified for a long time).
+    #[tool(
+        description = "Find stale directories (v0.10 Insights) — not modified for more than \
+                       `days` days (default 365). Helps identify inactive projects to archive."
+    )]
+    async fn insights_stale(
+        &self,
+        params: Parameters<InsightsDaysParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let days = params.0.days.unwrap_or(365).max(1);
+        let store = self.store()?;
+        let stale = store.find_stale_entries(days).map_err(mcp_err)?;
+        if stale.is_empty() {
+            return Ok(ok_text(format!(
+                "No stale directories found (threshold: {days} days)."
+            )));
+        }
+        let lines: Vec<String> = stale
+            .iter()
+            .map(|s| format!("{} days ago: {}", s.days_since_modified, s.path))
+            .collect();
+        Ok(ok_text(format!(
+            "{} stale director(ies) (>{days} days):\n\n{}",
+            stale.len(),
+            lines.join("\n")
+        )))
+    }
+
+    /// Show what was added or modified in the index over the past N days.
+    #[tool(
+        description = "Show a diff of index changes (v0.10 Insights) — which files were newly \
+                       discovered and which were modified on disk — over the past `days` days \
+                       (default 7)."
+    )]
+    async fn insights_diff(
+        &self,
+        params: Parameters<InsightsDaysParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let days = params.0.days.unwrap_or(7).max(1);
+        let since = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64 - days * 86_400)
+            .unwrap_or(0);
+        let store = self.store()?;
+        let diff = store.weekly_diff(since).map_err(mcp_err)?;
+        let added_sample: Vec<&str> = diff.added.iter().take(20).map(|s| s.as_str()).collect();
+        let modified_sample: Vec<&str> =
+            diff.modified.iter().take(20).map(|s| s.as_str()).collect();
+        Ok(ok_text(format!(
+            "Index diff (last {days} day(s)):\n\nAdded ({}):\n{}\n\nModified ({}):\n{}",
+            diff.added_count,
+            if added_sample.is_empty() {
+                "  none".to_owned()
+            } else {
+                added_sample
+                    .iter()
+                    .map(|p| format!("  + {p}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            },
+            diff.modified_count,
+            if modified_sample.is_empty() {
+                "  none".to_owned()
+            } else {
+                modified_sample
+                    .iter()
+                    .map(|p| format!("  ~ {p}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
         )))
     }
 

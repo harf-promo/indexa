@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use indexa_cli::{Cli, Commands, PackAction};
+use indexa_cli::{Cli, Commands, InsightsAction, PackAction, WeightAction};
 use indexa_core::config;
 use tracing_subscriber::prelude::*;
 
@@ -101,6 +101,27 @@ async fn main() -> Result<()> {
             } => commands::cmd_pack_export(name, format, output, depth).await,
             PackAction::Delete { name } => commands::cmd_pack_delete(name).await,
         },
+        Commands::Weight { action } => match action {
+            WeightAction::Set {
+                target,
+                weight,
+                kind,
+            } => commands::cmd_weight_set(target, weight, kind, &cfg).await,
+            WeightAction::Get { path } => commands::cmd_weight_get(path).await,
+            WeightAction::List { kind } => commands::cmd_weight_list(kind).await,
+            WeightAction::Delete { target, kind } => {
+                commands::cmd_weight_delete(target, kind).await
+            }
+            WeightAction::Suggest { days } => commands::cmd_weight_suggest(days).await,
+            WeightAction::Apply { days, yes } => commands::cmd_weight_apply(days, yes).await,
+        },
+        Commands::Insights { action } => match action {
+            InsightsAction::Duplicates { threshold, exact } => {
+                commands::cmd_insights_duplicates(threshold, exact).await
+            }
+            InsightsAction::Stale { days } => commands::cmd_insights_stale(days).await,
+            InsightsAction::Diff { days } => commands::cmd_insights_diff(days).await,
+        },
         Commands::Export {
             paths,
             format,
@@ -133,9 +154,10 @@ async fn main() -> Result<()> {
         }
         Commands::Serve {
             port,
+            host,
             embed_model,
             llm_model,
-        } => commands::cmd_serve(port, embed_model, llm_model, &cfg).await,
+        } => commands::cmd_serve(port, host, embed_model, llm_model, &cfg).await,
         Commands::Mcp {} => commands::cmd_mcp(&cfg).await,
         Commands::Status { unknown } => commands::cmd_status(unknown, &cfg).await,
         Commands::Rm { paths, recursive } => commands::cmd_rm(paths, recursive).await,

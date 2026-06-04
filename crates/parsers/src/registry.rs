@@ -1,4 +1,32 @@
 //! Parser registry — routes paths to the right parser by extension/MIME.
+//!
+//! # Plugin SDK
+//!
+//! Third-party parsers can extend the registry at compile time by implementing
+//! [`crate::types::Parser`] and registering via [`Registry::register`]:
+//!
+//! ```rust,ignore
+//! use indexa_parsers::registry::Registry;
+//! use indexa_parsers::types::{Chunk, Extracted, Parser};
+//!
+//! struct MyParser;
+//! impl Parser for MyParser {
+//!     fn accepts_mime(&self, mime: &str) -> bool { mime == "application/x-mything" }
+//!     fn parse(&self, path: &std::path::Path) -> anyhow::Result<Extracted> {
+//!         // ... read the file and return chunks ...
+//!         Ok(Extracted { source: path.to_path_buf(), mime: "application/x-mything".into(),
+//!             chunks: vec![], edges: vec![] })
+//!     }
+//! }
+//!
+//! // In your custom indexa binary:
+//! let mut reg = Registry::new();
+//! reg.register(Box::new(MyParser));
+//! let extracted = reg.parse(path)?;
+//! ```
+//!
+//! Custom parsers are inserted **before** the built-in fallbacks, so they take
+//! precedence for any MIME type they claim.
 
 use crate::code::CodeParser;
 use crate::epub::EpubParser;
@@ -12,8 +40,81 @@ use crate::types::{Extracted, Parser};
 use anyhow::{bail, Result};
 use std::path::Path;
 
-/// Returns an `Extracted` result for any supported file.
-/// Priority: extension-based parsers (exact-match) → MIME-based fallback → plain-text.
+// ── Registry struct ───────────────────────────────────────────────────────────
+
+/// An extensible parser registry.
+///
+/// [`Registry::new`] populates all built-in parsers. Call [`Registry::register`]
+/// to prepend additional parsers (e.g. third-party plugin parsers) before the
+/// built-ins. Custom parsers are checked **first**; built-ins serve as fallbacks.
+///
+/// For one-shot parsing without customisation, use the free-function [`parse`].
+pub struct Registry {
+    parsers: Vec<Box<dyn Parser>>,
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Registry {
+    /// Build a registry pre-loaded with all built-in Indexa parsers.
+    pub fn new() -> Self {
+        Self {
+            parsers: vec![
+                Box::new(CodeParser),
+                Box::new(PdfParser),
+                Box::new(EpubParser),
+                Box::new(OrgParser::default()),
+                Box::new(ImageParser),
+                Box::new(MediaParser),
+                Box::new(OfficeParser),
+                Box::new(MarkdownParser::default()),
+                Box::new(TextParser::default()),
+            ],
+        }
+    }
+
+    /// Register a custom parser. It is inserted **before** the built-ins so it
+    /// takes priority for any MIME type / extension it claims.
+    pub fn register(&mut self, parser: Box<dyn Parser>) {
+        self.parsers.insert(0, parser);
+    }
+
+    /// Parse `path` using the first matching parser in the registry.
+    pub fn parse(&self, path: &Path) -> Result<Extracted> {
+        let mime = mime_guess::from_path(path)
+            .first_or_octet_stream()
+            .to_string();
+        dispatch(&self.parsers, path, &mime)
+    }
+
+    /// Parse `path` with size and panic guards (see [`parse_guarded`]).
+    pub fn parse_guarded(&self, path: &Path, size_bytes: u64, max_bytes: u64) -> Result<Extracted> {
+        if max_bytes > 0 && size_bytes > max_bytes {
+            bail!(
+                "skipping {} for parsing: {size_bytes} bytes exceeds the {max_bytes}-byte cap",
+                path.display()
+            );
+        }
+        let path2 = path.to_path_buf();
+        // SAFETY: the closure captures no non-UnwindSafe data.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Re-run the full dispatch inline so we don't need to capture `self`.
+            parse(&path2)
+        })) {
+            Ok(result) => result,
+            Err(_) => bail!("parser panicked on {}", path.display()),
+        }
+    }
+}
+
+// ── Free-function API (backward-compatible) ────────────────────────────────────
+
+/// Convenience: parse `path` using the default built-in registry.
+/// Most callers should use this; use [`Registry`] only for plugin extension.
 pub fn parse(path: &Path) -> Result<Extracted> {
     let mime = mime_guess::from_path(path)
         .first_or_octet_stream()
@@ -31,13 +132,18 @@ pub fn parse(path: &Path) -> Result<Extracted> {
         Box::new(TextParser::default()),
     ];
 
+    dispatch(&parsers, path, &mime)
+}
+
+/// Core dispatch logic shared by [`Registry::parse`] and the free-function [`parse`].
+fn dispatch(parsers: &[Box<dyn Parser>], path: &Path, mime: &str) -> Result<Extracted> {
     // Prefer path-aware acceptance (handles extensions mime_guess gets wrong).
     if let Some(p) = parsers.iter().find(|p| p.accepts_path(path)) {
         return p.parse(path);
     }
 
     // MIME-based fallback.
-    if let Some(p) = parsers.iter().find(|p| p.accepts_mime(&mime)) {
+    if let Some(p) = parsers.iter().find(|p| p.accepts_mime(mime)) {
         return p.parse(path);
     }
 
@@ -101,7 +207,8 @@ pub fn parse_guarded(path: &Path, size_bytes: u64, max_bytes: u64) -> Result<Ext
             path.display()
         );
     }
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse(path))) {
+    let path2 = path.to_path_buf();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse(&path2))) {
         Ok(result) => result,
         Err(_) => bail!("parser panicked on {}", path.display()),
     }

@@ -6,6 +6,7 @@ use crate::types::{Chunk, Extracted, Parser};
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
+use tempfile::TempDir;
 
 pub struct MediaParser;
 
@@ -172,6 +173,61 @@ fn run_ffprobe(path: &Path) -> Result<String> {
     }
 
     Ok(parts.join(", "))
+}
+
+/// Extract frames from a video by shelling out to ffmpeg.
+/// Returns a list of `(temp_dir, jpg_paths)` so the caller can caption them.
+/// The returned `TempDir` must be kept alive until frames are consumed.
+///
+/// `fps_sample`: frames per second to extract (e.g. 0.5 = one every 2 s).
+/// `max_frames`: hard cap on extracted frame count.
+pub fn extract_video_frames(
+    path: &Path,
+    ffmpeg_binary: &str,
+    fps_sample: f32,
+    max_frames: usize,
+) -> Result<(TempDir, Vec<std::path::PathBuf>)> {
+    let dir = tempfile::tempdir().context("creating temp dir for video frames")?;
+    let pattern = dir.path().join("frame_%03d.jpg");
+    let output = Command::new(ffmpeg_binary)
+        .args([
+            "-i",
+            path.to_str().context("non-UTF-8 video path")?,
+            "-vf",
+            &format!("fps={fps_sample}"),
+            "-frames:v",
+            &max_frames.to_string(),
+            "-q:v",
+            "2",
+            pattern.to_str().context("non-UTF-8 temp dir")?,
+            "-y",
+        ])
+        .output()
+        .with_context(|| format!("running {ffmpeg_binary} (is ffmpeg installed and on PATH?)"))?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "{ffmpeg_binary} frame extraction failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    // Collect the extracted frame files in order.
+    let mut frames: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())
+        .context("reading frame temp dir")?
+        .filter_map(|e| {
+            let e = e.ok()?;
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) == Some("jpg") {
+                Some(p)
+            } else {
+                None
+            }
+        })
+        .collect();
+    frames.sort(); // frame_001.jpg < frame_002.jpg etc.
+    Ok((dir, frames))
 }
 
 fn capitalize(s: &str) -> String {

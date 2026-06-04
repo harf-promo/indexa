@@ -7,6 +7,7 @@ mod classify;
 mod config;
 mod export;
 mod fs;
+mod insights_handler;
 mod jobs;
 mod keys;
 mod misc;
@@ -21,6 +22,7 @@ mod tree;
 mod ui;
 mod update;
 mod watch;
+mod weights;
 
 pub(crate) use ask::{api_ask, api_ask_stream};
 pub(crate) use classify::{
@@ -33,6 +35,7 @@ pub(crate) use config::{
 };
 pub(crate) use export::api_export;
 pub(crate) use fs::api_fs_ls;
+pub(crate) use insights_handler::{api_insights_diff, api_insights_duplicates, api_insights_stale};
 pub(crate) use jobs::{
     api_job_deep, api_job_delete, api_job_estimate, api_job_get, api_job_index, api_job_scan,
     api_job_summarize, api_jobs_events, api_jobs_list,
@@ -55,3 +58,6 @@ pub(crate) use tree::api_tree;
 pub(crate) use ui::{serve_ui, serve_ui_css, serve_ui_js};
 pub(crate) use update::{api_update_apply, api_update_check};
 pub(crate) use watch::{api_watch_start, api_watch_status, api_watch_stop};
+pub(crate) use weights::{
+    api_weights_delete, api_weights_list, api_weights_set, api_weights_suggest,
+};

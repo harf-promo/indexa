@@ -6,6 +6,7 @@ use super::helpers::{build_embedder, build_llm, require_index_db};
 
 pub(crate) async fn cmd_serve(
     port: u16,
+    host: String,
     embed_model_flag: Option<String>,
     llm_model_flag: Option<String>,
     cfg: &Config,
@@ -30,5 +31,5 @@ pub(crate) async fn cmd_serve(
     let llm: Arc<dyn indexa_llm::Generator + Send + Sync + 'static> =
         Arc::from(build_llm(cfg, llm_model_flag.as_deref())?);
 
-    indexa_web::serve(port, store, embedder, llm, cfg.clone()).await
+    indexa_web::serve(port, &host, store, embedder, llm, cfg.clone()).await
 }

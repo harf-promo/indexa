@@ -161,6 +161,9 @@ pub struct RetrievalConfig {
     /// Minimum chunk count before the ANN index is built/used (below this, brute-force is
     /// faster than building an index). Only consulted when `ann` is true.
     pub ann_min_chunks: usize,
+    /// Apply importance weights (v0.8) as a multiplicative boost after RRF fusion.
+    /// Weights are stored per-file/dir/category in the `importance_weights` table.
+    pub use_weights: bool,
 }
 
 impl Default for RetrievalConfig {
@@ -175,6 +178,7 @@ impl Default for RetrievalConfig {
             context_budget: 4000,
             ann: false,
             ann_min_chunks: 50_000,
+            use_weights: true,
         }
     }
 }
@@ -263,6 +267,7 @@ pub struct ParsersConfig {
     pub pdf: PdfParserConfig,
     pub image: ImageParserConfig,
     pub audio: AudioParserConfig,
+    pub video: VideoParserConfig,
     /// Maximum file size (MB) to attempt content parsing. Larger files are skipped to
     /// avoid reading huge files (logs, misclassified binaries) fully into memory.
     /// `0` disables the cap.
@@ -276,6 +281,7 @@ impl Default for ParsersConfig {
             pdf: PdfParserConfig::default(),
             image: ImageParserConfig::default(),
             audio: AudioParserConfig::default(),
+            video: VideoParserConfig::default(),
             max_file_mb: default_max_file_mb(),
         }
     }
@@ -346,6 +352,45 @@ impl AudioParserConfig {
     /// The transcription binary to invoke (configured value or the default).
     pub fn transcribe_binary(&self) -> &str {
         self.binary.as_deref().unwrap_or(DEFAULT_TRANSCRIBE_BINARY)
+    }
+}
+
+/// Default ffmpeg binary for video frame extraction.
+pub const DEFAULT_FFMPEG_BINARY: &str = "ffmpeg";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VideoParserConfig {
+    /// Set true to caption video files by extracting frames and running them through
+    /// a local vision model (opt-in). Requires `ffmpeg` on PATH for frame extraction
+    /// and an Ollama vision model. Frames per second to sample is controlled by `fps_sample`.
+    pub caption: bool,
+    /// Ollama vision model. Defaults to [`DEFAULT_CAPTION_MODEL`].
+    pub model: Option<String>,
+    /// ffmpeg binary. Defaults to [`DEFAULT_FFMPEG_BINARY`].
+    pub binary: Option<String>,
+    /// Frames per second to sample from the video (default 0.5 = one frame every 2 s).
+    pub fps_sample: Option<f32>,
+    /// Maximum frames to caption per video (default 8 — caps LLM cost).
+    pub max_frames: Option<usize>,
+}
+
+impl VideoParserConfig {
+    /// The ffmpeg binary to use (configured value or the default).
+    pub fn ffmpeg_binary(&self) -> &str {
+        self.binary.as_deref().unwrap_or(DEFAULT_FFMPEG_BINARY)
+    }
+    /// Vision model (configured value or the image captioning default).
+    pub fn caption_model(&self) -> &str {
+        self.model.as_deref().unwrap_or(DEFAULT_CAPTION_MODEL)
+    }
+    /// Frames-per-second to sample (configured or default 0.5).
+    pub fn fps(&self) -> f32 {
+        self.fps_sample.unwrap_or(0.5)
+    }
+    /// Max frames per video (configured or default 8).
+    pub fn max_frames(&self) -> usize {
+        self.max_frames.unwrap_or(8)
     }
 }
 

@@ -19,6 +19,7 @@ reqwest = { workspace = true, features = ["stream"] }
 directories = { workspace = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
+if-addrs = "0.15"
 uuid = { version = "1", features = ["v4", "serde"] }
 indexa-core = { path = "../core" }
 indexa-embed = { path = "../embed" }

@@ -9,6 +9,9 @@
 //! - [`summaries`] — hierarchical summary reads/writes and tree shaping.
 //! - [`queue`] — the background summarization queue.
 //! - [`classify`] — semantic-classification reads/writes (Smart classification).
+//! - [`packs`] — Context Pack CRUD (v0.9).
+//! - [`weights`] — importance weight CRUD + search boost (v0.8).
+//! - [`insights`] — duplicate/stale/diff analysis (v0.10).
 //! - [`types`] — the public record structs.
 
 use anyhow::{Context, Result};
@@ -20,12 +23,14 @@ mod chunks;
 mod classify;
 mod edges;
 mod entries;
+mod insights;
 mod packs;
 mod queue;
 mod schema;
 mod search;
 mod summaries;
 mod types;
+mod weights;
 
 #[cfg(test)]
 mod tests;
@@ -34,9 +39,10 @@ mod tests;
 // are unchanged by the split.
 pub use ann::AnnIndex;
 pub use entries::CoverageEntry;
+pub use insights::{DuplicateCluster, StaleEntry, WeeklyDiff};
 pub use types::{
     ChunkRecord, ClassificationRecord, EdgeRecord, FailedQueueItem, PackRecord, QueueItem,
-    QueueStats, RegionSummary, SearchHit, SummaryRecord, TreeNode,
+    QueueStats, RegionSummary, SearchHit, SummaryRecord, TreeNode, WeightRecord,
 };
 
 // `abstract_from` is part of the public surface (used by `indexa_core::store::abstract_from`).
