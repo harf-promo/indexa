@@ -143,6 +143,23 @@ pub enum Commands {
         concurrency: usize,
     },
 
+    /// Manage Context Packs — named, cross-directory context bundles.
+    ///
+    /// A Context Pack is a curated set of paths that form one topic ("Auth",
+    /// "Tax 2025", "Client X"), even if they span different directories.
+    /// Build a pack once, export it as XML/Markdown for any AI tool.
+    #[command(after_help = "Examples:
+  indexa pack create \"Auth\" --description \"Auth and session handling\"
+  indexa pack add \"Auth\" ~/code/myrepo/src/auth
+  indexa pack list
+  indexa pack export \"Auth\" --format xml > auth-context.xml
+  indexa pack show \"Auth\"
+  indexa pack delete \"Auth\"")]
+    Pack {
+        #[command(subcommand)]
+        action: PackAction,
+    },
+
     /// Export the hierarchical summary tree as XML, Markdown, or JSON for use as AI context.
     #[command(after_help = "Examples:
   indexa export ~/code/myrepo --format xml > .context.xml
@@ -345,6 +362,65 @@ pub enum Commands {
         /// Install a specific release tag instead of the latest, e.g. `v0.12.1`.
         #[arg(long)]
         pin: Option<String>,
+    },
+}
+
+/// Sub-commands for `indexa pack`.
+#[derive(clap::Subcommand, Debug)]
+pub enum PackAction {
+    /// Create a new (empty) Context Pack.
+    Create {
+        /// Pack name (must be unique).
+        name: String,
+        /// Optional short description.
+        #[arg(long, short)]
+        description: Option<String>,
+    },
+    /// Add one or more paths to an existing pack.
+    Add {
+        /// Pack name.
+        name: String,
+        /// Paths to add (files or directories).
+        #[arg(num_args = 1..)]
+        paths: Vec<String>,
+    },
+    /// Remove one or more paths from a pack.
+    Remove {
+        /// Pack name.
+        name: String,
+        /// Paths to remove.
+        #[arg(num_args = 1..)]
+        paths: Vec<String>,
+    },
+    /// List all Context Packs.
+    List,
+    /// Show the paths inside a pack.
+    Show {
+        /// Pack name.
+        name: String,
+    },
+    /// Export a pack as XML, Markdown, or JSON — ready to paste into any AI tool.
+    #[command(after_help = "Examples:
+  indexa pack export \"Auth\" --format xml > auth.xml
+  indexa pack export \"Auth\" --format md
+  indexa pack export \"Auth\" --format json --output auth.json")]
+    Export {
+        /// Pack name.
+        name: String,
+        /// Output format: xml (default), md, json.
+        #[arg(long, default_value = "xml")]
+        format: String,
+        /// Write to a file instead of stdout.
+        #[arg(long, short)]
+        output: Option<String>,
+        /// Maximum tree depth per path (0 = top summary only).
+        #[arg(long)]
+        depth: Option<usize>,
+    },
+    /// Delete a pack (does not remove the indexed files — only the pack record).
+    Delete {
+        /// Pack name.
+        name: String,
     },
 }
 
