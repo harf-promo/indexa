@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use indexa_cli::{Cli, Commands};
+use indexa_cli::{Cli, Commands, PackAction};
 use indexa_core::config;
 use tracing_subscriber::prelude::*;
 
@@ -81,6 +81,26 @@ async fn main() -> Result<()> {
         } => commands::cmd_summarize(paths, mode, passes, &cfg).await,
         Commands::Describe { path } => commands::cmd_describe(path).await,
         Commands::Worker { concurrency } => commands::cmd_worker(concurrency, &cfg).await,
+        Commands::Pack { action } => match action {
+            PackAction::Create {
+                name,
+                description,
+                auto,
+                yes,
+                limit,
+            } => commands::cmd_pack_create(name, description, auto, yes, limit, &cfg).await,
+            PackAction::Add { name, paths } => commands::cmd_pack_add(name, paths).await,
+            PackAction::Remove { name, paths } => commands::cmd_pack_remove(name, paths).await,
+            PackAction::List => commands::cmd_pack_list().await,
+            PackAction::Show { name } => commands::cmd_pack_show(name).await,
+            PackAction::Export {
+                name,
+                format,
+                output,
+                depth,
+            } => commands::cmd_pack_export(name, format, output, depth).await,
+            PackAction::Delete { name } => commands::cmd_pack_delete(name).await,
+        },
         Commands::Export {
             paths,
             format,

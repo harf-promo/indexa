@@ -149,6 +149,23 @@ impl Store {
                 PRIMARY KEY (from_path, kind, to_ref)
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(kind, to_ref);
+
+            -- Context Packs (v0.9): named, cross-directory context bundles.
+            -- A pack is a user-curated set of paths that form a coherent topic
+            -- (e.g. 'Auth', 'Tax 2025', 'Client X'). Paths may span multiple
+            -- roots. The pack can be exported as a single XML/MD/JSON file.
+            CREATE TABLE IF NOT EXISTS packs (
+                id          TEXT PRIMARY KEY,
+                name        TEXT NOT NULL UNIQUE,
+                description TEXT,
+                created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE TABLE IF NOT EXISTS pack_paths (
+                pack_id  TEXT NOT NULL REFERENCES packs(id) ON DELETE CASCADE,
+                path     TEXT NOT NULL,
+                added_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                PRIMARY KEY (pack_id, path)
+            );
             ",
         )?;
 

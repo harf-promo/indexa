@@ -20,6 +20,7 @@ mod chunks;
 mod classify;
 mod edges;
 mod entries;
+mod packs;
 mod queue;
 mod schema;
 mod search;
@@ -34,8 +35,8 @@ mod tests;
 pub use ann::AnnIndex;
 pub use entries::CoverageEntry;
 pub use types::{
-    ChunkRecord, ClassificationRecord, EdgeRecord, FailedQueueItem, QueueItem, QueueStats,
-    RegionSummary, SearchHit, SummaryRecord, TreeNode,
+    ChunkRecord, ClassificationRecord, EdgeRecord, FailedQueueItem, PackRecord, QueueItem,
+    QueueStats, RegionSummary, SearchHit, SummaryRecord, TreeNode,
 };
 
 // `abstract_from` is part of the public surface (used by `indexa_core::store::abstract_from`).

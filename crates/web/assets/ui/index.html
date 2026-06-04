@@ -315,6 +315,43 @@
           <span id="features-status" style="font-size:12px;color:var(--muted)"></span>
         </div>
       </div>
+      <div class="settings-section" id="section-packs">
+        <h2>Context Packs</h2>
+        <p class="settings-note" style="margin-bottom:10px">Named bundles of files and folders from anywhere on your disk. Export as a single XML, Markdown, or JSON file to paste into any AI tool.</p>
+        <!-- create form -->
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:10px">
+          <input type="text" class="key-input" id="pack-new-name" placeholder="Pack name e.g. Auth" autocomplete="off" aria-label="New pack name" style="flex:1;max-width:220px" onkeydown="if(event.key==='Enter')createPack()">
+          <input type="text" class="key-input" id="pack-new-desc" placeholder="Description (optional)" autocomplete="off" aria-label="New pack description" style="flex:2" onkeydown="if(event.key==='Enter')createPack()">
+          <button class="btn-sm" onclick="createPack()">+ New pack</button>
+        </div>
+        <span id="pack-create-status" style="font-size:12px;color:var(--red);display:block;margin-bottom:6px;min-height:16px"></span>
+        <!-- pack list -->
+        <div id="packs-list" style="display:flex;flex-direction:column;gap:6px">
+          <span style="color:var(--muted);font-size:13px" id="packs-empty-msg">No Context Packs yet.</span>
+        </div>
+        <!-- path editor (shown when a pack is expanded) -->
+        <div id="pack-path-editor" style="display:none;margin-top:12px;padding:10px;background:var(--surface2);border-radius:6px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <strong id="pack-editor-name" style="font-size:13px"></strong>
+            <button class="btn-sm" style="padding:2px 8px;font-size:11px" onclick="closePackEditor()">✕ Close</button>
+          </div>
+          <div id="pack-editor-paths" style="display:flex;flex-direction:column;gap:4px;margin-bottom:8px;max-height:200px;overflow-y:auto"></div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="text" class="key-input" id="pack-add-path" placeholder="/path/to/file-or-folder" autocomplete="off" aria-label="Path to add" style="flex:1" onkeydown="if(event.key==='Enter')addPackPath()">
+            <button class="btn-sm" onclick="addPackPath()">Add path</button>
+          </div>
+          <span id="pack-path-status" style="font-size:12px;color:var(--muted);display:block;margin-top:4px;min-height:14px"></span>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:10px">
+            <label style="font-size:12px;color:var(--muted)">Export:</label>
+            <select id="pack-export-format" aria-label="Export format" style="font-size:12px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px">
+              <option value="xml">XML</option>
+              <option value="md">Markdown</option>
+              <option value="json">JSON</option>
+            </select>
+            <button class="btn-sm" onclick="exportCurrentPack()">Export</button>
+          </div>
+        </div>
+      </div>
       <div class="settings-section" id="section-update">
         <h2>Software Update</h2>
         <p class="settings-note" style="margin-bottom:8px">

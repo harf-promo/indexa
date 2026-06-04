@@ -92,13 +92,14 @@ Detect installed software and project types by file-pattern signatures — witho
 
 ---
 
-## v0.7 — Smart classification  *(next)*
+## v0.7 — Smart classification  *(shipped)*
 
 Indexa suggests how to categorize regions of your disk. You confirm, correct, or ignore.
 
-- Automatic "work / personal / archive / media / code / system" tagging at the folder level, inferred from file contents and well-known path patterns
-- Suggestions surfaced in the web UI and via `indexa classify`
-- Saved classifications feed into importance weighting
+- Automatic "work / personal / archive / media / code / system" tagging at the folder level, inferred from file-type patterns and well-known path names (content-free — no AI calls needed)
+- Suggestions surfaced in the web UI (Smart label chip) and via `indexa classify`
+- Confirm / Ignore / Undo in the web UI; saved classifications persist user decisions
+- Saved classifications feed into importance weighting (v0.8)
 
 ---
 

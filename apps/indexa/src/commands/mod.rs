@@ -9,6 +9,7 @@ mod helpers;
 mod index;
 mod map;
 mod mcp;
+mod pack;
 mod rm;
 mod scan;
 mod serve;
@@ -28,6 +29,10 @@ pub(crate) use fingerprint::cmd_fingerprint;
 pub(crate) use index::cmd_index;
 pub(crate) use map::cmd_map;
 pub(crate) use mcp::cmd_mcp;
+pub(crate) use pack::{
+    cmd_pack_add, cmd_pack_create, cmd_pack_delete, cmd_pack_export, cmd_pack_list,
+    cmd_pack_remove, cmd_pack_show,
+};
 pub(crate) use rm::cmd_rm;
 pub(crate) use scan::cmd_scan;
 pub(crate) use serve::cmd_serve;

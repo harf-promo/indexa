@@ -116,3 +116,14 @@ pub struct ClassificationRecord {
     pub confirmed_at: Option<i64>,
     pub created_at: i64,
 }
+
+/// A named Context Pack — a user-curated set of cross-directory paths that
+/// form a coherent topic (e.g. "Auth", "Tax 2025", "Client X").
+#[derive(Debug, Clone)]
+pub struct PackRecord {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub path_count: usize,
+    pub created_at: i64,
+}
