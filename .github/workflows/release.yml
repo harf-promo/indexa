@@ -91,7 +91,7 @@ jobs:
           generate_release_notes: true
 
   desktop:
-    name: Desktop (macOS Apple Silicon)
+    name: Desktop (macOS universal)
     needs: [build, release]
     runs-on: macos-latest
     permissions:
@@ -102,7 +102,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          # Both Apple targets — the desktop bundle is built as a universal
+          # (Intel + Apple-Silicon) binary via --target universal-apple-darwin.
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -142,4 +144,6 @@ jobs:
           projectPath: apps/indexa-desktop
           tauriScript: npx tauri
           tagName: ${{ github.ref_name }}
-          args: --target aarch64-apple-darwin
+          # Universal binary: one .dmg/.app.tar.gz that runs on Intel and Apple
+          # Silicon. Published under the darwin-universal updater key (see main.rs).
+          args: --target universal-apple-darwin
