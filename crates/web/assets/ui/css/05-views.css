@@ -272,7 +272,7 @@
 .export-menu-wrap { position: relative; flex-shrink: 0; }
 .export-menu {
   position: absolute; right: 0; top: calc(100% + 4px);
-  background: var(--surface3, var(--surface2, #1c2128));
+  background: var(--surface-3);
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   box-shadow: var(--shadow); z-index: 50; min-width: 200px;
   display: flex; flex-direction: column; overflow: hidden;
@@ -284,7 +284,7 @@
   border-bottom: 1px solid var(--border-subtle, var(--border));
 }
 .export-menu button:last-child { border-bottom: none; }
-.export-menu button:hover { background: var(--surface2); }
+.export-menu button:hover { background: var(--surface-2); }
 .export-hint { font-size: 11px; color: var(--muted); margin-left: 4px; }
 
 /* ── Smart label (classification) chip ── */
@@ -301,7 +301,7 @@
   font-size: 12px; font-weight: 500;
 }
 .classify-confirmed { background: color-mix(in srgb, var(--green) 15%, transparent); color: var(--green); }
-.classify-ignored   { background: var(--surface2); color: var(--muted); }
+.classify-ignored   { background: var(--surface-2); color: var(--muted); }
 .classify-select {
   background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
   color: var(--text); padding: 3px 8px; font-family: var(--font-sans); font-size: 12px;

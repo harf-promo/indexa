@@ -6,12 +6,16 @@
   --bg: #0d1117;
   --surface: #161b22;
   --surface-2: #1c2128;
+  --surface-3: #262c36;
   --border: #30363d;
   --border-subtle: #21262d;
   --text: #e6edf3;
   --muted: #8b949e;
   --accent: #58a6ff;
   --accent-hover: #79b8ff;
+  /* Theme-aware tint of --accent (tracks the accent in both themes via the
+     deferred var() resolution) — used for selected/active control backgrounds. */
+  --accent-muted: color-mix(in srgb, var(--accent) 16%, transparent);
   --green: #3fb950;
   --red: #f85149;
   --orange: #d29922;
@@ -31,6 +35,7 @@
   --bg: #f6f8fa;
   --surface: #ffffff;
   --surface-2: #f0f2f5;
+  --surface-3: #e7eaee;
   --border: #d0d7de;
   --border-subtle: #e6eaef;
   --text: #1f2328;

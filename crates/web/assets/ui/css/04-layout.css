@@ -132,16 +132,16 @@
 .toolbar-export-btn {
   font-size: 12px;
   padding: 4px 12px;
-  background: var(--surface2);
+  background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  color: var(--fg);
+  color: var(--text);
   cursor: pointer;
   transition: background 0.15s;
 }
 
 .toolbar-export-btn:hover {
-  background: var(--surface3);
+  background: var(--surface-3);
 }
 .view-toggle {
   display: inline-flex;
