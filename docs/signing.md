@@ -6,6 +6,17 @@ launches cleanly on macOS (no Gatekeeper warning) and the in-app auto-updater wo
 ad-hoc re-sign workaround. When the secrets are absent, the build falls back to **ad-hoc** signing
 (the app still runs locally but isn't notarized).
 
+## Universal binary (Intel + Apple Silicon)
+
+The desktop bundle is built with `--target universal-apple-darwin` — a single
+`.dmg`/`.app.tar.gz` that runs natively on both Intel and Apple-Silicon Macs. It
+is published under the **`darwin-universal`** key in `latest.json`, and the app
+pins its updater to that key (`tauri_plugin_updater::Builder::target("darwin-universal")`
+in `apps/indexa-desktop/src/main.rs`). Pre-universal builds (≤ v0.19) queried the
+`darwin-aarch64` key, so the first universal release must be **installed manually**
+— an old client won't find it via auto-update (this is the same release where the
+ad-hoc → Developer-ID signing transition also requires a manual install).
+
 ## Required GitHub repository secrets
 
 Add these under **Settings → Secrets and variables → Actions** (or `gh secret set NAME --repo
