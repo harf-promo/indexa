@@ -149,6 +149,14 @@ fn run_update_check(app: tauri::AppHandle) {
             return;
         }
 
+        // macOS 26+ Code Signing Monitor invalidates the trust record when the .app bundle
+        // is overwritten in place — even with an identical ad-hoc signature — so the freshly
+        // installed app would be killed on launch (exit 137). Re-sign the bundle before we
+        // restart into it. Mirrors the CLI's `indexa update` fix (crates/update/src/lib.rs);
+        // non-fatal so a missing/older `codesign` never blocks the update.
+        #[cfg(target_os = "macos")]
+        resign_app_bundle();
+
         eprintln!("[indexa-desktop] update installed — prompting restart");
 
         // Ask the user before restarting so they aren't surprised.
@@ -160,6 +168,51 @@ fn run_update_check(app: tauri::AppHandle) {
             app.restart();
         }
     });
+}
+
+/// Re-sign the running `.app` bundle with an ad-hoc signature after an in-place update,
+/// so macOS 26+'s Code Signing Monitor will let the replaced binary launch. The bundle is
+/// `<exe>/../../..` (exe = `Indexa.app/Contents/MacOS/indexa-desktop`). `--deep` covers the
+/// nested frameworks. Failures only warn — `codesign` ships with Xcode Command Line Tools and
+/// a missing one must not block the update flow.
+#[cfg(target_os = "macos")]
+fn resign_app_bundle() {
+    let Some(bundle) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok())
+        .and_then(|exe| {
+            exe.parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+        })
+    else {
+        eprintln!("[indexa-desktop] codesign skipped: cannot resolve app bundle path");
+        return;
+    };
+    let bundle_str = bundle.to_string_lossy();
+    match std::process::Command::new("codesign")
+        .args(["--force", "--deep", "--sign", "-", bundle_str.as_ref()])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            eprintln!("[indexa-desktop] re-signed {bundle_str} after update");
+        }
+        Ok(out) => {
+            eprintln!(
+                "[indexa-desktop] codesign re-sign failed ({:?}): {} — the updated app may not \
+                 launch; run: codesign --force --deep --sign - {bundle_str}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "[indexa-desktop] could not run codesign after update: {e} — install Xcode \
+                 Command Line Tools if the updated app fails to launch"
+            );
+        }
+    }
 }
 
 /// Embed and start the indexa web server directly — no subprocess needed.

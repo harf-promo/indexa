@@ -1619,3 +1619,43 @@ fn importance_weights_persist_across_entry_delete() {
     assert_eq!(orphan_rows_for(&store, "/proj/weighted.rs"), 0);
     assert!((store.weight_for("/proj/weighted.rs").unwrap() - 2.0).abs() < 1e-6);
 }
+
+#[test]
+fn delete_subtree_no_trailing_slash_spares_sibling_prefix() {
+    // Regression: delete_subtree("/proj") must remove /proj + /proj/… but NOT /projector
+    // (the bug was like_prefix("/proj") = "/proj%", matching the sibling). Callers (indexa rm,
+    // DELETE /api/entry) pass unnormalized paths, so the store must normalize internally.
+    let mut store = Store::open_in_memory().unwrap();
+    seed_full_entry(&mut store, "/proj");
+    seed_full_entry(&mut store, "/proj/src/a.rs");
+    seed_full_entry(&mut store, "/projector/x.rs"); // sibling sharing the string prefix
+
+    let removed = store.delete_subtree("/proj").unwrap(); // no trailing slash
+    assert_eq!(removed, 2, "removes /proj and /proj/src/a.rs only");
+
+    // The subtree is fully gone (no orphans).
+    assert_eq!(orphan_rows_for(&store, "/proj"), 0);
+    assert_eq!(orphan_rows_for(&store, "/proj/src/a.rs"), 0);
+    // The sibling is untouched across every table.
+    assert!(
+        orphan_rows_for(&store, "/projector/x.rs") >= 6,
+        "/projector must survive"
+    );
+}
+
+#[test]
+fn delete_chunks_for_subtree_spares_sibling_prefix() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_chunks(&[
+            dummy_chunk("/proj/a.rs", 0, "in scope"),
+            dummy_chunk("/projector/b.rs", 0, "sibling — must survive"),
+        ])
+        .unwrap();
+    store.delete_chunks_for_subtree("/proj").unwrap();
+    assert_eq!(store.chunk_count().unwrap(), 1, "only /proj/a.rs cleared");
+    let hits = store
+        .hybrid_search("sibling", None, &HybridMode::Sparse, None, 5, 60.0)
+        .unwrap();
+    assert!(hits.iter().any(|h| h.entry_path == "/projector/b.rs"));
+}
