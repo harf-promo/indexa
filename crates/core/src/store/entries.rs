@@ -10,24 +10,36 @@ use rusqlite::{params, Transaction};
 /// `(path, parent_path, is_dir, own_chunk_count, queue_state)`.
 pub type CoverageEntry = (String, String, bool, u64, Option<String>);
 
-/// Delete chunks (and their FTS5 entries) for every row whose `entry_path`
-/// matches the LIKE pattern. Shared by `delete_subtree` and
-/// `delete_chunks_for_subtree`.
+/// Split a subtree `prefix` into `(exact, child_pattern)` so a delete matches the path
+/// itself and everything strictly under it — but NOT a sibling that merely shares the
+/// string prefix (`/proj` must not match `/projector`). `child_pattern` is wildcard-escaped
+/// for use with `LIKE … ESCAPE '\'`.
+pub(super) fn subtree_match(prefix: &str) -> (String, String) {
+    let exact = prefix.trim_end_matches('/').to_owned();
+    let child_pattern = like_prefix(&format!("{exact}/"));
+    (exact, child_pattern)
+}
+
+/// Delete chunks (and their FTS5 entries + code-graph edges) for the file at `exact` and
+/// every file strictly under `child_pattern`. Shared by `delete_subtree` and
+/// `delete_chunks_for_subtree`. Matching the exact path too means deleting a single file's
+/// subtree (`/proj/a.rs`) still clears that file's own chunks.
 pub(super) fn delete_chunks_under_prefix(
     tx: &Transaction,
-    pattern: &str,
+    exact: &str,
+    child_pattern: &str,
 ) -> rusqlite::Result<usize> {
     tx.execute(
-        "DELETE FROM chunks_fts WHERE entry_path LIKE ?1 ESCAPE '\\'",
-        params![pattern],
+        "DELETE FROM chunks_fts WHERE entry_path = ?1 OR entry_path LIKE ?2 ESCAPE '\\'",
+        params![exact, child_pattern],
     )?;
     tx.execute(
-        "DELETE FROM edges WHERE from_path LIKE ?1 ESCAPE '\\'",
-        params![pattern],
+        "DELETE FROM edges WHERE from_path = ?1 OR from_path LIKE ?2 ESCAPE '\\'",
+        params![exact, child_pattern],
     )?;
     tx.execute(
-        "DELETE FROM chunks WHERE entry_path LIKE ?1 ESCAPE '\\'",
-        params![pattern],
+        "DELETE FROM chunks WHERE entry_path = ?1 OR entry_path LIKE ?2 ESCAPE '\\'",
+        params![exact, child_pattern],
     )
 }
 
@@ -52,10 +64,10 @@ impl Store {
 
     /// Insert or update a batch of walker entries.
     ///
-    /// Uses a non-destructive `ON CONFLICT … DO UPDATE` so the row's implicit
-    /// rowid is preserved across rescans. This matters because `ON DELETE CASCADE`
-    /// constraints on `chunks`, `summaries`, and `edges` would fire on every
-    /// rescan if the old `INSERT OR REPLACE` (= DELETE + INSERT) were kept.
+    /// Uses a non-destructive `ON CONFLICT … DO UPDATE` (not `INSERT OR REPLACE`) so an
+    /// existing row keeps its identity across rescans: REPLACE would DELETE then INSERT,
+    /// pointlessly churning the row (and resetting `first_indexed_at`). There is no FK
+    /// `ON DELETE CASCADE` on the child tables — see the integrity note in `store::schema`.
     pub fn upsert_entries(&mut self, entries: &[Entry]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
@@ -180,30 +192,35 @@ impl Store {
         Ok(removed)
     }
 
-    /// Remove all entries whose path starts with `prefix` (e.g. a whole directory subtree),
-    /// along with their chunks, summaries, and any queued summary work.
-    /// Returns the number of `entries` rows deleted.
+    /// Remove the entry at `prefix` and all entries strictly under it (a whole directory
+    /// subtree), along with their chunks, summaries, and any queued summary work. Matches the
+    /// exact path + `prefix/%` so a sibling sharing the string prefix (`/proj` vs `/projector`)
+    /// is never touched. Returns the number of `entries` rows deleted.
     pub fn delete_subtree(&mut self, prefix: &str) -> Result<usize> {
-        let pattern = like_prefix(prefix);
+        let (exact, child) = subtree_match(prefix);
         let tx = self.conn.transaction()?;
-        delete_chunks_under_prefix(&tx, &pattern)?;
+        delete_chunks_under_prefix(&tx, &exact, &child)?;
         // Summaries + queue must be cleared too (symmetry across all tables); an orphaned
         // summary_queue row would otherwise block re-summarization if the path is re-indexed.
         tx.execute(
-            "DELETE FROM summaries WHERE path LIKE ?1 ESCAPE '\\' OR parent_path LIKE ?1 ESCAPE '\\'",
-            params![pattern],
+            "DELETE FROM summaries
+              WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'
+                 OR parent_path = ?1 OR parent_path LIKE ?2 ESCAPE '\\'",
+            params![exact, child],
         )?;
         tx.execute(
-            "DELETE FROM summary_queue WHERE path LIKE ?1 ESCAPE '\\'",
-            params![pattern],
+            "DELETE FROM summary_queue WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+            params![exact, child],
         )?;
         tx.execute(
-            "DELETE FROM classifications WHERE path LIKE ?1 ESCAPE '\\'",
-            params![pattern],
+            "DELETE FROM classifications WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+            params![exact, child],
         )?;
         let n = tx.execute(
-            "DELETE FROM entries WHERE path LIKE ?1 ESCAPE '\\' OR parent_path LIKE ?1 ESCAPE '\\'",
-            params![pattern],
+            "DELETE FROM entries
+              WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'
+                 OR parent_path = ?1 OR parent_path LIKE ?2 ESCAPE '\\'",
+            params![exact, child],
         )?;
         tx.commit()?;
         Ok(n)

@@ -137,7 +137,21 @@ pub(crate) async fn api_watch_start(
                         let chunk_records: Vec<ChunkRecord> = rt.block_on(async {
                             let mut records = Vec::with_capacity(extracted.chunks.len());
                             for chunk in &extracted.chunks {
-                                let embedding = embedder.embed(&chunk.text).await.ok();
+                                let embedding = match embedder.embed(&chunk.text).await {
+                                    Ok(e) => Some(e),
+                                    Err(e) => {
+                                        // The chunk is still stored (searchable via BM25), but
+                                        // without a vector it won't match dense retrieval. Surface
+                                        // it — a silently-unembedded chunk degrades search invisibly.
+                                        tracing::warn!(
+                                            path = %path.display(),
+                                            seq = chunk.seq,
+                                            error = %e,
+                                            "watch: embedding failed; chunk stored without a vector"
+                                        );
+                                        None
+                                    }
+                                };
                                 records.push(ChunkRecord {
                                     entry_path: path.to_string_lossy().into_owned(),
                                     seq: chunk.seq,

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-06-05
+
+### Fixed
+
+- **Desktop auto-updater now survives macOS 26.** After the in-app updater replaces the
+  `.app` bundle, the desktop app re-signs it (`codesign --force --deep --sign -`) before
+  restarting — the macOS 26 Code Signing Monitor otherwise invalidates the trust record on
+  an in-place overwrite and the updated app would be killed on launch. This mirrors the
+  v0.17 CLI fix and is the root cause of the desktop app lagging behind releases. Self-heals
+  from this version onward.
+- **`indexa rm -r <dir>` / `DELETE /api/entry` no longer remove sibling paths.** Subtree
+  deletion matched a bare string prefix, so removing `/proj` also dropped `/projector/…`
+  from the index. It now matches the path itself plus `<path>/…` only — siblings are spared.
+  (Index-only; recoverable by re-scan, but a real correctness bug.)
+- **Watcher surfaces embedding failures.** A live-watch chunk whose embedding failed was
+  stored silently without a vector (degrading dense search invisibly); it now logs a warning.
+- **Corrected a misleading schema/`upsert_entries` comment** that referenced FK CASCADE
+  constraints which don't exist (follow-on to #155).
+
 ## [0.18.0] — 2026-06-04
 
 ### Added

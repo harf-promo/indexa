@@ -1,7 +1,7 @@
 //! Deep-scan chunk writes and chunk-level queries.
 
 use super::entries::delete_chunks_under_prefix;
-use super::search::{embedding_to_blob, like_prefix};
+use super::search::embedding_to_blob;
 use super::{ChunkRecord, Store};
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
@@ -123,11 +123,13 @@ impl Store {
         Ok(())
     }
 
-    /// Delete chunks for every file whose path is under `prefix`.
+    /// Delete chunks for the file at `prefix` and every file strictly under it. Uses the same
+    /// exact-or-`prefix/%` matching as `delete_subtree`, so a sibling sharing the string prefix
+    /// (`/proj` vs `/projector`) is never touched.
     pub fn delete_chunks_for_subtree(&mut self, prefix: &str) -> Result<usize> {
-        let pattern = like_prefix(prefix);
+        let (exact, child) = super::entries::subtree_match(prefix);
         let tx = self.conn.transaction()?;
-        let n = delete_chunks_under_prefix(&tx, &pattern)?;
+        let n = delete_chunks_under_prefix(&tx, &exact, &child)?;
         tx.commit()?;
         Ok(n)
     }
