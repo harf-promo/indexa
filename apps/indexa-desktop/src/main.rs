@@ -170,11 +170,16 @@ fn run_update_check(app: tauri::AppHandle) {
     });
 }
 
-/// Re-sign the running `.app` bundle with an ad-hoc signature after an in-place update,
+/// Re-sign the running `.app` bundle with an **ad-hoc** signature after an in-place update,
 /// so macOS 26+'s Code Signing Monitor will let the replaced binary launch. The bundle is
 /// `<exe>/../../..` (exe = `Indexa.app/Contents/MacOS/indexa-desktop`). `--deep` covers the
 /// nested frameworks. Failures only warn — `codesign` ships with Xcode Command Line Tools and
 /// a missing one must not block the update flow.
+///
+/// Self-disables when the freshly-installed bundle already carries a real **Developer ID
+/// Application** signature: re-signing ad-hoc would strip that (and its notarization), so once
+/// proper signing goes live (v0.20+ release builds) this becomes a no-op automatically — no
+/// version coordination needed.
 #[cfg(target_os = "macos")]
 fn resign_app_bundle() {
     let Some(bundle) = std::env::current_exe()
@@ -191,6 +196,21 @@ fn resign_app_bundle() {
         return;
     };
     let bundle_str = bundle.to_string_lossy();
+
+    // If the installed bundle is already Developer-ID signed, leave it alone — ad-hoc
+    // re-signing would downgrade a notarized signature.
+    if let Ok(info) = std::process::Command::new("codesign")
+        .args(["-dvv", bundle_str.as_ref()])
+        .output()
+    {
+        // codesign prints the signing authority to stderr.
+        let authority = String::from_utf8_lossy(&info.stderr);
+        if authority.contains("Authority=Developer ID Application") {
+            eprintln!("[indexa-desktop] bundle is Developer-ID signed — skipping ad-hoc re-sign");
+            return;
+        }
+    }
+
     match std::process::Command::new("codesign")
         .args(["--force", "--deep", "--sign", "-", bundle_str.as_ref()])
         .output()

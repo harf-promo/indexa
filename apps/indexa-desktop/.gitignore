@@ -1,0 +1,11 @@
+# Desktop-app build artifacts (this crate builds with its own nested target,
+# outside the workspace's root /target/). None of these are source.
+/target/
+
+# Tauri-generated capability/permission schemas (regenerated each build).
+/gen/
+
+# Mobile icon sets emitted by `tauri icon`; Indexa desktop ships only the
+# PNG/icns/ico referenced in tauri.conf.json, not the android/ios variants.
+/icons/android/
+/icons/ios/

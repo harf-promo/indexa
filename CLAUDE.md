@@ -119,3 +119,7 @@ sqlite3 "$HOME/Library/Application Support/dev.indexa.Indexa/index.db" \
 4. PR → squash-merge on green CI
 5. `git checkout main && git pull && git tag vX.Y.Z && git push origin vX.Y.Z`
 6. Release CI auto-triggers: builds 5 binary targets + Apple Silicon Tauri `.dmg`
+
+The `.dmg`/`.app` are **Developer ID signed + notarized** when the Apple secrets are present
+(ad-hoc fallback otherwise) — see [`docs/signing.md`](docs/signing.md) for the required GitHub
+secrets and how to obtain them.
