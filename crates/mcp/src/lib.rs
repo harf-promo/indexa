@@ -503,7 +503,7 @@ impl IndexaMcp {
 
     /// File-to-file call graph for a scope (the v0.18 signature graph, as text).
     #[tool(
-        description = "Build the file-to-file call graph for files under a path scope: an edge 'A → B' means file A calls a function that file B defines. Returns the heaviest edges (most shared symbols) as a 'caller → callee [weight]' list, plus node/edge counts. Matching is on bare symbol names (case-sensitive); languages: Rust, Python, JS, TS, Go, Java."
+        description = "Build the file-to-file call graph for files under a path scope: an edge 'A → B' means file A calls a function that file B defines. Returns the heaviest edges (most shared symbols) as a 'caller → callee [weight]' list, the most central hub files by weighted PageRank (scored 0–100), plus node/edge counts. Matching is on bare symbol names (case-sensitive); languages: Rust, Python, JS, TS, Go, Java."
     )]
     async fn code_graph(
         &self,
@@ -539,8 +539,40 @@ impl IndexaMcp {
         } else {
             ""
         };
+
+        // Most-central files by weighted PageRank, scored 0–100 relative to the
+        // most central in this scope — surfaces the hub files at a glance.
+        let max_pr = graph
+            .nodes
+            .iter()
+            .map(|n| n.pagerank)
+            .fold(0.0_f64, f64::max);
+        let mut ranked: Vec<_> = graph.nodes.iter().collect();
+        ranked.sort_by(|a, b| {
+            b.pagerank
+                .partial_cmp(&a.pagerank)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        // Full paths here (not basenames): an agent needs to resolve which file
+        // to read, and same-named files (e.g. two `ollama.rs`) must not collide.
+        let central = ranked
+            .iter()
+            .take(8)
+            .map(|n| {
+                let score = if max_pr > 0.0 {
+                    (n.pagerank / max_pr * 100.0).round() as i64
+                } else {
+                    0
+                };
+                format!("{score:>3}  {}", n.path)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
         Ok(ok_text(format!(
-            "Call graph under '{scope}': {} files, {} edges{trunc}\n\n{body}",
+            "Call graph under '{scope}': {} files, {} edges{trunc}\n\n\
+             Most central files (centrality 0–100):\n{central}\n\n\
+             Heaviest edges:\n{body}",
             graph.nodes.len(),
             graph.edges.len()
         )))

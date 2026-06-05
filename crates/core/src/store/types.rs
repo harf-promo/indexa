@@ -28,6 +28,9 @@ pub struct CodeGraphNode {
     pub out_degree: usize,
     /// Number of distinct files that call into this file.
     pub in_degree: usize,
+    /// Weighted PageRank centrality over the displayed subgraph (sums to ~1.0
+    /// across all nodes; higher = more central / more of a hub). v0.20.
+    pub pagerank: f64,
 }
 
 /// A directed file-to-file call edge: `from` calls a symbol that `to` defines.

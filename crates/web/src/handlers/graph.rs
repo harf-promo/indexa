@@ -28,6 +28,8 @@ struct NodeDto {
     label: String,
     out_degree: usize,
     in_degree: usize,
+    /// Weighted PageRank centrality over the displayed subgraph (sums to ~1.0).
+    pagerank: f64,
 }
 
 #[derive(Serialize)]
@@ -89,6 +91,7 @@ pub(crate) async fn api_graph(
                     path: n.path,
                     out_degree: n.out_degree,
                     in_degree: n.in_degree,
+                    pagerank: n.pagerank,
                 })
                 .collect();
             let edges: Vec<EdgeDto> = g

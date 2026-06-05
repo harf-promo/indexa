@@ -169,6 +169,21 @@ Chunks are included in ranked order until the character budget is exhausted. The
 
 ---
 
+## Code graph & centrality
+
+The signature graph (v0.18) is a **file-to-file call graph**: an edge `A → B` means file `A` calls a symbol that file `B` defines. It is built by joining the `calls` and `defines` edges extracted at `deep` time on the **bare symbol name**. This is deliberately lightweight, and the limits are honest ones:
+
+- **Bare-name, case-sensitive, 1-hop.** No type resolution, no scope/namespace analysis, no overload disambiguation. Two unrelated functions that share a name will be linked. Symbols defined in more than 25 files (common helpers like `new`/`get`) are dropped as noise.
+- **Seven languages.** Rust, Python, JavaScript, TypeScript, Go, Java, C/C++ — wherever the parser emits call/define edges.
+
+### PageRank centrality (v0.20)
+
+Each node carries a **weighted PageRank** score, computed over the *displayed* graph (after the edge cap is applied — so on a truncated graph, centrality is relative to what's shown). Rank flows along edges caller → callee, so a file **called by** many — or by other central files — scores highest; this surfaces hub/library files. Edge weight (number of shared call→define symbols) biases the flow toward stronger relationships. The algorithm is a standard power iteration (damping 0.85, dangling-mass redistribution, L1 convergence); scores sum to ~1.0.
+
+Centrality drives node **size** in the Map graph view and the ranked "most central files" list in `indexa graph` and the `code_graph` MCP tool. It inherits the bare-name-matching imprecision above, so it is an **approximate** importance signal — useful for "what should I read first," not an authoritative dependency analysis. It does **not** feed search/QA ranking (that remains RRF + summary/importance-weight boosts); wiring centrality into retrieval is a possible future extension.
+
+---
+
 ## What's opt-in (not default)
 
 | Feature | Why opt-in | How to enable |
