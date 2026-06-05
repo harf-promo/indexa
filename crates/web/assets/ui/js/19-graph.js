@@ -64,26 +64,31 @@ function renderGraph(d) {
   }
 
   if (meta) {
-    meta.textContent = nodes.length + ' files · ' + edges.length + ' edges'
+    meta.textContent = nodes.length + ' files · ' + edges.length + ' edges · node size = centrality'
       + (d.truncated ? ' · ⚠ truncated (showing the heaviest)' : '');
   }
 
   var rect = svg.getBoundingClientRect();
   var W = rect.width || 800, H = rect.height || 500;
 
+  // Centrality drives node size: normalize PageRank to the most-central node in
+  // the displayed subgraph so the biggest hubs stand out regardless of scale.
+  var maxPr = nodes.reduce(function (m, n) { return Math.max(m, n.pagerank || 0); }, 0) || 1;
+
   // Index nodes and seed positions on a circle (deterministic-ish start).
   var byId = {};
   var layout = nodes.map(function (n, i) {
-    var deg = n.in_degree + n.out_degree;
+    var prNorm = (n.pagerank || 0) / maxPr;        // 0..1, 1 = most central
     var angle = (i / nodes.length) * Math.PI * 2;
     var o = {
       id: n.path,
       label: n.label,
       node: n,
+      prNorm: prNorm,
       x: W / 2 + Math.cos(angle) * (W * 0.3) + (Math.random() - 0.5) * 40,
       y: H / 2 + Math.sin(angle) * (H * 0.3) + (Math.random() - 0.5) * 40,
       vx: 0, vy: 0,
-      r: Math.max(4, Math.min(20, 4 + Math.sqrt(deg) * 2.2)),
+      r: Math.max(4, Math.min(22, 4 + Math.sqrt(prNorm) * 18)),
     };
     byId[n.path] = o;
     return o;
@@ -125,6 +130,9 @@ function renderGraph(d) {
     var c = document.createElementNS(GRAPH_NS, 'circle');
     c.setAttribute('r', o.r);
     c.setAttribute('class', 'graph-node-circle');
+    // Fade peripheral nodes; central hubs render solid (keeps a 0.45 floor so
+    // even leaf nodes stay visible).
+    c.setAttribute('fill-opacity', (0.45 + 0.55 * o.prNorm).toFixed(2));
     g.appendChild(c);
     // Label only for higher-degree nodes (keeps it readable); always on hover.
     var lbl = document.createElementNS(GRAPH_NS, 'text');
@@ -159,7 +167,8 @@ function renderGraph(d) {
         tip.hidden = false;
         tip.innerHTML = '<strong>' + escG(o.label) + '</strong><br>'
           + '<span class="graph-tip-path">' + escG(o.id) + '</span><br>'
-          + 'calls ' + o.node.out_degree + ' file(s) · called by ' + o.node.in_degree;
+          + 'calls ' + o.node.out_degree + ' file(s) · called by ' + o.node.in_degree
+          + '<br>centrality ' + Math.round(o.prNorm * 100) + ' / 100';
         if (ev) { tip.style.left = (ev.clientX + 12) + 'px'; tip.style.top = (ev.clientY + 12) + 'px'; }
       }
     } else {

@@ -177,18 +177,36 @@ impl Store {
             });
         }
 
-        // Node set = every path that appears as a caller or callee.
+        // Node set = every path that appears as a caller or callee (sorted for
+        // stable ordering, then indexed so PageRank can run on integer ids).
         let mut paths: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         for (from, to, _) in edges_raw {
             paths.insert(from.as_str());
             paths.insert(to.as_str());
         }
-        let nodes = paths
-            .into_iter()
-            .map(|p| CodeGraphNode {
+        let node_paths: Vec<&str> = paths.into_iter().collect();
+        let idx: HashMap<&str, usize> = node_paths
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| (p, i))
+            .collect();
+
+        // Weighted PageRank over the displayed (post-cap) edge set: rank flows
+        // caller → callee, so hub files called by many score highest.
+        let pr_edges: Vec<(usize, usize, f64)> = edges_raw
+            .iter()
+            .map(|(from, to, weight)| (idx[from.as_str()], idx[to.as_str()], *weight as f64))
+            .collect();
+        let scores = super::pagerank::pagerank(node_paths.len(), &pr_edges);
+
+        let nodes = node_paths
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| CodeGraphNode {
                 path: p.to_owned(),
                 out_degree: out_deg.get(p).copied().unwrap_or(0),
                 in_degree: in_deg.get(p).copied().unwrap_or(0),
+                pagerank: scores[i],
             })
             .collect();
 

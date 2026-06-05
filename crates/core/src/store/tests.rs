@@ -1447,6 +1447,34 @@ fn code_graph_links_callers_to_definers() {
 }
 
 #[test]
+fn code_graph_pagerank_ranks_hub_highest() {
+    let mut store = Store::open_in_memory().unwrap();
+    // app, lib, util all call into /src/core.rs (the hub); app also calls lib.
+    store
+        .upsert_edges(&[
+            edge("/src/app.rs", "calls", "core_fn"),
+            edge("/src/lib.rs", "calls", "core_fn"),
+            edge("/src/util.rs", "calls", "core_fn"),
+            edge("/src/core.rs", "defines", "core_fn"),
+            edge("/src/app.rs", "calls", "lib_fn"),
+            edge("/src/lib.rs", "defines", "lib_fn"),
+        ])
+        .unwrap();
+
+    let g = store.code_graph("/src", 400).unwrap();
+    // Centrality is a proper distribution (sums to ~1) over the 4 nodes …
+    let sum: f64 = g.nodes.iter().map(|n| n.pagerank).sum();
+    assert!((sum - 1.0).abs() < 1e-6, "pagerank sum = {sum}");
+    // … and the hub everyone calls into is the most central.
+    let top = g
+        .nodes
+        .iter()
+        .max_by(|a, b| a.pagerank.partial_cmp(&b.pagerank).unwrap())
+        .unwrap();
+    assert_eq!(top.path, "/src/core.rs", "hub should rank highest");
+}
+
+#[test]
 fn code_graph_weight_counts_shared_symbols_and_excludes_self() {
     let mut store = Store::open_in_memory().unwrap();
     // /a.rs calls two symbols both defined in /b.rs → weight 2.

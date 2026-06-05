@@ -25,6 +25,7 @@ mod edges;
 mod entries;
 mod insights;
 mod packs;
+mod pagerank;
 mod queue;
 mod schema;
 mod search;
