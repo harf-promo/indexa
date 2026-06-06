@@ -27,8 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signing secrets are present the build is Developer-ID-signed + notarized (Gatekeeper-clean, no ad-hoc
   re-sign needed); it falls back to ad-hoc signing otherwise. See `docs/signing.md`.
 
+- **`indexa prune`** — garbage-collect orphaned index rows (chunks/summaries whose path has no
+  `entries` row) left behind after a root is removed or re-pointed. `--dry-run` previews the count;
+  no-ops on a deliberately entry-less index (`deep`/`summarize` without `scan`).
+
 ### Fixed
 
+- **`deep` now self-heals a partially-embedded index.** A file whose chunks were stored without a
+  vector (e.g. an embed failure during an Ollama outage) was treated as "current" and skipped on every
+  later `deep`, staying invisible to dense search. `deep` now re-embeds a file unless *every* chunk has
+  a vector — so a plain re-run fixes a broken index (no manual `rm -r` needed).
 - **Repaired app-wide broken CSS design tokens.** Several rules referenced custom properties that don't
   exist (`--surface2`/`--surface3`/`--fg`) and silently computed to transparent — the Export button,
   the Map active sub-tab, breadcrumb/root-pill hovers, tooltips, and the export dropdown were broken

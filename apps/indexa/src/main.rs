@@ -166,6 +166,7 @@ async fn main() -> Result<()> {
         Commands::Mcp {} => commands::cmd_mcp(&cfg).await,
         Commands::Status { unknown } => commands::cmd_status(unknown, &cfg).await,
         Commands::Rm { paths, recursive } => commands::cmd_rm(paths, recursive).await,
+        Commands::Prune { dry_run } => commands::cmd_prune(dry_run).await,
         Commands::Doctor {
             profile,
             files,

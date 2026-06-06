@@ -1731,3 +1731,51 @@ fn delete_chunks_for_subtree_spares_sibling_prefix() {
         .unwrap();
     assert!(hits.iter().any(|h| h.entry_path == "/projector/b.rs"));
 }
+
+#[test]
+fn prune_removes_dangling_rows_but_keeps_entried() {
+    let mut store = Store::open_in_memory().unwrap();
+    // One entried file; one orphan path (chunks + summary but no entries row).
+    store
+        .upsert_entries(&[dummy_entry("/keep.rs", EntryKind::File, 10)])
+        .unwrap();
+    store
+        .upsert_chunks(&[
+            dummy_chunk_embedded("/keep.rs", 0, "kept content"),
+            dummy_chunk_embedded("/orphan.rs", 0, "dangling content"),
+        ])
+        .unwrap();
+    store
+        .upsert_summary(&dummy_summary("/orphan.rs", "file", None, 0))
+        .unwrap();
+
+    let before = store.count_orphans().unwrap();
+    assert_eq!((before.chunks, before.summaries), (1, 1), "one orphan each");
+
+    let removed = store.prune_orphans().unwrap();
+    assert_eq!((removed.chunks, removed.summaries), (1, 1));
+
+    // Orphan gone; the entried file's chunk is untouched.
+    assert!(store.count_orphans().unwrap().is_empty());
+    assert_eq!(store.chunk_count().unwrap(), 1, "/keep.rs chunk preserved");
+    let hits = store
+        .hybrid_search("content", None, &HybridMode::Sparse, None, 5, 60.0)
+        .unwrap();
+    assert!(hits.iter().all(|h| h.entry_path == "/keep.rs"));
+}
+
+#[test]
+fn prune_noops_on_entryless_index() {
+    // `deep`/`summarize` without `scan` leaves chunks with zero entries — a legitimate,
+    // intentional state. prune must NOT treat the whole index as orphaned and wipe it.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_chunks(&[dummy_chunk_embedded("/a.rs", 0, "deep without scan")])
+        .unwrap();
+    let removed = store.prune_orphans().unwrap();
+    assert_eq!(
+        removed.chunks, 0,
+        "entry-less index must be preserved, not wiped"
+    );
+    assert_eq!(store.chunk_count().unwrap(), 1);
+}
