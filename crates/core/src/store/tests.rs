@@ -26,6 +26,16 @@ fn dummy_chunk(path: &str, seq: usize, text: &str) -> ChunkRecord {
     }
 }
 
+/// Like [`dummy_chunk`] but carries an embedding — for tests that exercise the
+/// "all chunks embedded" branch of `chunks_current_for_mtime`.
+fn dummy_chunk_embedded(path: &str, seq: usize, text: &str) -> ChunkRecord {
+    ChunkRecord {
+        embedding: Some(vec![0.1, 0.2, 0.3]),
+        embed_model: Some("test".to_owned()),
+        ..dummy_chunk(path, seq, text)
+    }
+}
+
 #[test]
 fn open_in_memory_and_upsert() {
     let mut store = Store::open_in_memory().unwrap();
@@ -776,14 +786,14 @@ fn tree_level_rolls_up_subtree_coverage() {
 fn chunks_current_for_mtime_uses_fresh_mtime_not_stored() {
     let mut store = Store::open_in_memory().unwrap();
     store
-        .upsert_chunks(&[dummy_chunk("/a.txt", 0, "hello world")])
+        .upsert_chunks(&[dummy_chunk_embedded("/a.txt", 0, "hello world")])
         .unwrap();
     // The chunk's indexed_at is "now" (SQLite unixepoch at insert).
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    // File last modified well in the past → chunks are current → deep skips it.
+    // Embedded chunk, file last modified well in the past → current → deep skips it.
     assert!(store
         .chunks_current_for_mtime("/a.txt", now - 3600)
         .unwrap());
@@ -797,6 +807,40 @@ fn chunks_current_for_mtime_uses_fresh_mtime_not_stored() {
     assert!(!store
         .chunks_current_for_mtime("/missing.txt", now - 3600)
         .unwrap());
+}
+
+#[test]
+fn chunks_with_missing_embeddings_are_not_current() {
+    // The broken-Ollama trap: chunks exist with a fresh `indexed_at` but were stored
+    // without a vector (embed failure). They must NOT count as current, so a re-run of
+    // `deep` re-processes the file and fills the missing embeddings instead of skipping it.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_chunks(&[dummy_chunk("/b.txt", 0, "no vector")]) // embedding: None
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    assert!(
+        !store
+            .chunks_current_for_mtime("/b.txt", now - 3600)
+            .unwrap(),
+        "a file with un-embedded chunks must be re-processed, not skipped"
+    );
+    // A mix (one embedded, one not) is also not current — the un-embedded one needs a vector.
+    store
+        .upsert_chunks(&[
+            dummy_chunk_embedded("/c.txt", 0, "has vector"),
+            dummy_chunk("/c.txt", 1, "no vector"),
+        ])
+        .unwrap();
+    assert!(
+        !store
+            .chunks_current_for_mtime("/c.txt", now - 3600)
+            .unwrap(),
+        "any un-embedded chunk makes the file not-current"
+    );
 }
 
 #[test]
