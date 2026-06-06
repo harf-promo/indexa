@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`indexa prune`** — garbage-collect orphaned index rows (chunks/summaries whose path has no
   `entries` row) left behind after a root is removed or re-pointed. `--dry-run` previews the count;
   no-ops on a deliberately entry-less index (`deep`/`summarize` without `scan`).
+- **Scanner honors `.gitignore` + a config `[scan] ignore` list.** On top of the built-in skips
+  (`node_modules`/`target`/`.venv`/…), `scan`/`deep` now skip files matched by the scan root's
+  `.gitignore` (default on; `[scan] respect_gitignore`) and any extra gitignore-style patterns in
+  `[scan] ignore` — so project-specific build/output dirs stay out of the index.
 
 ### Fixed
 

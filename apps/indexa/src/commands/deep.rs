@@ -24,6 +24,11 @@ pub(crate) async fn cmd_deep(
         return Ok(());
     };
     let max_parse_bytes = cfg.parsers.max_file_mb.saturating_mul(1024 * 1024);
+    let walk_cfg = WalkConfig {
+        respect_gitignore: cfg.scan.respect_gitignore,
+        ignore: cfg.scan.ignore.clone(),
+        ..Default::default()
+    };
 
     let embed_model = embed_model_flag
         .as_deref()
@@ -38,7 +43,7 @@ pub(crate) async fn cmd_deep(
             std::collections::HashMap::new();
 
         for root in &roots {
-            let entries = walk(root, &WalkConfig::default())?;
+            let entries = walk(root, &walk_cfg)?;
             let files: Vec<_> = entries
                 .iter()
                 .filter(|e| e.kind == indexa_core::walker::EntryKind::File)
@@ -115,7 +120,7 @@ pub(crate) async fn cmd_deep(
             root.display(),
             embed_model
         );
-        let entries = walk(root, &WalkConfig::default())?;
+        let entries = walk(root, &walk_cfg)?;
         let files: Vec<_> = entries
             .iter()
             .filter(|e| e.kind == indexa_core::walker::EntryKind::File)

@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
             mode,
             passes,
         } => commands::cmd_index(paths, embed_model, mode, passes, &cfg).await,
-        Commands::Scan { paths, all } => commands::cmd_scan(paths, all).await,
+        Commands::Scan { paths, all } => commands::cmd_scan(paths, all, &cfg).await,
         Commands::Deep {
             paths,
             embed_model,

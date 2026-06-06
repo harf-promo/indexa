@@ -31,6 +31,31 @@ pub struct Config {
     /// Model-catalog settings (optional online refresh source).
     #[serde(default)]
     pub models: ModelsConfig,
+    /// Scan-time ignore settings (`.gitignore` respect + extra patterns).
+    #[serde(default)]
+    pub scan: ScanConfig,
+}
+
+// ── Scan settings ─────────────────────────────────────────────────────────────
+
+/// Controls what the directory walker skips, on top of the built-in skips for build
+/// artifacts (`node_modules`, `target`, `.venv`, …) and caches/VCS internals.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScanConfig {
+    /// Honor the scan root's `.gitignore` (its patterns, anchored at the root). Default on.
+    pub respect_gitignore: bool,
+    /// Extra gitignore-style patterns to skip (e.g. `["build/", "*.log", "vendor/"]`).
+    pub ignore: Vec<String>,
+}
+
+impl Default for ScanConfig {
+    fn default() -> Self {
+        Self {
+            respect_gitignore: true,
+            ignore: Vec::new(),
+        }
+    }
 }
 
 // ── Model catalog ───────────────────────────────────────────────────────────
