@@ -1,6 +1,6 @@
 use anyhow::Result;
 use indexa_core::{config::HybridMode, store::Store};
-use indexa_query::{answer, QaConfig};
+use indexa_query::{answer, answer_agentic, QaConfig};
 
 use super::helpers::{build_embedder, build_llm, require_index_db};
 use indexa_core::config::Config;
@@ -14,6 +14,8 @@ pub(crate) async fn cmd_ask(
     top_k_flag: Option<usize>,
     sparse_only: bool,
     dense_only: bool,
+    agentic_flag: bool,
+    max_steps_flag: Option<usize>,
     cfg: &Config,
 ) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
@@ -42,7 +44,9 @@ pub(crate) async fn cmd_ask(
         .as_deref()
         .map(|s| shellexpand::tilde(s).into_owned());
 
-    println!("Searching {chunk_count} indexed chunks...\n");
+    // --max-steps implies --agentic; otherwise fall back to the config default.
+    let agentic = agentic_flag || max_steps_flag.is_some() || cfg.retrieval.agentic;
+    let max_steps = max_steps_flag.unwrap_or(cfg.retrieval.agentic_max_steps);
 
     let qa_cfg = QaConfig {
         top_k: top_k_flag.unwrap_or(cfg.retrieval.top_k),
@@ -54,19 +58,40 @@ pub(crate) async fn cmd_ask(
         summary_depth_alpha: cfg.retrieval.summary_depth_alpha,
         rerank: cfg.retrieval.rerank,
         use_weights: cfg.retrieval.use_weights,
+        max_steps,
     };
 
     // `store` is no longer needed by the query path — `answer` opens its own
     // scoped connection. Drop it so we don't hold two handles open.
     drop(store);
-    let answer = answer(
-        &db_path,
-        embedder.as_ref(),
-        llm.as_ref(),
-        &question,
-        &qa_cfg,
-    )
-    .await?;
+
+    let answer = if agentic {
+        println!("Searching {chunk_count} indexed chunks (agentic, up to {max_steps} hops)...\n");
+        let mut on_step = |step: usize, query: &str| {
+            println!("  🔍 step {step}: {query}");
+        };
+        let ans = answer_agentic(
+            &db_path,
+            embedder.as_ref(),
+            llm.as_ref(),
+            &question,
+            &qa_cfg,
+            &mut on_step,
+        )
+        .await?;
+        println!();
+        ans
+    } else {
+        println!("Searching {chunk_count} indexed chunks...\n");
+        answer(
+            &db_path,
+            embedder.as_ref(),
+            llm.as_ref(),
+            &question,
+            &qa_cfg,
+        )
+        .await?
+    };
 
     println!("Answer:\n{}\n", answer.answer);
 

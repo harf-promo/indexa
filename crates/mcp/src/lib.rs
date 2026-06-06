@@ -105,6 +105,11 @@ pub struct AskParams {
     /// `dense` (vector only).
     #[serde(default)]
     pub mode: Option<String>,
+    /// Agentic multi-hop retrieval: the model plans and refines the search across
+    /// several hops before answering. Better for compositional questions; costs a
+    /// few extra model calls. Defaults to the server's `[retrieval] agentic`.
+    #[serde(default)]
+    pub agentic: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -667,14 +672,16 @@ impl IndexaMcp {
 
     /// Answer a natural-language question against the index (grounded RAG).
     #[tool(
-        description = "Answer a natural-language question using the indexed context (hybrid retrieval + local LLM synthesis). Returns an answer with source paths."
+        description = "Answer a natural-language question using the indexed context (hybrid retrieval + local LLM synthesis). Returns an answer with source paths. Set `agentic: true` for compositional questions — the model plans and refines the search across several hops before answering (a few extra model calls)."
     )]
     async fn ask(&self, params: Parameters<AskParams>) -> Result<CallToolResult, ErrorData> {
         let AskParams {
             question,
             scope,
             mode,
+            agentic,
         } = params.0;
+        let agentic = agentic.unwrap_or(self.config.retrieval.agentic);
         let cfg = QaConfig {
             top_k: self.config.retrieval.top_k,
             mode: mode
@@ -688,26 +695,49 @@ impl IndexaMcp {
             summary_depth_alpha: self.config.retrieval.summary_depth_alpha,
             rerank: self.config.retrieval.rerank,
             use_weights: self.config.retrieval.use_weights,
+            max_steps: self.config.retrieval.agentic_max_steps,
         };
 
         // Single shared, Send-safe pipeline (embed → scoped retrieve → optional
         // rerank → synthesize). `answer` opens its own short-lived read connection
-        // from `db_path`; the empty-hit short-circuit lives inside it.
-        let answer = indexa_query::answer(
-            &self.db_path,
-            self.embedder.as_ref(),
-            self.llm.as_ref(),
-            &question,
-            &cfg,
-        )
-        .await
-        .map_err(mcp_err)?;
+        // from `db_path`; the empty-hit short-circuit lives inside it. Agentic mode
+        // adds a bounded plan→search→refine loop before synthesis and records the
+        // queries it ran so the agent can see how the answer was gathered.
+        let mut steps: Vec<String> = Vec::new();
+        let answer = if agentic {
+            indexa_query::answer_agentic(
+                &self.db_path,
+                self.embedder.as_ref(),
+                self.llm.as_ref(),
+                &question,
+                &cfg,
+                &mut |_step, query| steps.push(query.to_owned()),
+            )
+            .await
+            .map_err(mcp_err)?
+        } else {
+            indexa_query::answer(
+                &self.db_path,
+                self.embedder.as_ref(),
+                self.llm.as_ref(),
+                &question,
+                &cfg,
+            )
+            .await
+            .map_err(mcp_err)?
+        };
 
         let mut out = answer.answer;
         if !answer.sources.is_empty() {
             out.push_str("\n\nSources:\n");
             for s in &answer.sources {
                 out.push_str(&format!("- {}\n", s.path));
+            }
+        }
+        if agentic && steps.len() > 1 {
+            out.push_str("\nRetrieval steps:\n");
+            for (i, q) in steps.iter().enumerate() {
+                out.push_str(&format!("- {}. {}\n", i + 1, q));
             }
         }
         Ok(ok_text(out))

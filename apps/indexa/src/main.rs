@@ -137,6 +137,8 @@ async fn main() -> Result<()> {
             top_k,
             sparse_only,
             dense_only,
+            agentic,
+            max_steps,
         } => {
             commands::cmd_ask(
                 question,
@@ -146,6 +148,8 @@ async fn main() -> Result<()> {
                 top_k,
                 sparse_only,
                 dense_only,
+                agentic,
+                max_steps,
                 &cfg,
             )
             .await

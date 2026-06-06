@@ -167,6 +167,12 @@ The prompt instructs the LLM to:
 
 Chunks are included in ranked order until the character budget is exhausted. The parent file path and heading are included with each chunk so the LLM can produce accurate citations.
 
+### Agentic retrieval (opt-in)
+
+`indexa ask --agentic` (or MCP `agentic: true`) replaces the single retrieval with a bounded **iterative** one — a "self-ask" loop: search → show the model a compact digest of what's been found (file paths + headings, *not* the full context) and ask whether an important part of the question is still uncovered → if so, take one focused follow-up query and search again → synthesize from the merged, deduplicated context. This helps on **compositional** questions ("how does X work *and* where is Y?") whose pieces live in different files that a single query won't co-retrieve.
+
+It is **off by default** because each hop adds an LLM "decide" call. The loop is bounded (`--max-steps`, 1–5, default 3) and **fails open**: the between-hop decision is parsed leniently, and an unparseable reply, a repeated query, or a hop that surfaces no new chunks all end the loop — so a model that won't emit the `SEARCH:`/`DONE` actions simply degrades to ordinary one-shot retrieval rather than erroring or looping. Every hop reuses the same scoped retrieval, so `--scope` and the importance/summary boosts apply on each one.
+
 ---
 
 ## Code graph & centrality

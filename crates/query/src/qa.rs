@@ -52,6 +52,9 @@ pub struct QaConfig {
     pub rerank: bool,
     /// Apply importance weights (v0.8) as a multiplicative boost after RRF fusion.
     pub use_weights: bool,
+    /// Max retrieval hops for the agentic ([`answer_agentic`]) path. Clamped to
+    /// `1..=AGENTIC_MAX_STEPS_CAP`. Ignored by the one-shot [`answer`].
+    pub max_steps: usize,
 }
 
 impl Default for QaConfig {
@@ -66,6 +69,7 @@ impl Default for QaConfig {
             summary_depth_alpha: 0.15,
             rerank: false,
             use_weights: true,
+            max_steps: 3,
         }
     }
 }
@@ -146,6 +150,183 @@ pub async fn answer_with_ann(
     }
     // Synthesize (no store access).
     synthesize_from_hits(hits, llm, question, cfg).await
+}
+
+/// Hard cap on agentic retrieval hops, regardless of `cfg.max_steps`. Each hop is
+/// one retrieval + (except the last) one "decide" LLM call, so this bounds latency.
+pub const AGENTIC_MAX_STEPS_CAP: usize = 5;
+/// How many of the pooled hits to show the model in the gap-analysis digest.
+const AGENTIC_DIGEST_HITS: usize = 10;
+
+/// Agentic multi-step Q&A: a bounded *iterative retrieval* ("self-ask") loop.
+/// Search → ask the model whether an important part of the question is still
+/// uncovered and, if so, for one focused follow-up query → search again →
+/// synthesize a cited answer from the merged context. This finds material a single
+/// query misses (compositional questions, scattered context) at the cost of a few
+/// extra LLM calls — hence opt-in (`indexa ask --agentic`, MCP `agentic: true`);
+/// the default [`answer`] stays one-shot.
+///
+/// **Fails open by design.** The model's between-hop decision is parsed leniently;
+/// an unparseable reply, a repeated query, or a hop that surfaces no new chunks all
+/// end the loop. A model that won't emit `SEARCH:`/`DONE` therefore degrades to a
+/// single retrieval rather than erroring or looping forever.
+///
+/// `on_step(step, query)` is called once per hop (1-based) so a surface can show
+/// progress (the CLI prints it; a no-op closure is fine).
+pub async fn answer_agentic(
+    db_path: &Path,
+    embedder: &dyn Embedder,
+    llm: &dyn Generator,
+    question: &str,
+    cfg: &QaConfig,
+    on_step: &mut (dyn FnMut(usize, &str) + Send),
+) -> Result<Answer> {
+    let hits = agentic_retrieve(db_path, embedder, llm, question, cfg, None, on_step).await?;
+    if hits.is_empty() {
+        return Ok(no_match_answer(question));
+    }
+    synthesize_from_hits(hits, llm, question, cfg).await
+}
+
+/// The agentic hop loop: returns the merged, deduplicated, re-ranked hit pool.
+/// Each hop reuses [`retrieve`], so `cfg.scope` and the summary/importance boosts
+/// apply on every hop (a follow-up never leaks outside the requested scope). The
+/// `&Store` is opened and dropped inside a sync block each hop so the future stays
+/// `Send` (required by the MCP/web servers).
+async fn agentic_retrieve(
+    db_path: &Path,
+    embedder: &dyn Embedder,
+    llm: &dyn Generator,
+    question: &str,
+    cfg: &QaConfig,
+    ann: Option<&AnnIndex>,
+    on_step: &mut (dyn FnMut(usize, &str) + Send),
+) -> Result<Vec<SearchHit>> {
+    let max_steps = cfg.max_steps.clamp(1, AGENTIC_MAX_STEPS_CAP);
+    let mut pool: Vec<SearchHit> = Vec::new();
+    let mut seen_chunks: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut seen_queries: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut current = question.to_owned();
+
+    for step in 0..max_steps {
+        on_step(step + 1, &current);
+        seen_queries.insert(normalize_query(&current));
+
+        // Embed outside the Store scope (await), then retrieve in a sync block that
+        // drops the connection before the next await.
+        let query_vec = match cfg.mode {
+            HybridMode::Sparse => None,
+            _ => Some(embedder.embed(&current).await?),
+        };
+        let hits = {
+            let store = Store::open(db_path)?;
+            retrieve(&store, &current, query_vec.as_deref(), cfg, ann)?
+        };
+
+        let mut added = 0usize;
+        for h in hits {
+            if seen_chunks.insert(h.chunk_id) {
+                pool.push(h);
+                added += 1;
+            }
+        }
+
+        // Stop on the last allowed hop (a follow-up couldn't be used) or when a hop
+        // adds nothing new (a reworded query hitting the same chunks).
+        if step + 1 >= max_steps || added == 0 {
+            break;
+        }
+
+        // Decide: is a key aspect still missing? Ask for one follow-up query or DONE.
+        let digest = build_digest(&pool, AGENTIC_DIGEST_HITS);
+        let decision = llm.generate(&decide_prompt(question, &digest)).await?;
+        match parse_followup(&decision) {
+            Some(q) if !seen_queries.contains(&normalize_query(&q)) => current = q,
+            _ => break, // DONE / unparseable / repeated → synthesize with what we have
+        }
+    }
+
+    // Hits came from several searches; re-rank the merged pool before synthesis.
+    pool.sort_by(|a, b| {
+        b.rrf_score
+            .partial_cmp(&a.rrf_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(pool)
+}
+
+fn normalize_query(q: &str) -> String {
+    q.trim().to_lowercase()
+}
+
+/// A compact, gap-focused digest of the pool — `[n] path — heading` lines, not the
+/// full packed context. The decide call must see what's *covered* (to spot gaps),
+/// not enough to answer (which would always say DONE and waste a long generation).
+fn build_digest(hits: &[SearchHit], max: usize) -> String {
+    if hits.is_empty() {
+        return "(nothing found yet)".to_owned();
+    }
+    hits.iter()
+        .take(max)
+        .enumerate()
+        .map(|(i, h)| {
+            if h.heading.is_empty() {
+                format!("[{}] {}", i + 1, h.entry_path)
+            } else {
+                format!("[{}] {} — {}", i + 1, h.entry_path, h.heading)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn decide_prompt(question: &str, digest: &str) -> String {
+    format!(
+        "You are gathering context to answer a question by searching a file index.\n\
+         \n\
+         QUESTION: {question}\n\
+         \n\
+         Search has found these files/sections so far:\n\
+         {digest}\n\
+         \n\
+         If an important part of the question is NOT yet covered and one more search \
+         would help, reply with EXACTLY one line:\n\
+         SEARCH: <a short, focused query for the missing part>\n\
+         Otherwise, if the found context is enough to answer, reply with exactly:\n\
+         DONE"
+    )
+}
+
+/// Lenient parse of the decide reply — returns the follow-up query if the model
+/// asked to search again, else `None` (DONE, or anything unrecognised → fail open).
+/// Scans every line and tolerates markdown/bullet noise, so a chatty model that
+/// prefixes reasoning before the action line still works.
+fn parse_followup(reply: &str) -> Option<String> {
+    for raw in reply.lines() {
+        let line = raw
+            .trim()
+            .trim_start_matches(['-', '*', '>', '#', '`', ' '])
+            .trim();
+        if let Some(rest) = strip_prefix_ci(line, "search:") {
+            let q = rest.trim().trim_matches(['"', '*', '`', ' ']).trim();
+            if !q.is_empty() {
+                return Some(q.to_owned());
+            }
+        }
+        // A bare "DONE" (possibly with trailing punctuation/markdown) ends the loop.
+        let bare = line.trim_matches(['.', '*', '`', ' ']);
+        if bare.eq_ignore_ascii_case("done") {
+            return None;
+        }
+    }
+    None
+}
+
+/// ASCII-case-insensitive prefix strip that never panics on a multibyte boundary.
+fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = s.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &s[prefix.len()..])
 }
 
 /// Streaming variant of [`answer`]: identical retrieve → rerank → synthesize pipeline, but
@@ -600,6 +781,164 @@ mod tests {
         assert!(
             frags.contains("indexa deep"),
             "no-match guidance arrives as a fragment"
+        );
+    }
+
+    // ── Agentic ask ───────────────────────────────────────────────────────────
+
+    /// Generator that returns scripted replies in order (so an agentic-loop test can
+    /// drive distinct decide/synthesis responses); falls back to "DONE" if exhausted.
+    struct ScriptedGen {
+        replies: std::sync::Mutex<std::collections::VecDeque<String>>,
+        calls: Arc<AtomicUsize>,
+    }
+    impl ScriptedGen {
+        fn new(replies: &[&str], calls: Arc<AtomicUsize>) -> Self {
+            Self {
+                replies: std::sync::Mutex::new(replies.iter().map(|s| s.to_string()).collect()),
+                calls,
+            }
+        }
+    }
+    #[async_trait::async_trait]
+    impl Generator for ScriptedGen {
+        async fn generate(&self, _prompt: &str) -> Result<String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| "DONE".to_owned()))
+        }
+    }
+
+    fn temp_index_with_chunks(chunks: &[(&str, &str)]) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        let mut store = Store::open(&path).unwrap();
+        let records: Vec<ChunkRecord> = chunks
+            .iter()
+            .map(|(p, text)| ChunkRecord {
+                entry_path: (*p).to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: (*text).to_owned(),
+                language: None,
+                embedding: None,
+                embed_model: None,
+            })
+            .collect();
+        store.upsert_chunks(&records).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn parse_followup_extracts_search_query() {
+        assert_eq!(
+            parse_followup("SEARCH: error handling").as_deref(),
+            Some("error handling")
+        );
+        assert_eq!(
+            parse_followup("search: lowercase ok").as_deref(),
+            Some("lowercase ok")
+        );
+        // Tolerates leading reasoning + markdown noise around the action line.
+        assert_eq!(
+            parse_followup("Hmm, the auth part is missing.\n**SEARCH:** token refresh").as_deref(),
+            Some("token refresh")
+        );
+    }
+
+    #[test]
+    fn parse_followup_done_and_garbage_stop_the_loop() {
+        assert_eq!(parse_followup("DONE"), None);
+        assert_eq!(parse_followup("I think we have enough.\nDONE."), None);
+        assert_eq!(
+            parse_followup("SEARCH:"),
+            None,
+            "empty query is not a follow-up"
+        );
+        assert_eq!(
+            parse_followup("I'm not sure what you mean"),
+            None,
+            "unparseable reply fails open (stops the loop)"
+        );
+    }
+
+    #[tokio::test]
+    async fn agentic_runs_a_second_hop_and_merges_context() {
+        // Two chunks matched by different BM25 terms; the follow-up surfaces the
+        // second so the final answer draws on both hops.
+        let (_d, path) = temp_index_with_chunks(&[
+            ("/a.md", "alpha subsystem overview and design"),
+            ("/b.md", "beta subsystem error handling details"),
+        ]);
+        let gen_calls = Arc::new(AtomicUsize::new(0));
+        // Single-word follow-up ("beta") so it matches chunk B regardless of whether
+        // the BM25 layer treats a multi-word query as a phrase or an AND.
+        let llm = ScriptedGen::new(
+            &["SEARCH: beta", "DONE", "Both covered [1][2]."],
+            gen_calls.clone(),
+        );
+        let embedder = CountingEmbedder {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let cfg = QaConfig {
+            mode: HybridMode::Sparse,
+            max_steps: 3,
+            ..QaConfig::default()
+        };
+
+        let mut steps: Vec<String> = Vec::new();
+        let ans = answer_agentic(&path, &embedder, &llm, "alpha", &cfg, &mut |_i, q| {
+            steps.push(q.to_owned())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(steps, vec!["alpha".to_owned(), "beta".to_owned()]);
+        assert_eq!(ans.answer, "Both covered [1][2].");
+        assert_eq!(
+            ans.sources.len(),
+            2,
+            "both hops' chunks merged into the pool"
+        );
+        // decide#1 + decide#2 + synthesis = 3 generations.
+        assert_eq!(gen_calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn agentic_fails_open_to_single_hop_on_unparseable_decision() {
+        let (_d, path) = temp_index_with_chunks(&[("/a.md", "alpha subsystem overview")]);
+        let gen_calls = Arc::new(AtomicUsize::new(0));
+        // Garbage decide reply ⇒ stop after one hop, then synthesize.
+        let llm = ScriptedGen::new(&["uhh not sure", "Answer [1]."], gen_calls.clone());
+        let embedder = CountingEmbedder {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let cfg = QaConfig {
+            mode: HybridMode::Sparse,
+            max_steps: 3,
+            ..QaConfig::default()
+        };
+
+        let mut hops = 0usize;
+        let ans = answer_agentic(&path, &embedder, &llm, "alpha", &cfg, &mut |_i, _q| {
+            hops += 1
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            hops, 1,
+            "unparseable decision degrades to a single retrieval"
+        );
+        assert_eq!(ans.answer, "Answer [1].");
+        assert_eq!(
+            gen_calls.load(Ordering::SeqCst),
+            2,
+            "one decide call + one synthesis"
         );
     }
 }
