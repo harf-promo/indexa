@@ -74,6 +74,25 @@ overlap  = 100          # words of overlap between consecutive chunks
 
 ---
 
+## Scan
+
+Controls what the directory walker skips. On top of the built-in skips for build artifacts
+(`node_modules`, `target`, `.venv`, `__pycache__`, `dist`, `.next`, …) and caches/VCS internals,
+you can honor `.gitignore` and add your own patterns.
+
+```toml
+[scan]
+respect_gitignore = true   # honor the scan root's .gitignore (its patterns, anchored at the root)
+ignore            = []     # extra gitignore-style patterns, e.g. ["build/", "*.log", "vendor/"]
+```
+
+> `respect_gitignore` reads the scan root's own `.gitignore`; nested per-subdirectory `.gitignore`
+> files are not separately loaded. `ignore` patterns use gitignore syntax (globs, `dir/`, `!negation`).
+> Anything skipped here is never walked, so it can't be indexed or summarized. Use
+> [`indexa prune`](#) to clean rows left from content that *was* indexed before you ignored it.
+
+---
+
 ## Retrieval
 
 Controls how search results are ranked and how many are returned.

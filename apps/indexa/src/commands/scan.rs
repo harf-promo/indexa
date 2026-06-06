@@ -1,19 +1,25 @@
 use anyhow::Result;
 use indexa_core::{
+    config::Config,
     store::Store,
     walker::{walk, WalkConfig},
 };
 
 use super::helpers::{index_db_path, resolve_roots};
 
-pub(crate) async fn cmd_scan(paths: Vec<String>, all: bool) -> Result<()> {
+pub(crate) async fn cmd_scan(paths: Vec<String>, all: bool, cfg: &Config) -> Result<()> {
     let roots = resolve_roots(paths, all)?;
     let db_path = index_db_path()?;
     let mut store = Store::open(&db_path)?;
+    let walk_cfg = WalkConfig {
+        respect_gitignore: cfg.scan.respect_gitignore,
+        ignore: cfg.scan.ignore.clone(),
+        ..Default::default()
+    };
 
     for root in &roots {
         println!("Scanning {}", root.display());
-        let entries = walk(root, &WalkConfig::default())?;
+        let entries = walk(root, &walk_cfg)?;
         let live_paths: std::collections::HashSet<String> = entries
             .iter()
             .map(|e| e.path.to_string_lossy().into_owned())

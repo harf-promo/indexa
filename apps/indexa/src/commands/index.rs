@@ -17,7 +17,7 @@ pub(crate) async fn cmd_index(
 ) -> Result<()> {
     // ── Phase 1: scan ─────────────────────────────────────────────────────────
     println!("── Phase 1 / 3 · Scan ──────────────────────────────────────");
-    cmd_scan(paths.clone(), false).await?;
+    cmd_scan(paths.clone(), false, cfg).await?;
 
     // ── Phase 2: deep embed + code graph ──────────────────────────────────────
     println!("\n── Phase 2 / 3 · Deep context ──────────────────────────────");
