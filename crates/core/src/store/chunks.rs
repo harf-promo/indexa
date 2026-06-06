@@ -33,8 +33,14 @@ impl Store {
     /// the live on-disk mtime ensures an edited file is re-embedded rather than
     /// skipped. No `entries` join, so it also holds for a file with no entries row.
     pub fn chunks_current_for_mtime(&self, path: &str, mtime_secs: i64) -> Result<bool> {
+        // "Current" requires the file's chunks to be at least as new as its mtime AND every
+        // chunk to carry an embedding (`COUNT(*) = COUNT(embedding)` — COUNT skips NULLs). A
+        // chunk stored without a vector — e.g. an embed failure during a broken-Ollama run —
+        // must NOT count as current, or `deep` would skip the file forever and the chunk would
+        // never get a vector, degrading dense search invisibly. Treating "missing embedding" as
+        // not-current lets a plain re-run of `deep` self-heal a partially-embedded index.
         let current: bool = self.conn.query_row(
-            "SELECT COUNT(*) > 0
+            "SELECT COUNT(*) > 0 AND COUNT(*) = COUNT(embedding)
              FROM chunks
              WHERE entry_path = ?1
                AND indexed_at >= ?2",
