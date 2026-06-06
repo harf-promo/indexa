@@ -27,16 +27,21 @@ harf-promo/indexa`):
 | `APPLE_CERTIFICATE` | base64 of your **Developer ID Application** certificate exported as a `.p12` |
 | `APPLE_CERTIFICATE_PASSWORD` | the password you set when exporting the `.p12` |
 | `APPLE_SIGNING_IDENTITY` | the identity string, e.g. `Developer ID Application: Your Name (TEAMID)` |
-| `APPLE_ID` | your Apple Developer account email (notarization) |
-| `APPLE_PASSWORD` | an **app-specific password** (notarization) — *not* your Apple ID password |
-| `APPLE_TEAM_ID` | your 10-character Team ID |
+| `APPLE_API_ISSUER` | App Store Connect API **Issuer ID** (UUID, shown above the keys table) |
+| `APPLE_API_KEY` | App Store Connect API **Key ID** (10-char, shown in the keys table) |
+| `APPLE_API_KEY_FILE` | base64 of the downloaded **`AuthKey_<KEYID>.p8`** private key file |
 
 Already configured (keep — these sign the *updater* artifact, separate from Apple signing):
 `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 
-> Alternative notarization via App Store Connect API key: instead of `APPLE_ID`/`APPLE_PASSWORD`/
-> `APPLE_TEAM_ID`, set `APPLE_API_ISSUER`, `APPLE_API_KEY` (key ID), and `APPLE_API_KEY_PATH`
-> (path to the `.p8`). The workflow wires both; populate only one set.
+> **Why `APPLE_API_KEY_FILE` instead of `APPLE_API_KEY_PATH`?** `notarytool` requires a real file on
+> disk; a secret can only carry a string, not a path that exists. The workflow decodes the base64 to
+> `~/private_keys/AuthKey_<KEYID>.p8` at build time and exports the path via `$GITHUB_ENV`.
+> For local builds you can still set `APPLE_API_KEY_PATH` directly in your shell.
+
+> **Apple ID alternative:** set `APPLE_ID` (account email), `APPLE_PASSWORD` (an app-specific
+> password from appleid.apple.com), and `APPLE_TEAM_ID` instead of the three API-key secrets above.
+> The workflow wires both methods; populate only one set.
 
 ## How to obtain each value
 
@@ -50,11 +55,13 @@ Already configured (keep — these sign the *updater* artifact, separate from Ap
 **`APPLE_SIGNING_IDENTITY`:** `security find-identity -v -p codesigning` → copy the quoted name,
 e.g. `Developer ID Application: Your Name (ABCDE12345)`.
 
-**`APPLE_TEAM_ID`:** Apple Developer → **Membership** (the 10-char Team ID), or the parenthesized
-suffix of the identity string above.
-
-**`APPLE_PASSWORD` (app-specific password):** [appleid.apple.com](https://appleid.apple.com) →
-Sign-In and Security → **App-Specific Passwords** → generate one for "Indexa notarization".
+**App Store Connect API key (`APPLE_API_ISSUER`, `APPLE_API_KEY`, `APPLE_API_KEY_FILE`):**
+1. [appstoreconnect.apple.com](https://appstoreconnect.apple.com) → Users and Access →
+   **Integrations → App Store Connect API** → generate a **Team** key (role: *Developer* or higher).
+2. Copy the **Issuer ID** (UUID above the keys table) → `APPLE_API_ISSUER`.
+3. Copy the **Key ID** (10 chars in the table) → `APPLE_API_KEY`.
+4. **Download** `AuthKey_<KEYID>.p8` (one-time only — save it somewhere safe).
+5. base64-encode it: `base64 -i AuthKey_<KEYID>.p8 | pbcopy` → paste as `APPLE_API_KEY_FILE`.
 
 ## Verifying a build (on macOS, after a signed release)
 

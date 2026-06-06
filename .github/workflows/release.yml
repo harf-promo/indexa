@@ -117,6 +117,21 @@ jobs:
       - name: Install Tauri CLI
         run: npm install -g @tauri-apps/cli@^2
 
+      - name: Materialize App Store Connect API key (.p8)
+        # APPLE_API_KEY_PATH must be a real file on the runner — the .p8 is stored
+        # base64-encoded in APPLE_API_KEY_FILE and decoded here. No-ops when the
+        # secret is absent (ad-hoc fallback). See docs/signing.md for setup.
+        env:
+          APPLE_API_KEY_FILE: ${{ secrets.APPLE_API_KEY_FILE }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          if [ -n "$APPLE_API_KEY_FILE" ]; then
+            mkdir -p "$HOME/private_keys"
+            KEY_PATH="$HOME/private_keys/AuthKey_${APPLE_API_KEY}.p8"
+            printf '%s' "$APPLE_API_KEY_FILE" | openssl base64 -d -A > "$KEY_PATH"
+            echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+          fi
+
       - name: Build + bundle desktop app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -131,15 +146,14 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          # Notarization — Apple ID method (simplest). Populate these to notarize.
+          # Notarization — Apple ID method (unused; kept for completeness).
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Notarization — App Store Connect API-key method (optional alternative;
-          # leave blank if using the Apple ID method above).
+          # Notarization — App Store Connect API-key method (active).
+          # APPLE_API_KEY_PATH is written to $GITHUB_ENV by the step above.
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
         with:
           projectPath: apps/indexa-desktop
           tauriScript: npx tauri
