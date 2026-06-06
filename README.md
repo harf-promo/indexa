@@ -168,11 +168,10 @@ Defaults: `nomic-embed-text` (embeddings) · `gemma3:4b` (file context) · `gemm
 
 ## What's coming
 
-- **Mobile companion (v0.12)** — browse your index from a phone on the same network. The read-only API is already LAN-ready (`indexa serve --host 0.0.0.0`); a native client is next.
-- **Plugin marketplace (v0.13)** — the parser SDK is shipped (`indexa_parsers::Registry`); next is discovery and distribution of third-party parsers.
-- **Signature graph visualization** — render the code-relationship graph and the context treemap as the brand visual, surfacing calls/imports/blast-radius interactively.
+- **Mobile companion** — browse your index from a phone on the same network. The read-only API is already LAN-ready (`indexa serve --host 0.0.0.0`); a native client is next.
+- **Plugin marketplace** — the parser SDK is shipped (`indexa_parsers::Registry`); next is discovery and distribution of third-party parsers.
 
-Recently shipped: **Importance weighting**, **Insights** (duplicates / stale / weekly diff), **video captioning**, **Plugin SDK**, **LAN serve**.
+Recently shipped: **agentic `ask`** (multi-hop plan→search→refine), **PageRank centrality** (hub files in the code graph), **signature graph visualization**, **universal macOS desktop build**, **Importance weighting**, **Insights** (duplicates / stale / weekly diff), **video captioning**, **Plugin SDK**, **LAN serve**.
 
 Ideas and votes in [Discussions](../../discussions/categories/ideas). Full detail in [ROADMAP.md](ROADMAP.md).
 

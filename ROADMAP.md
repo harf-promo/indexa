@@ -191,7 +191,9 @@ A real code graph kept in local SQLite (no Neo4j, no cloud), queryable over MCP:
 - **Phase 3 — signature graph visualization** *(shipped — v0.18.0)*: interactive force-directed
   view of the file-to-file call graph in the web Map tab ("Graph" sub-view), plus `store.code_graph`,
   the `/api/graph` endpoint, the `code_graph` MCP tool, and the `indexa graph` CLI command.
-- Optional PageRank-style ranking and deeper reachability analysis — future iteration
+- **Weighted PageRank centrality** *(shipped — v0.20.0)*: each file in the call graph carries a
+  centrality score; the Map "Graph" view sizes nodes by it, and `indexa graph` / the `code_graph` MCP
+  tool surface the most-central hub files. Deeper reachability analysis remains a future iteration.
 
 ---
 

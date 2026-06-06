@@ -87,9 +87,20 @@ rerank               = false  # enable cross-encoder reranking (one extra local-
 summary_weight       = 0.0    # 0.0 disables the parent-summary boost; >0 blends folder-summary similarity into ranking
 summary_depth_alpha  = 0.15   # depth-boost coefficient for summary-aware retrieval
 context_budget       = 4000   # max characters of retrieved context packed into the answer prompt
+use_weights          = true   # apply per-file/dir/category importance weights as a multiplicative boost
+ann                  = false  # use an in-memory HNSW index for dense retrieval (vs brute-force cosine)
+ann_min_chunks       = 50000  # only build/use the ANN index above this chunk count
+agentic              = false  # default `ask` to the agentic multi-hop loop (per-call: --agentic / MCP agentic)
+agentic_max_steps    = 3      # max retrieval hops in agentic mode (clamped 1..=5)
 ```
 
 > The summary-boost (`summary_weight`) only takes effect for dense/RRF modes and is off (0.0) by default.
+
+> **Agentic retrieval** (`agentic`) runs a bounded *plan → search → refine* loop instead of a single
+> retrieval — better for compositional questions, at the cost of a few extra model calls. It's opt-in
+> per call (`indexa ask --agentic`, MCP `agentic: true`, or the web chat's "Agentic" checkbox); set
+> `agentic = true` here to make it the default. It **fails open** to one-shot retrieval if the model
+> won't emit the loop's actions. See [methodology.md](methodology.md#agentic-retrieval-opt-in).
 
 ### Hybrid modes
 

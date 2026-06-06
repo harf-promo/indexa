@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Agentic multi-step `ask`.** `indexa ask --agentic` (also MCP `ask` `agentic: true`, and an
+  "Agentic" checkbox in the web chat) runs a bounded *plan → search → refine* loop: search, ask the
+  model whether an important part of the question is still uncovered, take one focused follow-up query,
+  repeat, then synthesize from the merged context. Helps on compositional questions whose pieces live
+  in different files. Opt-in (`--max-steps` 1–5, default 3) and **fails open** to ordinary one-shot
+  retrieval if the model won't emit the search/done actions. The web UI streams each hop as a live
+  "🔍 searching" chip above the answer.
+- **Weighted PageRank centrality for the code graph.** Every file in the signature graph now carries a
+  centrality score; the Map "Graph" view **sizes nodes by centrality**, and `indexa graph` + the
+  `code_graph` MCP tool list the most-central hub files. (Inherits the bare-name-match caveat of the
+  call graph — an approximate "read these first" signal, not a dependency analysis.)
+- **Universal macOS desktop build.** The desktop app ships a single `.dmg`/`.app.tar.gz` that runs
+  natively on both Intel and Apple-Silicon Macs (`--target universal-apple-darwin`, published under the
+  `darwin-universal` updater key).
+- **Developer ID signing + notarization for the desktop app** (release pipeline wired). When the Apple
+  signing secrets are present the build is Developer-ID-signed + notarized (Gatekeeper-clean, no ad-hoc
+  re-sign needed); it falls back to ad-hoc signing otherwise. See `docs/signing.md`.
+
+### Fixed
+
+- **Repaired app-wide broken CSS design tokens.** Several rules referenced custom properties that don't
+  exist (`--surface2`/`--surface3`/`--fg`) and silently computed to transparent — the Export button,
+  the Map active sub-tab, breadcrumb/root-pill hovers, tooltips, and the export dropdown were broken
+  (notably in light theme). Added `--surface-3` + `--accent-muted` and reconciled every reference; plus
+  a subtle treemap fade-in on render.
+- The web `ask` path no longer silently drops the `[retrieval] use_weights` setting.
+
 ## [0.19.0] — 2026-06-05
 
 ### Fixed
