@@ -26,8 +26,16 @@ fn qa_config(state: &AppState) -> QaConfig {
         summary_weight: state.config.retrieval.summary_weight,
         summary_depth_alpha: state.config.retrieval.summary_depth_alpha,
         rerank: state.config.retrieval.rerank,
+        use_weights: state.config.retrieval.use_weights,
+        max_steps: state.config.retrieval.agentic_max_steps,
         ..QaConfig::default()
     }
+}
+
+/// Whether agentic retrieval is requested for this call: the request's `agentic` flag,
+/// or the server's `[retrieval] agentic` default when unset.
+fn agentic_requested(state: &AppState, body: &AskRequest) -> bool {
+    body.agentic.unwrap_or(state.config.retrieval.agentic)
 }
 
 /// Lazily build (and cache) the ANN index for dense retrieval, or return `None` to use the
@@ -112,22 +120,37 @@ pub(crate) async fn api_ask(
     Json(body): Json<AskRequest>,
 ) -> Response {
     let qa_cfg = qa_config(&state);
+    let agentic = agentic_requested(&state, &body);
     let ann = ensure_ann(&state).await;
 
     // Single shared, Send-safe pipeline (embed → scoped retrieve → optional
     // rerank → synthesize). `answer_with_ann` opens its own short-lived read connection
     // from `db_path`, so we don't hold the shared store mutex across the LLM
-    // round-trips. Empty-hit short-circuit lives inside it.
-    match indexa_query::answer_with_ann(
-        &state.db_path,
-        state.embedder.as_ref(),
-        state.llm.as_ref(),
-        &body.question,
-        &qa_cfg,
-        ann.as_deref(),
-    )
-    .await
-    {
+    // round-trips. Empty-hit short-circuit lives inside it. Agentic mode runs the
+    // bounded plan→search→refine loop first (progress isn't surfaced on this buffered
+    // endpoint — the SSE endpoint streams the per-hop steps).
+    let result = if agentic {
+        indexa_query::answer_agentic(
+            &state.db_path,
+            state.embedder.as_ref(),
+            state.llm.as_ref(),
+            &body.question,
+            &qa_cfg,
+            &mut |_step, _query| {},
+        )
+        .await
+    } else {
+        indexa_query::answer_with_ann(
+            &state.db_path,
+            state.embedder.as_ref(),
+            state.llm.as_ref(),
+            &body.question,
+            &qa_cfg,
+            ann.as_deref(),
+        )
+        .await
+    };
+    match result {
         Ok(answer) => Json(AskResponse {
             answer: answer.answer,
             sources: answer.sources.into_iter().map(into_ask_source).collect(),
@@ -153,6 +176,7 @@ pub(crate) async fn api_ask_stream(
     Json(body): Json<AskRequest>,
 ) -> impl IntoResponse {
     let qa_cfg = qa_config(&state);
+    let agentic = agentic_requested(&state, &body);
     let ann = ensure_ann(&state).await; // owned Arc moved into the task below
     let db_path = state.db_path.clone();
     let embedder = state.embedder.clone();
@@ -172,20 +196,38 @@ pub(crate) async fn api_ask_stream(
                 AnswerChunk::Fragment(text) => {
                     serde_json::json!({ "type": "fragment", "text": text })
                 }
+                AnswerChunk::Step(step, query) => {
+                    serde_json::json!({ "type": "step", "step": step, "query": query })
+                }
             };
             let _ = send_tx.send(Ok(Event::default().data(payload.to_string())));
         };
 
-        let result = indexa_query::answer_stream_with_ann(
-            &db_path,
-            embedder.as_ref(),
-            llm.as_ref(),
-            &question,
-            &qa_cfg,
-            ann.as_deref(),
-            &mut on_chunk,
-        )
-        .await;
+        // Agentic mode streams per-hop `step` events (from the plan→search→refine loop)
+        // before the synthesized answer; one-shot mode goes straight to sources+fragments.
+        let result = if agentic {
+            indexa_query::answer_agentic_stream(
+                &db_path,
+                embedder.as_ref(),
+                llm.as_ref(),
+                &question,
+                &qa_cfg,
+                ann.as_deref(),
+                &mut on_chunk,
+            )
+            .await
+        } else {
+            indexa_query::answer_stream_with_ann(
+                &db_path,
+                embedder.as_ref(),
+                llm.as_ref(),
+                &question,
+                &qa_cfg,
+                ann.as_deref(),
+                &mut on_chunk,
+            )
+            .await
+        };
 
         let terminal = match result {
             Ok(_) => serde_json::json!({ "type": "done" }),

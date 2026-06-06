@@ -57,10 +57,19 @@ async function doAsk() {
 
   let answerText = '';
   let sources = [];
+  let steps = []; // agentic per-hop queries (empty for one-shot ask)
+  // The agentic retrieval hops, shown as subtle chips above the answer so the user sees
+  // what the model searched for while it works.
+  const renderSteps = function() {
+    if (!steps.length) return '';
+    return '<div class="ask-steps">' + steps.map(function(s) {
+      return '<span class="ask-step">&#x1F50D; ' + escapeHtml(s.query) + '</span>';
+    }).join('') + '</div>';
+  };
   // Render the partial answer (leading whitespace from the model's first token trimmed so
   // it doesn't briefly indent) + sources, keeping the view pinned to the bottom.
   const renderAnswer = function() {
-    return renderMarkdown(answerText.replace(/^\s+/, '')) + renderSources(sources);
+    return renderSteps() + renderMarkdown(answerText.replace(/^\s+/, '')) + renderSources(sources);
   };
   const repaint = function() {
     bubble.innerHTML = renderAnswer();
@@ -69,15 +78,19 @@ async function doAsk() {
   const handleEvent = function(ev) {
     if (ev.type === 'sources') { sources = ev.sources || []; }
     else if (ev.type === 'fragment') { answerText += ev.text; repaint(); }
+    else if (ev.type === 'step') { steps.push(ev); repaint(); }
     else if (ev.type === 'error') { throw new Error(ev.message || 'Generation failed'); }
     // 'done' is terminal; the loop ends when the stream closes.
   };
+
+  const agenticEl = document.getElementById('ask-agentic');
+  const agentic = agenticEl ? agenticEl.checked : false;
 
   try {
     const r = await fetch('/api/ask/stream', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ question: q })
+      body: JSON.stringify({ question: q, agentic: agentic })
     });
     if (!r.ok || !r.body) throw new Error('Request failed (' + r.status + ')');
 

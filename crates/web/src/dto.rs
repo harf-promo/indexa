@@ -298,6 +298,9 @@ pub(crate) struct FeaturesRequest {
 #[derive(Deserialize)]
 pub(crate) struct AskRequest {
     pub(crate) question: String,
+    /// Agentic multi-hop retrieval. Omit ⇒ the server's `[retrieval] agentic` default.
+    #[serde(default)]
+    pub(crate) agentic: Option<bool>,
 }
 
 #[derive(Deserialize)]

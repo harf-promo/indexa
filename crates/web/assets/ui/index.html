@@ -153,6 +153,9 @@
     <!-- Always-docked Ask bar: submitting switches the workspace to the Ask view. -->
     <div class="input-bar" id="ask-bar">
       <input type="text" id="q" placeholder="Ask your local context&#x2026;" autocomplete="off" aria-label="Ask a question">
+      <label class="toggle-label ask-agentic-toggle" title="Agentic: plan &rarr; search &rarr; refine across multiple hops. Better for compositional questions; a bit slower.">
+        <input type="checkbox" id="ask-agentic"><span class="toggle-text">Agentic</span>
+      </label>
       <button id="send">Ask</button>
     </div>
   </main>

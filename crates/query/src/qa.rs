@@ -30,6 +30,9 @@ pub struct SourceCitation {
 pub enum AnswerChunk {
     Sources(Vec<SourceCitation>),
     Fragment(String),
+    /// Agentic progress: hop number (1-based) + the query being searched this hop.
+    /// Emitted only by [`answer_agentic_stream`]; one-shot streams never produce it.
+    Step(usize, String),
 }
 
 /// Configuration for the Q&A pipeline.
@@ -186,6 +189,55 @@ pub async fn answer_agentic(
         return Ok(no_match_answer(question));
     }
     synthesize_from_hits(hits, llm, question, cfg).await
+}
+
+/// Streaming agentic Q&A: the [`answer_agentic`] hop loop, then a streamed synthesis.
+/// Emits `Step` chunks (one per hop, so a UI can show "🔍 searching …" progress), then
+/// `Sources` once, then `Fragment`s as the model generates — mirroring
+/// [`answer_stream_with_ann`] for the synthesis half. The web SSE handler uses this when
+/// the caller requests agentic mode.
+#[allow(clippy::too_many_arguments)]
+pub async fn answer_agentic_stream(
+    db_path: &Path,
+    embedder: &dyn Embedder,
+    llm: &dyn Generator,
+    question: &str,
+    cfg: &QaConfig,
+    ann: Option<&AnnIndex>,
+    on_chunk: &mut (dyn FnMut(AnswerChunk) + Send),
+) -> Result<Answer> {
+    // Hop loop — each hop surfaces a Step chunk. The on_step closure's borrow of
+    // on_chunk is confined to this block so on_chunk is free for synthesis below.
+    let hits = {
+        let mut on_step =
+            |step: usize, query: &str| on_chunk(AnswerChunk::Step(step, query.to_owned()));
+        agentic_retrieve(db_path, embedder, llm, question, cfg, ann, &mut on_step).await?
+    };
+
+    if hits.is_empty() {
+        let ans = no_match_answer(question);
+        on_chunk(AnswerChunk::Sources(Vec::new()));
+        on_chunk(AnswerChunk::Fragment(ans.answer.clone()));
+        return Ok(ans);
+    }
+
+    let (context, sources) = pack_context(&hits, cfg.context_budget);
+    on_chunk(AnswerChunk::Sources(sources.clone()));
+
+    let prompt = build_prompt(question, &context);
+    let mut full = String::new();
+    {
+        let mut on_frag = |frag: String| {
+            full.push_str(&frag);
+            on_chunk(AnswerChunk::Fragment(frag));
+        };
+        llm.generate_stream(&prompt, &mut on_frag).await?;
+    }
+    Ok(Answer {
+        question: question.to_owned(),
+        answer: full.trim().to_owned(),
+        sources,
+    })
 }
 
 /// The agentic hop loop: returns the merged, deduplicated, re-ranked hit pool.
@@ -720,6 +772,7 @@ mod tests {
                     seen_fragment = true;
                     frags.push_str(&t);
                 }
+                AnswerChunk::Step(..) => unreachable!("one-shot stream emits no Step"),
             };
             let ans = answer_stream(
                 &path,
@@ -764,6 +817,7 @@ mod tests {
             let mut on_chunk = |c: AnswerChunk| match c {
                 AnswerChunk::Sources(s) => sources_len = Some(s.len()),
                 AnswerChunk::Fragment(t) => frags.push_str(&t),
+                AnswerChunk::Step(..) => unreachable!("one-shot stream emits no Step"),
             };
             let ans = answer_stream(
                 &path,
@@ -940,5 +994,59 @@ mod tests {
             2,
             "one decide call + one synthesis"
         );
+    }
+
+    #[tokio::test]
+    async fn agentic_stream_emits_steps_before_sources_and_answer() {
+        let (_d, path) = temp_index_with_chunks(&[
+            ("/a.md", "alpha subsystem overview and design"),
+            ("/b.md", "beta subsystem error handling details"),
+        ]);
+        let gen_calls = Arc::new(AtomicUsize::new(0));
+        let llm = ScriptedGen::new(
+            &["SEARCH: beta", "DONE", "Both covered [1][2]."],
+            gen_calls.clone(),
+        );
+        let embedder = CountingEmbedder {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let cfg = QaConfig {
+            mode: HybridMode::Sparse,
+            max_steps: 3,
+            ..QaConfig::default()
+        };
+
+        let mut step_queries: Vec<String> = Vec::new();
+        let mut sources_len: Option<usize> = None;
+        let mut frags = String::new();
+        let mut order: Vec<&str> = Vec::new();
+        let answer = {
+            let mut on_chunk = |c: AnswerChunk| match c {
+                AnswerChunk::Step(_n, q) => {
+                    step_queries.push(q);
+                    order.push("step");
+                }
+                AnswerChunk::Sources(s) => {
+                    sources_len = Some(s.len());
+                    order.push("sources");
+                }
+                AnswerChunk::Fragment(t) => {
+                    frags.push_str(&t);
+                    order.push("fragment");
+                }
+            };
+            answer_agentic_stream(&path, &embedder, &llm, "alpha", &cfg, None, &mut on_chunk)
+                .await
+                .unwrap()
+        };
+
+        assert_eq!(answer.answer, "Both covered [1][2].");
+        assert_eq!(frags, "Both covered [1][2].");
+        assert_eq!(step_queries, vec!["alpha".to_owned(), "beta".to_owned()]);
+        assert_eq!(sources_len, Some(2));
+        // Every `step` must arrive before the first `sources`/`fragment`.
+        let first_answer = order.iter().position(|k| *k != "step").unwrap();
+        assert!(order[..first_answer].iter().all(|k| *k == "step"));
+        assert_eq!(order[first_answer], "sources");
     }
 }
