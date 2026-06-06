@@ -26,6 +26,7 @@ mod entries;
 mod insights;
 mod packs;
 mod pagerank;
+mod prune;
 mod queue;
 mod schema;
 mod search;
@@ -41,6 +42,7 @@ mod tests;
 pub use ann::AnnIndex;
 pub use entries::CoverageEntry;
 pub use insights::{DuplicateCluster, StaleEntry, WeeklyDiff};
+pub use prune::OrphanCounts;
 pub use types::{
     ChunkRecord, ClassificationRecord, CodeGraph, CodeGraphEdge, CodeGraphNode, EdgeRecord,
     FailedQueueItem, PackRecord, QueueItem, QueueStats, RegionSummary, SearchHit, SummaryRecord,

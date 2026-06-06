@@ -338,6 +338,17 @@ pub enum Commands {
         recursive: bool,
     },
 
+    /// Garbage-collect orphaned index rows (chunks/summaries left behind after a root
+    /// was removed). Cleans dangling data the normal pipeline can't reach.
+    #[command(after_help = "Examples:
+  indexa prune --dry-run   # show what would be removed
+  indexa prune             # remove orphaned chunks/summaries")]
+    Prune {
+        /// Show what would be removed without deleting anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Detect your machine's specs, recommend AI models, and estimate job times.
     ///
     /// Run this before your first deep/summarize job to understand what Indexa

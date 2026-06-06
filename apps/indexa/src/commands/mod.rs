@@ -12,6 +12,7 @@ mod insights;
 mod map;
 mod mcp;
 mod pack;
+mod prune;
 mod rm;
 mod scan;
 mod serve;
@@ -38,6 +39,7 @@ pub(crate) use pack::{
     cmd_pack_add, cmd_pack_create, cmd_pack_delete, cmd_pack_export, cmd_pack_list,
     cmd_pack_remove, cmd_pack_show,
 };
+pub(crate) use prune::cmd_prune;
 pub(crate) use rm::cmd_rm;
 pub(crate) use scan::cmd_scan;
 pub(crate) use serve::cmd_serve;

@@ -29,8 +29,8 @@ Verify with `ollama list`.
 **CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize) · `scan` · `deep` ·
 `summarize` · `describe` · `map` · `worker` · `pack` (Context Packs) · `weight` (Importance
 weighting) · `insights` (duplicates/stale/diff) · `graph` (file-to-file call graph) · `export` ·
-`ask` · `watch` · `serve` (`--host 0.0.0.0` for LAN) · `mcp` · `status` · `rm` · `doctor` ·
-`fingerprint` · `classify` · `update`.
+`ask` · `watch` · `serve` (`--host 0.0.0.0` for LAN) · `mcp` · `status` · `rm` · `prune` (orphan-row
+GC) · `doctor` · `fingerprint` · `classify` · `update`.
 
 **Major features by version:** Context Packs (v0.14) · Importance Weighting (v0.16, `importance_weights`
 table + `boost_with_weights` in QA) · Insights (v0.16, `find_*_duplicates`/`find_stale_entries`/
