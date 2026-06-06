@@ -24,7 +24,7 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.18)
+## Current feature surface (v0.20)
 
 **CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize) · `scan` · `deep` ·
 `summarize` · `describe` · `map` · `worker` · `pack` (Context Packs) · `weight` (Importance
@@ -36,7 +36,11 @@ weighting) · `insights` (duplicates/stale/diff) · `graph` (file-to-file call g
 table + `boost_with_weights` in QA) · Insights (v0.16, `find_*_duplicates`/`find_stale_entries`/
 `weekly_diff`) · video captioning (v0.16, `parsers.video`) · Plugin SDK (v0.15, `indexa_parsers::Registry`
 + `register()`) · LAN serve (v0.16) · **signature graph visualization** (v0.18, `store.code_graph` →
-`/api/graph` → Map tab "Graph" sub-view, force-directed SVG).
+`/api/graph` → Map tab "Graph" sub-view, force-directed SVG) · **PageRank centrality** (v0.20,
+`store::pagerank` weighted PageRank → `CodeGraphNode.pagerank`; Map graph sizes nodes by centrality;
+`indexa graph` / `code_graph` MCP list hub files) · **agentic `ask`** (v0.20, `indexa ask --agentic` /
+MCP `agentic` / web "Agentic" checkbox — bounded plan→search→refine loop, fails open) · **universal
+macOS desktop build** (v0.20, `--target universal-apple-darwin`, `darwin-universal` updater key).
 
 **MCP server:** **29 tools** (`crates/mcp/src/lib.rs`). Code-graph tools: `dependencies` /
 `who_imports` / `who_calls` / `blast_radius` / `code_graph`. The call graph is bare-name matched
