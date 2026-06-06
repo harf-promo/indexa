@@ -127,6 +127,15 @@
 }
 .input-bar button:hover { opacity: 0.88; }
 .input-bar button:disabled { opacity: 0.4; cursor: default; }
+.ask-agentic-toggle { flex-shrink: 0; white-space: nowrap; align-self: center; }
+
+/* Agentic retrieval hops, shown as subtle chips above the streamed answer. */
+.ask-steps { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.ask-step {
+  font-size: 11px; color: var(--muted); background: var(--surface-2);
+  border: 1px solid var(--border-subtle, var(--border)); border-radius: 10px;
+  padding: 2px 9px; font-family: var(--font-mono);
+}
 
 /* ── Map view ── */
 .map-view { flex: 1; overflow-y: auto; padding: 24px; }
