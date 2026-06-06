@@ -164,6 +164,11 @@ pub struct RetrievalConfig {
     /// Apply importance weights (v0.8) as a multiplicative boost after RRF fusion.
     /// Weights are stored per-file/dir/category in the `importance_weights` table.
     pub use_weights: bool,
+    /// Default the agentic multi-hop `ask` on (opt-in; `--agentic` / MCP `agentic`
+    /// override per call). Off by default — agentic does a few extra LLM calls.
+    pub agentic: bool,
+    /// Max retrieval hops when agentic `ask` is used (clamped to 1..=5).
+    pub agentic_max_steps: usize,
 }
 
 impl Default for RetrievalConfig {
@@ -179,6 +184,8 @@ impl Default for RetrievalConfig {
             ann: false,
             ann_min_chunks: 50_000,
             use_weights: true,
+            agentic: false,
+            agentic_max_steps: 3,
         }
     }
 }

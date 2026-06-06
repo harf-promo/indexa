@@ -255,6 +255,16 @@ pub enum Commands {
         /// Use semantic (vector) search only; no FTS query.
         #[arg(long, conflicts_with_all = ["sparse_only"])]
         dense_only: bool,
+
+        /// Agentic multi-hop retrieval: plan → search → refine across several hops
+        /// before answering. Better on compositional questions; costs a few extra
+        /// model calls. Off by default (overrides `[retrieval] agentic`).
+        #[arg(long)]
+        agentic: bool,
+
+        /// Max retrieval hops in agentic mode (1..=5; overrides config). Implies --agentic.
+        #[arg(long)]
+        max_steps: Option<usize>,
     },
 
     /// Watch one or more paths for changes and keep their context current.
