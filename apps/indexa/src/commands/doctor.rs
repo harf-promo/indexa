@@ -101,10 +101,54 @@ pub(crate) async fn cmd_doctor(
     println!("    # then quit and relaunch Ollama.app");
     println!();
 
-    // ── Claude subscription provider (provider = "claude-code") ──
-    // All checks here are token-free local probes — no model is invoked.
+    // Load config once for the probes below (Ollama liveness + Claude provider).
     let cfg =
         indexa_core::config::load(&indexa_core::config::default_config_path()).unwrap_or_default();
+
+    // Blocking prerequisites for "can I index right now?" — filled by the Ollama probe.
+    let mut readiness_issues: Vec<String> = Vec::new();
+
+    // ── Ollama liveness probe ──
+    // Actually contacts the server (GET /api/tags) and confirms the models the *current
+    // config* will use are pulled. This is the check that catches the #1 first-run failure:
+    // "Ollama isn't running" or "the model was never pulled".
+    println!("Ollama server (liveness)");
+    let ollama_base =
+        indexa_llm::OllamaLlm::resolve_base_url(Some(cfg.embedding.base_url.as_str()));
+    println!("  Base URL  {ollama_base}");
+    // Required models = those the current config routes through Ollama.
+    let mut required: Vec<(&str, &str)> = Vec::new();
+    if cfg.embedding.provider == "ollama" {
+        required.push((cfg.embedding.model.as_str(), "embeddings"));
+    }
+    if cfg.describer.provider == "ollama" {
+        required.push((cfg.describer.file_model.as_str(), "file summaries"));
+        if cfg.describer.dir_model != cfg.describer.file_model {
+            required.push((cfg.describer.dir_model.as_str(), "dir roll-ups / Q&A"));
+        }
+    }
+    match indexa_llm::ollama_list_models(&ollama_base).await {
+        Ok(installed) => {
+            println!("  ✅  reachable — {} model(s) installed", installed.len());
+            for (model, role) in &required {
+                if model_installed(&installed, model) {
+                    println!("  ✅  {model}  ({role})");
+                } else {
+                    println!("  ❌  {model} — not pulled; run: ollama pull {model}  ({role})");
+                    readiness_issues.push(format!("missing model: {model} (ollama pull {model})"));
+                }
+            }
+        }
+        Err(e) => {
+            println!("  ❌  not reachable: {e:#}");
+            println!("      Start Ollama and retry (macOS: open -a Ollama; or `ollama serve`).");
+            readiness_issues.push(format!("Ollama not reachable at {ollama_base}"));
+        }
+    }
+    println!();
+
+    // ── Claude subscription provider (provider = "claude-code") ──
+    // All checks here are token-free local probes — no model is invoked.
     let claude = indexa_llm::claude_status(&cfg.describer.claude_bin).await;
     println!("Claude subscription provider  (set [describer] provider = \"claude-code\")");
     if claude.cli_present {
@@ -331,5 +375,59 @@ pub(crate) async fn cmd_doctor(
         println!();
     }
 
+    // ── Readiness summary ─────────────────────────────────────────────────────
+    // The bottom-line answer to "can I index right now?" — driven by the blocking
+    // prerequisites the Ollama probe collected (server up + required models pulled).
+    println!("Readiness");
+    if readiness_issues.is_empty() {
+        println!("  ✅  Ready to index — run `indexa index <path>`.");
+    } else {
+        println!(
+            "  ⚠   {} issue(s) to resolve before indexing:",
+            readiness_issues.len()
+        );
+        for issue in &readiness_issues {
+            println!("      • {issue}");
+        }
+    }
+    println!();
+
     Ok(())
+}
+
+/// True if `want` (a configured model name) is among Ollama's installed `models`,
+/// matching leniently across the implicit `:latest` tag (Ollama reports a model pulled
+/// as `nomic-embed-text` as `nomic-embed-text:latest`).
+fn model_installed(installed: &[String], want: &str) -> bool {
+    installed.iter().any(|m| {
+        m == want
+            || m == &format!("{want}:latest")
+            || (!want.contains(':') && m.split(':').next() == Some(want))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::model_installed;
+
+    #[test]
+    fn matches_exact_and_implicit_latest_tag() {
+        // Ollama reports an untagged pull as `name:latest`; an untagged config name must match it.
+        let installed = vec![
+            "nomic-embed-text:latest".to_owned(),
+            "gemma3:12b".to_owned(),
+        ];
+        assert!(model_installed(&installed, "nomic-embed-text")); // untagged ↔ :latest
+        assert!(model_installed(&installed, "gemma3:12b")); // exact tagged match
+        assert!(!model_installed(&installed, "gemma3:4b")); // different tag = not installed
+        assert!(!model_installed(&installed, "llama3")); // absent
+    }
+
+    #[test]
+    fn tagged_want_does_not_match_a_different_tag() {
+        // A specific tag must not be satisfied by a same-family different tag.
+        let installed = vec!["gemma3:4b".to_owned()];
+        assert!(!model_installed(&installed, "gemma3:12b"));
+        assert!(model_installed(&installed, "gemma3:4b"));
+    }
 }
