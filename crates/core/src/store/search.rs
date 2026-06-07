@@ -368,7 +368,10 @@ impl Store {
         if summary_weight == 0.0 || hits.is_empty() {
             return Ok(());
         }
-        let summaries = self.summary_cosine_search(query_vec, 20, depth_alpha)?;
+        // Scan the top-50 (not top-20) summaries by cosine so a deep subtree summary that
+        // ranks past 20 still boosts its chunks — cheap recall gain (only runs when
+        // summary_weight > 0, which is off by default).
+        let summaries = self.summary_cosine_search(query_vec, 50, depth_alpha)?;
         for hit in hits.iter_mut() {
             // Apply the score from the best matching summary (deepest parent wins).
             for (summary_path, sim) in &summaries {
