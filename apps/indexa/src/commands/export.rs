@@ -1,14 +1,19 @@
 use anyhow::{Context, Result};
 use indexa_core::store::Store;
-use indexa_query::{build_tree, render_json, render_markdown, render_xml};
+use indexa_query::{
+    build_tree, render_graph, render_json, render_markdown, render_weights, render_xml,
+};
 
 use super::helpers::require_index_db;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn cmd_export(
     paths: Vec<String>,
     format: String,
     depth: Option<usize>,
     output: Option<String>,
+    include_weights: bool,
+    include_graph: bool,
 ) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
@@ -59,6 +64,24 @@ pub(crate) async fn cmd_export(
         };
         out_buf.push_str(&rendered);
         out_buf.push('\n');
+    }
+
+    // Optional appended sections so the AI tool sees importance + relationships, not just
+    // the summary tree. Both reuse the existing store data; scoped to the exported roots.
+    if include_weights {
+        let weights = store.list_weights(None).unwrap_or_default();
+        out_buf.push_str(&render_weights(&weights, &format));
+    }
+    if include_graph {
+        // One root → scope the graph to it; multiple/none → whole index. Cap the edges.
+        let scope = if roots.len() == 1 {
+            roots[0].clone()
+        } else {
+            "/".to_owned()
+        };
+        if let Ok(graph) = store.code_graph(&scope, 500, false) {
+            out_buf.push_str(&render_graph(&graph, &format));
+        }
     }
 
     if let Some(path) = output {

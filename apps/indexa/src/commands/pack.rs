@@ -214,6 +214,7 @@ pub(crate) async fn cmd_pack_export(
     format: String,
     output: Option<String>,
     depth: Option<usize>,
+    include_weights: bool,
 ) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
@@ -258,6 +259,14 @@ pub(crate) async fn cmd_pack_export(
         out_buf.push_str(&rendered);
         out_buf.push('\n');
         exported += 1;
+    }
+
+    // Optional importance-weights section (global; reuses the same renderer as `export`).
+    if include_weights {
+        out_buf.push_str(&indexa_query::render_weights(
+            &store.list_weights(None).unwrap_or_default(),
+            &format,
+        ));
     }
 
     if is_xml {

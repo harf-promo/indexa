@@ -101,7 +101,8 @@ async fn main() -> Result<()> {
                 format,
                 output,
                 depth,
-            } => commands::cmd_pack_export(name, format, output, depth).await,
+                include_weights,
+            } => commands::cmd_pack_export(name, format, output, depth, include_weights).await,
             PackAction::Delete { name } => commands::cmd_pack_delete(name).await,
         },
         Commands::Weight { action } => match action {
@@ -135,7 +136,11 @@ async fn main() -> Result<()> {
             format,
             depth,
             output,
-        } => commands::cmd_export(paths, format, depth, output).await,
+            include_weights,
+            include_graph,
+        } => {
+            commands::cmd_export(paths, format, depth, output, include_weights, include_graph).await
+        }
         Commands::Ask {
             question,
             embed_model,
