@@ -6,11 +6,11 @@
 //!
 //! **stdout is the protocol channel** — all logging must go to stderr.
 //!
-//! Tools (29): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
+//! Tools (30): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
 //! disclosure), `read_file`, `ask`, `dependencies` (a file's imports, defined symbols,
 //! and calls), `who_imports` (reverse code-graph lookup), `who_calls` (D2 — reverse
 //! call lookup), `blast_radius` (D2 — 1-hop call blast radius), `code_graph` (file-to-file
-//! call graph for a scope), `get_stats`,
+//! call graph for a scope), `get_stats`, `prune` (orphan-row GC),
 //! `list_packs`, `get_pack`, `export_pack`, `create_pack`, `add_pack_paths`,
 //! `remove_pack_paths`, `delete_pack` (Context Packs),
 //! `list_classifications`, `confirm_classification`, `ignore_classification`
@@ -1398,6 +1398,19 @@ impl IndexaMcp {
         let chunks = store.chunk_count().map_err(mcp_err)?;
         Ok(ok_text(format!(
             "{entries} indexed entries, {chunks} chunks."
+        )))
+    }
+
+    /// Garbage-collect orphaned rows (chunks/summaries left behind after a root was removed).
+    #[tool(
+        description = "Garbage-collect orphaned index rows — chunks and summaries left behind after their files/roots were removed. Returns how many rows were pruned. Safe: only removes rows with no matching entry."
+    )]
+    async fn prune(&self) -> Result<CallToolResult, ErrorData> {
+        let mut store = self.store()?;
+        let counts = store.prune_orphans().map_err(mcp_err)?;
+        Ok(ok_text(format!(
+            "Pruned {} orphaned chunk(s) and {} orphaned summary row(s).",
+            counts.chunks, counts.summaries
         )))
     }
 

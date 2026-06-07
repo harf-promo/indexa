@@ -301,6 +301,22 @@ pub(crate) async fn cmd_pack_export(
     Ok(())
 }
 
+pub(crate) async fn cmd_pack_rename(name: String, new_name: String) -> Result<()> {
+    let Some(db_path) = require_index_db()? else {
+        return Ok(());
+    };
+    let mut store = Store::open(&db_path)?;
+    let pack = store
+        .pack_by_name(&name)?
+        .ok_or_else(|| anyhow::anyhow!("no pack named \"{name}\""))?;
+    if store.pack_by_name(&new_name)?.is_some() {
+        bail!("a pack named \"{new_name}\" already exists.");
+    }
+    store.rename_pack(&pack.id, &new_name)?;
+    println!("Renamed pack \"{name}\" → \"{new_name}\".");
+    Ok(())
+}
+
 pub(crate) async fn cmd_pack_delete(name: String) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());

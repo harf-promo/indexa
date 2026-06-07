@@ -15,6 +15,7 @@ mod pack;
 mod prune;
 mod rm;
 mod scan;
+mod search;
 mod serve;
 mod status;
 mod summarize;
@@ -37,11 +38,12 @@ pub(crate) use map::cmd_map;
 pub(crate) use mcp::cmd_mcp;
 pub(crate) use pack::{
     cmd_pack_add, cmd_pack_create, cmd_pack_delete, cmd_pack_export, cmd_pack_list,
-    cmd_pack_remove, cmd_pack_show,
+    cmd_pack_remove, cmd_pack_rename, cmd_pack_show,
 };
 pub(crate) use prune::cmd_prune;
 pub(crate) use rm::cmd_rm;
 pub(crate) use scan::cmd_scan;
+pub(crate) use search::cmd_search;
 pub(crate) use serve::cmd_serve;
 pub(crate) use status::cmd_status;
 pub(crate) use summarize::cmd_summarize;

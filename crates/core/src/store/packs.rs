@@ -17,6 +17,16 @@ impl Store {
         Ok(id)
     }
 
+    /// Rename a pack. Errors if `new_name` is already taken (UNIQUE name constraint).
+    /// Returns the number of rows changed (0 = no pack with that id).
+    pub fn rename_pack(&mut self, pack_id: &str, new_name: &str) -> Result<usize> {
+        let n = self.conn.execute(
+            "UPDATE packs SET name = ?1 WHERE id = ?2",
+            params![new_name, pack_id],
+        )?;
+        Ok(n)
+    }
+
     /// Add paths to a pack (idempotent — duplicates are silently ignored).
     pub fn add_pack_paths(&mut self, pack_id: &str, paths: &[String]) -> Result<()> {
         let tx = self.conn.transaction()?;
