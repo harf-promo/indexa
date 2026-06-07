@@ -182,6 +182,30 @@ The signature graph (v0.18) is a **file-to-file call graph**: an edge `A → B` 
 - **Bare-name, case-sensitive, 1-hop.** No type resolution, no scope/namespace analysis, no overload disambiguation. Two unrelated functions that share a name will be linked. Symbols defined in more than 25 files (common helpers like `new`/`get`) are dropped as noise.
 - **Seven languages.** Rust, Python, JavaScript, TypeScript, Go, Java, C/C++ — wherever the parser emits call/define edges.
 
+#### Strict mode — a precision filter (v0.20)
+
+`indexa graph --strict`, the `code_graph`/`blast_radius` MCP `strict: true` flag, and `/api/graph?strict=1`
+tighten the noise cap from 25 to **1**: only symbols defined in *exactly one file* produce an edge.
+Since the bare-name false positives come entirely from one name resolving to several definitions,
+keeping only uniquely-defined symbols removes those collisions — at the cost of dropping genuinely
+shared helpers (precision over recall).
+
+Be honest about what this is and isn't:
+
+- It is a **precision filter on names, not import resolution.** A name uniquely defined in file `B`
+  but *locally shadowed* in caller `A` still produces a spurious `A → B` edge — strict can't catch
+  that without scope/type analysis it doesn't do.
+- **Default is fuzzy** (the 25-file cap, historical behavior) so PageRank and the Map's node sizing
+  are unchanged unless you opt in. Strict is a per-query choice for "show me only edges I can trust."
+- `who_calls` takes a bare name with no definer to disambiguate against, so it **can't** be filtered
+  this way; instead it **annotates** its output with how many files define the name (`defines_count`),
+  flagging when the caller list may conflate distinct definitions.
+
+True import-aware resolution (mapping each call to the *imported* definer) would need a per-language
+module→file resolver — aliases, re-exports, glob and nested imports make that a much larger,
+error-prone subsystem. It is deliberately **deferred**; strict mode is the honest, no-new-machinery
+step that removes the most common class of false positive today.
+
 ### PageRank centrality (v0.20)
 
 Each node carries a **weighted PageRank** score, computed over the *displayed* graph (after the edge cap is applied — so on a truncated graph, centrality is relative to what's shown). Rank flows along edges caller → callee, so a file **called by** many — or by other central files — scores highest; this surfaces hub/library files. Edge weight (number of shared call→define symbols) biases the flow toward stronger relationships. The algorithm is a standard power iteration (damping 0.85, dangling-mass redistribution, L1 convergence); scores sum to ~1.0.

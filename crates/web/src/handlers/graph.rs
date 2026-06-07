@@ -20,6 +20,10 @@ use crate::AppState;
 pub(crate) struct GraphQuery {
     scope: Option<String>,
     limit: Option<usize>,
+    /// Strict resolution: only link calls to uniquely-defined symbols (default false =
+    /// the broader bare-name match, which is what PageRank / Map node sizing expect).
+    #[serde(default)]
+    strict: bool,
 }
 
 #[derive(Serialize)]
@@ -71,12 +75,13 @@ pub(crate) async fn api_graph(
         }
     };
     let limit = q.limit.unwrap_or(400).clamp(1, 2000);
+    let strict = q.strict;
 
     let db_path = state.db_path.clone();
     let scope_for_task = scope.clone();
     let graph = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let store = indexa_core::store::Store::open(&db_path)?;
-        store.code_graph(&scope_for_task, limit)
+        store.code_graph(&scope_for_task, limit, strict)
     })
     .await
     .unwrap_or_else(|e| Err(anyhow::anyhow!("graph task panicked: {e}")));

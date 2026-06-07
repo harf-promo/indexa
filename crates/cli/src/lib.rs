@@ -196,6 +196,10 @@ pub enum Commands {
         /// Max edges to print, heaviest first (default 100).
         #[arg(long, default_value = "100")]
         limit: usize,
+        /// Strict resolution: only link calls to symbols defined in exactly one file
+        /// (drops name-collision false positives). Default is the broader bare-name match.
+        #[arg(long)]
+        strict: bool,
     },
 
     /// Export the hierarchical summary tree as XML, Markdown, or JSON for use as AI context.
