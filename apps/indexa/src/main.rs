@@ -1,6 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
-use indexa_cli::{Cli, Commands, InsightsAction, PackAction, SavedAction, WeightAction};
+use indexa_cli::{
+    Cli, Commands, InsightsAction, PackAction, SavedAction, SnapshotAction, WeightAction,
+};
 use indexa_core::config;
 use tracing_subscriber::prelude::*;
 
@@ -132,6 +134,10 @@ async fn main() -> Result<()> {
                 commands::cmd_insights_largest(limit, json).await
             }
             InsightsAction::Languages { json } => commands::cmd_insights_languages(json).await,
+        },
+        Commands::Snapshot { action } => match action {
+            SnapshotAction::Export { output } => commands::cmd_snapshot_export(output).await,
+            SnapshotAction::Import { file } => commands::cmd_snapshot_import(file).await,
         },
         Commands::Report {
             questions,

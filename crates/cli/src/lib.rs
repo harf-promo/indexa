@@ -200,6 +200,15 @@ pub enum Commands {
         action: SavedAction,
     },
 
+    /// Export/import a portable snapshot of the index's summaries, call graph, and weights.
+    #[command(after_help = "Examples:
+  indexa snapshot export -o myindex.snapshot.json
+  indexa snapshot import myindex.snapshot.json   # into a fresh index")]
+    Snapshot {
+        #[command(subcommand)]
+        action: SnapshotAction,
+    },
+
     /// Run several questions and render one document (answers + cited sources + TOC).
     #[command(after_help = "Examples:
   indexa report \"what is the architecture?\" \"how does auth work?\" > onboarding.md
@@ -706,6 +715,22 @@ pub enum InsightsAction {
         /// Emit as JSON.
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// Sub-commands for `indexa snapshot`.
+#[derive(clap::Subcommand, Debug)]
+pub enum SnapshotAction {
+    /// Export a versioned snapshot (summaries + call graph + weights) as JSON.
+    Export {
+        /// Write to FILE instead of stdout.
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Import a snapshot into a fresh index (one with no summaries).
+    Import {
+        /// Snapshot JSON file to load.
+        file: String,
     },
 }
 

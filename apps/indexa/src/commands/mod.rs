@@ -20,6 +20,7 @@ mod saved;
 mod scan;
 mod search;
 mod serve;
+mod snapshot;
 mod status;
 mod summarize;
 mod update;
@@ -54,6 +55,7 @@ pub(crate) use saved::{cmd_saved_add, cmd_saved_list, cmd_saved_rm, cmd_saved_ru
 pub(crate) use scan::cmd_scan;
 pub(crate) use search::cmd_search;
 pub(crate) use serve::cmd_serve;
+pub(crate) use snapshot::{cmd_snapshot_export, cmd_snapshot_import};
 pub(crate) use status::cmd_status;
 pub(crate) use summarize::cmd_summarize;
 pub(crate) use update::cmd_update;
