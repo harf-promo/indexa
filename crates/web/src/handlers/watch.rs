@@ -54,6 +54,15 @@ pub(crate) async fn api_watch_start(
         Err(resp) => return resp,
     };
 
+    // Reject absurdly long paths before they hit the filesystem watcher. 4096 is the common
+    // PATH_MAX; a real watch root is far shorter, so anything past this is malformed input.
+    if path.len() > 4096 {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            "watch path is too long (max 4096 bytes)",
+        );
+    }
+
     let mut sessions = state.watch_sessions.lock().await;
     if sessions.contains_key(&path) {
         return Json(serde_json::json!({ "watching": true, "already_running": true }))
@@ -115,7 +124,9 @@ pub(crate) async fn api_watch_start(
                                 {
                                     let d = dir.to_string_lossy().into_owned();
                                     let depth = path_depth(&d);
-                                    let _ = store.mark_for_resummary(&d, "dir", depth);
+                                    if let Err(e) = store.mark_for_resummary(&d, "dir", depth) {
+                                        tracing::warn!(dir = %d, error = %e, "watch: failed to mark ancestor dir for re-summary after remove");
+                                    }
                                 }
                             }
                         }
@@ -134,6 +145,11 @@ pub(crate) async fn api_watch_start(
                             return;
                         }
 
+                        // `block_on` is safe here: this closure runs on a `spawn_blocking`
+                        // thread (not an async executor thread), so driving the embed futures
+                        // to completion blocks only this blocking-pool thread — never the
+                        // runtime's async workers. The awaited embeds park on the IO driver
+                        // running on those separate workers.
                         let chunk_records: Vec<ChunkRecord> = rt.block_on(async {
                             let mut records = Vec::with_capacity(extracted.chunks.len());
                             for chunk in &extracted.chunks {
@@ -169,13 +185,17 @@ pub(crate) async fn api_watch_start(
                             if store.upsert_chunks(&chunk_records).is_ok() {
                                 let s = path.to_string_lossy().into_owned();
                                 let depth = path_depth(&s);
-                                let _ = store.mark_for_resummary(&s, "file", depth);
+                                if let Err(e) = store.mark_for_resummary(&s, "file", depth) {
+                                    tracing::warn!(path = %s, error = %e, "watch: failed to mark changed file for re-summary");
+                                }
                                 for dir in
                                     ancestor_dirs_to_root(path, std::slice::from_ref(&watch_root2))
                                 {
                                     let d = dir.to_string_lossy().into_owned();
                                     let dd = path_depth(&d);
-                                    let _ = store.mark_for_resummary(&d, "dir", dd);
+                                    if let Err(e) = store.mark_for_resummary(&d, "dir", dd) {
+                                        tracing::warn!(dir = %d, error = %e, "watch: failed to mark ancestor dir for re-summary after upsert");
+                                    }
                                 }
                             }
                         }

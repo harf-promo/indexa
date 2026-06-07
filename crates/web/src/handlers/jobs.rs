@@ -161,7 +161,7 @@ pub(crate) async fn api_jobs_list(State(s): State<AppState>) -> impl IntoRespons
             job_id: h.id,
             kind: h.kind.clone(),
             path: h.path.clone(),
-            status: h.status.lock().unwrap().clone(),
+            status: h.status(),
             started_at: h.started_at,
         })
         .collect();
@@ -183,7 +183,7 @@ pub(crate) async fn api_jobs_events(
     // skipping live events whose serialized form already appears at the tail of the
     // replayed history.
     let rx = handle.tx.subscribe();
-    let history = handle.history.lock().unwrap().clone();
+    let history = handle.history_snapshot();
     // Tail of history used to suppress duplicates that also arrive on the live channel.
     let history_tail: std::collections::HashSet<String> = history
         .iter()
@@ -232,12 +232,10 @@ pub(crate) async fn api_jobs_events(
                     });
                     // A terminal event may have been among the dropped ones. Re-deliver
                     // it from history so the client always learns the job finished.
-                    let status = handle_for_live.status.lock().unwrap().clone();
+                    let status = handle_for_live.status();
                     if status != JobStatus::Running {
                         if let Some(term) = handle_for_live
-                            .history
-                            .lock()
-                            .unwrap()
+                            .history_snapshot()
                             .iter()
                             .rev()
                             .find(|e| matches!(e, JobEvent::Done { .. } | JobEvent::Failed { .. }))
@@ -266,8 +264,8 @@ pub(crate) async fn api_job_get(
     let Some(h) = jobs.get(&id) else {
         return err_json(StatusCode::NOT_FOUND, "job not found");
     };
-    let status = h.status.lock().unwrap().clone();
-    let history = h.history.lock().unwrap().clone();
+    let status = h.status();
+    let history = h.history_snapshot();
     let last_event = history.last().cloned();
     let resp = serde_json::json!({
         "job_id": h.id,

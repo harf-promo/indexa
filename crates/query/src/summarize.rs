@@ -16,10 +16,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Force a directory's roll-up after this many consecutive defers — a panic-level
-/// backstop (~5 min at the ~250 ms backoff, far above the LLM request timeout) so a
-/// child stranded `in_flight` can't defer its parent forever.
-const MAX_DIR_DEFERS: u32 = 1200;
+use crate::MAX_DIR_DEFERS;
 
 fn now_secs() -> i64 {
     SystemTime::now()
@@ -555,7 +552,15 @@ pub async fn summarize_subtree_sync(
                 // A store error left the claimed row `in_flight`; terminalize it (best-effort)
                 // so it isn't stuck for the rest of this process (this CLI loop runs no startup
                 // sweep). Mirrors the worker + web drain loops.
-                let _ = store.mark_queue_state(&item.path, "failed", Some(&format!("{e:#}")));
+                if let Err(mark_err) =
+                    store.mark_queue_state(&item.path, "failed", Some(&format!("{e:#}")))
+                {
+                    tracing::warn!(
+                        path = %item.path,
+                        error = %mark_err,
+                        "summarize: failed to terminalize stuck queue row as failed; it may stay in_flight"
+                    );
+                }
                 if first_error.is_none() {
                     first_error = Some(e.to_string());
                 }

@@ -180,7 +180,7 @@ pub async fn serve(
                 let active_job = {
                     let map = jobs.read().await;
                     map.values()
-                        .find(|h| *h.status.lock().unwrap() == JobStatus::Running)
+                        .find(|h| h.status() == JobStatus::Running)
                         .map(|h| dto::ActiveJobDto {
                             job_id: h.id,
                             kind: h.kind.clone(),
@@ -314,6 +314,11 @@ pub async fn serve(
         .route("/api/insights/stale", get(api_insights_stale))
         .route("/api/insights/diff", get(api_insights_diff))
         .with_state(state)
+        // Pin the request-body cap explicitly. axum's built-in default is also 2 MB, but
+        // stating it documents the limit and survives a future default change. Every
+        // legitimate POST body here (ask question, config, pack path lists, weights) is far
+        // under 2 MB, so this rejects oversized bodies before they're buffered into memory.
+        .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(
             tower_http::cors::CorsLayer::new()
                 .allow_origin(origin)

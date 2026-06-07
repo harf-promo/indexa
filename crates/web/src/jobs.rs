@@ -130,6 +130,29 @@ impl JobHandle {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
     }
+
+    /// Poison-safe read (clone) of the current job status. Recovers the inner value
+    /// if another thread panicked while holding the lock, so one job's panic can't
+    /// poison the mutex and take every other job's status read down with it.
+    pub fn status(&self) -> JobStatus {
+        self.status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Poison-safe write of the job status.
+    pub fn set_status(&self, status: JobStatus) {
+        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
+    }
+
+    /// Poison-safe snapshot (clone) of the job's event history.
+    pub fn history_snapshot(&self) -> Vec<JobEvent> {
+        self.history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
 }
 
 /// Shared jobs registry.
@@ -145,7 +168,7 @@ pub const MAX_STORED_WARNINGS: usize = 500;
 /// The true count can be recovered from `stageCounts` on the client.
 pub fn push(handle: &Arc<JobHandle>, event: JobEvent) {
     {
-        let mut history = handle.history.lock().unwrap();
+        let mut history = handle.history.lock().unwrap_or_else(|e| e.into_inner());
         // For Warning events: cap stored history to avoid unbounded growth.
         if matches!(event, JobEvent::Warning { .. }) {
             let warn_count = history
