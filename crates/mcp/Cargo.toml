@@ -19,3 +19,8 @@ indexa-embed = { path = "../embed" }
 indexa-llm = { path = "../llm" }
 rmcp = { version = "1.7.0", features = ["server", "transport-io", "macros"] }
 schemars = "1"
+
+[dev-dependencies]
+tempfile = "3"
+# Stub Embedder/Generator impls in tests use the same async-trait the traits do.
+async-trait = { workspace = true }
