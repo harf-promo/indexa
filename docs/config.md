@@ -129,6 +129,26 @@ agentic_max_steps    = 3      # max retrieval hops in agentic mode (clamped 1..=
 | `sparse` | Full-text search only (BM25/FTS5). |
 | `dense` | Semantic search only (cosine similarity). |
 
+### When to tune retrieval
+
+Start with the defaults — they're good for most repos. Reach for these only when answers are off,
+and change **one knob at a time**. Use `indexa ask --explain "<question>"` to see the sparse/dense/fused
+rankings and confirm a change did what you expected.
+
+| Symptom | Knob | Try |
+|---|---|---|
+| Answers miss relevant files that clearly exist | `top_k` | raise 8 → 12–20 (more candidates reach synthesis; costs a little context budget) |
+| Answer cites too much noise / drifts off-topic | `top_k`, `context_budget` | lower `top_k` to 5–6; trim `context_budget` so only the strongest hits are packed |
+| Exact keyword/identifier matches rank too low | `hybrid` | try `sparse`, or lower `rrf_k` (e.g. 30) to weight top ranks more heavily |
+| Conceptual/paraphrased questions miss | `hybrid` | ensure `rrf` or `dense`, and that the folder was deep-indexed (embeddings exist) |
+| Want folder-level topical relevance to count | `summary_weight` | raise from 0.0 to ~0.2–0.4 (dense/RRF only; blends parent-summary similarity) |
+| One important dir keeps getting buried | `use_weights` + `indexa weight set` | boost that file/dir/category instead of globally re-tuning |
+| Compositional question (needs several facts) | — | use `--agentic` per call rather than changing defaults |
+| Long answers truncate context | `context_budget` | raise from 4000 (more chars packed into the prompt; watch the model's context window) |
+
+`rrf_k` is the RRF rank constant: **higher** = ranks contribute more evenly (flatter), **lower** =
+the very top hits dominate. The industry default of 60 rarely needs changing.
+
 ---
 
 ## Describer (LLM for answer synthesis)
