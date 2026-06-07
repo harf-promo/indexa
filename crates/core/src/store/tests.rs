@@ -1655,6 +1655,34 @@ fn defines_count_counts_distinct_definers() {
 }
 
 #[test]
+fn last_indexed_at_for_root_is_prefix_scoped() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_chunks(&[
+            dummy_chunk("/proj/a.rs", 0, "fn a() {}"),
+            dummy_chunk("/projector/b.rs", 0, "fn b() {}"),
+        ])
+        .unwrap();
+    // Pin distinct timestamps so we can prove prefix scoping picks the right rows and
+    // that "/proj" does NOT absorb the "/projector" sibling.
+    store
+        .db_connection()
+        .execute_batch(
+            "UPDATE chunks SET indexed_at = 1000 WHERE entry_path = '/proj/a.rs';
+             UPDATE chunks SET indexed_at = 2000 WHERE entry_path = '/projector/b.rs';",
+        )
+        .unwrap();
+
+    assert_eq!(store.last_indexed_at_for_root("/proj").unwrap(), Some(1000));
+    assert_eq!(
+        store.last_indexed_at_for_root("/projector").unwrap(),
+        Some(2000)
+    );
+    // A root with nothing indexed under it → None (auto-reindex skips these).
+    assert_eq!(store.last_indexed_at_for_root("/nope").unwrap(), None);
+}
+
+#[test]
 fn code_graph_scope_excludes_prefix_siblings() {
     let mut store = Store::open_in_memory().unwrap();
     // "/proj" must NOT match "/projector" (trailing-slash normalization).

@@ -80,7 +80,10 @@ async fn main() -> Result<()> {
             passes,
         } => commands::cmd_summarize(paths, mode, passes, &cfg).await,
         Commands::Describe { path } => commands::cmd_describe(path).await,
-        Commands::Worker { concurrency } => commands::cmd_worker(concurrency, &cfg).await,
+        Commands::Worker {
+            concurrency,
+            auto_reindex,
+        } => commands::cmd_worker(concurrency, auto_reindex, &cfg).await,
         Commands::Pack { action } => match action {
             PackAction::Create {
                 name,

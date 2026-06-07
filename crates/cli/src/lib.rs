@@ -142,6 +142,10 @@ pub enum Commands {
         /// Number of concurrent summarization tasks.
         #[arg(short, long, default_value_t = 2)]
         concurrency: usize,
+        /// Before draining, re-index (scan→deep→summarize) any indexed root whose content
+        /// is older than `[scan] auto_reindex` (default 7d if that's unset). Incremental.
+        #[arg(long)]
+        auto_reindex: bool,
     },
 
     /// Manage Context Packs — named, cross-directory context bundles.

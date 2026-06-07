@@ -47,6 +47,11 @@ pub struct ScanConfig {
     pub respect_gitignore: bool,
     /// Extra gitignore-style patterns to skip (e.g. `["build/", "*.log", "vendor/"]`).
     pub ignore: Vec<String>,
+    /// Re-index interval for `indexa worker --auto-reindex`: `"off"` (default) or a duration
+    /// like `"7d"` / `"30d"` / `"12h"`. When set, the worker re-runs scan→deep→summarize for
+    /// any indexed root whose newest content is older than this. The `--auto-reindex` flag must
+    /// still be passed to activate it (so an expensive rebuild never starts implicitly).
+    pub auto_reindex: String,
 }
 
 impl Default for ScanConfig {
@@ -54,8 +59,28 @@ impl Default for ScanConfig {
         Self {
             respect_gitignore: true,
             ignore: Vec::new(),
+            auto_reindex: "off".to_owned(),
         }
     }
+}
+
+/// Parse an auto-reindex interval string (`"7d"`, `"30d"`, `"12h"`, `"90m"`, `"3600s"`) to
+/// seconds. `"off"`, empty, or `"0"` → `None` (disabled). An unrecognized unit/number → `None`.
+pub fn parse_reindex_interval(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("off") || s == "0" {
+        return None;
+    }
+    let (num, unit) = s.split_at(s.len() - 1);
+    let n: u64 = num.parse().ok()?;
+    let mult = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        _ => return None,
+    };
+    n.checked_mul(mult).filter(|&v| v > 0)
 }
 
 // ── Model catalog ───────────────────────────────────────────────────────────
@@ -614,6 +639,37 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_reindex_interval_units_and_off() {
+        assert_eq!(parse_reindex_interval("off"), None);
+        assert_eq!(parse_reindex_interval(""), None);
+        assert_eq!(parse_reindex_interval("0"), None);
+        assert_eq!(parse_reindex_interval("OFF"), None);
+        assert_eq!(parse_reindex_interval("7d"), Some(7 * 86_400));
+        assert_eq!(parse_reindex_interval("30d"), Some(30 * 86_400));
+        assert_eq!(parse_reindex_interval("12h"), Some(12 * 3600));
+        assert_eq!(parse_reindex_interval("90m"), Some(90 * 60));
+        assert_eq!(parse_reindex_interval("3600s"), Some(3600));
+        // Garbage / unknown unit → None (treated as disabled, never a panic).
+        assert_eq!(parse_reindex_interval("7w"), None);
+        assert_eq!(parse_reindex_interval("abc"), None);
+        assert_eq!(parse_reindex_interval("d"), None);
+    }
+
+    #[test]
+    fn scan_auto_reindex_roundtrips_and_defaults_off() {
+        // Default is "off".
+        assert_eq!(Config::default().scan.auto_reindex, "off");
+        // Explicit value round-trips through TOML; other [scan] fields keep their defaults.
+        let toml = r#"
+[scan]
+auto_reindex = "7d"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.scan.auto_reindex, "7d");
+        assert!(cfg.scan.respect_gitignore);
+    }
 
     #[test]
     fn default_config_is_valid() {
