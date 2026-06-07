@@ -656,7 +656,9 @@ fn pack_context(hits: &[SearchHit], budget: usize) -> (String, Vec<SourceCitatio
                     safe_end -= 1;
                 }
                 context.push_str(&chunk[..safe_end]);
-                context.push_str("...\n\n");
+                // Signal to the synthesizer that this chunk was cut to fit the budget, so it
+                // doesn't treat the partial text as the whole file.
+                context.push_str("\n…[chunk truncated to fit the context budget]\n\n");
             }
             break;
         }
@@ -707,6 +709,8 @@ mod tests {
         let (ctx, sources) = pack_context(&hits, 2000);
         assert!(ctx.len() <= 2100);
         assert!(!sources.is_empty());
+        // The over-budget chunk is cut and explicitly marked so the synthesizer knows.
+        assert!(ctx.contains("truncated"));
     }
 
     #[test]
