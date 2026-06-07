@@ -28,6 +28,11 @@ use tokio::sync::Semaphore;
 /// concurrency multiplies against it.
 const DEFAULT_MAX_CONCURRENCY: usize = 3;
 
+/// Hard timeout for a single `claude -p` invocation. A normal call is ~6 s; without a
+/// cap a hung CLI process would stall a summarize/answer job indefinitely. Generous
+/// enough for a large summary prompt, bounded so a stuck process always terminalizes.
+const CLAUDE_TIMEOUT_SECS: u64 = 300;
+
 /// The subset of `claude -p --output-format json` we care about.
 #[derive(Deserialize)]
 struct ClaudeCliResult {
@@ -88,7 +93,7 @@ impl ClaudeCodeLlm {
             .await
             .expect("claude-code semaphore never closed");
 
-        let output = Command::new(&self.claude_bin)
+        let run_fut = Command::new(&self.claude_bin)
             .arg("-p")
             .arg(prompt)
             .arg("--output-format")
@@ -98,14 +103,24 @@ impl ClaudeCodeLlm {
             // Belt-and-suspenders: never let an inherited API key silently switch
             // this off the subscription and onto metered billing.
             .env_remove("ANTHROPIC_API_KEY")
-            .output()
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to spawn `{}` — is the Claude Code CLI installed and on PATH?",
-                    self.claude_bin
-                )
-            })?;
+            // Kill the child if we drop the future on timeout, so a hung `claude` can't
+            // leak as a zombie holding the concurrency permit.
+            .kill_on_drop(true)
+            .output();
+        let output =
+            tokio::time::timeout(std::time::Duration::from_secs(CLAUDE_TIMEOUT_SECS), run_fut)
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "claude CLI timed out after {CLAUDE_TIMEOUT_SECS}s (model {model})"
+                    )
+                })?
+                .with_context(|| {
+                    format!(
+                        "failed to spawn `{}` — is the Claude Code CLI installed and on PATH?",
+                        self.claude_bin
+                    )
+                })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

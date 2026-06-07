@@ -251,9 +251,28 @@ pub(crate) async fn cmd_deep(
             // Embed all of a file's chunks in batched round-trips (≫ faster than one HTTP
             // call per chunk), preserving order; per-chunk-resilient on a batch failure.
             let texts: Vec<&str> = extracted.chunks.iter().map(|c| c.text.as_str()).collect();
-            let embeddings =
+            let mut embeddings =
                 indexa_embed::embed_all(embedder.as_ref(), &texts, indexa_embed::EMBED_BATCH_SIZE)
                     .await;
+            // Drop embeddings whose dim ≠ the configured `[embedding] dim` (model/config
+            // mismatch) — they'd corrupt dense search; the chunk stays BM25-searchable.
+            let (dim_mismatch, sample_dim) =
+                indexa_embed::enforce_embedding_dim(&mut embeddings, cfg.embedding.dim);
+            if dim_mismatch > 0 {
+                eprintln!(
+                    "  ⚠  {dim_mismatch} chunk(s) in {path_str} embedded at dim {} ≠ configured {} \
+                     — stored text-only; fix [embedding] model/dim and re-run deep.",
+                    sample_dim.unwrap_or(0),
+                    cfg.embedding.dim
+                );
+            }
+            let embed_failures = embeddings.iter().filter(|e| e.is_none()).count();
+            if embed_failures > 0 && dim_mismatch == 0 {
+                eprintln!(
+                    "  ⚠  {embed_failures}/{} chunk(s) in {path_str} failed to embed (stored text-only).",
+                    embeddings.len()
+                );
+            }
             let mut chunk_records = Vec::with_capacity(extracted.chunks.len());
             for (chunk, embedding) in extracted.chunks.iter().zip(embeddings) {
                 chunk_records.push(ChunkRecord {
@@ -282,7 +301,14 @@ pub(crate) async fn cmd_deep(
                         to_ref: e.to.clone(),
                     })
                     .collect();
-                store.upsert_edges(&edge_records)?;
+                // Best-effort (parity with the web deep path): code-graph edges are an
+                // enrichment, not the index — a failure warns rather than aborting the scan.
+                if let Err(e) = store.upsert_edges(&edge_records) {
+                    eprintln!(
+                        "  ⚠  {path_str}: failed to store {} code-graph edge(s): {e:#}",
+                        edge_records.len()
+                    );
+                }
             }
         }
 

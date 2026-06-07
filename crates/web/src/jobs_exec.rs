@@ -756,12 +756,34 @@ async fn run_deep_phase(
                 // still can't be embedded; we surface a single aggregate warning rather than one
                 // event per failed chunk.
                 let text_refs: Vec<&str> = embed_texts.iter().map(|s| s.as_str()).collect();
-                let embeddings = indexa_embed::embed_all(
+                let mut embeddings = indexa_embed::embed_all(
                     state.embedder.as_ref(),
                     &text_refs,
                     indexa_embed::EMBED_BATCH_SIZE,
                 )
                 .await;
+                // Drop any embedding whose dim ≠ the configured `[embedding] dim` (a model/config
+                // mismatch) — storing it would corrupt dense search. The chunk stays BM25-searchable.
+                let (dim_mismatch, sample_dim) = indexa_embed::enforce_embedding_dim(
+                    &mut embeddings,
+                    state.config.embedding.dim,
+                );
+                if dim_mismatch > 0 {
+                    push(
+                        handle,
+                        JobEvent::Warning {
+                            stage: "deep".to_owned(),
+                            item_path: Some(path_str.clone()),
+                            message: format!(
+                                "{dim_mismatch} chunk(s) embedded at dim {} ≠ configured {} — stored \
+                                 text-only; fix [embedding] model/dim and re-run deep",
+                                sample_dim.unwrap_or(0),
+                                state.config.embedding.dim
+                            ),
+                            pressure: None,
+                        },
+                    );
+                }
                 let embed_failures = embeddings.iter().filter(|e| e.is_none()).count();
                 if embed_failures > 0 {
                     push(
