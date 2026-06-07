@@ -103,6 +103,9 @@ async fn main() -> Result<()> {
                 depth,
                 include_weights,
             } => commands::cmd_pack_export(name, format, output, depth, include_weights).await,
+            PackAction::Rename { name, new_name } => {
+                commands::cmd_pack_rename(name, new_name).await
+            }
             PackAction::Delete { name } => commands::cmd_pack_delete(name).await,
         },
         Commands::Weight { action } => match action {
@@ -170,6 +173,14 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Commands::Search {
+            query,
+            top_k,
+            scope,
+            dense,
+            hybrid,
+            json,
+        } => commands::cmd_search(query, top_k, scope, dense, hybrid, json, &cfg).await,
         Commands::Watch { paths, embed_model } => {
             commands::cmd_watch(paths, embed_model, &cfg).await
         }

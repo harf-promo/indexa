@@ -988,6 +988,19 @@ fn pack_create_and_lookup_by_name() {
 }
 
 #[test]
+fn pack_rename_changes_name_and_preserves_id() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store.create_pack("Auth", None).unwrap();
+    let changed = store.rename_pack(&id, "Authentication").unwrap();
+    assert_eq!(changed, 1);
+    assert!(store.pack_by_name("Auth").unwrap().is_none());
+    let rec = store.pack_by_name("Authentication").unwrap().unwrap();
+    assert_eq!(rec.id, id, "rename keeps the same pack id");
+    // Renaming a non-existent id changes nothing.
+    assert_eq!(store.rename_pack("deadbeef", "x").unwrap(), 0);
+}
+
+#[test]
 fn pack_lookup_is_case_insensitive() {
     let mut store = Store::open_in_memory().unwrap();
     store.create_pack("Auth", None).unwrap();

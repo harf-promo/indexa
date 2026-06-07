@@ -292,6 +292,34 @@ pub enum Commands {
         json: bool,
     },
 
+    /// Search indexed content and print ranked hits — no LLM synthesis (that's `ask`).
+    ///
+    /// Defaults to fast keyword (BM25) search that needs no embedder, so it works even
+    /// with Ollama down. Use --dense for semantic-only or --hybrid for both.
+    #[command(after_help = "Examples:
+  indexa search \"async runtime\"
+  indexa search --hybrid --top-k 20 \"retry backoff\"
+  indexa search --json \"TODO\" | jq -r '.[].path'")]
+    Search {
+        /// Search query.
+        query: String,
+        /// Number of hits to return (default 10).
+        #[arg(long)]
+        top_k: Option<usize>,
+        /// Limit to files under this path.
+        #[arg(long)]
+        scope: Option<String>,
+        /// Semantic (vector) search only — requires embeddings.
+        #[arg(long, conflicts_with = "hybrid")]
+        dense: bool,
+        /// Hybrid BM25 + vector (RRF) search — requires embeddings.
+        #[arg(long)]
+        hybrid: bool,
+        /// Emit hits as JSON for scripting.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Watch one or more paths for changes and keep their context current.
     #[command(after_help = "Examples:
   indexa watch ~/Documents
@@ -528,6 +556,13 @@ pub enum PackAction {
         /// Append an importance-weights section (which files you've marked as important).
         #[arg(long)]
         include_weights: bool,
+    },
+    /// Rename a pack.
+    Rename {
+        /// Current pack name.
+        name: String,
+        /// New pack name (must be unique).
+        new_name: String,
     },
     /// Delete a pack (does not remove the indexed files — only the pack record).
     Delete {
