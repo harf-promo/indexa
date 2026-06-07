@@ -1396,6 +1396,26 @@ fn suggest_weights_by_recency_tiers_by_age() {
 // ── Insights (v0.10) ──────────────────────────────────────────────────────────
 
 #[test]
+fn all_summaries_and_all_edges_for_snapshot() {
+    let mut store = Store::open_in_memory().unwrap();
+    let mut s = dummy_summary("/r", "dir", Some("/"), 0);
+    s.embedding = Some(vec![0.1, 0.2, 0.3]);
+    store.upsert_summary(&s).unwrap();
+    store
+        .upsert_summary(&dummy_summary("/r/a", "file", Some("/r"), 1))
+        .unwrap();
+    store
+        .upsert_edges(&[edge("/r/a", "defines", "foo"), edge("/r/a", "calls", "bar")])
+        .unwrap();
+
+    let summaries = store.all_summaries().unwrap();
+    assert_eq!(summaries.len(), 2);
+    // Embeddings are intentionally omitted from the bulk getter (snapshot size).
+    assert!(summaries.iter().all(|s| s.embedding.is_none()));
+    assert_eq!(store.all_edges().unwrap().len(), 2);
+}
+
+#[test]
 fn saved_queries_crud_roundtrip() {
     let mut store = Store::open_in_memory().unwrap();
     store

@@ -68,6 +68,33 @@ impl Store {
     // ── Summary writes ────────────────────────────────────────────────────────
 
     /// Insert or replace a summary row.
+    /// All summary rows, **without embeddings** (the blobs are large and model-specific —
+    /// snapshot export omits them). `embedding` is `None` on every returned record.
+    pub fn all_summaries(&self) -> Result<Vec<SummaryRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, kind, parent_path, depth, summary, summary_l0,
+                    child_count, byte_size, model, source_hash, generated_at
+             FROM summaries ORDER BY path",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(SummaryRecord {
+                path: r.get(0)?,
+                kind: r.get(1)?,
+                parent_path: r.get(2)?,
+                depth: r.get(3)?,
+                summary: r.get(4)?,
+                summary_l0: r.get(5)?,
+                embedding: None,
+                child_count: r.get(6)?,
+                byte_size: r.get(7)?,
+                model: r.get(8)?,
+                source_hash: r.get(9)?,
+                generated_at: r.get(10)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn upsert_summary(&mut self, record: &SummaryRecord) -> Result<()> {
         let embedding_blob = record.embedding.as_deref().map(embedding_to_blob);
         // Always persist an L0 abstract: use the provided one, else derive from L1.

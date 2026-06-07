@@ -77,6 +77,21 @@ impl Store {
     /// then insert), mirroring [`upsert_chunks`](Self::upsert_chunks) so a re-`deep` of a
     /// file refreshes its graph rather than accumulating stale edges. `INSERT OR IGNORE`
     /// collapses duplicates against the composite primary key.
+    /// Every edge in the graph (for snapshot export). Ordered for stable output.
+    pub fn all_edges(&self) -> Result<Vec<EdgeRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT from_path, kind, to_ref FROM edges ORDER BY from_path, kind, to_ref",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(EdgeRecord {
+                from_path: r.get(0)?,
+                kind: r.get(1)?,
+                to_ref: r.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn upsert_edges(&mut self, edges: &[EdgeRecord]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
