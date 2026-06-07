@@ -1470,7 +1470,7 @@ fn code_graph_links_callers_to_definers() {
         ])
         .unwrap();
 
-    let g = store.code_graph("/src", 400).unwrap();
+    let g = store.code_graph("/src", 400, false).unwrap();
     assert!(!g.truncated);
     // Two edges: app→lib (run), app→util (parse). /other excluded by scope.
     assert_eq!(g.edges.len(), 2);
@@ -1505,7 +1505,7 @@ fn code_graph_pagerank_ranks_hub_highest() {
         ])
         .unwrap();
 
-    let g = store.code_graph("/src", 400).unwrap();
+    let g = store.code_graph("/src", 400, false).unwrap();
     // Centrality is a proper distribution (sums to ~1) over the 4 nodes …
     let sum: f64 = g.nodes.iter().map(|n| n.pagerank).sum();
     assert!((sum - 1.0).abs() < 1e-6, "pagerank sum = {sum}");
@@ -1534,7 +1534,7 @@ fn code_graph_weight_counts_shared_symbols_and_excludes_self() {
         ])
         .unwrap();
 
-    let g = store.code_graph("/", 400).unwrap();
+    let g = store.code_graph("/", 400, false).unwrap();
     assert_eq!(g.edges.len(), 1, "only a→b (self-edge excluded)");
     assert_eq!(g.edges[0].from, "/a.rs");
     assert_eq!(g.edges[0].to, "/b.rs");
@@ -1555,7 +1555,7 @@ fn code_graph_truncates_at_cap() {
             edge("/d.rs", "defines", "s3"),
         ])
         .unwrap();
-    let g = store.code_graph("/", 2).unwrap();
+    let g = store.code_graph("/", 2, false).unwrap();
     assert_eq!(g.edges.len(), 2);
     assert!(g.truncated);
 }
@@ -1574,10 +1574,84 @@ fn code_graph_excludes_over_common_symbols() {
     edges.push(edge("/caller.rs", "calls", "special"));
     store.upsert_edges(&edges).unwrap();
 
-    let g = store.code_graph("/", 400).unwrap();
+    let g = store.code_graph("/", 400, false).unwrap();
     // Only the `special` edge survives; the 30 `gen` edges are filtered as noise.
     assert!(g.edges.iter().all(|e| e.to == "/special.rs"));
     assert_eq!(g.edges.len(), 1);
+}
+
+#[test]
+fn code_graph_strict_keeps_only_uniquely_defined_symbols() {
+    let mut store = Store::open_in_memory().unwrap();
+    // `parse` is defined in TWO files → ambiguous (a name collision). `unique` is defined
+    // in ONE → unambiguous. /app calls both.
+    store
+        .upsert_edges(&[
+            edge("/src/app.rs", "calls", "parse"),
+            edge("/src/app.rs", "calls", "unique"),
+            edge("/src/p1.rs", "defines", "parse"),
+            edge("/src/p2.rs", "defines", "parse"),
+            edge("/src/u.rs", "defines", "unique"),
+        ])
+        .unwrap();
+
+    // Fuzzy (default): `parse` is under the 25-file cap, so app links to BOTH definers
+    // (app→p1, app→p2) plus app→u — 3 edges.
+    let fuzzy = store.code_graph("/src", 400, false).unwrap();
+    assert_eq!(fuzzy.edges.len(), 3);
+
+    // Strict: `parse` is defined in >1 file → dropped as ambiguous; only the unique
+    // symbol survives, leaving exactly app→u.
+    let strict = store.code_graph("/src", 400, true).unwrap();
+    assert_eq!(strict.edges.len(), 1);
+    assert_eq!(strict.edges[0].from, "/src/app.rs");
+    assert_eq!(strict.edges[0].to, "/src/u.rs");
+}
+
+#[test]
+fn blast_radius_strict_cuts_ambiguous_transitive_hop() {
+    let mut store = Store::open_in_memory().unwrap();
+    // target() is called by mid.rs (direct caller). mid.rs defines `helper` — but `helper`
+    // is ALSO defined in other.rs, so in fuzzy mode the transitive hop drags in everyone
+    // who calls `helper` (far.rs). In strict mode `helper` is ambiguous (>1 definer) and
+    // is not followed, so far.rs drops out.
+    store
+        .upsert_edges(&[
+            edge("/mid.rs", "calls", "target"),
+            edge("/mid.rs", "defines", "helper"),
+            edge("/other.rs", "defines", "helper"),
+            edge("/far.rs", "calls", "helper"),
+        ])
+        .unwrap();
+
+    let fuzzy = store.blast_radius("target", 200, false).unwrap();
+    assert!(fuzzy.contains(&"/mid.rs".to_string()));
+    assert!(
+        fuzzy.contains(&"/far.rs".to_string()),
+        "fuzzy follows the ambiguous transitive hop"
+    );
+
+    let strict = store.blast_radius("target", 200, true).unwrap();
+    assert!(strict.contains(&"/mid.rs".to_string()));
+    assert!(
+        !strict.contains(&"/far.rs".to_string()),
+        "strict must not follow an ambiguously-defined transitive symbol"
+    );
+}
+
+#[test]
+fn defines_count_counts_distinct_definers() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_edges(&[
+            edge("/a.rs", "defines", "parse"),
+            edge("/b.rs", "defines", "parse"),
+            edge("/c.rs", "defines", "unique"),
+        ])
+        .unwrap();
+    assert_eq!(store.defines_count("parse").unwrap(), 2);
+    assert_eq!(store.defines_count("unique").unwrap(), 1);
+    assert_eq!(store.defines_count("absent").unwrap(), 0);
 }
 
 #[test]
@@ -1592,7 +1666,7 @@ fn code_graph_scope_excludes_prefix_siblings() {
             edge("/projector/y.rs", "defines", "run"),
         ])
         .unwrap();
-    let g = store.code_graph("/proj", 400).unwrap();
+    let g = store.code_graph("/proj", 400, false).unwrap();
     assert_eq!(g.edges.len(), 1);
     assert_eq!(g.edges[0].from, "/proj/a.rs");
     assert_eq!(g.edges[0].to, "/proj/b.rs");

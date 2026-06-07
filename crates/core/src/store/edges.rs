@@ -79,11 +79,40 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// How many distinct files `define` a symbol of this exact name. Used to **annotate**
+    /// `who_calls` results: a name defined in >1 file is ambiguous, so the caller list may
+    /// conflate references to different definitions (bare-name matching can't tell them
+    /// apart without an import resolver). `0` means the symbol isn't defined in the index.
+    pub fn defines_count(&self, symbol: &str) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT from_path) FROM edges WHERE kind = 'defines' AND to_ref = ?1",
+            params![symbol],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
     /// D2 — 1-hop blast radius for `symbol`: direct callers **plus** files that call any
     /// symbol defined in one of those callers. Gives a conservative "what breaks if I
     /// change this?" set without full recursive name resolution. Capped at `limit`.
-    pub fn blast_radius(&self, symbol: &str, limit: usize) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+    ///
+    /// `strict` tightens the **transitive** hop: a caller's exported symbol is only followed
+    /// when that name is defined in exactly one file, so an ambiguous common name (defined
+    /// in several files) no longer drags unrelated callers into the radius. The direct
+    /// callers of `symbol` itself can't be tightened this way (the input is a bare name with
+    /// no definer to disambiguate against) — see `who_calls` + `defines_count`. `strict` is a
+    /// precision filter on names, **not** import resolution.
+    pub fn blast_radius(&self, symbol: &str, limit: usize, strict: bool) -> Result<Vec<String>> {
+        // In strict mode, restrict the followed exports to symbols with a unique definition.
+        let strict_clause = if strict {
+            "AND to_ref NOT IN (
+                 SELECT to_ref FROM edges WHERE kind = 'defines'
+                  GROUP BY to_ref HAVING COUNT(DISTINCT from_path) > 1
+             )"
+        } else {
+            ""
+        };
+        let sql = format!(
             "WITH direct_callers AS (
                  SELECT DISTINCT from_path FROM edges
                   WHERE kind = 'calls' AND to_ref = ?1
@@ -92,6 +121,7 @@ impl Store {
                  SELECT DISTINCT to_ref FROM edges
                   WHERE kind = 'defines'
                     AND from_path IN (SELECT from_path FROM direct_callers)
+                    {strict_clause}
              ),
              transitive_callers AS (
                  SELECT DISTINCT from_path FROM edges
@@ -102,8 +132,9 @@ impl Store {
              UNION
              SELECT from_path FROM transitive_callers
              ORDER BY from_path
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![symbol, limit as i64], |r| r.get(0))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -121,7 +152,22 @@ impl Store {
     /// Symbols defined in more than [`Self::CODE_GRAPH_COMMON_SYMBOL_CAP`] files are excluded:
     /// they are generic names (`new`, `from`, `default`, `fmt`) whose caller×definer pairings
     /// both bloat the JOIN on a whole-disk index and produce noise rather than signal.
-    pub fn code_graph(&self, prefix: &str, max_edges: usize) -> Result<CodeGraph> {
+    ///
+    /// `strict` lowers that exclusion threshold to **1** — only symbols with a *unique*
+    /// definition produce edges, so name collisions (the source of bare-name false positives)
+    /// can't create spurious `A → B` links. It is a precision filter on names, **not** import
+    /// resolution: a locally-shadowed name uniquely defined elsewhere can still mislink, and a
+    /// genuinely-shared helper is dropped. `strict` trades recall for precision; `false`
+    /// (default) keeps the historical >25-file behavior so PageRank / Map node sizing are
+    /// unchanged.
+    pub fn code_graph(&self, prefix: &str, max_edges: usize, strict: bool) -> Result<CodeGraph> {
+        // strict → keep only uniquely-defined symbols (defined in exactly 1 file);
+        // fuzzy → the historical "common name" noise cap.
+        let common_cap = if strict {
+            1
+        } else {
+            Self::CODE_GRAPH_COMMON_SYMBOL_CAP
+        };
         // Normalize to a directory prefix so `/a/proj` doesn't also match `/a/projector`.
         // `/` (whole disk) is left as-is → matches everything.
         let dir = if prefix == "/" || prefix.ends_with('/') {
@@ -150,10 +196,9 @@ impl Store {
               LIMIT ?2",
         )?;
         let raw: Vec<(String, String, i64)> = stmt
-            .query_map(
-                params![pattern, fetch, Self::CODE_GRAPH_COMMON_SYMBOL_CAP],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?
+            .query_map(params![pattern, fetch, common_cap], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
 
         let truncated = raw.len() > max_edges;

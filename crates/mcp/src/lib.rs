@@ -135,6 +135,10 @@ pub struct WhoCallsParams {
 pub struct BlastRadiusParams {
     /// Bare function or method name whose blast radius to compute.
     pub symbol: String,
+    /// Strict: on the transitive hop, follow only symbols defined in exactly one file
+    /// (fewer false positives from common names). Default false (broader match).
+    #[serde(default)]
+    pub strict: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -144,6 +148,10 @@ pub struct CodeGraphParams {
     /// Max edges to return, heaviest first (default 200).
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Strict: link calls only to symbols defined in exactly one file, dropping
+    /// name-collision false positives. Default false (broader bare-name match).
+    #[serde(default)]
+    pub strict: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -472,22 +480,36 @@ impl IndexaMcp {
             .map(|p| format!("📄 {p}"))
             .collect::<Vec<_>>()
             .join("\n");
+        // Honest ambiguity note: bare-name matching can't disambiguate a name defined in
+        // several files, so the caller list may conflate references to different definitions.
+        let defs = store.defines_count(&params.0.symbol).unwrap_or(0);
+        let note = if defs > 1 {
+            format!(
+                "\n\n⚠ '{}' is defined in {defs} files — callers above may target any of them \
+                 (bare-name match, no import resolution).",
+                params.0.symbol
+            )
+        } else {
+            String::new()
+        };
         Ok(ok_text(format!(
-            "{total} file(s) call '{}':\n{body}",
+            "{total} file(s) call '{}':\n{body}{note}",
             params.0.symbol
         )))
     }
 
     /// D2 — 1-hop blast radius for a symbol: direct callers and transitive callers.
     #[tool(
-        description = "D2 code-graph: compute the blast radius of changing a function or method — returns the direct callers plus files that call any symbol defined in those callers (1-hop transitive). Use to answer 'what breaks if I change X?'. Returns up to 200 results."
+        description = "D2 code-graph: compute the blast radius of changing a function or method — returns the direct callers plus files that call any symbol defined in those callers (1-hop transitive). Use to answer 'what breaks if I change X?'. Set `strict: true` to follow only uniquely-defined symbols on the transitive hop (fewer false positives from common names). Returns up to 200 results."
     )]
     async fn blast_radius(
         &self,
         params: Parameters<BlastRadiusParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let store = self.store()?;
-        let files = store.blast_radius(&params.0.symbol, 200).map_err(mcp_err)?;
+        let files = store
+            .blast_radius(&params.0.symbol, 200, params.0.strict)
+            .map_err(mcp_err)?;
         if files.is_empty() {
             return Ok(ok_text(format!(
                 "No blast radius found for '{}'. Run `indexa deep` on source files first.",
@@ -508,16 +530,20 @@ impl IndexaMcp {
 
     /// File-to-file call graph for a scope (the v0.18 signature graph, as text).
     #[tool(
-        description = "Build the file-to-file call graph for files under a path scope: an edge 'A → B' means file A calls a function that file B defines. Returns the heaviest edges (most shared symbols) as a 'caller → callee [weight]' list, the most central hub files by weighted PageRank (scored 0–100), plus node/edge counts. Matching is on bare symbol names (case-sensitive); languages: Rust, Python, JS, TS, Go, Java."
+        description = "Build the file-to-file call graph for files under a path scope: an edge 'A → B' means file A calls a function that file B defines. Returns the heaviest edges (most shared symbols) as a 'caller → callee [weight]' list, the most central hub files by weighted PageRank (scored 0–100), plus node/edge counts. Matching is on bare symbol names (case-sensitive); set `strict: true` to keep only uniquely-defined symbols (drops name-collision false positives). Languages: Rust, Python, JS, TS, Go, Java."
     )]
     async fn code_graph(
         &self,
         params: Parameters<CodeGraphParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let CodeGraphParams { scope, limit } = params.0;
+        let CodeGraphParams {
+            scope,
+            limit,
+            strict,
+        } = params.0;
         let limit = limit.unwrap_or(200).min(2000);
         let store = self.store()?;
-        let graph = store.code_graph(&scope, limit).map_err(mcp_err)?;
+        let graph = store.code_graph(&scope, limit, strict).map_err(mcp_err)?;
         if graph.edges.is_empty() {
             return Ok(ok_text(format!(
                 "No call edges under '{scope}'. Run `indexa deep` on source files first."

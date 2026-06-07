@@ -28,22 +28,28 @@ fn rel_to_scope(path: &str, scope: &str) -> String {
         .to_owned()
 }
 
-pub(crate) async fn cmd_graph(path: String, limit: usize) -> Result<()> {
+pub(crate) async fn cmd_graph(path: String, limit: usize, strict: bool) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };
     let store = Store::open(&db_path)?;
     let scope = expand(&path);
-    let graph = store.code_graph(&scope, limit)?;
+    let graph = store.code_graph(&scope, limit, strict)?;
 
     if graph.edges.is_empty() {
         println!("No call edges under \"{scope}\".");
+        if strict {
+            println!(
+                "(strict mode — only unambiguous, uniquely-defined symbols. Try without --strict.)"
+            );
+        }
         println!("Run `indexa deep {path}` on source files first (Rust/Python/JS/TS/Go/Java).");
         return Ok(());
     }
 
     println!(
-        "Call graph under \"{scope}\": {} files, {} edges{}",
+        "Call graph under \"{scope}\" ({} mode): {} files, {} edges{}",
+        if strict { "strict" } else { "fuzzy" },
         graph.nodes.len(),
         graph.edges.len(),
         if graph.truncated {

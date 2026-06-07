@@ -122,7 +122,11 @@ async fn main() -> Result<()> {
             InsightsAction::Stale { days } => commands::cmd_insights_stale(days).await,
             InsightsAction::Diff { days } => commands::cmd_insights_diff(days).await,
         },
-        Commands::Graph { path, limit } => commands::cmd_graph(path, limit).await,
+        Commands::Graph {
+            path,
+            limit,
+            strict,
+        } => commands::cmd_graph(path, limit, strict).await,
         Commands::Export {
             paths,
             format,
