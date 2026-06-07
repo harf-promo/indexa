@@ -13,12 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-/// Force a directory's roll-up after this many consecutive defers — a panic-level
-/// backstop so a child that never reaches a terminal state (e.g. a task panic that
-/// strands it `in_flight`) can't defer the parent forever. With the ~250 ms backoff this
-/// is ~5 min — far above the LLM request timeout that normally terminalizes a hung child
-/// — so normal summary latency never triggers a premature (incomplete) roll-up.
-const MAX_DIR_DEFERS: u32 = 1200;
+use crate::MAX_DIR_DEFERS;
 
 /// Run the background summarization worker until the channel is closed or the
 /// process exits. Items are processed one at a time per worker instance;

@@ -13,15 +13,9 @@ use indexa_core::{
 };
 use indexa_embed::Embedder;
 use indexa_llm::{Describer, Generator, OllamaLlm};
-use indexa_query::{process_queue_item_with_passes, requeue_subtree, QueueOutcome};
+use indexa_query::{process_queue_item_with_passes, requeue_subtree, QueueOutcome, MAX_DIR_DEFERS};
 use std::collections::HashMap;
 use std::sync::Arc;
-
-/// Force a directory's roll-up after this many consecutive defers — a panic-level
-/// backstop (~5 min at the ~250 ms backoff) so a child stranded `in_flight` can't hang
-/// the job forever. Far above the LLM request timeout that normally terminalizes a hung
-/// child, so normal latency never forces a premature (incomplete) roll-up.
-const MAX_DIR_DEFERS: u32 = 1200;
 
 // ── Job runner ────────────────────────────────────────────────────────────────
 
@@ -47,7 +41,7 @@ fn finalize_failed(handle: &Arc<JobHandle>, stage: &str, err: &anyhow::Error) {
             code: None,
         },
     );
-    *handle.status.lock().unwrap() = JobStatus::Failed;
+    handle.set_status(JobStatus::Failed);
 }
 
 fn finalize_done(handle: &Arc<JobHandle>, summary: &str) {
@@ -57,7 +51,7 @@ fn finalize_done(handle: &Arc<JobHandle>, summary: &str) {
             summary: summary.to_owned(),
         },
     );
-    *handle.status.lock().unwrap() = JobStatus::Done;
+    handle.set_status(JobStatus::Done);
 }
 
 /// Emit a terminal Done event noting the job was cancelled mid-run.
@@ -68,7 +62,7 @@ fn finalize_cancelled(handle: &Arc<JobHandle>, done: usize) {
             summary: format!("Cancelled after {done} items"),
         },
     );
-    *handle.status.lock().unwrap() = JobStatus::Done;
+    handle.set_status(JobStatus::Done);
 }
 
 /// Compute the swap-used percentage of total swap (0–100), saturating to 100 on no swap.
@@ -1104,7 +1098,15 @@ pub(crate) async fn run_summarize_phase(
             Err(e) => {
                 defers.remove(&item.path);
                 errors += 1;
-                let _ = job_store.mark_queue_state(&item.path, "failed", Some(&format!("{e:#}")));
+                if let Err(mark_err) =
+                    job_store.mark_queue_state(&item.path, "failed", Some(&format!("{e:#}")))
+                {
+                    tracing::warn!(
+                        path = %item.path,
+                        error = %mark_err,
+                        "summarize: failed to terminalize stuck queue row as failed; it may stay in_flight"
+                    );
+                }
             }
         }
 
@@ -1156,5 +1158,5 @@ pub(crate) async fn run_summarize_phase(
             summary: format!("{done} summaries generated"),
         },
     );
-    *handle.status.lock().unwrap() = JobStatus::Done;
+    handle.set_status(JobStatus::Done);
 }

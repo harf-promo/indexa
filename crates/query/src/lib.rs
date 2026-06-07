@@ -17,3 +17,10 @@ pub use summarize::{
     QueueOutcome,
 };
 pub use worker::run_worker;
+
+/// Force a directory's roll-up after this many consecutive defers — a panic-level
+/// backstop (~5 min at the ~250 ms summarize backoff, far above the LLM request timeout
+/// that normally terminalizes a hung child) so a child stranded `in_flight` can't defer
+/// its parent forever. Single source of truth shared by the CLI worker, the synchronous
+/// summarize loop, and the web crate's background summarize job (`indexa_query::MAX_DIR_DEFERS`).
+pub const MAX_DIR_DEFERS: u32 = 1200;
