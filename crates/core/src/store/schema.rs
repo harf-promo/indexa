@@ -187,6 +187,15 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_weights_kind ON importance_weights(target_kind);
 
+            -- Saved searches: named, reusable `ask` queries (question + retrieval mode + scope).
+            CREATE TABLE IF NOT EXISTS saved_queries (
+                name       TEXT PRIMARY KEY,
+                question   TEXT NOT NULL,
+                mode       TEXT NOT NULL DEFAULT 'rrf',
+                scope      TEXT,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+
             -- Insights (v0.10): first_indexed_at is populated separately via migration.
             ",
         )?;

@@ -28,6 +28,7 @@ mod packs;
 mod pagerank;
 mod prune;
 mod queue;
+mod saved;
 mod schema;
 mod search;
 mod summaries;
@@ -43,6 +44,7 @@ pub use ann::AnnIndex;
 pub use entries::CoverageEntry;
 pub use insights::{DuplicateCluster, LanguageStat, LargestEntry, StaleEntry, WeeklyDiff};
 pub use prune::OrphanCounts;
+pub use saved::SavedQuery;
 pub use types::{
     ChunkRecord, ClassificationRecord, CodeGraph, CodeGraphEdge, CodeGraphNode, EdgeRecord,
     FailedQueueItem, PackRecord, QueueItem, QueueStats, RegionSummary, RelatedFile, SearchHit,

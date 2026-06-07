@@ -1396,6 +1396,37 @@ fn suggest_weights_by_recency_tiers_by_age() {
 // ── Insights (v0.10) ──────────────────────────────────────────────────────────
 
 #[test]
+fn saved_queries_crud_roundtrip() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .save_query("prio", "what are my priorities?", "rrf", None)
+        .unwrap();
+    store
+        .save_query("auth", "how does auth work?", "agentic", Some("/src/auth"))
+        .unwrap();
+    let q = store.get_saved_query("auth").unwrap().unwrap();
+    assert_eq!(q.question, "how does auth work?");
+    assert_eq!(q.mode, "agentic");
+    assert_eq!(q.scope.as_deref(), Some("/src/auth"));
+    let all = store.list_saved_queries().unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].name, "auth"); // alphabetical
+                                     // Overwrite by name.
+    store
+        .save_query("prio", "updated?", "sparse", None)
+        .unwrap();
+    assert_eq!(
+        store.get_saved_query("prio").unwrap().unwrap().mode,
+        "sparse"
+    );
+    assert_eq!(store.list_saved_queries().unwrap().len(), 2);
+    // Delete.
+    assert_eq!(store.delete_saved_query("prio").unwrap(), 1);
+    assert!(store.get_saved_query("prio").unwrap().is_none());
+    assert_eq!(store.delete_saved_query("nope").unwrap(), 0);
+}
+
+#[test]
 fn find_largest_orders_files_by_size() {
     let mut store = Store::open_in_memory().unwrap();
     store

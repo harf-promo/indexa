@@ -15,6 +15,7 @@ mod pack;
 mod prune;
 mod related;
 mod rm;
+mod saved;
 mod scan;
 mod search;
 mod serve;
@@ -47,6 +48,7 @@ pub(crate) use pack::{
 pub(crate) use prune::cmd_prune;
 pub(crate) use related::cmd_related;
 pub(crate) use rm::cmd_rm;
+pub(crate) use saved::{cmd_saved_add, cmd_saved_list, cmd_saved_rm, cmd_saved_run};
 pub(crate) use scan::cmd_scan;
 pub(crate) use search::cmd_search;
 pub(crate) use serve::cmd_serve;
