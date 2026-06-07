@@ -227,6 +227,14 @@ pub enum Commands {
         /// Write output to FILE instead of stdout.
         #[arg(short, long)]
         output: Option<String>,
+
+        /// Append an importance-weights section (which files you've marked as important).
+        #[arg(long)]
+        include_weights: bool,
+
+        /// Append the file-to-file call graph for the exported scope (heaviest edges).
+        #[arg(long)]
+        include_graph: bool,
     },
 
     /// Query your local context with a natural-language question.
@@ -517,6 +525,9 @@ pub enum PackAction {
         /// Maximum tree depth per path (0 = top summary only).
         #[arg(long)]
         depth: Option<usize>,
+        /// Append an importance-weights section (which files you've marked as important).
+        #[arg(long)]
+        include_weights: bool,
     },
     /// Delete a pack (does not remove the indexed files — only the pack record).
     Delete {

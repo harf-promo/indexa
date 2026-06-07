@@ -6,7 +6,10 @@ pub mod rerank;
 pub mod summarize;
 pub mod worker;
 
-pub use export::{build_tree, render_json, render_markdown, render_xml};
+pub use export::{
+    approx_tokens, build_tree, render_graph, render_json, render_markdown, render_weights,
+    render_xml,
+};
 pub use indexa_core::config::HybridMode;
 pub use qa::{
     answer, answer_agentic, answer_agentic_stream, answer_stream, answer_stream_with_ann,
