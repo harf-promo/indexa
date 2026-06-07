@@ -139,6 +139,8 @@ async fn main() -> Result<()> {
             dense_only,
             agentic,
             max_steps,
+            explain,
+            json,
         } => {
             commands::cmd_ask(
                 question,
@@ -150,6 +152,8 @@ async fn main() -> Result<()> {
                 dense_only,
                 agentic,
                 max_steps,
+                explain,
+                json,
                 &cfg,
             )
             .await
@@ -164,7 +168,7 @@ async fn main() -> Result<()> {
             llm_model,
         } => commands::cmd_serve(port, host, embed_model, llm_model, &cfg).await,
         Commands::Mcp {} => commands::cmd_mcp(&cfg).await,
-        Commands::Status { unknown } => commands::cmd_status(unknown, &cfg).await,
+        Commands::Status { unknown, json } => commands::cmd_status(unknown, json, &cfg).await,
         Commands::Rm { paths, recursive } => commands::cmd_rm(paths, recursive).await,
         Commands::Prune { dry_run } => commands::cmd_prune(dry_run).await,
         Commands::Doctor {

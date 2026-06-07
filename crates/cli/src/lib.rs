@@ -265,6 +265,15 @@ pub enum Commands {
         /// Max retrieval hops in agentic mode (1..=5; overrides config). Implies --agentic.
         #[arg(long)]
         max_steps: Option<usize>,
+
+        /// Print the retrieval pipeline (sparse, dense, and fused/reranked hits with
+        /// scores) before the answer, to debug why specific sources were chosen.
+        #[arg(long, conflicts_with_all = ["agentic", "max_steps"])]
+        explain: bool,
+
+        /// Emit the answer (and `--explain` trace, if set) as JSON for scripting.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Watch one or more paths for changes and keep their context current.
@@ -322,6 +331,10 @@ pub enum Commands {
         /// Print the top-20 file extensions that could not be classified.
         #[arg(long)]
         unknown: bool,
+
+        /// Emit the status as a JSON object for scripting/CI.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Remove one or more paths from the context store.

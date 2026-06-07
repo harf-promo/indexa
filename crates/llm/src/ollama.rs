@@ -27,6 +27,33 @@ fn ollama_client() -> reqwest::Client {
     crate::http_client(LLM_TIMEOUT_SECS)
 }
 
+/// Liveness + inventory probe: `GET {base_url}/api/tags`. Returns the names of every
+/// model the Ollama server has pulled, or an error if the server is unreachable. Uses a
+/// short timeout so `indexa doctor` fails fast when nothing is listening on the port.
+pub async fn ollama_list_models(base_url: &str) -> Result<Vec<String>> {
+    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
+    let resp = crate::http_client(5)
+        .get(&url)
+        .send()
+        .await
+        .context("connecting to Ollama")?
+        .error_for_status()
+        .context("Ollama returned an error status")?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .context("parsing Ollama /api/tags response")?;
+    let models = body["models"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m["name"].as_str().map(|s| s.to_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(models)
+}
+
 pub struct OllamaLlm {
     pub(crate) base_url: String,
     pub(crate) model: String,
