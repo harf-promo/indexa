@@ -267,6 +267,7 @@ function renderBreadcrumb() {
       var sep = document.createElement('span');
       sep.className = 'treemap-crumb-sep';
       sep.textContent = '›';
+      sep.setAttribute('aria-hidden', 'true'); // decorative separator — skip for AT
       bc.appendChild(sep);
     }
     var isCurrent = i === allNodes.length - 1;
@@ -274,6 +275,7 @@ function renderBreadcrumb() {
       var span = document.createElement('span');
       span.className = 'treemap-crumb current';
       span.textContent = node.name || node.path || 'All roots';
+      span.setAttribute('aria-current', 'page'); // marks the active drill-down level
       bc.appendChild(span);
     } else {
       var btn = document.createElement('button');

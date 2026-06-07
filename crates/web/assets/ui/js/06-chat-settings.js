@@ -123,7 +123,7 @@ async function doAsk() {
     if (!answerText) repaint();
   } catch(err) {
     // Keep any already-streamed answer; append the error beneath it rather than discarding.
-    const errHtml = '<div class="ask-error" style="color:var(--red)">' + escapeHtml(err.message) + '</div>';
+    const errHtml = '<div class="ask-error" role="alert" style="color:var(--red)">' + escapeHtml(err.message) + '</div>';
     bubble.innerHTML = answerText ? renderAnswer() + errHtml : errHtml;
   }
 
