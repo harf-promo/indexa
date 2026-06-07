@@ -135,6 +135,32 @@ pub async fn embed_all(
     out
 }
 
+/// Null out any embedding whose length ≠ `expected_dim` and return
+/// `(mismatched_count, a_sample_actual_dim)` for an aggregate warning.
+///
+/// A dimension mismatch means the configured `[embedding] dim` disagrees with the model's
+/// real output (e.g. the user changed the model but not `dim`). Such a vector can't be
+/// compared against `dim`-sized query vectors — storing it would silently corrupt dense
+/// search and the ANN index. We drop it (the chunk is still stored text-only / BM25-searchable
+/// and re-embeds on the next `deep` once the config is fixed) rather than poison retrieval.
+pub fn enforce_embedding_dim(
+    embeddings: &mut [Option<Vec<f32>>],
+    expected_dim: usize,
+) -> (usize, Option<usize>) {
+    let mut count = 0usize;
+    let mut sample = None;
+    for slot in embeddings.iter_mut() {
+        if let Some(v) = slot {
+            if v.len() != expected_dim {
+                sample.get_or_insert(v.len());
+                *slot = None;
+                count += 1;
+            }
+        }
+    }
+    (count, sample)
+}
+
 /// Build an `Embedder` from config values, optionally setting `keep_alive` on Ollama adapters.
 ///
 /// `openai_key` / `google_key` are used as fallbacks when the corresponding
@@ -302,6 +328,28 @@ mod batch_tests {
                 "slot {i} order/identity"
             );
         }
+    }
+
+    #[test]
+    fn enforce_embedding_dim_nulls_mismatches() {
+        let mut embs = vec![
+            Some(vec![0.0; 8]),  // ok
+            Some(vec![0.0; 4]),  // wrong dim → nulled
+            None,                // already missing
+            Some(vec![0.0; 8]),  // ok
+            Some(vec![0.0; 16]), // wrong dim → nulled
+        ];
+        let (count, sample) = enforce_embedding_dim(&mut embs, 8);
+        assert_eq!(count, 2);
+        assert_eq!(sample, Some(4)); // first mismatch's actual dim
+        assert_eq!(embs[0].as_ref().map(|v| v.len()), Some(8));
+        assert_eq!(embs[1], None);
+        assert_eq!(embs[2], None);
+        assert_eq!(embs[3].as_ref().map(|v| v.len()), Some(8));
+        assert_eq!(embs[4], None);
+        // All-correct input is untouched.
+        let mut ok = vec![Some(vec![0.0; 8]), Some(vec![0.0; 8])];
+        assert_eq!(enforce_embedding_dim(&mut ok, 8), (0, None));
     }
 
     #[tokio::test]

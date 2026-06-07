@@ -335,11 +335,10 @@ impl Generator for OllamaLlm {
             images: None,
         };
 
-        let resp = self
-            .client
-            .post(&url)
-            .json(&body)
-            .send()
+        // Retry transient failures (429/503, connect/timeout) like the cloud adapters do,
+        // so a momentary Ollama hiccup during a bulk summarize retries instead of failing
+        // the item. `build` re-creates the request each attempt (send() consumes it).
+        let resp = crate::send_with_retry(|| self.client.post(&url).json(&body), 2)
             .await
             .with_context(|| format!("Ollama generate request to {url}"))?;
 
