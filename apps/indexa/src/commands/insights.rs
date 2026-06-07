@@ -2,7 +2,67 @@ use anyhow::Result;
 use indexa_core::store::Store;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::helpers::require_index_db;
+use super::helpers::{format_size, require_index_db};
+
+pub(crate) async fn cmd_insights_largest(limit: usize, json: bool) -> Result<()> {
+    let Some(db_path) = require_index_db()? else {
+        return Ok(());
+    };
+    let store = Store::open(&db_path)?;
+    let rows = store.find_largest(limit)?;
+    if json {
+        let out: Vec<_> = rows
+            .iter()
+            .map(|e| serde_json::json!({ "path": e.path, "size": e.size }))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("No indexed files found.");
+        return Ok(());
+    }
+    println!("Largest indexed files (top {}):", rows.len());
+    println!("{:>10}  Path", "Size");
+    println!("{}", "─".repeat(60));
+    for e in &rows {
+        println!("{:>10}  {}", format_size(e.size), e.path);
+    }
+    Ok(())
+}
+
+pub(crate) async fn cmd_insights_languages(json: bool) -> Result<()> {
+    let Some(db_path) = require_index_db()? else {
+        return Ok(());
+    };
+    let store = Store::open(&db_path)?;
+    let rows = store.language_breakdown()?;
+    if json {
+        let out: Vec<_> = rows
+            .iter()
+            .map(|l| serde_json::json!({ "language": l.language, "chunks": l.chunks }))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("No language-tagged chunks yet. Run `indexa deep` on source files first.");
+        return Ok(());
+    }
+    let total: u64 = rows.iter().map(|l| l.chunks).sum();
+    println!("Language breakdown by indexed chunks ({total} total):");
+    println!("{:>10}  {:>6}  Language", "Chunks", "Share");
+    println!("{}", "─".repeat(40));
+    for l in &rows {
+        let pct = if total > 0 {
+            l.chunks as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        };
+        println!("{:>10}  {:>5.1}%  {}", l.chunks, pct, l.language);
+    }
+    Ok(())
+}
 
 pub(crate) async fn cmd_insights_duplicates(threshold: f32, exact: bool) -> Result<()> {
     let Some(db_path) = require_index_db()? else {

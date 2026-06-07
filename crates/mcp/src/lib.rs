@@ -6,7 +6,7 @@
 //!
 //! **stdout is the protocol channel** — all logging must go to stderr.
 //!
-//! Tools (30): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
+//! Tools (32): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
 //! disclosure), `read_file`, `ask`, `dependencies` (a file's imports, defined symbols,
 //! and calls), `who_imports` (reverse code-graph lookup), `who_calls` (D2 — reverse
 //! call lookup), `blast_radius` (D2 — 1-hop call blast radius), `code_graph` (file-to-file
@@ -17,7 +17,8 @@
 //! (Smart classification), `trigger_index` (indexing trigger),
 //! `search_pack` (scoped content search within a pack),
 //! `list_weights`, `set_weight`, `delete_weight` (v0.8 Importance weighting),
-//! `insights_duplicates`, `insights_stale`, `insights_diff` (v0.10 Insights).
+//! `insights_duplicates`, `insights_stale`, `insights_diff`, `insights_largest`,
+//! `insights_languages` (Insights).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -272,6 +273,13 @@ pub struct InsightsDaysParams {
     /// Number of days for the look-back window.
     #[serde(default)]
     pub days: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InsightsLargestParams {
+    /// How many of the largest files to return (default 20, max 500).
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 fn mcp_err(e: impl std::fmt::Display) -> ErrorData {
@@ -1387,6 +1395,59 @@ impl IndexaMcp {
                     .collect::<Vec<_>>()
                     .join("\n")
             }
+        )))
+    }
+
+    /// Largest indexed files (bloat detection).
+    #[tool(
+        description = "List the largest indexed files by on-disk size (bloat detection). `limit` defaults to 20."
+    )]
+    async fn insights_largest(
+        &self,
+        params: Parameters<InsightsLargestParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let limit = params.0.limit.unwrap_or(20).clamp(1, 500);
+        let store = self.store()?;
+        let rows = store.find_largest(limit).map_err(mcp_err)?;
+        if rows.is_empty() {
+            return Ok(ok_text("No indexed files found.".to_owned()));
+        }
+        let body = rows
+            .iter()
+            .map(|e| format!("{} bytes  {}", e.size, e.path))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ok_text(format!("Largest {} file(s):\n{body}", rows.len())))
+    }
+
+    /// Language breakdown of indexed content.
+    #[tool(
+        description = "Show the language breakdown of indexed content (chunk count per language). Only code chunks carry a language tag."
+    )]
+    async fn insights_languages(&self) -> Result<CallToolResult, ErrorData> {
+        let store = self.store()?;
+        let rows = store.language_breakdown().map_err(mcp_err)?;
+        if rows.is_empty() {
+            return Ok(ok_text(
+                "No language-tagged chunks yet. Run `indexa deep` on source files first."
+                    .to_owned(),
+            ));
+        }
+        let total: u64 = rows.iter().map(|l| l.chunks).sum();
+        let body = rows
+            .iter()
+            .map(|l| {
+                let pct = if total > 0 {
+                    l.chunks as f64 / total as f64 * 100.0
+                } else {
+                    0.0
+                };
+                format!("{:>6.1}%  {} ({} chunks)", pct, l.language, l.chunks)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ok_text(format!(
+            "Language breakdown ({total} chunks):\n{body}"
         )))
     }
 

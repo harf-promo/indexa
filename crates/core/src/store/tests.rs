@@ -1396,6 +1396,43 @@ fn suggest_weights_by_recency_tiers_by_age() {
 // ── Insights (v0.10) ──────────────────────────────────────────────────────────
 
 #[test]
+fn find_largest_orders_files_by_size() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            dummy_entry("/small.txt", EntryKind::File, 100),
+            dummy_entry("/big.txt", EntryKind::File, 9000),
+            dummy_entry("/mid.txt", EntryKind::File, 500),
+            dummy_entry("/adir", EntryKind::Dir, 0), // dirs excluded
+        ])
+        .unwrap();
+    let top = store.find_largest(2).unwrap();
+    assert_eq!(top.len(), 2);
+    assert_eq!(top[0].path, "/big.txt");
+    assert_eq!(top[0].size, 9000);
+    assert_eq!(top[1].path, "/mid.txt");
+}
+
+#[test]
+fn language_breakdown_counts_chunks_per_language() {
+    let mut store = Store::open_in_memory().unwrap();
+    let mut rust1 = dummy_chunk("/a.rs", 0, "fn a");
+    rust1.language = Some("rust".into());
+    let mut rust2 = dummy_chunk("/b.rs", 0, "fn b");
+    rust2.language = Some("rust".into());
+    let mut py = dummy_chunk("/c.py", 0, "def c");
+    py.language = Some("python".into());
+    let untagged = dummy_chunk("/d.txt", 0, "plain"); // no language → excluded
+    store.upsert_chunks(&[rust1, rust2, py, untagged]).unwrap();
+    let langs = store.language_breakdown().unwrap();
+    assert_eq!(langs.len(), 2);
+    assert_eq!(langs[0].language, "rust"); // most chunks first
+    assert_eq!(langs[0].chunks, 2);
+    assert_eq!(langs[1].language, "python");
+    assert_eq!(langs[1].chunks, 1);
+}
+
+#[test]
 fn find_exact_duplicates_groups_by_source_hash() {
     let mut store = Store::open_in_memory().unwrap();
     let mut a = dummy_summary("/a.txt", "file", Some("/"), 1);

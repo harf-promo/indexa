@@ -644,6 +644,21 @@ pub enum InsightsAction {
         #[arg(long, default_value = "7")]
         days: i64,
     },
+    /// List the largest indexed files (bloat detection).
+    Largest {
+        /// How many files to show.
+        #[arg(long, default_value = "20")]
+        limit: usize,
+        /// Emit as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the language breakdown of indexed content (by chunk count).
+    Languages {
+        /// Emit as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[cfg(test)]
