@@ -84,12 +84,40 @@ you can honor `.gitignore` and add your own patterns.
 [scan]
 respect_gitignore = true   # honor the scan root's .gitignore (its patterns, anchored at the root)
 ignore            = []     # extra gitignore-style patterns, e.g. ["build/", "*.log", "vendor/"]
+auto_reindex      = "off"  # "off" | "7d" | "30d" | "12h" … staleness interval for `worker --auto-reindex`
 ```
 
 > `respect_gitignore` reads the scan root's own `.gitignore`; nested per-subdirectory `.gitignore`
 > files are not separately loaded. `ignore` patterns use gitignore syntax (globs, `dir/`, `!negation`).
 > Anything skipped here is never walked, so it can't be indexed or summarized. Use
 > [`indexa prune`](#) to clean rows left from content that *was* indexed before you ignored it.
+
+### Scheduled / auto re-index
+
+`auto_reindex` sets a **staleness interval**, not a scheduler. When you run:
+
+```bash
+indexa worker --auto-reindex
+```
+
+the worker first re-runs `scan → deep → summarize` for any indexed **root** whose newest content is
+older than this interval (incremental — `deep` skips unchanged files, `summarize` refreshes stale
+summaries), then drains the summary queue as usual. Roots that were never deep-indexed are skipped.
+
+- The `--auto-reindex` **flag must be present** — an expensive rebuild never starts implicitly from
+  the config value alone. If the flag is set but `auto_reindex = "off"`, it falls back to a 7-day interval.
+- **To run it on a schedule, use cron** (the worker itself does the staleness check on each launch).
+  For example, a nightly refresh that exits when the queue is drained is best expressed as a direct
+  re-index of the roots you care about:
+
+  ```cron
+  # 3 AM daily — refresh a specific project (incremental; cheap if nothing changed)
+  0 3 * * *  indexa index ~/code/myproject >> ~/.indexa-cron.log 2>&1
+  ```
+
+  Use `indexa worker --auto-reindex` when you want one long-running process that both keeps roots
+  fresh and continuously drains summaries; use a cron'd `indexa index <path>` when you want a
+  scheduled one-shot.
 
 ---
 

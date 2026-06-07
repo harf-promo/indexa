@@ -158,6 +158,24 @@ impl Store {
         Ok(ts)
     }
 
+    /// Newest chunk `indexed_at` among files under `root` (prefix match), or `None` when
+    /// nothing under the root is deep-indexed. Drives auto-reindex staleness decisions.
+    pub fn last_indexed_at_for_root(&self, root: &str) -> Result<Option<i64>> {
+        // Normalize to a directory prefix so `/a/proj` doesn't also match `/a/projector`.
+        let dir = if root == "/" || root.ends_with('/') {
+            root.to_owned()
+        } else {
+            format!("{root}/")
+        };
+        let pattern = super::search::like_prefix(&dir);
+        let ts: Option<i64> = self.conn.query_row(
+            "SELECT MAX(indexed_at) FROM chunks WHERE entry_path LIKE ?1 ESCAPE '\\'",
+            params![pattern],
+            |r| r.get(0),
+        )?;
+        Ok(ts)
+    }
+
     /// Count of indexed chunks.
     pub fn chunk_count(&self) -> Result<u64> {
         let n: i64 = self

@@ -1,14 +1,89 @@
 use anyhow::Result;
-use indexa_core::{config::Config, store::Store};
+use indexa_core::{
+    config::{parse_reindex_interval, Config},
+    store::Store,
+};
 use indexa_embed::OllamaEmbedder;
 use std::sync::Arc;
 
+use super::cmd_index;
 use super::helpers::{require_index_db, select_summary_models};
 
-pub(crate) async fn cmd_worker(concurrency: usize, cfg: &Config) -> Result<()> {
+/// Default re-index interval when `--auto-reindex` is passed but `[scan] auto_reindex`
+/// is `off`/unset — a week is a sane "keep it fresh" cadence without being aggressive.
+const DEFAULT_REINDEX_SECS: u64 = 7 * 86_400;
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Indexed roots whose newest deep-indexed content is older than `interval_secs`.
+/// Roots that have never been deep-indexed (no chunks) are skipped — auto-reindex
+/// refreshes existing context, it doesn't deep-index something the user never did.
+fn stale_roots(store: &Store, interval_secs: u64, now: i64) -> Result<Vec<String>> {
+    let cutoff = now - interval_secs as i64;
+    let mut stale = Vec::new();
+    for root in store.root_paths()? {
+        if let Some(ts) = store.last_indexed_at_for_root(&root)? {
+            if ts < cutoff {
+                stale.push(root);
+            }
+        }
+    }
+    Ok(stale)
+}
+
+/// Re-index every stale root (incremental scan→deep→summarize) before the worker
+/// starts draining. Runs to completion synchronously; per-root failures only warn.
+async fn run_auto_reindex(db_path: &std::path::Path, cfg: &Config) -> Result<()> {
+    let interval = parse_reindex_interval(&cfg.scan.auto_reindex).unwrap_or_else(|| {
+        println!(
+            "auto-reindex: [scan] auto_reindex is \"{}\"; using the default 7d interval.",
+            cfg.scan.auto_reindex
+        );
+        DEFAULT_REINDEX_SECS
+    });
+    let stale = {
+        let store = Store::open(db_path)?;
+        stale_roots(&store, interval, now_secs())?
+    };
+    if stale.is_empty() {
+        println!("auto-reindex: all indexed roots are current (interval {interval}s). Nothing to refresh.");
+        return Ok(());
+    }
+    println!(
+        "auto-reindex: {} root(s) older than {interval}s — refreshing:",
+        stale.len()
+    );
+    for root in &stale {
+        println!("  ↻ {root}");
+    }
+    for root in stale {
+        // Reuse the one-shot pipeline; it's incremental (deep skips unchanged files,
+        // summarize refreshes stale summaries). A failure on one root must not abort
+        // the others or the worker.
+        if let Err(e) = cmd_index(vec![root.clone()], None, "augment".to_owned(), None, cfg).await {
+            eprintln!("auto-reindex: failed to refresh {root}: {e:#}");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn cmd_worker(concurrency: usize, auto_reindex: bool, cfg: &Config) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };
+
+    // Auto-reindex: refresh stale roots before draining (opt-in via the flag so an
+    // expensive rebuild never starts implicitly).
+    if auto_reindex {
+        if let Err(e) = run_auto_reindex(&db_path, cfg).await {
+            eprintln!("auto-reindex: skipped ({e:#})");
+        }
+    }
 
     // Pre-flight: for local Ollama, downgrade the dir roll-up model to one that fits
     // the budget (non-interactive CLI "ask me first"). For claude-code the models run
