@@ -190,6 +190,16 @@ pub enum Commands {
         action: InsightsAction,
     },
 
+    /// Save and re-run named queries (reusable `ask` searches).
+    #[command(after_help = "Examples:
+  indexa saved add priorities \"what are my current priorities?\"
+  indexa saved run priorities
+  indexa saved list")]
+    Saved {
+        #[command(subcommand)]
+        action: SavedAction,
+    },
+
     /// Show the file-to-file call graph for a directory (who calls whom).
     #[command(after_help = "Examples:
   indexa graph ~/code/myrepo
@@ -677,6 +687,43 @@ pub enum InsightsAction {
         /// Emit as JSON.
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// Sub-commands for `indexa saved`.
+#[derive(clap::Subcommand, Debug)]
+pub enum SavedAction {
+    /// Save (or overwrite) a named query.
+    Add {
+        /// Name to save it under.
+        name: String,
+        /// The question.
+        question: String,
+        /// Retrieval mode: rrf (default) | sparse | dense | agentic.
+        #[arg(long, default_value = "rrf")]
+        mode: String,
+        /// Limit retrieval to files under this path.
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// List saved queries.
+    List {
+        /// Emit as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a saved query through the `ask` pipeline.
+    Run {
+        /// Saved query name.
+        name: String,
+        /// Emit the answer as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a saved query.
+    Rm {
+        /// Saved query name.
+        name: String,
     },
 }
 
