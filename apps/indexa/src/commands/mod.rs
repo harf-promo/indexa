@@ -33,7 +33,10 @@ pub(crate) use export::cmd_export;
 pub(crate) use fingerprint::cmd_fingerprint;
 pub(crate) use graph::cmd_graph;
 pub(crate) use index::cmd_index;
-pub(crate) use insights::{cmd_insights_diff, cmd_insights_duplicates, cmd_insights_stale};
+pub(crate) use insights::{
+    cmd_insights_diff, cmd_insights_duplicates, cmd_insights_languages, cmd_insights_largest,
+    cmd_insights_stale,
+};
 pub(crate) use map::cmd_map;
 pub(crate) use mcp::cmd_mcp;
 pub(crate) use pack::{

@@ -15,6 +15,20 @@ pub struct DuplicateCluster {
     pub exact: bool,
 }
 
+/// A large indexed file (bloat detection).
+#[derive(Debug, Clone)]
+pub struct LargestEntry {
+    pub path: String,
+    pub size: u64,
+}
+
+/// One language's share of indexed content, by chunk count.
+#[derive(Debug, Clone)]
+pub struct LanguageStat {
+    pub language: String,
+    pub chunks: u64,
+}
+
 /// A stale entry (not modified within the given threshold).
 #[derive(Debug, Clone)]
 pub struct StaleEntry {
@@ -178,6 +192,41 @@ impl Store {
     }
 
     // ── Stale detection ───────────────────────────────────────────────────────
+
+    /// The `limit` largest indexed files by on-disk size (bloat detection).
+    pub fn find_largest(&self, limit: usize) -> Result<Vec<LargestEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, size FROM entries
+             WHERE kind = 'file'
+             ORDER BY size DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok(LargestEntry {
+                path: r.get(0)?,
+                size: r.get::<_, i64>(1)? as u64,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Language breakdown of indexed content by chunk count, most-chunks first.
+    /// Only code chunks carry a language tag; untagged chunks are excluded.
+    pub fn language_breakdown(&self) -> Result<Vec<LanguageStat>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT language, COUNT(*) AS n FROM chunks
+             WHERE language IS NOT NULL AND language != ''
+             GROUP BY language
+             ORDER BY n DESC, language ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(LanguageStat {
+                language: r.get(0)?,
+                chunks: r.get::<_, i64>(1)? as u64,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
 
     /// Return entries not modified on disk for more than `days` days.
     pub fn find_stale_entries(&self, days: i64) -> Result<Vec<StaleEntry>> {

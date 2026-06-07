@@ -128,6 +128,10 @@ async fn main() -> Result<()> {
             }
             InsightsAction::Stale { days } => commands::cmd_insights_stale(days).await,
             InsightsAction::Diff { days } => commands::cmd_insights_diff(days).await,
+            InsightsAction::Largest { limit, json } => {
+                commands::cmd_insights_largest(limit, json).await
+            }
+            InsightsAction::Languages { json } => commands::cmd_insights_languages(json).await,
         },
         Commands::Graph {
             path,

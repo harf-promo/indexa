@@ -41,7 +41,7 @@ mod tests;
 // are unchanged by the split.
 pub use ann::AnnIndex;
 pub use entries::CoverageEntry;
-pub use insights::{DuplicateCluster, StaleEntry, WeeklyDiff};
+pub use insights::{DuplicateCluster, LanguageStat, LargestEntry, StaleEntry, WeeklyDiff};
 pub use prune::OrphanCounts;
 pub use types::{
     ChunkRecord, ClassificationRecord, CodeGraph, CodeGraphEdge, CodeGraphNode, EdgeRecord,
