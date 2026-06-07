@@ -200,6 +200,25 @@ pub enum Commands {
         action: SavedAction,
     },
 
+    /// Run several questions and render one document (answers + cited sources + TOC).
+    #[command(after_help = "Examples:
+  indexa report \"what is the architecture?\" \"how does auth work?\" > onboarding.md
+  indexa report --saved priorities --saved risks --format xml -o report.xml")]
+    Report {
+        /// Questions to answer (any number).
+        #[arg(num_args = 0..)]
+        questions: Vec<String>,
+        /// Include a saved query by name (repeatable).
+        #[arg(long)]
+        saved: Vec<String>,
+        /// Output format: md (default) or xml.
+        #[arg(long, default_value = "md")]
+        format: String,
+        /// Write to FILE instead of stdout.
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+
     /// Show the file-to-file call graph for a directory (who calls whom).
     #[command(after_help = "Examples:
   indexa graph ~/code/myrepo

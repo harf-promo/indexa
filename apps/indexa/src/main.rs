@@ -133,6 +133,12 @@ async fn main() -> Result<()> {
             }
             InsightsAction::Languages { json } => commands::cmd_insights_languages(json).await,
         },
+        Commands::Report {
+            questions,
+            saved,
+            format,
+            output,
+        } => commands::cmd_report(questions, saved, format, output, &cfg).await,
         Commands::Saved { action } => match action {
             SavedAction::Add {
                 name,

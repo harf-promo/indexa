@@ -14,6 +14,7 @@ mod mcp;
 mod pack;
 mod prune;
 mod related;
+mod report;
 mod rm;
 mod saved;
 mod scan;
@@ -47,6 +48,7 @@ pub(crate) use pack::{
 };
 pub(crate) use prune::cmd_prune;
 pub(crate) use related::cmd_related;
+pub(crate) use report::cmd_report;
 pub(crate) use rm::cmd_rm;
 pub(crate) use saved::{cmd_saved_add, cmd_saved_list, cmd_saved_rm, cmd_saved_run};
 pub(crate) use scan::cmd_scan;
