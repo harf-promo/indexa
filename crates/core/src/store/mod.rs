@@ -45,8 +45,8 @@ pub use insights::{DuplicateCluster, LanguageStat, LargestEntry, StaleEntry, Wee
 pub use prune::OrphanCounts;
 pub use types::{
     ChunkRecord, ClassificationRecord, CodeGraph, CodeGraphEdge, CodeGraphNode, EdgeRecord,
-    FailedQueueItem, PackRecord, QueueItem, QueueStats, RegionSummary, SearchHit, SummaryRecord,
-    TreeNode, WeightRecord,
+    FailedQueueItem, PackRecord, QueueItem, QueueStats, RegionSummary, RelatedFile, SearchHit,
+    SummaryRecord, TreeNode, WeightRecord,
 };
 
 // `abstract_from` is part of the public surface (used by `indexa_core::store::abstract_from`).

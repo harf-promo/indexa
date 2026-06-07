@@ -20,6 +20,14 @@ pub struct EdgeRecord {
     pub to_ref: String,
 }
 
+/// A file related to a query file through the call graph, with the relation strength
+/// (count of shared call→define symbols across both directions).
+#[derive(Debug, Clone)]
+pub struct RelatedFile {
+    pub path: String,
+    pub shared: usize,
+}
+
 /// A node in the file-to-file call graph (v0.18 signature graph).
 #[derive(Debug, Clone)]
 pub struct CodeGraphNode {
