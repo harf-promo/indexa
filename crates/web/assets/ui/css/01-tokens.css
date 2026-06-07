@@ -39,7 +39,10 @@
   --border: #d0d7de;
   --border-subtle: #e6eaef;
   --text: #1f2328;
-  --muted: #656d76;
+  /* #656d76 fell to 4.35:1 on --surface-3 (#e7eaee) — below WCAG AA 4.5:1. #5a6370
+     measures 5.04:1 on surface-3 and ≥5.7:1 on --bg/--surface, fixing the one failing
+     light-theme pairing while improving all the others. */
+  --muted: #5a6370;
   --accent: #0969da;
   --accent-hover: #0550ae;
   --green: #1a7f37;

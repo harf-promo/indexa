@@ -150,3 +150,27 @@ document.addEventListener('keydown', function(e) {
   });
 });
 
+/* WAI-ARIA tablist keyboard support: the view tabs and Map sub-tabs already carry
+   role="tab"/aria-selected + click handlers, but only respond to the mouse. Wire the
+   arrow keys (and Home/End) the pattern expects: move focus to the adjacent tab and
+   activate it via its existing click handler (automatic activation). */
+function initTablistKeys() {
+  document.querySelectorAll('[role="tablist"]').forEach(function(list) {
+    list.addEventListener('keydown', function(e) {
+      const tabs = Array.prototype.slice.call(list.querySelectorAll('[role="tab"]'));
+      const idx = tabs.indexOf(document.activeElement);
+      if (idx < 0) return;
+      let next = null;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = tabs[(idx + 1) % tabs.length];
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = tabs[(idx - 1 + tabs.length) % tabs.length];
+      else if (e.key === 'Home') next = tabs[0];
+      else if (e.key === 'End') next = tabs[tabs.length - 1];
+      else return;
+      e.preventDefault();
+      next.focus();
+      next.click(); // activate — mirrors a mouse click (switchTab / switchMapView)
+    });
+  });
+}
+initTablistKeys();
+

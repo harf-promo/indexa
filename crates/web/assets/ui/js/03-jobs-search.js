@@ -277,13 +277,13 @@ async function doSearch(query) {
     const r = await fetch('/api/search?q=' + encodeURIComponent(query));
     const results = await r.json();
     if (!results.length) {
-      list.innerHTML = '<div style="padding:8px 12px;color:var(--muted);font-size:12px">No results for "' + escapeHtml(query) + '"</div>';
+      list.innerHTML = '<div role="status" style="padding:8px 12px;color:var(--muted);font-size:12px">No results for "' + escapeHtml(query) + '"</div>';
       return;
     }
     list.innerHTML = '';
     results.forEach(function(node) { list.appendChild(buildTreeNode(node)); });
   } catch(e) {
-    list.innerHTML = '<div style="padding:8px 12px;color:var(--red);font-size:12px">Search error</div>';
+    list.innerHTML = '<div role="alert" style="padding:8px 12px;color:var(--red);font-size:12px">Search error</div>';
   }
 }
 

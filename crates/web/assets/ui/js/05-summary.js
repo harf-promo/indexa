@@ -126,11 +126,11 @@ function renderSummary(d) {
 
   var exportBtnHtml =
     '<div class="export-menu-wrap">' +
-    '<button class="btn-sm export-menu-btn" title="Export context as XML, Markdown, or JSON" aria-label="Export context" onclick="toggleExportMenu(this)">Export ↓</button>' +
-    '<div class="export-menu" hidden>' +
-    '<button onclick="doExport(' + JSON.stringify(d.path) + ',\'xml\')">XML <span class="export-hint">for Claude / Cursor</span></button>' +
-    '<button onclick="doExport(' + JSON.stringify(d.path) + ',\'md\')">Markdown</button>' +
-    '<button onclick="doExport(' + JSON.stringify(d.path) + ',\'json\')">JSON</button>' +
+    '<button class="btn-sm export-menu-btn" title="Export context as XML, Markdown, or JSON" aria-label="Export context" aria-haspopup="menu" aria-expanded="false" onclick="toggleExportMenu(this)">Export ↓</button>' +
+    '<div class="export-menu" role="menu" hidden>' +
+    '<button role="menuitem" onclick="doExport(' + JSON.stringify(d.path) + ',\'xml\')">XML <span class="export-hint">for Claude / Cursor</span></button>' +
+    '<button role="menuitem" onclick="doExport(' + JSON.stringify(d.path) + ',\'md\')">Markdown</button>' +
+    '<button role="menuitem" onclick="doExport(' + JSON.stringify(d.path) + ',\'json\')">JSON</button>' +
     '</div></div>';
 
   return crumbHtml +
@@ -150,13 +150,20 @@ function toggleExportMenu(btn) {
   var menu = btn.nextElementSibling;
   if (!menu) return;
   var isHidden = menu.hidden;
-  document.querySelectorAll('.export-menu').forEach(function(m) { m.hidden = true; });
+  // Collapse any other open export menus and reset their buttons' aria-expanded.
+  document.querySelectorAll('.export-menu').forEach(function(m) {
+    m.hidden = true;
+    var b = m.previousElementSibling;
+    if (b) b.setAttribute('aria-expanded', 'false');
+  });
   menu.hidden = !isHidden;
+  btn.setAttribute('aria-expanded', menu.hidden ? 'false' : 'true');
   if (!menu.hidden) {
     setTimeout(function() {
       document.addEventListener('click', function closeMenu(e) {
         if (!menu.contains(e.target) && e.target !== btn) {
           menu.hidden = true;
+          btn.setAttribute('aria-expanded', 'false');
           document.removeEventListener('click', closeMenu);
         }
       });
