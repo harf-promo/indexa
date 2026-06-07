@@ -4,10 +4,68 @@
 //! D2: per-file `calls` edges — function/method names called by a file.
 
 use super::search::like_prefix;
-use super::{CodeGraph, CodeGraphEdge, CodeGraphNode, EdgeRecord, Store};
+use super::{CodeGraph, CodeGraphEdge, CodeGraphNode, EdgeRecord, RelatedFile, Store};
 use anyhow::Result;
 use rusqlite::params;
 use std::collections::HashMap;
+
+/// Tarjan's strongly-connected-components, iterative (no recursion → no stack-overflow risk
+/// on deep graphs). `adj[v]` lists v's out-neighbors. Returns every SCC (including singletons);
+/// the caller keeps those with len > 1 as cycles.
+fn tarjan_scc(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let n = adj.len();
+    let mut idx = vec![usize::MAX; n];
+    let mut low = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut sccs: Vec<Vec<usize>> = Vec::new();
+    let mut next_index = 0usize;
+
+    for start in 0..n {
+        if idx[start] != usize::MAX {
+            continue;
+        }
+        // DFS frames: (node, next-child-pointer).
+        let mut call_stack: Vec<(usize, usize)> = vec![(start, 0)];
+        while let Some(&(v, ci)) = call_stack.last() {
+            if ci == 0 {
+                idx[v] = next_index;
+                low[v] = next_index;
+                next_index += 1;
+                stack.push(v);
+                on_stack[v] = true;
+            }
+            if ci < adj[v].len() {
+                let w = adj[v][ci];
+                call_stack.last_mut().unwrap().1 += 1;
+                if idx[w] == usize::MAX {
+                    call_stack.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(idx[w]);
+                }
+            } else {
+                // Finished v: if it's an SCC root, pop the component.
+                if low[v] == idx[v] {
+                    let mut comp = Vec::new();
+                    loop {
+                        let w = stack.pop().unwrap();
+                        on_stack[w] = false;
+                        comp.push(w);
+                        if w == v {
+                            break;
+                        }
+                    }
+                    sccs.push(comp);
+                }
+                call_stack.pop();
+                if let Some(&(parent, _)) = call_stack.last() {
+                    low[parent] = low[parent].min(low[v]);
+                }
+            }
+        }
+    }
+    sccs
+}
 
 impl Store {
     /// A `defines` symbol present in more than this many files is treated as a generic
@@ -77,6 +135,79 @@ impl Store {
         )?;
         let rows = stmt.query_map(params![symbol, limit as i64], |r| r.get(0))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Files related to `path` through the call graph, ranked by the number of shared
+    /// call→define symbols (the relation strength). A file is related when `path` calls a
+    /// symbol it defines (a dependency) **or** it calls a symbol `path` defines (a
+    /// dependent) — both directions are merged. Over-common symbols (defined in more than
+    /// [`Self::CODE_GRAPH_COMMON_SYMBOL_CAP`] files) are excluded as noise, exactly like
+    /// `code_graph`. Bare-name matched, so it inherits the same approximate-ness.
+    pub fn find_related_files(&self, path: &str, limit: usize) -> Result<Vec<RelatedFile>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT other, SUM(w) AS shared FROM (
+                 SELECT d.from_path AS other, COUNT(DISTINCT c.to_ref) AS w
+                   FROM edges c
+                   JOIN edges d ON d.kind = 'defines' AND d.to_ref = c.to_ref
+                  WHERE c.kind = 'calls' AND c.from_path = ?1 AND d.from_path <> ?1
+                    AND c.to_ref NOT IN (
+                        SELECT to_ref FROM edges WHERE kind = 'defines'
+                         GROUP BY to_ref HAVING COUNT(DISTINCT from_path) > ?3)
+                  GROUP BY d.from_path
+                 UNION ALL
+                 SELECT c.from_path AS other, COUNT(DISTINCT c.to_ref) AS w
+                   FROM edges c
+                   JOIN edges d ON d.kind = 'defines' AND d.to_ref = c.to_ref
+                  WHERE c.kind = 'calls' AND d.from_path = ?1 AND c.from_path <> ?1
+                    AND c.to_ref NOT IN (
+                        SELECT to_ref FROM edges WHERE kind = 'defines'
+                         GROUP BY to_ref HAVING COUNT(DISTINCT from_path) > ?3)
+                  GROUP BY c.from_path
+             )
+             GROUP BY other
+             ORDER BY shared DESC, other ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(
+            params![path, limit as i64, Self::CODE_GRAPH_COMMON_SYMBOL_CAP],
+            |r| {
+                Ok(RelatedFile {
+                    path: r.get(0)?,
+                    shared: r.get::<_, i64>(1)? as usize,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Detect dependency cycles in the file-to-file call graph under `prefix` (Tarjan SCC).
+    /// Returns each strongly-connected component of size > 1 (a genuine cycle) as a sorted
+    /// list of file paths, largest cycle first. Runs over the same edges as `code_graph`
+    /// (so it shares the bare-name caveat); `max_edges` bounds the graph it analyzes.
+    pub fn find_cycles(&self, prefix: &str, max_edges: usize) -> Result<Vec<Vec<String>>> {
+        let graph = self.code_graph(prefix, max_edges, false)?;
+        // Index nodes; build adjacency (caller → callee).
+        let nodes: Vec<&str> = graph.nodes.iter().map(|n| n.path.as_str()).collect();
+        let idx: HashMap<&str, usize> = nodes.iter().enumerate().map(|(i, &p)| (p, i)).collect();
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+        for e in &graph.edges {
+            if let (Some(&a), Some(&b)) = (idx.get(e.from.as_str()), idx.get(e.to.as_str())) {
+                adj[a].push(b);
+            }
+        }
+        let mut sccs = tarjan_scc(&adj);
+        // Keep only true cycles (SCC size > 1), map indices back to paths, sort for stability.
+        let mut cycles: Vec<Vec<String>> = sccs
+            .drain(..)
+            .filter(|c| c.len() > 1)
+            .map(|c| {
+                let mut paths: Vec<String> = c.into_iter().map(|i| nodes[i].to_owned()).collect();
+                paths.sort();
+                paths
+            })
+            .collect();
+        cycles.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        Ok(cycles)
     }
 
     /// How many distinct files `define` a symbol of this exact name. Used to **annotate**

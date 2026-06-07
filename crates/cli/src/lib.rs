@@ -204,6 +204,25 @@ pub enum Commands {
         /// (drops name-collision false positives). Default is the broader bare-name match.
         #[arg(long)]
         strict: bool,
+
+        /// Report dependency cycles (strongly-connected components) instead of the graph.
+        #[arg(long)]
+        cycles: bool,
+    },
+
+    /// Find files related to a file via the call graph (it calls them, or they call it).
+    #[command(after_help = "Examples:
+  indexa related src/store/mod.rs
+  indexa related --json --limit 5 crates/core/src/lib.rs")]
+    Related {
+        /// File to find relations for.
+        path: String,
+        /// Max related files to return.
+        #[arg(long, default_value = "15")]
+        limit: usize,
+        /// Emit as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Export the hierarchical summary tree as XML, Markdown, or JSON for use as AI context.

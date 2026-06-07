@@ -13,6 +13,7 @@ mod map;
 mod mcp;
 mod pack;
 mod prune;
+mod related;
 mod rm;
 mod scan;
 mod search;
@@ -44,6 +45,7 @@ pub(crate) use pack::{
     cmd_pack_remove, cmd_pack_rename, cmd_pack_show,
 };
 pub(crate) use prune::cmd_prune;
+pub(crate) use related::cmd_related;
 pub(crate) use rm::cmd_rm;
 pub(crate) use scan::cmd_scan;
 pub(crate) use search::cmd_search;

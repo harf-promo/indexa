@@ -137,7 +137,9 @@ async fn main() -> Result<()> {
             path,
             limit,
             strict,
-        } => commands::cmd_graph(path, limit, strict).await,
+            cycles,
+        } => commands::cmd_graph(path, limit, strict, cycles).await,
+        Commands::Related { path, limit, json } => commands::cmd_related(path, limit, json).await,
         Commands::Export {
             paths,
             format,

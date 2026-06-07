@@ -28,12 +28,38 @@ fn rel_to_scope(path: &str, scope: &str) -> String {
         .to_owned()
 }
 
-pub(crate) async fn cmd_graph(path: String, limit: usize, strict: bool) -> Result<()> {
+pub(crate) async fn cmd_graph(
+    path: String,
+    limit: usize,
+    strict: bool,
+    cycles: bool,
+) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };
     let store = Store::open(&db_path)?;
     let scope = expand(&path);
+
+    // --cycles: report dependency cycles (Tarjan SCC over the call graph) and return.
+    if cycles {
+        let found = store.find_cycles(&scope, limit.max(500))?;
+        if found.is_empty() {
+            println!("No dependency cycles found under \"{scope}\". ✓");
+            return Ok(());
+        }
+        println!(
+            "Found {} dependency cycle(s) under \"{scope}\" (bare-name matched — verify):",
+            found.len()
+        );
+        for (i, cycle) in found.iter().enumerate() {
+            println!("\n  Cycle {} ({} files):", i + 1, cycle.len());
+            for p in cycle {
+                println!("    {}", basename(p));
+            }
+        }
+        return Ok(());
+    }
+
     let graph = store.code_graph(&scope, limit, strict)?;
 
     if graph.edges.is_empty() {

@@ -1733,6 +1733,55 @@ fn last_indexed_at_for_root_is_prefix_scoped() {
 }
 
 #[test]
+fn find_related_files_merges_both_directions() {
+    let mut store = Store::open_in_memory().unwrap();
+    // app calls `run` (defined in lib) → lib is a dependency of app.
+    // util calls `helper` (defined in app) → util is a dependent of app.
+    store
+        .upsert_edges(&[
+            edge("/app.rs", "calls", "run"),
+            edge("/lib.rs", "defines", "run"),
+            edge("/app.rs", "defines", "helper"),
+            edge("/util.rs", "calls", "helper"),
+        ])
+        .unwrap();
+    let related = store.find_related_files("/app.rs", 10).unwrap();
+    let paths: Vec<&str> = related.iter().map(|r| r.path.as_str()).collect();
+    assert!(paths.contains(&"/lib.rs"), "dependency direction");
+    assert!(paths.contains(&"/util.rs"), "dependent direction");
+    assert!(!paths.contains(&"/app.rs"), "self excluded");
+}
+
+#[test]
+fn find_cycles_detects_an_scc() {
+    let mut store = Store::open_in_memory().unwrap();
+    // a→b→c→a cycle (each calls a uniquely-defined symbol of the next), plus standalone d.
+    store
+        .upsert_edges(&[
+            edge("/a.rs", "calls", "bsym"),
+            edge("/b.rs", "defines", "bsym"),
+            edge("/b.rs", "calls", "csym"),
+            edge("/c.rs", "defines", "csym"),
+            edge("/c.rs", "calls", "asym"),
+            edge("/a.rs", "defines", "asym"),
+            edge("/d.rs", "defines", "dsym"),
+        ])
+        .unwrap();
+    let cycles = store.find_cycles("/", 400).unwrap();
+    assert_eq!(cycles.len(), 1, "exactly one cycle");
+    assert_eq!(cycles[0], vec!["/a.rs", "/b.rs", "/c.rs"]);
+    // No false cycle without a back-edge.
+    let mut store2 = Store::open_in_memory().unwrap();
+    store2
+        .upsert_edges(&[
+            edge("/x.rs", "calls", "ysym"),
+            edge("/y.rs", "defines", "ysym"),
+        ])
+        .unwrap();
+    assert!(store2.find_cycles("/", 400).unwrap().is_empty());
+}
+
+#[test]
 fn code_graph_scope_excludes_prefix_siblings() {
     let mut store = Store::open_in_memory().unwrap();
     // "/proj" must NOT match "/projector" (trailing-slash normalization).

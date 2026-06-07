@@ -6,11 +6,12 @@
 //!
 //! **stdout is the protocol channel** — all logging must go to stderr.
 //!
-//! Tools (32): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
+//! Tools (33): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
 //! disclosure), `read_file`, `ask`, `dependencies` (a file's imports, defined symbols,
 //! and calls), `who_imports` (reverse code-graph lookup), `who_calls` (D2 — reverse
 //! call lookup), `blast_radius` (D2 — 1-hop call blast radius), `code_graph` (file-to-file
-//! call graph for a scope), `get_stats`, `prune` (orphan-row GC),
+//! call graph for a scope), `related_files` (call-graph neighbors), `get_stats`,
+//! `prune` (orphan-row GC),
 //! `list_packs`, `get_pack`, `export_pack`, `create_pack`, `add_pack_paths`,
 //! `remove_pack_paths`, `delete_pack` (Context Packs),
 //! `list_classifications`, `confirm_classification`, `ignore_classification`
@@ -140,6 +141,15 @@ pub struct BlastRadiusParams {
     /// (fewer false positives from common names). Default false (broader match).
     #[serde(default)]
     pub strict: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RelatedFilesParams {
+    /// Absolute path of the file to find related files for.
+    pub path: String,
+    /// Max related files to return (default 15).
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -614,6 +624,37 @@ impl IndexaMcp {
              Heaviest edges:\n{body}",
             graph.nodes.len(),
             graph.edges.len()
+        )))
+    }
+
+    /// Files related to a file through the call graph.
+    #[tool(
+        description = "Find files related to a given file through the call graph: files it calls into, or files that call into it, ranked by shared symbol count. Use to discover what to read alongside a file. Bare-name matched (approximate)."
+    )]
+    async fn related_files(
+        &self,
+        params: Parameters<RelatedFilesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let limit = params.0.limit.unwrap_or(15).clamp(1, 100);
+        let store = self.store()?;
+        let related = store
+            .find_related_files(&params.0.path, limit)
+            .map_err(mcp_err)?;
+        if related.is_empty() {
+            return Ok(ok_text(format!(
+                "No files related to '{}' (needs a deep-indexed code file with edges).",
+                params.0.path
+            )));
+        }
+        let body = related
+            .iter()
+            .map(|r| format!("{} (shared: {})", r.path, r.shared))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ok_text(format!(
+            "{} file(s) related to '{}':\n{body}",
+            related.len(),
+            params.0.path
         )))
     }
 
