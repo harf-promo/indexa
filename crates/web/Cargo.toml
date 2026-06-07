@@ -27,3 +27,9 @@ indexa-llm = { path = "../llm" }
 indexa-parsers = { path = "../parsers" }
 indexa-query = { path = "../query" }
 indexa-update = { path = "../update" }
+
+[dev-dependencies]
+# `tower::ServiceExt::oneshot` drives the real router in integration tests.
+tower = { version = "0.5", features = ["util"] }
+# Stub Embedder/Generator impls in tests use the same async-trait the traits do.
+async-trait = { workspace = true }

@@ -215,13 +215,47 @@ pub async fn serve(
         watch_sessions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
+    let app = build_router(state, port);
+
+    let addr = format!("{host}:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    info!("Indexa web UI listening on http://{addr}");
+
+    if host == "127.0.0.1" || host == "localhost" {
+        println!("Open http://localhost:{port} in your browser. Press Ctrl-C to stop.");
+    } else {
+        // LAN mode: print all non-loopback IPv4 addresses so the user knows what to connect to.
+        println!("Open http://localhost:{port} in your browser. Press Ctrl-C to stop.");
+        println!("⚠  LAN mode active — also accessible at:");
+        if let Ok(ifaces) = if_addrs::get_if_addrs() {
+            // crate: if-addrs
+            for iface in ifaces {
+                let ip = iface.ip();
+                if !ip.is_loopback() && ip.is_ipv4() {
+                    println!("   http://{}:{port}", ip);
+                }
+            }
+        }
+        println!("   Ensure your network is trusted before sharing this URL.");
+    }
+
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Build the full axum router (all routes + layers) for the given app state.
+///
+/// `port` is used only to lock the CORS allow-origin to `http://localhost:<port>`.
+/// Extracted from [`serve`] so integration tests can drive handlers through the real
+/// router (routing + extractors + layers) via `tower::ServiceExt::oneshot`.
+pub(crate) fn build_router(state: AppState, port: u16) -> Router {
     // Restrict CORS to localhost only — prevents drive-by sites from reading the
     // user's private index via cross-origin requests to the local server.
     let origin = format!("http://localhost:{port}")
         .parse::<axum::http::HeaderValue>()
         .expect("valid localhost origin header");
 
-    let app = Router::new()
+    Router::new()
         .route("/", get(serve_ui))
         .route("/assets/app.css", get(serve_ui_css))
         .route("/assets/app.js", get(serve_ui_js))
@@ -328,37 +362,18 @@ pub async fn serve(
                     axum::http::Method::DELETE,
                 ])
                 .allow_headers([header::CONTENT_TYPE]),
-        );
-
-    let addr = format!("{host}:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    info!("Indexa web UI listening on http://{addr}");
-
-    if host == "127.0.0.1" || host == "localhost" {
-        println!("Open http://localhost:{port} in your browser. Press Ctrl-C to stop.");
-    } else {
-        // LAN mode: print all non-loopback IPv4 addresses so the user knows what to connect to.
-        println!("Open http://localhost:{port} in your browser. Press Ctrl-C to stop.");
-        println!("⚠  LAN mode active — also accessible at:");
-        if let Ok(ifaces) = if_addrs::get_if_addrs() {
-            // crate: if-addrs
-            for iface in ifaces {
-                let ip = iface.ip();
-                if !ip.is_loopback() && ip.is_ipv4() {
-                    println!("   http://{}:{port}", ip);
-                }
-            }
-        }
-        println!("   Ensure your network is trusted before sharing this URL.");
-    }
-
-    axum::serve(listener, app).await?;
-    Ok(())
+        )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use indexa_core::store::ChunkRecord;
+    use indexa_core::walker::{Entry, EntryKind};
+    use std::path::PathBuf;
+    use tower::ServiceExt; // brings `Router::oneshot`
 
     #[test]
     fn ui_assets_non_empty() {
@@ -367,5 +382,156 @@ mod tests {
         assert!(!UI_CSS.is_empty());
         assert!(!UI_JS.is_empty());
         assert!(UI_JS.contains("/api/ask"));
+    }
+
+    // ── Test scaffolding ────────────────────────────────────────────────────────
+    // Stub AI backends: the handlers exercised below (stats/search/keys) never call
+    // them, but `AppState` requires concrete trait objects.
+    struct StubEmbedder;
+    #[async_trait::async_trait]
+    impl Embedder for StubEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.0; 8])
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+    struct StubGenerator;
+    #[async_trait::async_trait]
+    impl Generator for StubGenerator {
+        async fn generate(&self, _prompt: &str) -> anyhow::Result<String> {
+            Ok("stub".to_owned())
+        }
+    }
+
+    fn entry(path: &str, kind: EntryKind) -> Entry {
+        Entry {
+            path: PathBuf::from(path),
+            kind,
+            size: 10,
+            modified: None,
+            hint: None,
+        }
+    }
+    fn chunk(path: &str, seq: usize, text: &str) -> ChunkRecord {
+        ChunkRecord {
+            entry_path: path.to_owned(),
+            seq,
+            heading: String::new(),
+            text: text.to_owned(),
+            language: None,
+            embedding: None,
+            embed_model: None,
+        }
+    }
+
+    fn state_with(store: Store) -> AppState {
+        // The sender is dropped immediately; the receiver still yields its last value on
+        // `borrow()`, and none of the tested handlers read telemetry anyway.
+        let (_tx, telemetry) = tokio::sync::watch::channel(crate::dto::TelemetrySample::default());
+        AppState {
+            store: Arc::new(Mutex::new(store)),
+            embedder: Arc::new(StubEmbedder),
+            llm: Arc::new(StubGenerator),
+            config: Arc::new(Config::default()),
+            jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            db_path: Arc::new(PathBuf::from(":memory:")),
+            log_dir: Arc::new(std::env::temp_dir()),
+            walk_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+            machine_spec: Arc::new(indexa_core::resource::detect_machine()),
+            telemetry,
+            ann: Arc::new(tokio::sync::RwLock::new(AnnCache::default())),
+            ann_build_lock: Arc::new(tokio::sync::Mutex::new(())),
+            watch_sessions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// GET `uri` through the real router; return (status, parsed-JSON-body).
+    async fn get_json(app: Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    // ── Tests ────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn api_stats_empty_store_is_zero() {
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let (status, json) = get_json(app, "/api/stats").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["entries"], 0);
+        assert_eq!(json["chunks"], 0);
+    }
+
+    #[tokio::test]
+    async fn api_stats_counts_seeded_rows() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                entry("/r", EntryKind::Dir),
+                entry("/r/a.rs", EntryKind::File),
+            ])
+            .unwrap();
+        store
+            .upsert_chunks(&[chunk("/r/a.rs", 0, "fn main() {}")])
+            .unwrap();
+        let app = build_router(state_with(store), 7620);
+        let (status, json) = get_json(app, "/api/stats").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["entries"], 2);
+        assert_eq!(json["chunks"], 1);
+    }
+
+    #[tokio::test]
+    async fn api_search_empty_query_returns_empty_array() {
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let (status, json) = get_json(app, "/api/search?q=").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn api_search_query_returns_ok_array() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[entry("/r/alpha.rs", EntryKind::File)])
+            .unwrap();
+        store
+            .upsert_chunks(&[chunk("/r/alpha.rs", 0, "the quick brown fox")])
+            .unwrap();
+        let app = build_router(state_with(store), 7620);
+        let (status, json) = get_json(app, "/api/search?q=alpha").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json.is_array());
+    }
+
+    #[tokio::test]
+    async fn api_keys_post_is_forbidden_without_env_gate() {
+        // The write gate must reject when INDEXA_WEB_ALLOW_KEY_EDIT != "1". CI leaves it
+        // unset and no test in this binary sets it, so the closed-gate path is deterministic.
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let body = serde_json::json!({ "provider": "openai", "key": "sk-test" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/keys")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }

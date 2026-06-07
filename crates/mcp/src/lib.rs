@@ -1481,6 +1481,8 @@ fn path_within_roots(requested: &Path, roots: &[PathBuf]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use indexa_core::walker::{Entry, EntryKind};
+    use rmcp::handler::server::wrapper::Parameters;
 
     #[test]
     fn path_within_roots_confines_to_index() {
@@ -1499,5 +1501,133 @@ mod tests {
         assert!(!path_within_roots(Path::new("/home/u/proj-evil/x"), &roots));
         // No indexed roots → nothing is readable.
         assert!(!path_within_roots(Path::new("/home/u/proj/a"), &[]));
+    }
+
+    // ── Tool wiring tests (real IndexaMcp against a temp on-disk index) ──
+
+    struct StubEmbedder;
+    #[async_trait::async_trait]
+    impl Embedder for StubEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.0; 8])
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+    struct StubGenerator;
+    #[async_trait::async_trait]
+    impl Generator for StubGenerator {
+        async fn generate(&self, _prompt: &str) -> anyhow::Result<String> {
+            Ok("stub".to_owned())
+        }
+    }
+
+    /// An `IndexaMcp` over a fresh temp-file index. Returns the handle plus the `TempDir`
+    /// guard for the DB (kept alive by the caller) and a closure-free seeded store.
+    fn mcp_with_db(dbdir: &tempfile::TempDir) -> IndexaMcp {
+        let dbpath = dbdir.path().join("idx.db");
+        // Touch the store so the file + schema exist before the tools open it.
+        let _ = Store::open(&dbpath).unwrap();
+        IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        )
+    }
+
+    #[tokio::test]
+    async fn read_file_rejects_path_outside_indexed_roots() {
+        // Indexed root with one file inside it…
+        let root = tempfile::tempdir().unwrap();
+        let inside = root.path().join("inside.txt");
+        std::fs::write(&inside, "hello inside").unwrap();
+        // …and a file in a *separate* tree that is NOT indexed.
+        let other = tempfile::tempdir().unwrap();
+        let outside = other.path().join("outside.txt");
+        std::fs::write(&outside, "secret").unwrap();
+
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            // Insert only the file; its parent dir (the root) is not itself an entry, so
+            // `root_paths()` reports the root — mirroring a real scan.
+            store
+                .upsert_entries(&[Entry {
+                    path: inside.clone(),
+                    kind: EntryKind::File,
+                    size: 11,
+                    modified: None,
+                    hint: None,
+                }])
+                .unwrap();
+        }
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+
+        // A file inside the indexed root is readable.
+        assert!(mcp.read_file_inner(inside.to_str().unwrap()).is_ok());
+        // A file outside every indexed root is rejected (the security contract).
+        let err = mcp.read_file_inner(outside.to_str().unwrap()).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("not within an indexed root"),
+            "expected an indexed-root rejection, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_weight_rejects_negative_weight() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        let res = mcp
+            .set_weight(Parameters(SetWeightParams {
+                target_kind: "file".into(),
+                target: "/some/file.rs".into(),
+                weight: -0.5,
+                reason: None,
+            }))
+            .await;
+        assert!(res.is_err(), "negative weight must be rejected");
+    }
+
+    #[tokio::test]
+    async fn set_weight_accepts_valid_weight() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        let res = mcp
+            .set_weight(Parameters(SetWeightParams {
+                target_kind: "file".into(),
+                target: "/some/file.rs".into(),
+                weight: 2.0,
+                reason: Some("important".into()),
+            }))
+            .await;
+        assert!(res.is_ok(), "a non-negative weight must be accepted");
+    }
+
+    #[tokio::test]
+    async fn create_pack_rejects_duplicate_name() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        let first = mcp
+            .create_pack(Parameters(CreatePackMcpParams {
+                name: "docs".into(),
+                description: None,
+            }))
+            .await;
+        assert!(first.is_ok(), "first create_pack should succeed");
+        let dup = mcp
+            .create_pack(Parameters(CreatePackMcpParams {
+                name: "docs".into(),
+                description: None,
+            }))
+            .await;
+        assert!(dup.is_err(), "duplicate pack name must be rejected");
     }
 }
