@@ -161,3 +161,23 @@ jobs:
           # Universal binary: one .dmg/.app.tar.gz that runs on Intel and Apple
           # Silicon. Published under the darwin-universal updater key (see main.rs).
           args: --target universal-apple-darwin
+
+      - name: Notarization diagnostics (on failure)
+        # If the build/notarize step fails or hangs, dump recent notarytool submissions so the
+        # failure is self-diagnosing. A long "In Progress" with a "log not yet available" log means
+        # the team isn't provisioned for the Notary service yet (first-time notarizer) — contact
+        # Apple Developer Programs Support; see docs/signing.md. No-ops without an API key.
+        if: failure()
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          if [ -z "${APPLE_API_KEY_PATH:-}" ] || [ -z "${APPLE_API_KEY:-}" ] || [ -z "${APPLE_API_ISSUER:-}" ]; then
+            echo "No App Store Connect API key configured — skipping notarization diagnostics."
+            exit 0
+          fi
+          echo "Recent notarytool submissions (a long 'In Progress' + a 'log not yet available'"
+          echo "log means the team isn't provisioned for the Notary service — contact Apple"
+          echo "Developer Programs Support; see docs/signing.md):"
+          xcrun notarytool history \
+            --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" || true

@@ -71,6 +71,46 @@ spctl -a -vvv -t exec /Applications/Indexa.app       # → accepted, source=Nota
 stapler validate /Applications/Indexa.app            # → The validate action worked!
 ```
 
+## Troubleshooting: the **first** notarization can stall for a day or two
+
+The very first time a team notarizes, Apple has to **provision the team for the Notary service** on
+their back end. Until they do, `notarytool` submissions sit at **"In Progress" indefinitely** (often
+24–48 h, sometimes longer) and never reach *Accepted* or *Invalid*. The tell-tale signs:
+
+- `xcrun notarytool log <submission-id> …` returns **"Submission log is not yet available"** — i.e.
+  processing never even started. (A genuine *rejection* would instead return a log with reasons.)
+- `xcrun notarytool history …` shows every recent submission still **In Progress**.
+- Some toolchains surface it as error **7000 "Team is not yet configured for notarization."**
+
+This is **not** a build, signing, certificate, or entitlements problem — the bundle is fine. It is an
+Apple-account state, so:
+
+1. **Do not keep resubmitting.** The block is account-level; new submissions queue behind the same
+   wall and stay stuck (resubmitting only helps *after* the team is provisioned).
+2. **Confirm it's the provisioning stall**, not a real rejection:
+   ```bash
+   xcrun notarytool log <submission-id> --key /path/to/AuthKey_<KEYID>.p8 \
+     --key-id <KEYID> --issuer <ISSUER-UUID>      # → "Submission log is not yet available"
+   xcrun notarytool history --key /path/to/AuthKey_<KEYID>.p8 \
+     --key-id <KEYID> --issuer <ISSUER-UUID>      # → all "In Progress"
+   ```
+3. **Contact Apple Developer *Programs* Support** (the Account Holder) — *not* DTS or Feedback
+   Assistant, which can't change account provisioning. **developer.apple.com/contact →
+   Development and Technical → Other Development or Technical Questions.** Tell them you're notarizing
+   for the first time, give the **Team ID**, the App Store Connect **Issuer ID** + **Key ID**, and a
+   stuck submission UUID, and ask them to **enable/configure the team for the Notary service**.
+4. Once they confirm, **re-trigger one notarization** (re-run the release workflow, or
+   `notarytool submit … --wait` locally). It should reach **Accepted in under ~4 minutes**, and stays
+   fast for every release after.
+
+The release workflow prints `notarytool history` automatically on failure (an `if: failure()` step)
+so a future stall is self-diagnosing in the job log.
+
+References: Apple Developer Forums threads
+[739751](https://developer.apple.com/forums/thread/739751),
+[809228](https://developer.apple.com/forums/thread/809228),
+[770236](https://developer.apple.com/forums/thread/770236).
+
 ## Entitlements
 
 The app runs **without a custom entitlements file**: it is not sandboxed (Developer ID distribution),
