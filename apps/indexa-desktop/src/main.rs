@@ -69,16 +69,14 @@ fn main() {
     // Build the Tauri application.
     tauri::Builder::default()
         .plugin({
-            // Release builds ship a single universal (Intel + Apple-Silicon) bundle,
-            // published under the `darwin-universal` key in latest.json. Pin the
-            // updater to that key on macOS so both architectures find the update
-            // (the default would query the running arch's key, which we no longer
-            // publish). Mirrors the `--target universal-apple-darwin` build in
-            // .github/workflows/release.yml.
-            let builder = tauri_plugin_updater::Builder::new();
-            #[cfg(target_os = "macos")]
-            let builder = builder.target("darwin-universal");
-            builder.build()
+            // Release builds ship a single universal (Intel + Apple-Silicon) bundle.
+            // tauri-action publishes it under BOTH per-arch updater keys in latest.json
+            // (`darwin-aarch64` + `darwin-x86_64`), each pointing at the same universal
+            // artifact — so the DEFAULT per-arch updater target resolves correctly on
+            // both architectures. Do NOT pin `.target("darwin-universal")`: tauri never
+            // emits that key, so pinning it makes the updater find no update. Mirrors the
+            // `--target universal-apple-darwin` build in .github/workflows/release.yml.
+            tauri_plugin_updater::Builder::new().build()
         })
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {

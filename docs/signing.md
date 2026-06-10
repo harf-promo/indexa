@@ -9,13 +9,17 @@ ad-hoc re-sign workaround. When the secrets are absent, the build falls back to 
 ## Universal binary (Intel + Apple Silicon)
 
 The desktop bundle is built with `--target universal-apple-darwin` — a single
-`.dmg`/`.app.tar.gz` that runs natively on both Intel and Apple-Silicon Macs. It
-is published under the **`darwin-universal`** key in `latest.json`, and the app
-pins its updater to that key (`tauri_plugin_updater::Builder::target("darwin-universal")`
-in `apps/indexa-desktop/src/main.rs`). Pre-universal builds (≤ v0.19) queried the
-`darwin-aarch64` key, so the first universal release must be **installed manually**
-— an old client won't find it via auto-update (this is the same release where the
-ad-hoc → Developer-ID signing transition also requires a manual install).
+`.dmg`/`.app.tar.gz` that runs natively on both Intel and Apple-Silicon Macs.
+`tauri-action` publishes that one universal artifact under **both** per-arch
+updater keys in `latest.json` (`darwin-aarch64` **and** `darwin-x86_64`), so the
+app's **default** per-arch updater target resolves correctly on either
+architecture — each arch queries its own key and gets the same universal bundle.
+(Do **not** pin `.target("darwin-universal")`: tauri never emits that key, so
+pinning it makes the updater find no update — this was a bug in the v0.20.0
+desktop binary, fixed for v0.21+.) To be safe, **install v0.20.0 manually**: it
+carries the ad-hoc → Developer-ID signing transition, and its baked-in updater
+still queries the missing `darwin-universal` key, so it won't auto-update to
+v0.21 — clean auto-update resumes from v0.21 onward.
 
 ## Required GitHub repository secrets
 
