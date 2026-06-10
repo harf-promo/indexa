@@ -146,12 +146,15 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          # Notarization — Apple ID method (unused; kept for completeness).
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           # Notarization — App Store Connect API-key method (active).
           # APPLE_API_KEY_PATH is written to $GITHUB_ENV by the step above.
+          #
+          # APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID are deliberately NOT passed here.
+          # tauri-bundler probes the Apple-ID auth triple *first* with var_os(), which
+          # treats an empty string as "present". Passing them as `${{ secrets.X }}` (which
+          # expand to "" when the secret is unset) hijacks notarization into the Apple-ID
+          # path and dies with "Team ID must be at least 3 characters" — never reaching the
+          # API-key method. Omitting them lets the bundler fall through to the API key below.
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         with:
