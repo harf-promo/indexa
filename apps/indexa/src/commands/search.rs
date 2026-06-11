@@ -34,7 +34,7 @@ pub(crate) async fn cmd_search(
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };
-    let store = Store::open(&db_path)?;
+    let mut store = Store::open(&db_path)?;
     if store.chunk_count()? == 0 {
         if json {
             println!("[]");
@@ -74,6 +74,15 @@ pub(crate) async fn cmd_search(
         cfg.retrieval.rrf_k as f32,
     )?;
 
+    // Best-effort token-savings telemetry — must never fail the user's search.
+    let record_usage = |store: &mut Store, served: usize| {
+        let paths: Vec<&str> = hits.iter().map(|h| h.entry_path.as_str()).collect();
+        let counterfactual = store.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
+        if let Err(e) = store.record_tool_usage("cli", "search", served as u64, counterfactual) {
+            tracing::debug!("usage telemetry skipped: {e:#}");
+        }
+    };
+
     if json {
         let out: Vec<HitJson> = hits
             .iter()
@@ -85,21 +94,30 @@ pub(crate) async fn cmd_search(
                 snippet: h.text.chars().take(160).collect(),
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        let body = serde_json::to_string_pretty(&out)?;
+        record_usage(&mut store, body.len());
+        println!("{body}");
         return Ok(());
     }
 
     if hits.is_empty() {
+        // Zero-hit calls are still calls — record them (0 bytes both ways) so
+        // the weekly `calls` count doesn't depend on the output mode (--json
+        // records empties via its body; MCP and web do too).
+        record_usage(&mut store, 0);
         println!("No results for \"{query}\".");
         return Ok(());
     }
+    let mut body = String::new();
     for (i, h) in hits.iter().enumerate() {
         let loc = if h.heading.is_empty() {
             h.entry_path.clone()
         } else {
             format!("{} — {}", h.entry_path, h.heading)
         };
-        println!("{:>2}. [{:.4}] {}", i + 1, h.rrf_score, loc);
+        body.push_str(&format!("{:>2}. [{:.4}] {}\n", i + 1, h.rrf_score, loc));
     }
+    record_usage(&mut store, body.len());
+    print!("{body}");
     Ok(())
 }

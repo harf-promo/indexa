@@ -84,6 +84,15 @@ fn ok_text(s: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![Content::text(s.into())])
 }
 
+/// Best-effort token-savings telemetry — a recording failure must never fail
+/// the user's call, so this swallows errors at debug level instead of `?`.
+fn record_usage(store: &mut Store, tool: &str, bytes_served: usize, bytes_counterfactual: u64) {
+    if let Err(e) = store.record_tool_usage("mcp", tool, bytes_served as u64, bytes_counterfactual)
+    {
+        tracing::debug!("usage telemetry skipped ({tool}): {e:#}");
+    }
+}
+
 impl IndexaMcp {
     pub fn new(
         db_path: PathBuf,
@@ -282,9 +291,13 @@ mod tests {
         );
 
         // A file inside the indexed root is readable.
-        assert!(mcp.read_file_inner(inside.to_str().unwrap()).is_ok());
+        assert!(mcp
+            .read_file_inner(inside.to_str().unwrap(), "read_file")
+            .is_ok());
         // A file outside every indexed root is rejected (the security contract).
-        let err = mcp.read_file_inner(outside.to_str().unwrap()).unwrap_err();
+        let err = mcp
+            .read_file_inner(outside.to_str().unwrap(), "read_file")
+            .unwrap_err();
         assert!(
             format!("{err:?}").contains("not within an indexed root"),
             "expected an indexed-root rejection, got: {err:?}"

@@ -1,6 +1,8 @@
 use anyhow::Result;
 use indexa_core::{config::HybridMode, store::Store};
-use indexa_query::{answer, answer_agentic, explain_retrieval, QaConfig, RetrievalTrace};
+use indexa_query::{
+    answer, answer_agentic, explain_retrieval, Confidence, QaConfig, RetrievalTrace,
+};
 use serde::Serialize;
 
 use super::helpers::{build_embedder, build_llm, require_index_db};
@@ -41,10 +43,19 @@ struct RetrievalJson {
 }
 
 #[derive(Serialize)]
+struct ConfidenceJson {
+    level: &'static str,
+    basis: String,
+}
+
+#[derive(Serialize)]
 struct AnswerJson {
     question: String,
     answer: String,
     sources: Vec<SourceJson>,
+    /// Retrieval-shape confidence; absent for the no-match short-circuit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confidence: Option<ConfidenceJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     retrieval: Option<RetrievalJson>,
 }
@@ -133,6 +144,7 @@ pub(crate) async fn cmd_ask(
                     answer: "No deep-scanned content found. Run `indexa deep <path>` first."
                         .to_owned(),
                     sources: Vec::new(),
+                    confidence: None,
                     retrieval: None,
                 })?
             );
@@ -236,6 +248,22 @@ pub(crate) async fn cmd_ask(
         .await?
     };
 
+    // Best-effort token-savings telemetry — must never fail the user's ask.
+    // (`store` was dropped above so the query path didn't hold two handles; a
+    // fresh open here is the same cost every other command pays.)
+    match Store::open(&db_path) {
+        Ok(mut s) => {
+            let paths: Vec<&str> = answer.sources.iter().map(|x| x.path.as_str()).collect();
+            let counterfactual = s.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
+            if let Err(e) =
+                s.record_tool_usage("cli", "ask", answer.answer.len() as u64, counterfactual)
+            {
+                tracing::debug!("usage telemetry skipped: {e:#}");
+            }
+        }
+        Err(e) => tracing::debug!("usage telemetry skipped: {e:#}"),
+    }
+
     if json {
         let out = AnswerJson {
             question: answer.question.clone(),
@@ -249,6 +277,10 @@ pub(crate) async fn cmd_ask(
                     snippet: s.snippet.clone(),
                 })
                 .collect(),
+            confidence: answer.confidence.as_ref().map(|c| ConfidenceJson {
+                level: c.level.as_str(),
+                basis: c.basis.clone(),
+            }),
             retrieval: trace.as_ref().map(trace_to_json),
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -266,6 +298,42 @@ pub(crate) async fn cmd_ask(
                 format!("{} — {}", src.path, src.heading)
             };
             println!("  [{}] {}", i + 1, loc);
+        }
+    }
+
+    // Retrieval-shape confidence (absent only for the no-match short-circuit —
+    // that message already says the index has nothing).
+    if let Some(c) = &answer.confidence {
+        use std::io::IsTerminal;
+        // Below High with no scope set, narrowing the search is the one lever
+        // the user can pull right now.
+        let hint = if c.level != Confidence::High && qa_cfg.scope.is_none() {
+            "; consider scoping with --scope"
+        } else {
+            ""
+        };
+        let line = format!("confidence: {} — {}{}", c.level, c.basis, hint);
+        if std::io::stdout().is_terminal() {
+            println!("\n\x1b[2m{line}\x1b[0m");
+        } else {
+            println!("\n{line}");
+        }
+        // --explain: the raw shape numbers the level was derived from (heuristic,
+        // not calibrated — see indexa_query::assess_confidence).
+        if explain {
+            let i = &c.inputs;
+            println!(
+                "  inputs: {}/{} hits · top {:.4} · median {:.4} · gap {:.1}× · \
+                 {} strong (floor {:.4}) · embeddings {}",
+                i.hit_count,
+                i.top_k,
+                i.top_score,
+                i.median_score,
+                i.gap,
+                i.strong_hits,
+                i.strong_floor,
+                if i.embeddings { "on" } else { "off" },
+            );
         }
     }
 

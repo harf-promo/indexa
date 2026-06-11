@@ -14,6 +14,177 @@ pub struct Answer {
     pub question: String,
     pub answer: String,
     pub sources: Vec<SourceCitation>,
+    /// Retrieval-shape confidence (see [`assess_confidence`]). `None` only for the
+    /// zero-hit short-circuit — that message already says the index has nothing,
+    /// so bolting a confidence label onto it would be noise.
+    pub confidence: Option<ConfidenceReport>,
+}
+
+/// Heuristic answer-level confidence. Derived purely from the *shape of the
+/// retrieval pool* before synthesis — it says how well the index covered the
+/// question, not whether the model's prose is correct. NOT calibrated: the
+/// thresholds in [`assess_confidence`] are documented judgment calls, not
+/// probabilities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confidence {
+    High,
+    Medium,
+    Low,
+}
+
+impl Confidence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Confidence::High => "high",
+            Confidence::Medium => "medium",
+            Confidence::Low => "low",
+        }
+    }
+}
+
+impl std::fmt::Display for Confidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfidenceReport {
+    pub level: Confidence,
+    /// One-line human explanation, e.g. "9 strong matches".
+    pub basis: String,
+    /// The raw numbers the level was derived from (`indexa ask --explain` prints them).
+    pub inputs: ConfidenceInputs,
+    /// Phase-2 placeholder: question aspects retrieval likely did not cover.
+    /// Always `None` today.
+    pub uncovered: Option<Vec<String>>,
+}
+
+/// The retrieval-shape numbers behind a [`ConfidenceReport`], surfaced by
+/// `indexa ask --explain` so a user can see why a level was chosen.
+#[derive(Debug, Clone)]
+pub struct ConfidenceInputs {
+    pub hit_count: usize,
+    pub top_k: usize,
+    pub top_score: f64,
+    pub median_score: f64,
+    /// top/median score ratio (≥ 1.0): large ⇒ one dominant hit, ~1 ⇒ a flat pool.
+    pub gap: f64,
+    /// Hits at or above `strong_floor`.
+    pub strong_hits: usize,
+    /// Fused-mass floor for a "strong" hit: `1/(rrf_k+10)` ≈ top-10 in one retriever.
+    pub strong_floor: f64,
+    /// Whether dense retrieval ran (a query embedding existed), i.e. corroboration
+    /// between keyword and semantic rankings was possible at all.
+    pub embeddings: bool,
+}
+
+/// Classify retrieval-pool shape into a [`ConfidenceReport`]. Pure and deterministic;
+/// `None` only for an empty pool (the no-match short-circuit speaks for itself).
+///
+/// Anchors derive from the RRF formula — a hit at rank `r` in one retriever
+/// contributes `1/(rrf_k + r)` fused mass — so thresholds track `rrf_k` and the
+/// *relative* structure of the pool rather than absolute magic numbers:
+/// - `rank1` = `1/(rrf_k+1)`: a clean rank-1 in a single retriever.
+/// - strong hit: ≥ `1/(rrf_k+10)` (≈ top-10 in one retriever, or equivalent fused mass).
+/// - corroborated top (hybrid only): ≥ 1.5 × `rank1`, reachable only when keyword and
+///   semantic retrieval both rank the same chunk near their tops (an importance weight
+///   can also push a hit there — accepted, it encodes user judgment).
+///
+/// Levels (heuristic, NOT calibrated):
+/// - High: corroborated top + ≥ 3 strong hits + pool at least half of `top_k` + no
+///   single hit dominating a weak remainder (gap ≤ 3).
+/// - Low: no strong hits at all, or a single weak hit.
+/// - Medium: everything in between.
+pub fn assess_confidence(
+    hits: &[SearchHit],
+    top_k: usize,
+    rrf_k: f32,
+    embeddings: bool,
+) -> Option<ConfidenceReport> {
+    if hits.is_empty() {
+        return None;
+    }
+    // Sort scores locally: callers may hand us reranked (reordered) hits, and the
+    // shape metrics must not depend on presentation order.
+    let mut scores: Vec<f64> = hits.iter().map(|h| h.rrf_score).collect();
+    scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let n = scores.len();
+    let top = scores[0];
+    let median = scores[n / 2].max(f64::EPSILON);
+    let gap = top / median;
+
+    let rank1 = 1.0 / (rrf_k as f64 + 1.0);
+    let strong_floor = 1.0 / (rrf_k as f64 + 10.0);
+    let strong = scores.iter().filter(|s| **s >= strong_floor).count();
+
+    // Sparse-only can never corroborate, so its best possible evidence — a clean
+    // keyword rank-1 — counts as a strong top there.
+    let top_is_strong = if embeddings {
+        top >= 1.5 * rank1
+    } else {
+        top >= rank1
+    };
+
+    let level = if strong == 0 {
+        Confidence::Low
+    } else if n == 1 {
+        // A single chunk of evidence is never High, however well it scored.
+        if top >= rank1 {
+            Confidence::Medium
+        } else {
+            Confidence::Low
+        }
+    } else if top_is_strong && strong >= 3 && n * 2 >= top_k && gap <= 3.0 {
+        Confidence::High
+    } else {
+        Confidence::Medium
+    };
+
+    let basis = match level {
+        Confidence::High => format!("{strong} strong matches"),
+        Confidence::Medium if n == 1 => "a single strong match — uncorroborated".to_owned(),
+        Confidence::Medium if !top_is_strong => format!("{n} moderate matches"),
+        Confidence::Medium if gap > 3.0 => "one dominant match, weak support".to_owned(),
+        Confidence::Medium => format!(
+            "only {strong} strong match{}",
+            if strong == 1 { "" } else { "es" }
+        ),
+        Confidence::Low => {
+            if n <= 2 {
+                "few weak matches — the index may not cover this".to_owned()
+            } else {
+                "only weak matches — the index may not cover this".to_owned()
+            }
+        }
+    };
+
+    Some(ConfidenceReport {
+        level,
+        basis,
+        inputs: ConfidenceInputs {
+            hit_count: n,
+            top_k,
+            top_score: top,
+            median_score: median,
+            gap,
+            strong_hits: strong,
+            strong_floor,
+            embeddings,
+        },
+        uncovered: None,
+    })
+}
+
+/// [`assess_confidence`] wired to a [`QaConfig`]: embeddings were available exactly
+/// when the mode embedded the query (everything but sparse-only).
+fn confidence_for(hits: &[SearchHit], cfg: &QaConfig) -> Option<ConfidenceReport> {
+    assess_confidence(
+        hits,
+        cfg.top_k,
+        cfg.rrf_k,
+        !matches!(cfg.mode, HybridMode::Sparse),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +207,7 @@ pub enum AnswerChunk {
 }
 
 /// Configuration for the Q&A pipeline.
+#[derive(Clone)]
 pub struct QaConfig {
     pub top_k: usize,
     /// Max characters of context to include in the LLM prompt.
@@ -345,6 +517,8 @@ pub async fn answer_agentic_stream(
         return Ok(ans);
     }
 
+    // Confidence is a property of the retrieval pool, fixed before synthesis.
+    let confidence = confidence_for(&hits, cfg);
     let (context, sources) = pack_context(&hits, cfg.context_budget);
     on_chunk(AnswerChunk::Sources(sources.clone()));
 
@@ -361,6 +535,7 @@ pub async fn answer_agentic_stream(
         question: question.to_owned(),
         answer: full.trim().to_owned(),
         sources,
+        confidence,
     })
 }
 
@@ -542,6 +717,8 @@ pub async fn answer_stream_with_ann(
         return Ok(ans);
     }
 
+    // Confidence is a property of the retrieval pool, fixed before synthesis.
+    let confidence = confidence_for(&hits, cfg);
     let (context, sources) = pack_context(&hits, cfg.context_budget);
     // Citations up front so the UI can render them before the first token.
     on_chunk(AnswerChunk::Sources(sources.clone()));
@@ -559,6 +736,7 @@ pub async fn answer_stream_with_ann(
         question: question.to_owned(),
         answer: full.trim().to_owned(),
         sources,
+        confidence,
     })
 }
 
@@ -602,7 +780,8 @@ async fn retrieve_and_rerank(
     Ok(hits)
 }
 
-/// The shared no-match answer (identical across CLI, web, MCP).
+/// The shared no-match answer (identical across CLI, web, MCP). Deliberately carries
+/// no confidence label — the message already says the index has nothing.
 fn no_match_answer(question: &str) -> Answer {
     Answer {
         question: question.to_owned(),
@@ -610,6 +789,7 @@ fn no_match_answer(question: &str) -> Answer {
                  `indexa summarize` on the relevant folder first, then ask again."
             .to_owned(),
         sources: Vec::new(),
+        confidence: None,
     }
 }
 
@@ -621,6 +801,9 @@ pub(crate) async fn synthesize_from_hits(
     question: &str,
     cfg: &QaConfig,
 ) -> Result<Answer> {
+    // Confidence is a property of the retrieval pool, fixed before synthesis
+    // (rerank only reorders; assess_confidence sorts scores internally).
+    let confidence = confidence_for(&hits, cfg);
     let (context, sources) = pack_context(&hits, cfg.context_budget);
     let prompt = build_prompt(question, &context);
     let answer_text = llm.generate(&prompt).await?;
@@ -628,6 +811,7 @@ pub(crate) async fn synthesize_from_hits(
         question: question.to_owned(),
         answer: answer_text.trim().to_owned(),
         sources,
+        confidence,
     })
 }
 
@@ -720,6 +904,132 @@ mod tests {
         assert!(prompt.contains("some context"));
     }
 
+    // ── assess_confidence (retrieval-shape classifier) ─────────────────────────
+
+    /// Minimal hit with a given fused score (the classifier only reads scores).
+    fn scored_hit(i: i64, score: f64) -> SearchHit {
+        SearchHit {
+            chunk_id: i,
+            entry_path: format!("/doc{i}.md"),
+            seq: 0,
+            heading: String::new(),
+            text: "x".to_owned(),
+            rrf_score: score,
+        }
+    }
+
+    fn scored_hits(scores: &[f64]) -> Vec<SearchHit> {
+        scores
+            .iter()
+            .enumerate()
+            .map(|(i, s)| scored_hit(i as i64, *s))
+            .collect()
+    }
+
+    #[test]
+    fn confidence_empty_pool_is_none() {
+        // The zero-hit short-circuit owns that message; no confidence label on it.
+        assert!(assess_confidence(&[], 8, 60.0, true).is_none());
+    }
+
+    #[test]
+    fn confidence_one_weak_hit_is_low() {
+        // Single hit deep in one list: 1/(60+40), below the strong floor 1/70.
+        let r = assess_confidence(&scored_hits(&[0.010]), 8, 60.0, true).unwrap();
+        assert_eq!(r.level, Confidence::Low);
+        assert!(r.basis.contains("may not cover"), "basis: {}", r.basis);
+        assert_eq!(r.inputs.strong_hits, 0);
+        assert!(r.uncovered.is_none(), "phase-2 placeholder stays None");
+    }
+
+    #[test]
+    fn confidence_many_strong_corroborated_is_high() {
+        // 8 hits, top at 2/(61) (rank-1 in both lists), pool above the strong floor.
+        let r = assess_confidence(
+            &scored_hits(&[0.0328, 0.0301, 0.028, 0.020, 0.018, 0.016, 0.015, 0.0148]),
+            8,
+            60.0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(r.level, Confidence::High);
+        assert_eq!(r.basis, "8 strong matches");
+        assert!(r.inputs.gap <= 3.0);
+    }
+
+    #[test]
+    fn confidence_moderate_uncorroborated_pool_is_medium() {
+        // Decent single-list hits but no chunk both retrievers agree on near the top.
+        let r = assess_confidence(
+            &scored_hits(&[0.0164, 0.0158, 0.0150, 0.0145]),
+            8,
+            60.0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(r.level, Confidence::Medium);
+        assert_eq!(r.basis, "4 moderate matches");
+    }
+
+    #[test]
+    fn confidence_single_strong_hit_caps_at_medium() {
+        // One chunk of evidence is never High, however well it scored.
+        let r = assess_confidence(&scored_hits(&[0.033]), 8, 60.0, true).unwrap();
+        assert_eq!(r.level, Confidence::Medium);
+        assert!(r.basis.contains("single"), "basis: {}", r.basis);
+    }
+
+    #[test]
+    fn confidence_dominant_top_over_weak_pool_is_medium() {
+        // gap > 3 (e.g. a weight-boosted top): the pool's strength is illusory.
+        let r = assess_confidence(
+            &scored_hits(&[0.050, 0.0145, 0.0144, 0.0143, 0.001, 0.001]),
+            8,
+            60.0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(r.level, Confidence::Medium);
+        assert_eq!(r.basis, "one dominant match, weak support");
+    }
+
+    #[test]
+    fn confidence_all_weak_pool_is_low() {
+        // Plenty of hits, none reaching top-10-of-a-list mass.
+        let r = assess_confidence(
+            &scored_hits(&[0.012, 0.011, 0.011, 0.010, 0.010, 0.009]),
+            8,
+            60.0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(r.level, Confidence::Low);
+        assert!(r.basis.contains("may not cover"), "basis: {}", r.basis);
+    }
+
+    #[test]
+    fn confidence_sparse_clean_rank1_counts_without_corroboration() {
+        // Sparse-only can't corroborate; a clean keyword rank-1 top still qualifies.
+        let r = assess_confidence(
+            &scored_hits(&[0.0164, 0.0161, 0.0156, 0.0152, 0.0149, 0.0147]),
+            8,
+            60.0,
+            false,
+        )
+        .unwrap();
+        assert_eq!(r.level, Confidence::High);
+        assert!(!r.inputs.embeddings);
+    }
+
+    #[test]
+    fn confidence_is_order_independent() {
+        // Reranked (reordered) hits must classify identically: scores are sorted internally.
+        let asc = scored_hits(&[0.0148, 0.016, 0.020, 0.0328, 0.028, 0.018, 0.015, 0.0301]);
+        let r = assess_confidence(&asc, 8, 60.0, true).unwrap();
+        assert_eq!(r.level, Confidence::High);
+        assert_eq!(r.inputs.top_score, 0.0328);
+    }
+
     // ── answer() unified-pipeline tests (CLI/web/MCP all call this) ────────────
     use indexa_core::store::ChunkRecord;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -795,6 +1105,10 @@ mod tests {
             .unwrap();
         assert!(ans.answer.contains("indexa deep"));
         assert!(ans.sources.is_empty());
+        assert!(
+            ans.confidence.is_none(),
+            "the no-match short-circuit carries no confidence label"
+        );
         assert_eq!(
             gen_calls.load(Ordering::SeqCst),
             0,
@@ -849,6 +1163,10 @@ mod tests {
         assert_eq!(ans.answer, "a synthesized answer");
         assert!(!ans.sources.is_empty());
         assert_eq!(gen_calls.load(Ordering::SeqCst), 1);
+        // One sparse rank-1 chunk: confidence present, capped at Medium (single hit).
+        let conf = ans.confidence.expect("hits ⇒ a confidence report");
+        assert_eq!(conf.level, Confidence::Medium);
+        assert!(!conf.inputs.embeddings, "sparse mode never embedded");
     }
 
     /// Generator that streams several fragments (overrides generate_stream) so we can verify

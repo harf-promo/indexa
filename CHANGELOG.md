@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Token-savings telemetry — the pitch, measured.** Every content-serving retrieval call (`ask`,
+  `search`, `get_summary`, `read_file`, across CLI/web/MCP) now records what it served vs. the
+  full on-disk size of the files behind it. `indexa status`, MCP `get_stats`, and the web header
+  report: *"This week Indexa served 12.3 KB where whole-file context would have been 4.2 MB —
+  roughly 1.1M tokens saved (estimated at ≈4 bytes/token)."* The counterfactual is an estimate and
+  is documented as one — see the new ["What tokens saved means"](docs/methodology.md#what-tokens-saved-means)
+  section. UI navigation (the sidebar path filter) deliberately records nothing.
+- **Answer confidence.** `ask` now labels each answer **high / medium / low** from the retrieval
+  evidence (hit count, fusion-score strength, keyword+semantic corroboration, drop-off), with the
+  basis stated: `confidence: medium — 4 moderate matches`. Shown in the CLI (+ `--json` fields,
+  inputs under `--explain`), the web chat, and the MCP `ask` response. A heuristic, not a
+  calibrated probability — [documented](docs/methodology.md#what-confidence-on-an-answer-means).
+- **`indexa status --deep` — the index health report.** Coverage at a glance: % files chunked,
+  % chunks embedded (with an explicit "dense search can't see them" callout when short),
+  summary coverage, summaries older than their file, queue depth, open review questions, and
+  last-indexed per root. JSON via `--json`.
+- **`indexa eval` — retrieval regression harness.** Golden-questions JSON → hit rate, MRR, and
+  citation precision against the same retrieval `ask` uses (LLM-free; sparse mode needs no
+  embedder). `--min-hit-rate` turns it into a CI gate. This is the measuring stick future
+  retrieval changes (tree-sitter call resolution) must move before they ship.
+- **`indexa mcp install --client claude-code|claude-desktop|cursor|vscode`** — one-shot MCP
+  registration. JSON-config clients get a safe merge (other servers untouched, `.bak` of the
+  original, write-temp-then-rename, invalid JSON refused rather than clobbered); Claude Code
+  delegates to `claude mcp add`. `--dry-run` previews. Bare `indexa mcp` still runs the stdio
+  server, unchanged.
+
 ## [0.22.0] — 2026-06-11
 
 "The Ledger": Indexa asks instead of guessing — and remembers your answer.

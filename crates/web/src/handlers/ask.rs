@@ -13,7 +13,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::dto::{err_json, AskRequest, AskResponse, AskSource};
+use crate::dto::{err_json, AskConfidence, AskRequest, AskResponse, AskSource};
 use crate::AppState;
 
 /// Build the Q&A config from the server's retrieval settings (shared by both ask handlers).
@@ -151,12 +151,40 @@ pub(crate) async fn api_ask(
         .await
     };
     match result {
-        Ok(answer) => Json(AskResponse {
-            answer: answer.answer,
-            sources: answer.sources.into_iter().map(into_ask_source).collect(),
-        })
-        .into_response(),
+        Ok(answer) => {
+            record_ask_usage(&state.db_path, &answer);
+            Json(AskResponse {
+                confidence: into_ask_confidence(answer.confidence.as_ref()),
+                answer: answer.answer,
+                sources: answer.sources.into_iter().map(into_ask_source).collect(),
+            })
+            .into_response()
+        }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
+}
+
+/// Best-effort token-savings telemetry for both ask handlers — a recording
+/// failure must never fail (or delay-fail) the user's answer. Opens its own
+/// short-lived connection: the buffered handler never locked the shared store,
+/// and the stream task outlives the request scope.
+fn record_ask_usage(db_path: &std::path::Path, answer: &indexa_query::Answer) {
+    let recorded = Store::open(db_path).and_then(|mut s| {
+        let paths: Vec<&str> = answer.sources.iter().map(|x| x.path.as_str()).collect();
+        let counterfactual = s.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
+        // Served = answer + the source snippets actually delivered — counting
+        // less served would inflate the savings (MCP ask counts its full
+        // rendered output the same way).
+        let served = answer.answer.len()
+            + answer
+                .sources
+                .iter()
+                .map(|x| x.path.len() + x.heading.len() + x.snippet.len())
+                .sum::<usize>();
+        s.record_tool_usage("web", "ask", served as u64, counterfactual)
+    });
+    if let Err(e) = recorded {
+        tracing::debug!("usage telemetry skipped: {e:#}");
     }
 }
 
@@ -230,7 +258,16 @@ pub(crate) async fn api_ask_stream(
         };
 
         let terminal = match result {
-            Ok(_) => serde_json::json!({ "type": "done" }),
+            Ok(answer) => {
+                record_ask_usage(&db_path, &answer);
+                // Confidence rides the terminal event (it's known before synthesis but
+                // belongs to the whole answer). Additive: absent on the no-match path
+                // and on older servers, so clients must tolerate it missing.
+                match into_ask_confidence(answer.confidence.as_ref()) {
+                    Some(c) => serde_json::json!({ "type": "done", "confidence": c }),
+                    None => serde_json::json!({ "type": "done" }),
+                }
+            }
             Err(e) => serde_json::json!({ "type": "error", "message": format!("{e:#}") }),
         };
         let _ = tx.send(Ok(Event::default().data(terminal.to_string())));
@@ -245,4 +282,11 @@ fn into_ask_source(s: indexa_query::SourceCitation) -> AskSource {
         heading: s.heading,
         snippet: s.snippet,
     }
+}
+
+fn into_ask_confidence(c: Option<&indexa_query::ConfidenceReport>) -> Option<AskConfidence> {
+    c.map(|c| AskConfidence {
+        level: c.level.as_str(),
+        basis: c.basis.clone(),
+    })
 }

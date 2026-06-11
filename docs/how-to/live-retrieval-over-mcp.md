@@ -25,6 +25,12 @@ indexa mcp        # waits on stdin/stdout; Ctrl-C to stop
 
 ## 3. Register it with a client
 
+Or let indexa do it: `indexa mcp install --client claude-code` (also `claude-desktop`, `cursor`,
+`vscode` — repeat the flag or comma-separate; add `--dry-run` to preview). It merges only the
+`indexa` entry — for the JSON-config clients (Claude Desktop, Cursor, VS Code) it backs up any
+existing file first; for Claude Code it delegates to `claude mcp add` (undo with
+`claude mcp remove indexa`). The manual steps below do the same thing.
+
 In every client the registration is the same idea — *launch `indexa` with the arg `mcp` over
 stdio* — only the config file differs. Use an absolute path to the binary (`which indexa`) if it
 isn't on the client's `PATH`.

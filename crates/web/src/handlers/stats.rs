@@ -7,15 +7,25 @@ use axum::{
 
 use crate::dto::{
     err_json, file_name_of, CoverageStats, RootResponse, SearchQuery, StatsResponse,
-    TreeNodeResponse, TreemapNodeDto,
+    TreeNodeResponse, TreemapNodeDto, UsageWeekDto,
 };
 use crate::AppState;
-use indexa_core::store::CoverageEntry;
+use indexa_core::store::{CoverageEntry, USAGE_WEEK_SECS};
 
 pub(crate) async fn api_stats(State(state): State<AppState>) -> Response {
     let store = state.store.lock().await;
+    // Telemetry read is best-effort: zeros (the UI hides the line) over a 500.
+    let usage = store.usage_summary(USAGE_WEEK_SECS).unwrap_or_default();
     match (store.entry_count(), store.chunk_count()) {
-        (Ok(entries), Ok(chunks)) => Json(StatsResponse { entries, chunks }).into_response(),
+        (Ok(entries), Ok(chunks)) => Json(StatsResponse {
+            entries,
+            chunks,
+            usage_week: UsageWeekDto {
+                served: usage.bytes_served,
+                counterfactual: usage.bytes_counterfactual,
+            },
+        })
+        .into_response(),
         (Err(e), _) | (_, Err(e)) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
 }
@@ -68,13 +78,17 @@ pub(crate) async fn api_search(
     let limit = params.limit.unwrap_or(50).min(200);
     let store = state.store.lock().await;
     match store.search_paths(&q, limit) {
-        Ok(nodes) => Json(
-            nodes
-                .into_iter()
-                .map(TreeNodeResponse::from)
-                .collect::<Vec<_>>(),
-        )
-        .into_response(),
+        Ok(nodes) => {
+            // Deliberately NO usage telemetry here: this is the sidebar
+            // path-typeahead (a human navigating, debounced per keystroke),
+            // not retrieval serving content to an AI client. Counting the
+            // matched files' full sizes as "avoided reading" would inflate
+            // the tokens-saved metric with every keystroke pause — a skeptic
+            // could falsify the headline number by typing in the sidebar.
+            let out: Vec<TreeNodeResponse> =
+                nodes.into_iter().map(TreeNodeResponse::from).collect();
+            Json(out).into_response()
+        }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
 }

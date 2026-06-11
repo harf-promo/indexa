@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
 use indexa_cli::{
-    Cli, Commands, InsightsAction, PackAction, ReviewAction, SavedAction, SnapshotAction,
-    WeightAction,
+    Cli, Commands, InsightsAction, McpAction, PackAction, ReviewAction, SavedAction,
+    SnapshotAction, WeightAction,
 };
 use indexa_core::config;
 use tracing_subscriber::prelude::*;
@@ -140,6 +140,14 @@ async fn main() -> Result<()> {
             SnapshotAction::Export { output } => commands::cmd_snapshot_export(output).await,
             SnapshotAction::Import { file } => commands::cmd_snapshot_import(file).await,
         },
+        Commands::Eval {
+            golden,
+            mode,
+            top_k,
+            scope,
+            json,
+            min_hit_rate,
+        } => commands::cmd_eval(golden, mode, top_k, scope, json, min_hit_rate, &cfg).await,
         Commands::Report {
             questions,
             saved,
@@ -236,8 +244,19 @@ async fn main() -> Result<()> {
             embed_model,
             llm_model,
         } => commands::cmd_serve(port, host, embed_model, llm_model, &cfg).await,
-        Commands::Mcp {} => commands::cmd_mcp(&cfg).await,
-        Commands::Status { unknown, json } => commands::cmd_status(unknown, json, &cfg).await,
+        // Bare `indexa mcp` must keep running the stdio server — every client
+        // config written by `mcp install` points at exactly that invocation.
+        Commands::Mcp { action } => match action {
+            None => commands::cmd_mcp(&cfg).await,
+            Some(McpAction::Install { client, dry_run }) => {
+                commands::cmd_mcp_install(client, dry_run).await
+            }
+        },
+        Commands::Status {
+            unknown,
+            deep,
+            json,
+        } => commands::cmd_status(unknown, deep, json, &cfg).await,
         Commands::Rm { paths, recursive } => commands::cmd_rm(paths, recursive).await,
         Commands::Prune { dry_run } => commands::cmd_prune(dry_run).await,
         Commands::Doctor {

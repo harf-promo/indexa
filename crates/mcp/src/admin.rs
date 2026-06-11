@@ -21,9 +21,18 @@ impl IndexaMcp {
         let store = self.store()?;
         let entries = store.entry_count().map_err(mcp_err)?;
         let chunks = store.chunk_count().map_err(mcp_err)?;
-        Ok(ok_text(format!(
-            "{entries} indexed entries, {chunks} chunks."
-        )))
+        let mut out = format!("{entries} indexed entries, {chunks} chunks.");
+        // Measured token savings (approximate by definition — see store::usage);
+        // best-effort, so a telemetry read failure can't fail the stats call.
+        if let Some(line) = store
+            .usage_summary(indexa_core::store::USAGE_WEEK_SECS)
+            .ok()
+            .and_then(|u| u.savings_line())
+        {
+            out.push('\n');
+            out.push_str(&line);
+        }
+        Ok(ok_text(out))
     }
 
     /// Garbage-collect orphaned rows (chunks/summaries left behind after a root was removed).

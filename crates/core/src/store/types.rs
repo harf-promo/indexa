@@ -126,6 +126,30 @@ pub struct QueueStats {
     pub failed: i64,
 }
 
+/// Whole-index coverage aggregates for the `status --deep` health report.
+/// Chunk/summary counts join back to live `entries` rows so orphans left
+/// behind by a removed root (cleaned by `prune`) can never push a coverage
+/// ratio past 100%.
+#[derive(Debug, Clone, Default)]
+pub struct HealthStats {
+    /// Entries with kind='file'.
+    pub files: u64,
+    /// Entries with kind='dir'.
+    pub dirs: u64,
+    /// File entries with at least one chunk (deep-indexed).
+    pub files_with_chunks: u64,
+    pub chunks: u64,
+    /// Chunks with a stored embedding — anything below `chunks` is invisible
+    /// to dense (and therefore hybrid) search.
+    pub embedded_chunks: u64,
+    /// File entries with a summaries row.
+    pub files_summarized: u64,
+    /// Dir entries with a summaries row.
+    pub dirs_summarized: u64,
+    /// Summaries generated before their entry's on-disk mtime (possibly stale).
+    pub stale_summaries: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct FailedQueueItem {
     pub path: String,

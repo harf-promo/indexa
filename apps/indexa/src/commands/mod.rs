@@ -3,6 +3,7 @@ mod classify;
 mod deep;
 mod describe;
 mod doctor;
+mod eval;
 mod export;
 mod fingerprint;
 mod graph;
@@ -11,6 +12,7 @@ mod index;
 mod insights;
 mod map;
 mod mcp;
+mod mcp_install;
 mod pack;
 mod prune;
 mod related;
@@ -34,6 +36,7 @@ pub(crate) use classify::cmd_classify;
 pub(crate) use deep::cmd_deep;
 pub(crate) use describe::cmd_describe;
 pub(crate) use doctor::cmd_doctor;
+pub(crate) use eval::cmd_eval;
 pub(crate) use export::cmd_export;
 pub(crate) use fingerprint::cmd_fingerprint;
 pub(crate) use graph::cmd_graph;
@@ -44,6 +47,7 @@ pub(crate) use insights::{
 };
 pub(crate) use map::cmd_map;
 pub(crate) use mcp::cmd_mcp;
+pub(crate) use mcp_install::cmd_mcp_install;
 pub(crate) use pack::{
     cmd_pack_add, cmd_pack_create, cmd_pack_delete, cmd_pack_export, cmd_pack_list,
     cmd_pack_remove, cmd_pack_rename, cmd_pack_show,

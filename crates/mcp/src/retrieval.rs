@@ -11,7 +11,9 @@ use serde::Deserialize;
 use indexa_core::{config::HybridMode, store::Store};
 use indexa_query::QaConfig;
 
-use crate::{mcp_err, ok_text, parse_hybrid_mode, path_within_roots, IndexaMcp, READ_FILE_CAP};
+use crate::{
+    mcp_err, ok_text, parse_hybrid_mode, path_within_roots, record_usage, IndexaMcp, READ_FILE_CAP,
+};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchParams {
@@ -100,7 +102,7 @@ impl IndexaMcp {
             self.embedder.embed(&query).await.ok()
         };
 
-        let store = self.store()?;
+        let mut store = self.store()?;
         let hits = store
             .hybrid_search(&query, embedding.as_deref(), &mode, scope, limit, 60.0)
             .map_err(mcp_err)?;
@@ -122,7 +124,13 @@ impl IndexaMcp {
             })
             .collect::<Vec<_>>()
             .join("\n\n");
-        Ok(ok_text(format!("{} result(s):\n\n{body}", hits.len())))
+        let out = format!("{} result(s):\n\n{body}", hits.len());
+
+        let paths: Vec<&str> = hits.iter().map(|h| h.entry_path.as_str()).collect();
+        let counterfactual = store.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
+        record_usage(&mut store, "search", out.len(), counterfactual);
+
+        Ok(ok_text(out))
     }
 
     /// List the direct children (with summary state) of a directory.
@@ -166,10 +174,10 @@ impl IndexaMcp {
         let tier = tier.as_deref().unwrap_or("l1").to_lowercase();
 
         if tier == "l2" {
-            return self.read_file_inner(&path);
+            return self.read_file_inner(&path, "get_summary");
         }
 
-        let store = self.store()?;
+        let mut store = self.store()?;
         let rec = match store.summary_by_path(&path).map_err(mcp_err)? {
             Some(r) => r,
             None => {
@@ -200,6 +208,10 @@ impl IndexaMcp {
                 }
             }
         }
+
+        let counterfactual = store.counterfactual_bytes_for_paths(&[&path]).unwrap_or(0);
+        record_usage(&mut store, "get_summary", out.len(), counterfactual);
+
         Ok(ok_text(out))
     }
 
@@ -209,7 +221,7 @@ impl IndexaMcp {
         &self,
         params: Parameters<ReadFileParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.read_file_inner(&params.0.path)
+        self.read_file_inner(&params.0.path, "read_file")
     }
 
     /// Answer a natural-language question against the index (grounded RAG).
@@ -285,6 +297,18 @@ impl IndexaMcp {
                 out.push_str(&format!("- {}. {}\n", i + 1, q));
             }
         }
+        // Retrieval-shape confidence (heuristic, from the hit pool — not calibrated).
+        // Absent for the no-match short-circuit, whose message stands on its own.
+        if let Some(c) = &answer.confidence {
+            out.push_str(&format!("\nConfidence: {} ({})\n", c.level, c.basis));
+        }
+
+        if let Ok(mut store) = Store::open(&self.db_path) {
+            let paths: Vec<&str> = answer.sources.iter().map(|s| s.path.as_str()).collect();
+            let counterfactual = store.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
+            record_usage(&mut store, "ask", out.len(), counterfactual);
+        }
+
         Ok(ok_text(out))
     }
 
@@ -294,10 +318,14 @@ impl IndexaMcp {
     /// file"; an MCP client must not be able to read arbitrary paths (`/etc/passwd`, `../../…`)
     /// through it. (Threat model is local stdio — the client already has the user's filesystem
     /// rights — so this is contract hygiene / defense-in-depth, not a privilege boundary.)
-    pub(crate) fn read_file_inner(&self, path: &str) -> Result<CallToolResult, ErrorData> {
+    pub(crate) fn read_file_inner(
+        &self,
+        path: &str,
+        tool: &str,
+    ) -> Result<CallToolResult, ErrorData> {
         let requested =
             std::fs::canonicalize(path).map_err(|e| mcp_err(format!("reading {path}: {e}")))?;
-        let store = Store::open(&self.db_path).map_err(mcp_err)?;
+        let mut store = Store::open(&self.db_path).map_err(mcp_err)?;
         let roots: Vec<PathBuf> = store
             .root_paths()
             .map_err(mcp_err)?
@@ -321,6 +349,10 @@ impl IndexaMcp {
         if text.len() > safe_end {
             body.push_str("\n…[truncated]");
         }
+
+        // Counterfactual = the file's full on-disk size (vs. the served cap).
+        record_usage(&mut store, tool, body.len(), bytes.len() as u64);
+
         Ok(ok_text(body))
     }
 }

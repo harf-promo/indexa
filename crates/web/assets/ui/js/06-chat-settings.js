@@ -58,6 +58,7 @@ async function doAsk() {
   let answerText = '';
   let sources = [];
   let steps = []; // agentic per-hop queries (empty for one-shot ask)
+  let confidence = null; // retrieval-shape confidence, from the terminal 'done' event
   // The agentic retrieval hops, shown as subtle chips above the answer so the user sees
   // what the model searched for while it works.
   const renderSteps = function() {
@@ -66,10 +67,19 @@ async function doAsk() {
       return '<span class="ask-step">&#x1F50D; ' + escapeHtml(s.query) + '</span>';
     }).join('') + '</div>';
   };
+  // A muted "confidence: medium — 4 moderate matches" line under the answer. Empty until
+  // the terminal 'done' event arrives — and stays empty when the server omits the field
+  // (no-match answers, older servers), so this is purely additive.
+  const renderConfidence = function() {
+    if (!confidence || !confidence.level) return '';
+    return '<div class="ask-confidence">confidence: ' + escapeHtml(confidence.level) +
+      (confidence.basis ? ' — ' + escapeHtml(confidence.basis) : '') + '</div>';
+  };
   // Render the partial answer (leading whitespace from the model's first token trimmed so
   // it doesn't briefly indent) + sources, keeping the view pinned to the bottom.
   const renderAnswer = function() {
-    return renderSteps() + renderMarkdown(answerText.replace(/^\s+/, '')) + renderSources(sources);
+    return renderSteps() + renderMarkdown(answerText.replace(/^\s+/, '')) +
+      renderSources(sources) + renderConfidence();
   };
   const repaint = function() {
     bubble.innerHTML = renderAnswer();
@@ -79,6 +89,7 @@ async function doAsk() {
     if (ev.type === 'sources') { sources = ev.sources || []; }
     else if (ev.type === 'fragment') { answerText += ev.text; repaint(); }
     else if (ev.type === 'step') { steps.push(ev); repaint(); }
+    else if (ev.type === 'done') { if (ev.confidence) { confidence = ev.confidence; repaint(); } }
     else if (ev.type === 'error') { throw new Error(ev.message || 'Generation failed'); }
     // 'done' is terminal; the loop ends when the stream closes.
   };
