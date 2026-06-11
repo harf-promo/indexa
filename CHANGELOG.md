@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-06-11
+
+"Truth & Trust": every claim the project makes — in docs, in tool output, in summary rows — is now
+either true or build-breaking.
+
 ### Added
 
 - **Saved searches everywhere.** The `saved_queries` table (CLI-only since v0.20) is now reachable
@@ -875,7 +880,8 @@ locally. Feedback welcome via [Discussions](../../discussions).
 
 ---
 
-[Unreleased]: https://github.com/harf-promo/indexa/compare/v0.20.1...HEAD
+[Unreleased]: https://github.com/harf-promo/indexa/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/harf-promo/indexa/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/harf-promo/indexa/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/harf-promo/indexa/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/harf-promo/indexa/compare/v0.18.0...v0.19.0
