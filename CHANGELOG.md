@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-06-11
+
+"The Ledger": Indexa asks instead of guessing — and remembers your answer.
+
 ### Added
 
 - **The Decision Ledger.** Indexa now records the judgment calls indexing wasn't confident enough
@@ -912,7 +916,8 @@ locally. Feedback welcome via [Discussions](../../discussions).
 
 ---
 
-[Unreleased]: https://github.com/harf-promo/indexa/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/harf-promo/indexa/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/harf-promo/indexa/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/harf-promo/indexa/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/harf-promo/indexa/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/harf-promo/indexa/compare/v0.19.0...v0.20.0
