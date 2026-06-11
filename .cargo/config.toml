@@ -1,0 +1,15 @@
+# Force `pcre2-sys` to statically link the vendored libpcre2 on every target rather
+# than dynamically linking a pkg-config system library (e.g. Homebrew's
+# /opt/homebrew/opt/pcre2/lib/libpcre2-8.0.dylib).
+#
+# A dynamically-linked Homebrew dylib is unusable in the distributed app: it is not
+# present on users' machines, and under the macOS hardened runtime, library
+# validation rejects it because its Team ID differs from the app's — crashing the
+# app at launch (DYLD "Library missing"). pcre2 reaches us via
+# crates/core -> hyperpolyglot -> pcre2 -> pcre2-sys.
+#
+# PCRE2_SYS_STATIC=1 makes pcre2-sys skip the pkg-config probe and compile the
+# vendored pcre2 source straight into the binary. `force = true` ensures it wins over
+# any inherited environment so CI and local builds are deterministic.
+[env]
+PCRE2_SYS_STATIC = { value = "1", force = true }
