@@ -1,14 +1,18 @@
 add_pack_paths
+answer_decision
 ask
 blast_radius
 browse_tree
 code_graph
 confirm_classification
 create_pack
+decision_history
 delete_pack
 delete_weight
 dependencies
+dismiss_decision
 export_pack
+get_decision
 get_pack
 get_stats
 get_summary
@@ -19,6 +23,7 @@ insights_languages
 insights_largest
 insights_stale
 list_classifications
+list_open_decisions
 list_packs
 list_saved_queries
 list_weights

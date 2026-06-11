@@ -9,6 +9,7 @@
 //! - [`summaries`] — hierarchical summary reads/writes and tree shaping.
 //! - [`queue`] — the background summarization queue.
 //! - [`classify`] — semantic-classification reads/writes (Smart classification).
+//! - [`decisions`] — Decision Ledger reads/writes (v0.22).
 //! - [`packs`] — Context Pack CRUD (v0.9).
 //! - [`weights`] — importance weight CRUD + search boost (v0.8).
 //! - [`insights`] — duplicate/stale/diff analysis (v0.10).
@@ -21,6 +22,7 @@ use std::path::{Path, PathBuf};
 mod ann;
 mod chunks;
 mod classify;
+mod decisions;
 mod edges;
 mod entries;
 mod insights;
@@ -47,9 +49,9 @@ pub use insights::{DuplicateCluster, LanguageStat, LargestEntry, StaleEntry, Wee
 pub use prune::OrphanCounts;
 pub use saved::SavedQuery;
 pub use types::{
-    ChunkRecord, ClassificationRecord, CodeGraph, CodeGraphEdge, CodeGraphNode, EdgeRecord,
-    FailedQueueItem, PackRecord, QueueItem, QueueStats, RegionSummary, RelatedFile, SearchHit,
-    SummaryRecord, TreeNode, WeightRecord,
+    ChunkRecord, ClassificationRecord, CodeGraph, CodeGraphEdge, CodeGraphNode, DecisionRecord,
+    EdgeRecord, FailedQueueItem, NewDecision, PackRecord, QueueItem, QueueStats, RegionSummary,
+    RelatedFile, SearchHit, SummaryRecord, TreeNode, WeightRecord,
 };
 
 // `abstract_from` is part of the public surface (used by `indexa_core::store::abstract_from`).

@@ -19,7 +19,7 @@ indexa serve                           # open local web UI\n\n\
 are individually scriptable.)",
     after_help = "Command groups:\n  \
 Core      index · ask · search · export · serve · status\n  \
-Manage    pack · weight · classify · saved · rm · prune\n  \
+Manage    pack · weight · classify · saved · rm · prune · review\n  \
 Analyze   insights · graph · related · report · map · describe · fingerprint · snapshot\n  \
 Pipeline  scan · deep · summarize · worker · watch   (the stages behind `index`)\n  \
 System    doctor · mcp · update"
@@ -216,6 +216,26 @@ pub enum Commands {
     Saved {
         #[command(subcommand)]
         action: SavedAction,
+    },
+
+    /// Review the questions Indexa asked — the Decision Ledger inbox.
+    ///
+    /// When indexing hits an uncertain judgment (a folder's category, a duplicate
+    /// cluster's canonical copy) it opens a question here instead of guessing
+    /// silently. Every answer is recorded with full history and can be reverted;
+    /// nothing is ever silently overridden.
+    #[command(after_help = "Examples:
+  indexa review list
+  indexa review show 12
+  indexa review answer 12 work
+  indexa review answer --type classification --under ~/Downloads --choose archive
+  indexa review history ~/Downloads/reports
+  indexa review revert 12
+  indexa review scan")]
+    #[command(display_order = 26)]
+    Review {
+        #[command(subcommand)]
+        action: ReviewAction,
     },
 
     /// Export/import a portable snapshot of the index's summaries, call graph, and weights.
@@ -806,6 +826,71 @@ pub enum SavedAction {
     },
 }
 
+/// Sub-commands for `indexa review`.
+#[derive(clap::Subcommand, Debug)]
+pub enum ReviewAction {
+    /// List open questions, highest priority first.
+    List {
+        /// Only questions of this type: classification or duplicate.
+        #[arg(long = "type", value_name = "TYPE")]
+        decision_type: Option<String>,
+    },
+    /// Show one question in full: rendering, raw evidence, and revision chain.
+    Show {
+        /// Question id (from `review list`).
+        id: i64,
+    },
+    /// Answer one question, or batch-answer with --type/--under/--choose.
+    Answer {
+        /// Question id (from `review list`).
+        #[arg(
+            required_unless_present = "under",
+            conflicts_with_all = ["decision_type", "under", "choose"]
+        )]
+        id: Option<i64>,
+        /// Option value to answer with, exactly as listed.
+        #[arg(required_unless_present = "under", conflicts_with = "under")]
+        choice: Option<String>,
+        /// Batch: answer questions of this type (classification or duplicate).
+        #[arg(long = "type", value_name = "TYPE", requires = "under")]
+        decision_type: Option<String>,
+        /// Batch: every open question whose subject is under this directory.
+        #[arg(
+            long,
+            value_name = "DIR",
+            requires = "decision_type",
+            requires = "choose"
+        )]
+        under: Option<String>,
+        /// Batch: the option value to answer each matched question with.
+        #[arg(long, value_name = "VALUE", requires = "under")]
+        choose: Option<String>,
+    },
+    /// Dismiss a question — it only returns if its evidence changes.
+    Dismiss {
+        /// Question id.
+        id: i64,
+    },
+    /// Show every decision recorded about a path, oldest first.
+    History {
+        /// The path the decisions are about.
+        path: String,
+    },
+    /// Restore an earlier answer by appending a new revision (never deletes).
+    Revert {
+        /// Id of the decided revision whose answer to restore.
+        id: i64,
+    },
+    /// Run the detectors now (duplicate clusters + crash-repair sweep).
+    Scan,
+    /// Remove dismissed/expired questions older than the horizon.
+    Gc {
+        /// Age horizon in days.
+        #[arg(long, default_value_t = 365)]
+        older_than_days: i64,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -919,6 +1004,73 @@ mod tests {
             Commands::Deep { dry_run, .. } => assert!(dry_run),
             _ => panic!("wrong command"),
         }
+    }
+
+    #[test]
+    fn cli_review_answer_single() {
+        let cli = Cli::try_parse_from(["indexa", "review", "answer", "12", "work"]).unwrap();
+        match cli.command {
+            Commands::Review {
+                action: ReviewAction::Answer { id, choice, .. },
+            } => {
+                assert_eq!(id, Some(12));
+                assert_eq!(choice.as_deref(), Some("work"));
+            }
+            _ => panic!("wrong command"),
+        }
+        // <choice> is mandatory alongside <id>.
+        assert!(Cli::try_parse_from(["indexa", "review", "answer", "12"]).is_err());
+    }
+
+    #[test]
+    fn cli_review_answer_batch_flags() {
+        let cli = Cli::try_parse_from([
+            "indexa",
+            "review",
+            "answer",
+            "--type",
+            "classification",
+            "--under",
+            "/tmp",
+            "--choose",
+            "archive",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Review {
+                action:
+                    ReviewAction::Answer {
+                        id,
+                        decision_type,
+                        under,
+                        choose,
+                        ..
+                    },
+            } => {
+                assert!(id.is_none());
+                assert_eq!(decision_type.as_deref(), Some("classification"));
+                assert_eq!(under.as_deref(), Some("/tmp"));
+                assert_eq!(choose.as_deref(), Some("archive"));
+            }
+            _ => panic!("wrong command"),
+        }
+        // --under without --type/--choose is incomplete.
+        assert!(Cli::try_parse_from(["indexa", "review", "answer", "--under", "/tmp"]).is_err());
+        // Positional <id> and the batch flags are mutually exclusive.
+        assert!(Cli::try_parse_from([
+            "indexa",
+            "review",
+            "answer",
+            "12",
+            "work",
+            "--under",
+            "/tmp",
+            "--type",
+            "classification",
+            "--choose",
+            "archive",
+        ])
+        .is_err());
     }
 
     #[test]

@@ -1,7 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
 use indexa_cli::{
-    Cli, Commands, InsightsAction, PackAction, SavedAction, SnapshotAction, WeightAction,
+    Cli, Commands, InsightsAction, PackAction, ReviewAction, SavedAction, SnapshotAction,
+    WeightAction,
 };
 use indexa_core::config;
 use tracing_subscriber::prelude::*;
@@ -156,6 +157,22 @@ async fn main() -> Result<()> {
             SavedAction::Run { name, json } => commands::cmd_saved_run(name, json, &cfg).await,
             SavedAction::Rm { name } => commands::cmd_saved_rm(name).await,
         },
+        Commands::Review { action } => match action {
+            ReviewAction::List { decision_type } => commands::cmd_review_list(decision_type).await,
+            ReviewAction::Show { id } => commands::cmd_review_show(id).await,
+            ReviewAction::Answer {
+                id,
+                choice,
+                decision_type,
+                under,
+                choose,
+            } => commands::cmd_review_answer(id, choice, decision_type, under, choose).await,
+            ReviewAction::Dismiss { id } => commands::cmd_review_dismiss(id).await,
+            ReviewAction::History { path } => commands::cmd_review_history(path).await,
+            ReviewAction::Revert { id } => commands::cmd_review_revert(id).await,
+            ReviewAction::Scan => commands::cmd_review_scan(&cfg).await,
+            ReviewAction::Gc { older_than_days } => commands::cmd_review_gc(older_than_days).await,
+        },
         Commands::Graph {
             path,
             limit,
@@ -229,7 +246,9 @@ async fn main() -> Result<()> {
             chunks,
         } => commands::cmd_doctor(profile, files, chunks).await,
         Commands::Fingerprint { paths } => commands::cmd_fingerprint(paths).await,
-        Commands::Classify { paths, category } => commands::cmd_classify(paths, category).await,
+        Commands::Classify { paths, category } => {
+            commands::cmd_classify(paths, category, &cfg).await
+        }
         Commands::Update { check, yes, pin } => commands::cmd_update(check, yes, pin).await,
     }
 }

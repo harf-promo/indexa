@@ -32,12 +32,12 @@ function toggleTheme() {
 }
 
 /* ── Navigation ──
-   'tree' | 'chat' | 'map'  → workspace views (in-place toggle)
-   'settings' | 'jobs'      → drawers opened over the workspace
+   'tree' | 'chat' | 'map'            → workspace views (in-place toggle)
+   'settings' | 'jobs' | 'review'     → drawers opened over the workspace
    Single entry point so every existing caller (showSummary→'tree', doAsk→'chat',
    fireJob→'jobs', the pill, the gear) keeps working. */
 function switchTab(tab) {
-  if (tab === 'settings' || tab === 'jobs') { openDrawer(tab); return; }
+  if (tab === 'settings' || tab === 'jobs' || tab === 'review') { openDrawer(tab); return; }
 
   currentView = tab;
   currentTab = tab;
@@ -75,7 +75,7 @@ function setBackgroundInert(on) {
 }
 
 function anyDrawerOpen() {
-  return ['settings', 'jobs'].some(function(n) {
+  return ['settings', 'jobs', 'review'].some(function(n) {
     const d = document.getElementById('panel-' + n);
     return d && d.classList.contains('open');
   });
@@ -99,7 +99,7 @@ function openDrawer(name) {
   // Capture "was a drawer already open" BEFORE we hide any sibling, so switching drawers
   // keeps the original opener and doesn't re-inert (which is already on).
   const wasOpen = anyDrawerOpen();
-  ['settings', 'jobs'].forEach(function(n) {
+  ['settings', 'jobs', 'review'].forEach(function(n) {
     if (n !== name) {
       const other = document.getElementById('panel-' + n);
       if (other) other.classList.remove('open');
@@ -118,6 +118,7 @@ function openDrawer(name) {
     const pill = document.getElementById('jobs-pill');
     if (pill) pill.hidden = true;
   }
+  if (name === 'review') loadReview();
   // Move focus into the drawer (first focusable — the close button).
   const target = firstFocusable(drawer);
   if (target) target.focus();
@@ -144,7 +145,7 @@ function closeDrawer(name) {
 /* Esc closes whichever drawer is open. */
 document.addEventListener('keydown', function(e) {
   if (e.key !== 'Escape') return;
-  ['settings','jobs'].forEach(function(name) {
+  ['settings','jobs','review'].forEach(function(name) {
     const d = document.getElementById('panel-' + name);
     if (d && d.classList.contains('open')) closeDrawer(name);
   });

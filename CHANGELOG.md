@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The Decision Ledger.** Indexa now records the judgment calls indexing wasn't confident enough
+  to make alone — and asks you, instead of guessing. Uncertain folder classifications (Tier-0
+  confidence in the 60–80% band) and duplicate clusters ("which copy is canonical?") become
+  **questions in a review inbox**; your answers are recorded durably with provenance, applied
+  immediately (classification confirmed; non-canonical copies down-weighted to 0 in search,
+  reversibly), and **remembered as revision chains**: when a folder's contents later change enough
+  to contradict your answer, Indexa **re-asks** — quoting what you said and when — and never
+  silently overrides you. Reach it from all three surfaces:
+  - **CLI** — `indexa review list / show / answer / dismiss / history / revert / scan / gc`
+    (answer by option number: `indexa review answer 12 2`); batch answers with
+    `--type … --under <dir> --choose …`.
+  - **Web** — a review drawer (envelope icon, live count badge) where questions are cards with
+    one-click answers.
+  - **MCP** — 5 new tools (`list_open_decisions` / `get_decision` / `answer_decision` /
+    `dismiss_decision` / `decision_history`, **39 tools** total): an agent can relay Indexa's
+    questions to you mid-session and record your answer.
+  Question fatigue is engineered against: confident automatic judgments stay out of the ledger,
+  open questions are capped (`[review] max_open`, default 50; `max_new_per_scan`, 20), dismissal
+  is sticky (a dismissed question returns only when its evidence changes), questions whose
+  evidence leaves the index expire automatically, and the budget is spent on your
+  highest-priority questions first (re-asks of your own answers outrank fresh suggestions).
+  Everything is local — the ledger is your index learning your judgment, on your machine.
+- Pre-ledger classification answers (confirm/ignore) are imported automatically as decided
+  ledger revisions the first time `classify` runs, so re-asking works for them too.
+
+### Changed
+
+- The MCP server crate is split into family modules (retrieval / graph / packs / curation /
+  insights / admin / review) behind golden contract tests — no tool behavior changed.
+
 ## [0.21.0] — 2026-06-11
 
 "Truth & Trust": every claim the project makes — in docs, in tool output, in summary rows — is now

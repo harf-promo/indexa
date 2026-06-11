@@ -1,4 +1,5 @@
 pub mod config;
+pub mod decisions;
 pub mod fingerprint;
 pub mod models_catalog;
 pub mod resource;

@@ -34,6 +34,37 @@ pub struct Config {
     /// Scan-time ignore settings (`.gitignore` respect + extra patterns).
     #[serde(default)]
     pub scan: ScanConfig,
+    /// Decision-Ledger review settings (v0.22): when uncertainty becomes a question.
+    #[serde(default)]
+    pub review: ReviewConfig,
+}
+
+// ── Review (Decision Ledger) ──────────────────────────────────────────────────
+
+/// Knobs for the Decision Ledger's question flow. Confident auto judgments stay
+/// out of the ledger entirely (anti-bloat); the caps are question-fatigue
+/// controls so a whole-disk pass can never flood the inbox.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewConfig {
+    /// Auto judgments with confidence below this are recorded as open questions
+    /// instead of being silently applied (the band is bounded below by
+    /// `decisions::detectors::UNCERTAINTY_FLOOR`).
+    pub auto_record_below: f32,
+    /// Detectors stop opening new questions once this many are already open.
+    pub max_open: usize,
+    /// Max questions a single scan/classify pass may open.
+    pub max_new_per_scan: usize,
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            auto_record_below: 0.8,
+            max_open: 50,
+            max_new_per_scan: 20,
+        }
+    }
 }
 
 // ── Scan settings ─────────────────────────────────────────────────────────────
