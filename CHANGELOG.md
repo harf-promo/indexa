@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Scoped call resolution.** The D2 call graph resolves each call through evidence tiers —
+  **same-file** (an intra-file helper named like a popular symbol no longer fans out repo-wide),
+  **import-linked** (relative JS/TS imports, Rust `crate::`/`super::` paths, dotted Python
+  modules), **same-dir** (proximity), then labeled **bare-name** fallback — at query time, on
+  existing indexes, no re-index needed. `who_calls` groups callers by tier; `code_graph`,
+  `blast_radius`, `indexa graph`, and `related_files` report scoped vs bare counts, and the
+  bare-name caveat now applies only to the bare remainder. `strict` drops the bare tier entirely.
+  Heuristic import-string matching, not semantic analysis — what does and doesn't resolve is
+  tabled in [methodology](docs/methodology.md). On the test fixture: 11 bare edges → 6 scoped,
+  zero true edges lost.
+- **Decision Ledger phase 3.** Three new question types: **summary drift** (a regeneration of
+  unchanged content that disagrees with the old summary — keep new or restore old, both abstracts
+  quoted), **language fallback** (files whose chunks lost language detection), and **symbol
+  ambiguity** ("which definition of `parse` is authoritative?") — answering the last one now
+  actually narrows `who_calls`/`blast_radius` to the pinned definition. The web review drawer
+  gains **time-travel**: per-question history chains with one-click *restore this answer*
+  (shared `revert_decision` core with the CLI).
+- **Experimental Linux desktop build** — AppImage + .deb artifacts on releases (unsigned, no
+  auto-update yet; the job cannot block the CLI release).
+- `indexa status --deep`-era docs caught up: ROADMAP records today's five releases; USAGE.md
+  explains why `report` (ask digest) and `insights` (index analytics) both exist.
+
 ## [0.24.0] — 2026-06-11
 
 "Always Current": the index never lies about freshness.

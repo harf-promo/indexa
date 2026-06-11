@@ -195,6 +195,43 @@ impl Store {
         Ok(id)
     }
 
+    /// Files whose chunks carry NO language tag, with their chunk counts,
+    /// largest first. Feeds the ledger's language-fallback detector: a file
+    /// with several untagged chunks parsed as plain text even though its
+    /// extension suggests code (the extension filter happens in Rust — SQL
+    /// can't map extensions to languages).
+    pub fn unlabeled_chunk_files(
+        &self,
+        min_chunks: i64,
+        limit: usize,
+    ) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT entry_path, COUNT(*) AS n FROM chunks
+              WHERE language IS NULL
+              GROUP BY entry_path
+             HAVING COUNT(*) >= ?1
+              ORDER BY n DESC, entry_path
+              LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![min_chunks, limit as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Tag every chunk of `entry_path` with `language` (the ledger's language
+    /// answer projection). Idempotent; returns rows updated. A later re-deep
+    /// rewrites the chunks (language NULL again) — the detector re-applies the
+    /// standing answer instead of re-asking.
+    pub fn set_chunks_language(&mut self, entry_path: &str, language: &str) -> Result<usize> {
+        self.conn
+            .execute(
+                "UPDATE chunks SET language = ?2 WHERE entry_path = ?1",
+                params![entry_path, language],
+            )
+            .map_err(Into::into)
+    }
+
     /// Text of the first chunk for a given file path (used as description input).
     pub fn first_chunk_text(&self, entry_path: &str) -> Result<Option<String>> {
         let text: Option<String> = self

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use indexa_core::store::Store;
+use indexa_core::store::{ResolutionTier, Store};
 
 use super::helpers::require_index_db;
 
@@ -48,7 +48,7 @@ pub(crate) async fn cmd_graph(
             return Ok(());
         }
         println!(
-            "Found {} dependency cycle(s) under \"{scope}\" (bare-name matched — verify):",
+            "Found {} dependency cycle(s) under \"{scope}\" (heuristic call resolution — verify):",
             found.len()
         );
         for (i, cycle) in found.iter().enumerate() {
@@ -60,13 +60,14 @@ pub(crate) async fn cmd_graph(
         return Ok(());
     }
 
-    let graph = store.code_graph(&scope, limit, strict)?;
+    let scoped = store.code_graph_scoped(&scope, limit, strict)?;
+    let graph = &scoped.graph;
 
     if graph.edges.is_empty() {
         println!("No call edges under \"{scope}\".");
         if strict {
             println!(
-                "(strict mode — only unambiguous, uniquely-defined symbols. Try without --strict.)"
+                "(strict mode — only scope-resolved edges (same-dir/import). Try without --strict.)"
             );
         }
         println!("Run `indexa deep {path}` on source files first (Rust/Python/JS/TS/Go/Java).");
@@ -75,7 +76,7 @@ pub(crate) async fn cmd_graph(
 
     println!(
         "Call graph under \"{scope}\" ({} mode): {} files, {} edges{}",
-        if strict { "strict" } else { "fuzzy" },
+        if strict { "strict" } else { "scoped" },
         graph.nodes.len(),
         graph.edges.len(),
         if graph.truncated {
@@ -111,21 +112,46 @@ pub(crate) async fn cmd_graph(
     println!();
 
     println!("Heaviest call edges:");
-    for e in &graph.edges {
+    for (e, tier) in graph.edges.iter().zip(&scoped.edge_tiers) {
         println!(
-            "{:>3}  {} → {}",
+            "{:>3}  {} → {}{}",
             e.weight,
             basename(&e.from),
-            basename(&e.to)
+            basename(&e.to),
+            // Only the bare remainder is approximate — flag it inline.
+            if *tier == ResolutionTier::Bare {
+                "  (bare)"
+            } else {
+                ""
+            }
         );
     }
     println!();
+
+    // Resolution-tier summary; the bare-name caveat applies ONLY to the bare remainder.
+    let count = |t: ResolutionTier| scoped.edge_tiers.iter().filter(|x| **x == t).count();
+    let (same_dir, import, bare) = (
+        count(ResolutionTier::SameDir),
+        count(ResolutionTier::Import),
+        count(ResolutionTier::Bare),
+    );
+    println!(
+        "edges: {} scoped ({same_dir} same-dir, {import} import-resolved) + {bare} bare-name",
+        same_dir + import
+    );
     println!(
         "(edge weight = number of shared call→define symbols; centrality = weighted PageRank)"
     );
-    println!(
-        "(approximate: {} — see docs/methodology.md)",
-        indexa_core::store::BARE_NAME_CAVEAT
-    );
+    if bare > 0 {
+        println!(
+            "({bare} bare-name edge(s) are approximate: {} — see docs/methodology.md)",
+            indexa_core::store::BARE_NAME_CAVEAT
+        );
+    } else {
+        println!(
+            "(no bare-name matches in this view; same-dir edges are proximity-matched, \
+same-file/import are structural)"
+        );
+    }
     Ok(())
 }

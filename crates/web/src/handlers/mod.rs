@@ -59,6 +59,7 @@ pub(crate) use providers::api_providers_status;
 pub(crate) use queue::{api_queue_failed, api_queue_retry, api_queue_stats};
 pub(crate) use review::{
     api_review_answer, api_review_count, api_review_dismiss, api_review_history, api_review_list,
+    api_review_revert,
 };
 pub(crate) use saved::{api_saved_delete, api_saved_list, api_saved_set};
 pub(crate) use stats::{api_map, api_map_treemap, api_roots, api_search, api_stats};

@@ -1,6 +1,7 @@
 //! Code-graph tools: `dependencies`, `who_imports`, `who_calls`,
 //! `blast_radius`, `code_graph`, and `related_files`.
 
+use indexa_core::store::ResolutionTier;
 use rmcp::{
     handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router, ErrorData,
 };
@@ -31,8 +32,8 @@ pub struct WhoCallsParams {
 pub struct BlastRadiusParams {
     /// Bare function or method name whose blast radius to compute.
     pub symbol: String,
-    /// Strict: on the transitive hop, follow only symbols defined in exactly one file
-    /// (fewer false positives from common names). Default false (broader match).
+    /// Strict: drop the bare-name fallback on the transitive hop — keep only callers
+    /// whose call resolves (same-dir/import) to a direct caller. Default false.
     #[serde(default)]
     pub strict: bool,
 }
@@ -53,8 +54,8 @@ pub struct CodeGraphParams {
     /// Max edges to return, heaviest first (default 200).
     #[serde(default)]
     pub limit: Option<usize>,
-    /// Strict: link calls only to symbols defined in exactly one file, dropping
-    /// name-collision false positives. Default false (broader bare-name match).
+    /// Strict: drop the bare-name fallback tier — keep only edges whose call resolved
+    /// via same-dir or import matching. Default false (bare edges kept, labeled).
     #[serde(default)]
     pub strict: bool,
 }
@@ -165,85 +166,139 @@ impl IndexaMcp {
         Ok(ok_text(format!("{header}\n{body}")))
     }
 
-    /// D2 — which files call a given function or method name.
+    /// D2 — which files call a given function or method name, grouped by how each
+    /// call resolved (same-file / same-dir / import / bare).
     #[tool(
-        description = "D2 code-graph: which indexed files contain a call to the given function or method name (bare, unqualified — e.g. `parse`, `render`, `connect`). Requires `indexa deep` to have been run on source files. Returns up to 100 results."
+        description = "D2 code-graph: which indexed files contain a call to the given function or method name (bare, unqualified — e.g. `parse`, `render`, `connect`). Each caller is resolved against the name's definition sites (same-file → same-dir → import-matched → bare-name fallback) and the output is grouped by that tier; only the bare group is approximate. Requires `indexa deep` to have been run on source files. Returns up to 100 results."
     )]
     pub(crate) async fn who_calls(
         &self,
         params: Parameters<WhoCallsParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let store = self.store()?;
-        let files = store.who_calls(&params.0.symbol, 100).map_err(mcp_err)?;
-        if files.is_empty() {
+        let resolved = store
+            .who_calls_resolved(&params.0.symbol, 100)
+            .map_err(mcp_err)?;
+        if resolved.is_empty() {
             return Ok(ok_text(format!(
                 "No indexed file calls '{}'. Run `indexa deep` on source files first.",
                 params.0.symbol
             )));
         }
-        let total = files.len();
-        let body = files
-            .iter()
-            .map(|p| format!("📄 {p}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        // Honest ambiguity note: bare-name matching can't disambiguate a name defined in
-        // several files, so the caller list may conflate references to different definitions.
+        let total = resolved.len();
+        // Group by tier, best first. Resolved tiers show their target definition file(s);
+        // an arrow-less entry means the caller IS the definer (same-file).
+        let mut out = format!("{total} file(s) call '{}':", params.0.symbol);
+        let groups: &[(ResolutionTier, &str)] = &[
+            (
+                ResolutionTier::SameFile,
+                "same-file — call their own definition",
+            ),
+            (
+                ResolutionTier::SameDir,
+                "same-dir — resolved to a definition beside the caller",
+            ),
+            (
+                ResolutionTier::Import,
+                "import-resolved — definition matched an import",
+            ),
+            (
+                ResolutionTier::Bare,
+                "bare-name — unresolved, may target any definer",
+            ),
+        ];
+        let mut bare_count = 0usize;
+        for (tier, label) in groups {
+            let members: Vec<_> = resolved.iter().filter(|r| r.tier == *tier).collect();
+            if members.is_empty() {
+                continue;
+            }
+            if *tier == ResolutionTier::Bare {
+                bare_count = members.len();
+            }
+            out.push_str(&format!("\n\n{label} ({}):", members.len()));
+            for m in members {
+                if m.targets.is_empty() || m.targets == [m.path.clone()] {
+                    out.push_str(&format!("\n📄 {}", m.path));
+                } else {
+                    out.push_str(&format!("\n📄 {} → {}", m.path, m.targets.join(", ")));
+                }
+            }
+        }
+        // The ambiguity caveat applies ONLY to the bare remainder.
         let defs = store.defines_count(&params.0.symbol).unwrap_or(0);
-        let note = if defs > 1 {
-            format!(
-                "\n\n⚠ '{}' is defined in {defs} files — callers above may target any of them \
-                 (bare-name match, no import resolution).",
+        if bare_count > 0 && defs > 1 {
+            out.push_str(&format!(
+                "\n\n⚠ '{}' is defined in {defs} files — the bare-name callers above may \
+                 target any of them.",
                 params.0.symbol
-            )
-        } else {
-            String::new()
-        };
-        Ok(ok_text(format!(
-            "{total} file(s) call '{}':\n{body}{note}",
-            params.0.symbol
-        )))
+            ));
+        }
+        Ok(ok_text(out))
     }
 
-    /// D2 — 1-hop blast radius for a symbol: direct callers and transitive callers.
+    /// D2 — 1-hop blast radius for a symbol: direct callers and transitive callers,
+    /// with the transitive hop resolved (scoped) where possible.
     #[tool(
-        description = "D2 code-graph: compute the blast radius of changing a function or method — returns the direct callers plus files that call any symbol defined in those callers (1-hop transitive). Use to answer 'what breaks if I change X?'. Set `strict: true` to follow only uniquely-defined symbols on the transitive hop (fewer false positives from common names). Returns up to 200 results."
+        description = "D2 code-graph: compute the blast radius of changing a function or method — returns the direct callers plus files whose call to one of those callers' exported symbols resolves back to that caller (same-dir/import resolution; bare-name matches are kept as a labeled fallback). Use to answer 'what breaks if I change X?'. Set `strict: true` to drop the bare-name fallback on the transitive hop. Returns up to 200 results."
     )]
     pub(crate) async fn blast_radius(
         &self,
         params: Parameters<BlastRadiusParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let store = self.store()?;
-        let files = store
-            .blast_radius(&params.0.symbol, 200, params.0.strict)
+        let radius = store
+            .blast_radius_resolved(&params.0.symbol, 200, params.0.strict)
             .map_err(mcp_err)?;
-        if files.is_empty() {
+        if radius.files.is_empty() {
             return Ok(ok_text(format!(
                 "No blast radius found for '{}'. Run `indexa deep` on source files first.",
                 params.0.symbol
             )));
         }
-        let total = files.len();
-        let body = files
+        let total = radius.files.len();
+        let body = radius
+            .files
             .iter()
             .map(|p| format!("📄 {p}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let mode = if params.0.strict {
-            "strict transitive hop"
-        } else {
-            "fuzzy — consider strict:true"
-        };
-        Ok(ok_text(format!(
-            "Blast radius of '{}' ({total} file(s)):\n{body}\n\n⚠ Approximate ({mode}): {}.",
+        let mut out = format!(
+            "Blast radius of '{}' ({total} file(s)):\n{body}\n\n\
+             direct callers: {} · transitive: {} resolution-confirmed + {} bare-name{}",
             params.0.symbol,
-            indexa_core::store::BARE_NAME_CAVEAT
-        )))
+            radius.direct,
+            radius.scoped_transitive,
+            radius.bare_transitive,
+            if params.0.strict {
+                " (strict: bare fallback disabled)"
+            } else {
+                ""
+            }
+        );
+        // Caveats apply only to the name-matched parts: the bare transitive remainder,
+        // and the direct set when the input name has several definitions.
+        if radius.bare_transitive > 0 {
+            out.push_str(&format!(
+                "\n⚠ {} transitive file(s) are approximate: {}.",
+                radius.bare_transitive,
+                indexa_core::store::BARE_NAME_CAVEAT
+            ));
+        }
+        let defs = store.defines_count(&params.0.symbol).unwrap_or(0);
+        if defs > 1 {
+            out.push_str(&format!(
+                "\n⚠ '{}' is defined in {defs} files — direct callers are name-matched and \
+                 may target any of them (see who_calls for per-caller resolution).",
+                params.0.symbol
+            ));
+        }
+        Ok(ok_text(out))
     }
 
     /// File-to-file call graph for a scope (the v0.18 signature graph, as text).
     #[tool(
-        description = "Build the file-to-file call graph for files under a path scope: an edge 'A → B' means file A calls a function that file B defines. Returns the heaviest edges (most shared symbols) as a 'caller → callee [weight]' list, the most central hub files by weighted PageRank (scored 0–100), plus node/edge counts. Matching is on bare symbol names (case-sensitive); set `strict: true` to keep only uniquely-defined symbols (drops name-collision false positives). Languages: Rust, Python, JS, TS, Go, Java."
+        description = "Build the file-to-file call graph for files under a path scope: an edge 'A → B' means file A calls a function that file B defines. Each call is resolved against the symbol's definition sites (same-file → same-dir → import-matched); unresolvable calls fall back to bare-name matching and are labeled. Returns the heaviest edges (most shared symbols) as a 'caller → callee [weight]' list, the most central hub files by weighted PageRank (scored 0–100), plus node/edge/tier counts. Set `strict: true` to drop the bare-name fallback entirely. Languages: Rust, Python, JS, TS, Go, Java."
     )]
     pub(crate) async fn code_graph(
         &self,
@@ -256,7 +311,10 @@ impl IndexaMcp {
         } = params.0;
         let limit = limit.unwrap_or(200).min(2000);
         let store = self.store()?;
-        let graph = store.code_graph(&scope, limit, strict).map_err(mcp_err)?;
+        let scoped = store
+            .code_graph_scoped(&scope, limit, strict)
+            .map_err(mcp_err)?;
+        let graph = &scoped.graph;
         if graph.edges.is_empty() {
             return Ok(ok_text(format!(
                 "No call edges under '{scope}'. Run `indexa deep` on source files first."
@@ -265,7 +323,8 @@ impl IndexaMcp {
         let body = graph
             .edges
             .iter()
-            .map(|e| {
+            .zip(&scoped.edge_tiers)
+            .map(|(e, tier)| {
                 let from = std::path::Path::new(&e.from)
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -274,7 +333,13 @@ impl IndexaMcp {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| e.to.clone());
-                format!("{from} → {to} [{}]", e.weight)
+                // Only the bare remainder is approximate — flag it inline.
+                let mark = if *tier == ResolutionTier::Bare {
+                    " (bare)"
+                } else {
+                    ""
+                };
+                format!("{from} → {to} [{}]{mark}", e.weight)
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -313,19 +378,37 @@ impl IndexaMcp {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // Tier summary; the bare-name caveat applies ONLY to the bare remainder.
+        let count = |t: ResolutionTier| scoped.edge_tiers.iter().filter(|x| **x == t).count();
+        let (same_dir, import, bare) = (
+            count(ResolutionTier::SameDir),
+            count(ResolutionTier::Import),
+            count(ResolutionTier::Bare),
+        );
+        let caveat = if bare > 0 {
+            format!(
+                "\n\n⚠ {bare} bare-name edge(s) are approximate: {}.",
+                indexa_core::store::BARE_NAME_CAVEAT
+            )
+        } else {
+            "\n\nNo bare-name matches in this view (same-dir edges are proximity-matched; \
+             same-file/import are structural)."
+                .to_owned()
+        };
         Ok(ok_text(format!(
-            "Call graph under '{scope}': {} files, {} edges{trunc}\n\n\
+            "Call graph under '{scope}': {} files, {} edges{trunc}\n\
+             edges: {} scoped ({same_dir} same-dir, {import} import-resolved) + {bare} bare-name\n\n\
              Most central files (centrality 0–100):\n{central}\n\n\
-             Heaviest edges:\n{body}\n\n⚠ Approximate: {}.",
+             Heaviest edges:\n{body}{caveat}",
             graph.nodes.len(),
             graph.edges.len(),
-            indexa_core::store::BARE_NAME_CAVEAT
+            same_dir + import,
         )))
     }
 
-    /// Files related to a file through the call graph.
+    /// Files related to a file through the call graph, with resolution tiers.
     #[tool(
-        description = "Find files related to a given file through the call graph: files it calls into, or files that call into it, ranked by shared symbol count. Use to discover what to read alongside a file. Bare-name matched (approximate)."
+        description = "Find files related to a given file through the call graph: files it calls into, or files that call into it, ranked by shared symbol count. Each relation is resolved (same-dir/import) where possible; unresolvable links fall back to bare-name matching and are labeled 'bare' (approximate). Use to discover what to read alongside a file."
     )]
     pub(crate) async fn related_files(
         &self,
@@ -334,7 +417,7 @@ impl IndexaMcp {
         let limit = params.0.limit.unwrap_or(15).clamp(1, 100);
         let store = self.store()?;
         let related = store
-            .find_related_files(&params.0.path, limit)
+            .find_related_files_resolved(&params.0.path, limit)
             .map_err(mcp_err)?;
         if related.is_empty() {
             return Ok(ok_text(format!(
@@ -342,13 +425,23 @@ impl IndexaMcp {
                 params.0.path
             )));
         }
+        let bare = related
+            .iter()
+            .filter(|r| r.tier == ResolutionTier::Bare)
+            .count();
         let body = related
             .iter()
-            .map(|r| format!("{} (shared: {})", r.path, r.shared))
+            .map(|r| format!("{} (shared: {}, {})", r.path, r.shared, r.tier.as_str()))
             .collect::<Vec<_>>()
             .join("\n");
+        // Caveat only when a bare-tier relation is actually present.
+        let note = if bare > 0 {
+            format!("\n\n⚠ {bare} relation(s) are bare-name matched (approximate).")
+        } else {
+            String::new()
+        };
         Ok(ok_text(format!(
-            "{} file(s) related to '{}':\n{body}",
+            "{} file(s) related to '{}':\n{body}{note}",
             related.len(),
             params.0.path
         )))

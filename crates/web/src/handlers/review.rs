@@ -5,6 +5,7 @@
 //!   POST /api/review/answer   — answer an open question { id, chosen }
 //!   POST /api/review/dismiss  — dismiss an open question { id }
 //!   GET  /api/review/history  — full revision chain for a subject { subject, type? }
+//!   POST /api/review/revert   — restore a superseded decided revision's answer { id }
 //!   GET  /api/review/count    — open-question count (polled for the topbar badge)
 //!
 //! Answers route through `decide_and_apply` — the same single entry point the
@@ -17,7 +18,9 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use indexa_core::decisions::{decide_and_apply, templates::render_question, DecisionType};
+use indexa_core::decisions::{
+    decide_and_apply, revert_decision, templates::render_question, DecisionType,
+};
 use indexa_core::store::DecisionRecord;
 use serde::Deserialize;
 
@@ -39,6 +42,11 @@ pub(crate) struct AnswerBody {
 
 #[derive(Deserialize)]
 pub(crate) struct DismissBody {
+    id: i64,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RevertBody {
     id: i64,
 }
 
@@ -133,6 +141,31 @@ pub(crate) async fn api_review_dismiss(
     let mut store = state.store.lock().await;
     match store.dismiss_decision(body.id) {
         Ok(()) => Json(serde_json::json!({ "dismissed": true })).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, format!("{e:#}")),
+    }
+}
+
+/// Restore a superseded decided revision's answer (the "Restore this answer"
+/// button in the history chain). Routes through the same
+/// `core::decisions::revert_decision` the CLI uses, so the append-only chain
+/// rules and projection contract can't drift between surfaces.
+pub(crate) async fn api_review_revert(
+    State(state): State<AppState>,
+    Json(body): Json<RevertBody>,
+) -> Response {
+    let mut store = state.store.lock().await;
+    match revert_decision(&mut store, body.id) {
+        Ok(out) => Json(serde_json::json!({
+            "reverted": true,
+            "new_id": out.new_id,
+            "superseded_id": out.superseded_id,
+            "subject": out.subject,
+            "chosen": out.chosen,
+            "effects": out.effects,
+        }))
+        .into_response(),
+        // Unknown id, a non-decided row, or a blocking open question — all
+        // client-input shaped, never a 500.
         Err(e) => err_json(StatusCode::BAD_REQUEST, format!("{e:#}")),
     }
 }

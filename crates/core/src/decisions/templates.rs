@@ -16,6 +16,9 @@ use super::DecisionType;
 pub struct RenderedQuestion {
     pub id: i64,
     pub decision_type: String,
+    /// The stable ledger key (path or symbol) — the web UI's history view
+    /// queries `/api/review/history` by it.
+    pub subject: String,
     pub title: String,
     pub detail: String,
     /// `(value, label)` pairs: `value` is what to pass back as the answer.
@@ -36,6 +39,9 @@ pub fn render_question(d: &DecisionRecord) -> RenderedQuestion {
         Some(DecisionType::Classification) => classification_text(d, &params),
         Some(DecisionType::Duplicate) => duplicate_text(d, &params, &option_values),
         Some(DecisionType::Archive) => archive_text(d, &params),
+        Some(DecisionType::SummaryDrift) => summary_drift_text(d, &params),
+        Some(DecisionType::Language) => language_text(d, &params),
+        Some(DecisionType::SymbolAmbiguity) => symbol_ambiguity_text(d, &params, &option_values),
         None => (
             format!("{}: {}", d.decision_type, d.subject),
             "This question was recorded by a newer indexa — update to see it properly.".to_owned(),
@@ -46,6 +52,7 @@ pub fn render_question(d: &DecisionRecord) -> RenderedQuestion {
     RenderedQuestion {
         id: d.id,
         decision_type: d.decision_type.clone(),
+        subject: d.subject.clone(),
         title,
         detail,
         options: option_values
@@ -151,6 +158,69 @@ fn archive_text(d: &DecisionRecord, params: &serde_json::Value) -> (String, Stri
     (title, detail)
 }
 
+/// Summary-drift detail quotes BOTH L0 abstracts, so the user can pick
+/// new-vs-old without leaving the inbox to read either summary.
+fn summary_drift_text(d: &DecisionRecord, params: &serde_json::Value) -> (String, String) {
+    let s = |key: &str| params.get(key).and_then(|v| v.as_str()).unwrap_or("?");
+    let cosine = params.get("cosine").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let title = format!(
+        "{} re-summarized — the new summary disagrees with the old",
+        d.subject
+    );
+    let detail = format!(
+        "The content is unchanged, but the regenerated summary only ~{:.0}% agrees with \
+         the previous one. Old ({}): “{}” — New ({}): “{}”. Keep the new wording or \
+         restore the old?",
+        cosine * 100.0,
+        s("old_model"),
+        s("old_l0"),
+        s("new_model"),
+        s("new_l0"),
+    );
+    (title, detail)
+}
+
+fn language_text(d: &DecisionRecord, params: &serde_json::Value) -> (String, String) {
+    let lang = params
+        .get("language")
+        .and_then(|v| v.as_str())
+        .or(d.auto_value.as_deref())
+        .unwrap_or("?");
+    let chunks = params.get("chunks").and_then(|v| v.as_i64()).unwrap_or(0);
+    let title = format!("{} looks like {lang} — confirm its language?", d.subject);
+    let detail = format!(
+        "Its {chunks} chunk(s) carry no language tag (no tree-sitter grammar for this \
+         file type — the {lang} guess comes from the extension). Confirming tags the \
+         chunks for filters and stats; ignore leaves them untagged."
+    );
+    (title, detail)
+}
+
+fn symbol_ambiguity_text(
+    d: &DecisionRecord,
+    params: &serde_json::Value,
+    option_values: &[String],
+) -> (String, String) {
+    let definers = params
+        .get("definers")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        // Fall back to the options minus `all`.
+        .unwrap_or_else(|| option_values.len().saturating_sub(1));
+    let callers = params.get("callers").and_then(|v| v.as_i64()).unwrap_or(0);
+    let title = format!(
+        "'{}' is defined in {definers} files — which definition is authoritative?",
+        d.subject
+    );
+    let detail = format!(
+        "The call graph matches bare names, so {callers} calling file(s) can't be told \
+         apart between these definitions. Pick the file that owns '{}' (graph lookups \
+         will prefer it), or choose all to keep every definition equally valid.",
+        d.subject
+    );
+    (title, detail)
+}
+
 /// Human label for an option value. Path/category values label themselves;
 /// the system's own suggestion is marked so the default choice is visible
 /// among otherwise identically-styled options.
@@ -166,6 +236,15 @@ fn option_label(ty: Option<DecisionType>, value: &str, suggested: Option<&str>) 
         (Some(DecisionType::Archive), "keep_active") => {
             "Keep active (ask again if it stays untouched)".to_owned()
         }
+        (Some(DecisionType::SummaryDrift), "keep_new") => "Keep the new summary".to_owned(),
+        (Some(DecisionType::SummaryDrift), "restore_old") => {
+            "Restore the previous summary (clears its stored embedding until the next \
+             re-summarize — dense search skips the file meanwhile)"
+                .to_owned()
+        }
+        // Type-scoped like Archive's: `all` could be a real path/category
+        // elsewhere; only the symbol question's option means "every definition".
+        (Some(DecisionType::SymbolAmbiguity), "all") => "All (keep every definition)".to_owned(),
         (_, "ignore") => "Ignore (stop suggesting)".to_owned(),
         (_, "keep_all") => "Keep all (no canonical)".to_owned(),
         (_, other) => other.to_owned(),
@@ -315,6 +394,57 @@ mod tests {
         );
         let q = render_question(&d);
         assert_eq!(q.options[0].1, "archive");
+    }
+
+    #[test]
+    fn summary_drift_question_quotes_both_l0s() {
+        let mut d = record(
+            "summary_drift",
+            json!({
+                "old_summary": "Old text.",
+                "old_l0": "Parses TOML files.",
+                "new_l0": "Renders HTML pages.",
+                "cosine": 0.42, "old_model": "gemma3:4b", "new_model": "llama3",
+            }),
+            json!(["keep_new", "restore_old"]),
+        );
+        d.auto_value = Some("keep_new".to_owned());
+        let q = render_question(&d);
+        assert_eq!(
+            q.subject, "/r/proj",
+            "the web history view keys off subject"
+        );
+        assert!(q.title.contains("disagrees"));
+        // Both abstracts quoted — answerable without leaving the inbox.
+        assert!(q.detail.contains("Parses TOML files."));
+        assert!(q.detail.contains("Renders HTML pages."));
+        assert!(q.detail.contains("gemma3:4b"));
+        assert!(q.detail.contains("~42%"));
+        assert_eq!(q.options[0].1, "Keep the new summary (suggested)");
+        assert!(q.options[1].1.starts_with("Restore the previous summary"));
+    }
+
+    #[test]
+    fn language_and_symbol_questions_render_typed_labels() {
+        let d = record(
+            "language",
+            json!({"language": "ruby", "chunks": 7}),
+            json!(["ruby", "ignore"]),
+        );
+        let q = render_question(&d);
+        assert!(q.title.contains("looks like ruby"));
+        assert!(q.detail.contains("7 chunk(s)"));
+        assert_eq!(q.options[1].1, "Ignore (stop suggesting)");
+
+        let d = record(
+            "symbol_ambiguity",
+            json!({"definers": ["/a.rs", "/b.rs"], "callers": 3}),
+            json!(["/a.rs", "/b.rs", "all"]),
+        );
+        let q = render_question(&d);
+        assert!(q.title.contains("defined in 2 files"));
+        assert!(q.detail.contains("3 calling file(s)"));
+        assert_eq!(q.options[2].1, "All (keep every definition)");
     }
 
     #[test]

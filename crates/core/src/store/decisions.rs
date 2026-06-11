@@ -297,6 +297,29 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Called symbols defined in MORE than one file — the D2 bare-name
+    /// ambiguity set — as `(symbol, caller_count)`, most-called first.
+    /// One GROUP BY over `edges`; the definer paths are fetched per symbol via
+    /// `edges_to("defines", …)`. Lives here (a ledger concern), not in
+    /// edges.rs, on purpose: the graph surfaces consult the *answers* later.
+    pub fn ambiguous_called_symbols(&self, limit: usize) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT to_ref,
+                    COUNT(DISTINCT CASE WHEN kind = 'calls' THEN from_path END) AS callers
+               FROM edges
+              WHERE kind IN ('calls', 'defines')
+              GROUP BY to_ref
+             HAVING COUNT(DISTINCT CASE WHEN kind = 'defines' THEN from_path END) > 1
+                AND COUNT(DISTINCT CASE WHEN kind = 'calls' THEN from_path END) > 0
+              ORDER BY callers DESC, to_ref
+              LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     // ── Lifecycle transitions (open → decided/dismissed/expired) ─────────────
 
     /// Answer an open question. Errors when the row is missing or not open

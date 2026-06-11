@@ -177,40 +177,61 @@ It is **off by default** because each hop adds an LLM "decide" call. The loop is
 
 ## Code graph & centrality
 
-The signature graph (v0.18) is a **file-to-file call graph**: an edge `A → B` means file `A` calls a symbol that file `B` defines. It is built by joining the `calls` and `defines` edges extracted at `deep` time on the **bare symbol name**. This is deliberately lightweight, and the limits are honest ones:
+The signature graph (v0.18) is a **file-to-file call graph**: an edge `A → B` means file `A` calls a symbol that file `B` defines, built from the `calls`/`defines`/`imports` edges extracted at `deep` time. It is deliberately lightweight, and the limits are honest ones:
 
-- **Bare-name, case-sensitive, 1-hop.** No type resolution, no scope/namespace analysis, no overload disambiguation. Two unrelated functions that share a name will be linked. Symbols defined in more than 25 files (common helpers like `new`/`get`) are dropped as noise.
+- **Name-based with scoped resolution, case-sensitive, 1-hop.** No type resolution, no overload disambiguation. Symbols defined in more than 25 files (common helpers like `new`/`get`) are dropped as noise.
 - **Seven languages.** Rust, Python, JavaScript, TypeScript, Go, Java, C/C++ — wherever the parser emits call/define edges.
 
-#### Strict mode — a precision filter (v0.20)
+#### Scoped call resolution (v0.25)
+
+Every graph query (`code_graph`, `who_calls`, `blast_radius`, `related_files`, the Map view) resolves
+each `calls X` edge against X's definition sites **at query time** — edge recording is unchanged, so
+existing indexes get the precision win without re-indexing. Definition sites are ranked in tier order;
+the first tier that matches wins:
+
+1. **same-file** — the caller defines `X` itself: the call binds to the local definition and links to
+   that file *only*. An intra-file helper named like a popular symbol no longer fans out repo-wide
+   (this was the largest class of false positives).
+2. **same-dir** — definers sharing the caller's directory: only those are linked.
+3. **import** — definers whose file path matches one of the caller's recorded import strings.
+4. **bare** — the remaining fallback: every definer of the name (the pre-v0.25 behavior), **labeled**
+   as bare. Only this tier carries the bare-name caveat; surfaces show it only when bare edges are
+   actually present.
+
+The tier-3 matcher is **heuristic import-string matching, not semantic analysis**. Exactly these
+forms resolve:
+
+| Language | Resolves | Does not resolve |
+|---|---|---|
+| JS/TS | relative specifiers `./x`, `../y/z` (joined to the caller's dir; usual extensions and `/index.*` tried) | bare/package specifiers (`react`, `@scope/pkg`), path aliases (`@/...`), re-exports, dynamic `import()` |
+| Rust | `crate::a::b` → `<crate-src>/a/b.rs` or `a/b/mod.rs` (crate root = the caller's nearest `src/` ancestor); `super::a` (one dir up per extra `super`); a trailing item segment is also tried (`use crate::a::b::item`) | external-crate paths (`std::fs`, `other_crate::x` — a crate *name* doesn't map to a directory lexically), `self::`, use-**renames'** aliases, macro-generated items |
+| Python | absolute dotted modules `a.b` → suffix `a/b.py` or `a/b/__init__.py` | `sys.path` manipulation, namespace-package tricks; relative imports are recorded without their leading dots and degrade to a broader suffix match |
+| Go / Java | — (package paths / FQCNs don't map to files lexically) | everything — their calls still get same-file/same-dir/bare tiers |
+
+Unresolvable import strings simply contribute nothing and the call falls through to the bare tier —
+resolution can *narrow* an edge set, never invent edges, so PageRank and Map node sizing stay
+comparable with earlier versions.
+
+#### Strict mode (v0.20, redefined in v0.25)
 
 `indexa graph --strict`, the `code_graph`/`blast_radius` MCP `strict: true` flag, and `/api/graph?strict=1`
-tighten the noise cap from 25 to **1**: only symbols defined in *exactly one file* produce an edge.
-Since the bare-name false positives come entirely from one name resolving to several definitions,
-keeping only uniquely-defined symbols removes those collisions — at the cost of dropping genuinely
-shared helpers (precision over recall).
+now **drop the bare tier entirely**: only structurally-resolved edges (same-dir/import) remain.
+(Before v0.25 strict was a unique-definition *name* filter; resolution supersedes it — a uniquely-named
+symbol with no structural link is now treated as the unconfirmed match it is, and a multi-definition
+symbol that *does* resolve via an import is kept.)
 
-Be honest about what this is and isn't:
-
-- It is a **precision filter on names, not import resolution.** A name uniquely defined in file `B`
-  but *locally shadowed* in caller `A` still produces a spurious `A → B` edge — strict can't catch
-  that without scope/type analysis it doesn't do.
-- **Default is fuzzy** (the 25-file cap, historical behavior) so PageRank and the Map's node sizing
-  are unchanged unless you opt in. Strict is a per-query choice for "show me only edges I can trust."
-- `who_calls` takes a bare name with no definer to disambiguate against, so it **can't** be filtered
-  this way; instead it **annotates** its output with how many files define the name (`defines_count`),
-  flagging when the caller list may conflate distinct definitions.
-
-True import-aware resolution (mapping each call to the *imported* definer) would need a per-language
-module→file resolver — aliases, re-exports, glob and nested imports make that a much larger,
-error-prone subsystem. It is deliberately **deferred**; strict mode is the honest, no-new-machinery
-step that removes the most common class of false positive today.
+- `who_calls` takes a bare name with no definer to disambiguate against, so its *input* can't be
+  scoped; instead it groups its callers by resolution tier and annotates the bare group with how many
+  files define the name (`defines_count`).
+- `blast_radius`'s direct-caller set is name-matched for the same reason; the transitive hop is
+  resolved — a transitive caller is included only when its call resolves back to a direct caller
+  (or on the labeled bare fallback, which `strict` disables).
 
 ### PageRank centrality (v0.20)
 
 Each node carries a **weighted PageRank** score, computed over the *displayed* graph (after the edge cap is applied — so on a truncated graph, centrality is relative to what's shown). Rank flows along edges caller → callee, so a file **called by** many — or by other central files — scores highest; this surfaces hub/library files. Edge weight (number of shared call→define symbols) biases the flow toward stronger relationships. The algorithm is a standard power iteration (damping 0.85, dangling-mass redistribution, L1 convergence); scores sum to ~1.0.
 
-Centrality drives node **size** in the Map graph view and the ranked "most central files" list in `indexa graph` and the `code_graph` MCP tool. It inherits the bare-name-matching imprecision above, so it is an **approximate** importance signal — useful for "what should I read first," not an authoritative dependency analysis. It does **not** feed search/QA ranking (that remains RRF + summary/importance-weight boosts); wiring centrality into retrieval is a possible future extension.
+Centrality drives node **size** in the Map graph view and the ranked "most central files" list in `indexa graph` and the `code_graph` MCP tool. Since v0.25 most edges are scope-resolved, but bare-tier edges still contribute, so it remains an **approximate** importance signal — useful for "what should I read first," not an authoritative dependency analysis. It does **not** feed search/QA ranking (that remains RRF + summary/importance-weight boosts); wiring centrality into retrieval is a possible future extension.
 
 ---
 
@@ -288,3 +309,4 @@ Changes to defaults are recorded here with rationale.
 | 2026-05-28 | Default describer: `gemma2:9b` (was `qwen2.5:14b`) | Google, Apache-2.0; user preference for non-Chinese-company defaults |
 | 2026-05-28 | Default describer upgraded: `gemma3:12b` / `gemma3:4b` (was `gemma2:9b` / `gemma2:2b`) | Gemma 3 (March 2025) outperforms Gemma 2 at same parameter count; available on Ollama |
 | 2026-05-28 | Added `google` embedding provider | Google `text-embedding-004` matches nomic-embed-text dim (768), state-of-the-art quality |
+| 2026-06-11 | Call-graph queries resolve calls by tier (same-file → same-dir → import → bare) at query time; strict = drop bare tier (was: unique-definition name filter) | Bare-name matching's worst false positive — a local helper named like a popular symbol fanning out repo-wide — is structural, not statistical; tiered resolution removes it without re-indexing, never invents edges, and confines the caveat to the labeled bare remainder |

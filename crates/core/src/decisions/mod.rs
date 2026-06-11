@@ -30,6 +30,15 @@ pub enum DecisionType {
     Duplicate,
     /// "This dir hasn't changed in a year — archive it?" (subject = the dir path).
     Archive,
+    /// "The regenerated summary disagrees with the old one for unchanged
+    /// content — keep new or restore old?" (subject = the file path). v0.25.
+    SummaryDrift,
+    /// "This code file's chunks carry no language tag — confirm the
+    /// extension-derived guess?" (subject = the file path). v0.25.
+    Language,
+    /// "This symbol is defined in more than one file — which definition is
+    /// authoritative for call tracing?" (subject = the bare symbol name). v0.25.
+    SymbolAmbiguity,
 }
 
 impl DecisionType {
@@ -39,6 +48,9 @@ impl DecisionType {
             DecisionType::Classification => "classification",
             DecisionType::Duplicate => "duplicate",
             DecisionType::Archive => "archive",
+            DecisionType::SummaryDrift => "summary_drift",
+            DecisionType::Language => "language",
+            DecisionType::SymbolAmbiguity => "symbol_ambiguity",
         }
     }
 
@@ -49,15 +61,21 @@ impl DecisionType {
             "classification" => DecisionType::Classification,
             "duplicate" => DecisionType::Duplicate,
             "archive" => DecisionType::Archive,
+            "summary_drift" => DecisionType::SummaryDrift,
+            "language" => DecisionType::Language,
+            "symbol_ambiguity" => DecisionType::SymbolAmbiguity,
             _ => return None,
         })
     }
 
     /// Every type, for UI filters and `--type` validation.
-    pub const ALL: [DecisionType; 3] = [
+    pub const ALL: [DecisionType; 6] = [
         DecisionType::Classification,
         DecisionType::Duplicate,
         DecisionType::Archive,
+        DecisionType::SummaryDrift,
+        DecisionType::Language,
+        DecisionType::SymbolAmbiguity,
     ];
 }
 
@@ -212,6 +230,98 @@ pub fn route_uncertain_classification(
     Ok(match opened {
         Some(id) => SuggestionOutcome::Opened(id),
         None => SuggestionOutcome::Deduped,
+    })
+}
+
+/// What [`revert_decision`] did — enough for any surface (CLI/web) to report
+/// the restore without re-reading the ledger.
+#[derive(Debug)]
+pub struct RevertOutcome {
+    /// The freshly appended revision that now carries the restored answer.
+    pub new_id: i64,
+    /// The revision that was the head before the revert (now superseded).
+    pub superseded_id: i64,
+    pub subject: String,
+    /// The restored answer value.
+    pub chosen: String,
+    /// The projection receipt (same shape as [`decide_and_apply`]'s return).
+    pub effects: serde_json::Value,
+}
+
+/// Restore a decided revision's answer by appending a new revision (never
+/// deletes — the chain stays auditable) and re-running the idempotent
+/// projection. Shared by `indexa review revert` and `POST /api/review/revert`
+/// so the two surfaces can never drift apart.
+pub fn revert_decision(store: &mut Store, id: i64) -> Result<RevertOutcome> {
+    let old = store
+        .decision_by_id(id)?
+        .ok_or_else(|| anyhow!("no decision with id {id}"))?;
+    if old.status != "decided" {
+        bail!(
+            "decision {id} is '{}', not decided — only an answered revision can be restored",
+            old.status
+        );
+    }
+    let chosen = old
+        .chosen
+        .clone()
+        .ok_or_else(|| anyhow!("decision {id} carries no answer to restore"))?;
+    // The new revision chains off the CURRENT head so `latest_decided` stays
+    // unique; `old` only supplies the value (and evidence) being restored.
+    let prior = store
+        .latest_decided(&old.decision_type, &old.subject)?
+        .unwrap_or_else(|| old.clone());
+
+    let mut params: serde_json::Value =
+        serde_json::from_str(&old.params).unwrap_or_else(|_| serde_json::json!({}));
+    if !params.is_object() {
+        params = serde_json::json!({});
+    }
+    // Recorded so the history explains itself.
+    params["revert_of"] = serde_json::json!(id);
+    // Duplicate rows carry their members in params; everything else covers its
+    // own subject.
+    let paths = params
+        .get("paths")
+        .and_then(|p| p.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| vec![old.subject.clone()]);
+    let options: serde_json::Value =
+        serde_json::from_str(&old.options).unwrap_or_else(|_| serde_json::json!([]));
+
+    let new_id = store
+        .supersede_with(
+            prior.id,
+            crate::store::NewDecision {
+                decision_type: old.decision_type.clone(),
+                subject: old.subject.clone(),
+                params,
+                options,
+                auto_value: old.auto_value.clone(),
+                confidence: old.confidence,
+                evidence_hash: old.evidence_hash.clone(),
+                priority: old.priority,
+                paths,
+            },
+        )?
+        .ok_or_else(|| {
+            anyhow!(
+                "could not append a revision for {} — an open question for it already exists",
+                old.subject
+            )
+        })?;
+    let effects = decide_and_apply(store, new_id, &chosen, "user")?;
+    Ok(RevertOutcome {
+        new_id,
+        superseded_id: prior.id,
+        subject: old.subject,
+        chosen,
+        effects,
     })
 }
 
@@ -488,6 +598,100 @@ mod tests {
             "open",
             "nothing committed on refusal"
         );
+    }
+
+    #[test]
+    fn revert_restores_a_superseded_answer_via_a_new_revision() {
+        let mut store = Store::open_in_memory().unwrap();
+        let p = classification_question(&mut store, "/r/proj");
+        decide_and_apply(&mut store, p, "work", "user").unwrap();
+        // Re-ask answered differently — `work` is now a superseded revision.
+        let c = store
+            .supersede_with(
+                p,
+                NewDecision {
+                    decision_type: "classification".into(),
+                    subject: "/r/proj".into(),
+                    params: json!({"category": "code", "confidence": 0.7}),
+                    options: json!(["work", "code", "ignore"]),
+                    auto_value: Some("code".into()),
+                    confidence: Some(0.7),
+                    evidence_hash: "fp2".into(),
+                    priority: 100,
+                    paths: vec!["/r/proj".into()],
+                },
+            )
+            .unwrap()
+            .unwrap();
+        decide_and_apply(&mut store, c, "code", "user").unwrap();
+        assert_eq!(
+            store
+                .classification_for("/r/proj")
+                .unwrap()
+                .unwrap()
+                .category,
+            "code"
+        );
+
+        // Restore the superseded `work` answer — shared logic the CLI and the
+        // web's POST /api/review/revert both call.
+        let out = revert_decision(&mut store, p).unwrap();
+        assert_eq!(out.chosen, "work");
+        assert_eq!(out.subject, "/r/proj");
+        assert_eq!(
+            out.superseded_id, c,
+            "chains off the CURRENT head, not the old row"
+        );
+        assert_eq!(out.effects, json!({"classification": "work"}));
+        let cls = store.classification_for("/r/proj").unwrap().unwrap();
+        assert_eq!(
+            (cls.category.as_str(), cls.source.as_str()),
+            ("work", "user")
+        );
+
+        // Exactly one live head; the chain stays auditable (append-only).
+        let head = store
+            .latest_decided("classification", "/r/proj")
+            .unwrap()
+            .unwrap();
+        assert_eq!(head.id, out.new_id);
+        let hist = store.decision_history("classification", "/r/proj").unwrap();
+        assert_eq!(hist.len(), 3, "revert appends, never deletes");
+        let restored = hist.iter().find(|d| d.id == out.new_id).unwrap();
+        let params: serde_json::Value = serde_json::from_str(&restored.params).unwrap();
+        assert_eq!(params["revert_of"], json!(p), "history explains itself");
+    }
+
+    #[test]
+    fn revert_refuses_open_rows_and_blocking_open_questions() {
+        let mut store = Store::open_in_memory().unwrap();
+        let open = classification_question(&mut store, "/r/open");
+        // An open row carries no answer to restore.
+        assert!(revert_decision(&mut store, open).is_err());
+
+        let p = classification_question(&mut store, "/r/proj");
+        decide_and_apply(&mut store, p, "work", "user").unwrap();
+        // An open re-ask for the key blocks the append (partial unique index) —
+        // the user should answer the live question instead.
+        store
+            .supersede_with(
+                p,
+                NewDecision {
+                    decision_type: "classification".into(),
+                    subject: "/r/proj".into(),
+                    params: json!({}),
+                    options: json!(["work", "code", "ignore"]),
+                    auto_value: None,
+                    confidence: None,
+                    evidence_hash: "fp2".into(),
+                    priority: 100,
+                    paths: vec!["/r/proj".into()],
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let err = revert_decision(&mut store, p).unwrap_err();
+        assert!(err.to_string().contains("open question"), "{err}");
     }
 
     #[test]

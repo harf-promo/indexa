@@ -173,10 +173,13 @@ pub async fn summarize_file(
     // LLM run still reads as modified_s >= generated_at on the next refresh.
     let generated_at = now_secs();
     let source_hash = file_source_hash(Path::new(path));
+    // One fetch serves both the freshness gate and the drift comparison after
+    // the regeneration. A read error degrades to "not summarized yet"
+    // (re-summarize), never a skip.
+    let existing = store.summary_by_path(path).ok().flatten();
     if !source_hash.is_empty() {
-        // A read error degrades to "not summarized yet" (re-summarize), never a skip.
-        if let Ok(Some(existing)) = store.summary_by_path(path) {
-            if existing.source_hash == source_hash {
+        if let Some(e) = &existing {
+            if e.source_hash == source_hash {
                 tracing::debug!("summarize {path}: content unchanged, skipping");
                 return Ok(SummaryWrite::Skipped);
             }
@@ -234,9 +237,14 @@ pub async fn summarize_file(
     let parent_path = Path::new(path)
         .parent()
         .map(|p| p.to_string_lossy().into_owned());
-    let byte_size = std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0);
+    let meta = std::fs::metadata(path).ok();
+    let byte_size = meta.as_ref().map(|m| m.len() as i64).unwrap_or(0);
+    let mtime_secs = meta
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64);
 
-    store.upsert_summary(&SummaryRecord {
+    let record = SummaryRecord {
         path: path.to_owned(),
         kind: "file".into(),
         parent_path,
@@ -249,8 +257,38 @@ pub async fn summarize_file(
         model: model.to_owned(),
         source_hash,
         generated_at,
-    })?;
+    };
+    store.upsert_summary(&record)?;
     store.set_summary_provenance(path, describer.provider_name(), passes_run, model_fallback)?;
+
+    // Summary-drift detector (ledger v0.25): the new summary is already written
+    // — never blocked — but if this regeneration was for IDENTICAL content and
+    // it semantically disagrees with the old summary, raise a ledger question
+    // ("keep new / restore old"). "Identical content" is established two ways:
+    // - the stored old hash equals the new one (direct proof — the freshness
+    //   gate normally skips this case, so it only arises if a future gate
+    //   bypass regenerates anyway), or
+    // - Regenerate cleared the old hash (the explicit force signal blanks it,
+    //   destroying the hash evidence by design) AND the file's mtime strictly
+    //   predates the old summary's start-of-run stamp — `generated_at` is
+    //   stamped before the content read precisely so this bound is sound.
+    //   Strict `<`: a same-second edit is indistinguishable, and a missed
+    //   question is cheaper than asking about content that actually changed.
+    // Failures are logged, never propagated — a drift bookkeeping error must
+    // not fail the queue item whose summary just landed successfully.
+    if let Some(old) = existing {
+        let same_content = !record.source_hash.is_empty()
+            && (old.source_hash == record.source_hash
+                || (old.source_hash.is_empty()
+                    && mtime_secs.is_some_and(|m| m < old.generated_at)));
+        if same_content {
+            if let Err(e) =
+                indexa_core::decisions::detectors::flag_summary_drift(store, &old, &record)
+            {
+                tracing::warn!("summary-drift check failed for {path}: {e:#}");
+            }
+        }
+    }
 
     Ok(SummaryWrite::Written)
 }
@@ -1012,6 +1050,218 @@ mod scheduler_tests {
             dir_calls.load(Ordering::SeqCst) >= 1,
             "force_rollup summarizes the dir despite the pending child"
         );
+    }
+}
+
+#[cfg(test)]
+mod drift_tests {
+    //! Summary-drift detector wiring: fires only when a regeneration ran for
+    //! IDENTICAL content AND the new embedding disagrees with the old.
+
+    use super::{summarize_file, SummaryWrite};
+    use indexa_core::store::{Store, SummaryRecord};
+    use indexa_embed::Embedder;
+    use indexa_llm::{ChildSummary, Describer};
+
+    /// Always-different describer (so the regeneration genuinely rewrites).
+    struct StubDescriber;
+    #[async_trait::async_trait]
+    impl Describer for StubDescriber {
+        async fn describe(
+            &self,
+            _p: &str,
+            _c: &[u8],
+            _prev: Option<&str>,
+        ) -> anyhow::Result<String> {
+            Ok("Completely new wording. Extra.".into())
+        }
+        async fn summarize_dir(
+            &self,
+            _d: &str,
+            _children: &[ChildSummary],
+            _prev: Option<&str>,
+        ) -> anyhow::Result<String> {
+            Ok("dir".into())
+        }
+    }
+
+    /// Embedder returning a fixed vector — the OLD vector is seeded directly
+    /// on the summaries row, so one fixed new vector controls the cosine.
+    struct FixedEmbedder(Vec<f32>);
+    #[async_trait::async_trait]
+    impl Embedder for FixedEmbedder {
+        async fn embed(&self, _t: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(self.0.clone())
+        }
+        fn dim(&self) -> usize {
+            self.0.len()
+        }
+    }
+
+    /// An old summary row as Regenerate leaves it: source_hash blanked (the
+    /// force signal), embedding present, generated_at safely AFTER the file's
+    /// mtime (so the mtime bound proves the bytes are the ones it described).
+    fn old_row(path: &str, source_hash: &str, emb: Vec<f32>) -> SummaryRecord {
+        SummaryRecord {
+            path: path.to_owned(),
+            kind: "file".into(),
+            parent_path: None,
+            depth: 1,
+            summary: "Old summary text. Tail.".into(),
+            summary_l0: None,
+            embedding: Some(emb),
+            child_count: 0,
+            byte_size: 1,
+            model: "m-old".into(),
+            source_hash: source_hash.to_owned(),
+            // Far future relative to the test file's mtime — strictly after.
+            generated_at: super::now_secs() + 3600,
+        }
+    }
+
+    #[tokio::test]
+    async fn regenerate_of_identical_content_with_low_cosine_opens_a_question() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("f.txt");
+        std::fs::write(&f, "stable content").unwrap();
+        let path = f.to_string_lossy().into_owned();
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_summary(&old_row(&path, "", vec![1.0, 0.0]))
+            .unwrap();
+
+        // Orthogonal new embedding → cosine 0 → drift.
+        let out = summarize_file(
+            &mut store,
+            &StubDescriber,
+            &FixedEmbedder(vec![0.0, 1.0]),
+            &path,
+            "m-new",
+            1,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, SummaryWrite::Written, "the write is never blocked");
+        // The NEW summary landed — the question asks after the fact.
+        let row = store.summary_by_path(&path).unwrap().unwrap();
+        assert_eq!(row.summary, "Completely new wording. Extra.");
+
+        let open = store.open_decisions(Some("summary_drift"), 10).unwrap();
+        assert_eq!(open.len(), 1, "identical content + low cosine must ask");
+        let params: serde_json::Value = serde_json::from_str(&open[0].params).unwrap();
+        assert_eq!(params["old_l0"], "Old summary text.");
+        assert_eq!(params["new_l0"], "Completely new wording.");
+        assert_eq!(params["old_model"], "m-old");
+        assert_eq!(params["new_model"], "m-new");
+
+        // restore_old projects: old text back, embedding cleared.
+        let fx =
+            indexa_core::decisions::decide_and_apply(&mut store, open[0].id, "restore_old", "user")
+                .unwrap();
+        assert_eq!(fx["summary"], "restored");
+        let row = store.summary_by_path(&path).unwrap().unwrap();
+        assert_eq!(row.summary, "Old summary text. Tail.");
+        assert!(row.embedding.is_none());
+    }
+
+    #[tokio::test]
+    async fn changed_content_or_high_cosine_or_missing_embedding_stays_silent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("f.txt");
+        std::fs::write(&f, "stable content").unwrap();
+        let path = f.to_string_lossy().into_owned();
+
+        // Changed content: the old row's hash is non-empty and differs from the
+        // new bytes — a legitimately different summary is NOT drift.
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_summary(&old_row(
+                &path,
+                "hash-of-the-previous-bytes",
+                vec![1.0, 0.0],
+            ))
+            .unwrap();
+        summarize_file(
+            &mut store,
+            &StubDescriber,
+            &FixedEmbedder(vec![0.0, 1.0]),
+            &path,
+            "m-new",
+            1,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(store.open_decision_count().unwrap(), 0);
+
+        // Identical content but agreeing embeddings → no question.
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_summary(&old_row(&path, "", vec![1.0, 0.0]))
+            .unwrap();
+        summarize_file(
+            &mut store,
+            &StubDescriber,
+            &FixedEmbedder(vec![0.99, 0.05]),
+            &path,
+            "m-new",
+            1,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(store.open_decision_count().unwrap(), 0);
+
+        // Old row has no embedding (e.g. a prior restore_old cleared it) →
+        // silent skip, never a nag loop.
+        let mut store = Store::open_in_memory().unwrap();
+        let mut no_emb = old_row(&path, "", vec![1.0, 0.0]);
+        no_emb.embedding = None;
+        store.upsert_summary(&no_emb).unwrap();
+        summarize_file(
+            &mut store,
+            &StubDescriber,
+            &FixedEmbedder(vec![0.0, 1.0]),
+            &path,
+            "m-new",
+            1,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(store.open_decision_count().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn edit_after_the_old_summary_defeats_the_mtime_identity_bound() {
+        // Old hash cleared (Regenerate) but the file was edited AFTER the old
+        // summary's stamp — identity can't be proven, so no question.
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("f.txt");
+        std::fs::write(&f, "stable content").unwrap();
+        let path = f.to_string_lossy().into_owned();
+        let mut store = Store::open_in_memory().unwrap();
+        let mut old = old_row(&path, "", vec![1.0, 0.0]);
+        old.generated_at = 1_000; // ancient stamp: today's mtime is far newer
+        store.upsert_summary(&old).unwrap();
+        summarize_file(
+            &mut store,
+            &StubDescriber,
+            &FixedEmbedder(vec![0.0, 1.0]),
+            &path,
+            "m-new",
+            1,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(store.open_decision_count().unwrap(), 0);
     }
 }
 

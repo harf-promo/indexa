@@ -350,6 +350,7 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/api/review/answer", post(api_review_answer))
         .route("/api/review/dismiss", post(api_review_dismiss))
         .route("/api/review/history", get(api_review_history))
+        .route("/api/review/revert", post(api_review_revert))
         .route("/api/review/count", get(api_review_count))
         .route(
             "/api/review/dismiss-evidence",
@@ -592,6 +593,64 @@ mod tests {
         assert_eq!(json.as_array().unwrap().len(), 1);
         assert_eq!(json[0]["status"], "decided");
         assert_eq!(json[0]["chosen"], "work");
+    }
+
+    #[tokio::test]
+    async fn api_review_revert_restores_a_superseded_answer() {
+        // Build a chain: decided "work" → re-ask decided "code" (supersedes it),
+        // then revert the original via the real route. The endpoint shares
+        // core::decisions::revert_decision with the CLI.
+        let mut store = Store::open_in_memory().unwrap();
+        let q = |hash: &str, priority: i64| indexa_core::store::NewDecision {
+            decision_type: "classification".to_owned(),
+            subject: "/r/proj".to_owned(),
+            params: serde_json::json!({"category": "code", "confidence": 0.7}),
+            options: serde_json::json!(["work", "code", "ignore"]),
+            auto_value: Some("code".to_owned()),
+            confidence: Some(0.7),
+            evidence_hash: hash.to_owned(),
+            priority,
+            paths: vec!["/r/proj".to_owned()],
+        };
+        let p = store.record_decision(q("fp1", 50)).unwrap().unwrap();
+        indexa_core::decisions::decide_and_apply(&mut store, p, "work", "user").unwrap();
+        let c = store.supersede_with(p, q("fp2", 100)).unwrap().unwrap();
+        indexa_core::decisions::decide_and_apply(&mut store, c, "code", "user").unwrap();
+        let state = state_with(store);
+        let app = build_router(state.clone(), 7620);
+
+        let body = serde_json::json!({ "id": p });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/review/revert")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["reverted"], true);
+        assert_eq!(json["chosen"], "work");
+        assert_eq!(json["superseded_id"], c);
+        assert_eq!(json["effects"]["classification"], "work");
+        {
+            let store = state.store.lock().await;
+            let cls = store.classification_for("/r/proj").unwrap().unwrap();
+            assert_eq!(cls.category, "work");
+        }
+
+        // The history route (the chain view's data source) shows 3 revisions.
+        let (status, json) = get_json(app, "/api/review/history?subject=/r/proj").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json.as_array().unwrap().len(), 3);
     }
 
     #[tokio::test]

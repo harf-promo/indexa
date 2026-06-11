@@ -3,7 +3,7 @@ use indexa_core::config::Config;
 use indexa_core::decisions::templates::render_question;
 use indexa_core::decisions::{decide_and_apply, detectors, effects, DecisionType};
 use indexa_core::smart_classify::SemanticCategory;
-use indexa_core::store::{DecisionRecord, NewDecision, Store};
+use indexa_core::store::{DecisionRecord, Store};
 use std::io::IsTerminal;
 
 use super::helpers::{format_unix_timestamp, require_index_db};
@@ -223,6 +223,28 @@ per-cluster, so answer those individually (indexa review answer <id> <path>)"
                 anyhow::bail!("archive questions accept: archive, keep_active");
             }
         }
+        // Drift menus are fixed too — both answers batch safely.
+        DecisionType::SummaryDrift => {
+            if choose != "keep_new" && choose != "restore_old" {
+                anyhow::bail!("summary_drift questions accept: keep_new, restore_old");
+            }
+        }
+        DecisionType::Language => {
+            if choose != "ignore" {
+                anyhow::bail!(
+                    "the only batch-safe language answer is ignore — the right language is \
+per-file, so answer those individually (indexa review answer <id> <language>)"
+                );
+            }
+        }
+        DecisionType::SymbolAmbiguity => {
+            if choose != "all" {
+                anyhow::bail!(
+                    "the only batch-safe symbol answer is all — an authoritative definition is \
+per-symbol, so answer those individually (indexa review answer <id> <path>)"
+                );
+            }
+        }
     }
 
     let dir = shellexpand::tilde(under).into_owned();
@@ -320,81 +342,20 @@ pub(crate) async fn cmd_review_history(path: String) -> Result<()> {
 
 /// `indexa review revert <id>` — restore a decided revision's answer by
 /// appending a new revision (never deletes) and re-running the idempotent
-/// projection.
+/// projection. Thin shell over `core::decisions::revert_decision`, the single
+/// implementation the web's `POST /api/review/revert` shares.
 pub(crate) async fn cmd_review_revert(id: i64) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };
     let mut store = Store::open(&db_path)?;
-    let old = store
-        .decision_by_id(id)?
-        .ok_or_else(|| anyhow!("no decision with id {id}"))?;
-    if old.status != "decided" {
-        anyhow::bail!(
-            "decision {id} is '{}', not decided — only an answered revision can be restored",
-            old.status
-        );
-    }
-    let chosen = old
-        .chosen
-        .clone()
-        .ok_or_else(|| anyhow!("decision {id} carries no answer to restore"))?;
-    // The new revision chains off the CURRENT head so `latest_decided` stays
-    // unique; `old` only supplies the value (and evidence) being restored.
-    let prior = store
-        .latest_decided(&old.decision_type, &old.subject)?
-        .unwrap_or_else(|| old.clone());
-
-    let mut params: serde_json::Value =
-        serde_json::from_str(&old.params).unwrap_or_else(|_| serde_json::json!({}));
-    if !params.is_object() {
-        params = serde_json::json!({});
-    }
-    // Recorded so the history explains itself.
-    params["revert_of"] = serde_json::json!(id);
-    // Duplicate rows carry their members in params; everything else covers its
-    // own subject.
-    let paths = params
-        .get("paths")
-        .and_then(|p| p.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect::<Vec<_>>()
-        })
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| vec![old.subject.clone()]);
-    let options: serde_json::Value =
-        serde_json::from_str(&old.options).unwrap_or_else(|_| serde_json::json!([]));
-
-    let new_id = store
-        .supersede_with(
-            prior.id,
-            NewDecision {
-                decision_type: old.decision_type.clone(),
-                subject: old.subject.clone(),
-                params,
-                options,
-                auto_value: old.auto_value.clone(),
-                confidence: old.confidence,
-                evidence_hash: old.evidence_hash.clone(),
-                priority: old.priority,
-                paths,
-            },
-        )?
-        .ok_or_else(|| {
-            anyhow!(
-                "could not append a revision for {} — an open question for it already \
-exists (see `indexa review list`)",
-                old.subject
-            )
-        })?;
-    let effects = decide_and_apply(&mut store, new_id, &chosen, "user")?;
+    let out = indexa_core::decisions::revert_decision(&mut store, id)
+        .map_err(|e| anyhow!("{e:#} (see `indexa review list`)"))?;
     println!(
-        "Restored '{chosen}' for {} — revision #{new_id} supersedes #{}.",
-        old.subject, prior.id
+        "Restored '{}' for {} — revision #{} supersedes #{}.",
+        out.chosen, out.subject, out.new_id, out.superseded_id
     );
-    println!("  → {}", effects_summary(&effects));
+    println!("  → {}", effects_summary(&out.effects));
     Ok(())
 }
 
@@ -486,6 +447,30 @@ fn effects_summary(effects: &serde_json::Value) -> String {
             "classification suggestions for this folder are off".to_owned()
         } else {
             format!("folder classified as {cat}")
+        };
+    }
+    if let Some(s) = effects.get("summary") {
+        return match s.as_str() {
+            Some("restored") => "previous summary restored — its embedding is cleared until \
+the path is next regenerated"
+                .to_owned(),
+            Some(_) => "kept the new summary".to_owned(),
+            None => "summary row no longer exists — nothing to restore".to_owned(),
+        };
+    }
+    if let Some(l) = effects.get("language") {
+        return match l.as_str() {
+            Some(lang) => {
+                let n = effects.get("chunks").and_then(|v| v.as_i64()).unwrap_or(0);
+                format!("{n} chunk(s) tagged as {lang}")
+            }
+            None => "left untagged".to_owned(),
+        };
+    }
+    if let Some(a) = effects.get("authoritative") {
+        return match a.as_str() {
+            Some(p) => format!("{p} recorded as the authoritative definition"),
+            None => "all definitions kept equally valid".to_owned(),
         };
     }
     if let Some(canonical) = effects.get("canonical") {
