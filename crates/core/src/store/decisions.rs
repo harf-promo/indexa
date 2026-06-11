@@ -384,6 +384,63 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    // ── One-time backfill ─────────────────────────────────────────────────────
+
+    /// Import pre-ledger classification answers (`classifications.source IN
+    /// ('user','ignored')`) as decided ledger rows, so the re-ask detector has a
+    /// prior to compare against. Guarded on the ledger holding NO classification
+    /// rows at all — runs exactly once per database, idempotent thereafter.
+    ///
+    /// `evidence_hash` is left `''`: no fingerprint existed when the user
+    /// originally answered, and `''` means "re-askable on the first
+    /// contradiction". The effects receipt is stamped immediately — the
+    /// classifications table already reflects these answers, and re-projecting
+    /// would pointlessly rewrite `confirmed_at`.
+    pub fn backfill_classification_decisions(&mut self) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let has_any: bool = tx
+            .prepare("SELECT 1 FROM decisions WHERE decision_type = 'classification' LIMIT 1")?
+            .exists([])?;
+        if has_any {
+            return Ok(0);
+        }
+        let rows: Vec<(String, String, String, Option<i64>, i64)> = {
+            let mut stmt = tx.prepare(
+                "SELECT path, category, source, confirmed_at, created_at
+                   FROM classifications WHERE source IN ('user','ignored')",
+            )?;
+            let mapped = stmt.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        let n = rows.len();
+        for (path, category, source, confirmed_at, created_at) in rows {
+            let chosen = if source == "ignored" {
+                "ignore"
+            } else {
+                category.as_str()
+            };
+            let when = confirmed_at.unwrap_or(created_at);
+            let effects = serde_json::json!({ "classification": chosen });
+            tx.execute(
+                "INSERT INTO decisions
+                     (decision_type, subject, params, options, chosen, source, status,
+                      evidence_hash, effects, effects_applied_at, created_at, decided_at)
+                 VALUES ('classification', ?1, '{}', '[]', ?2, 'user', 'decided',
+                         '', ?3, unixepoch(), ?4, ?4)",
+                params![path, chosen, effects.to_string(), when],
+            )?;
+            let id = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT OR IGNORE INTO decision_paths (decision_id, path) VALUES (?1, ?2)",
+                params![id, path],
+            )?;
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     // ── Garbage collection ────────────────────────────────────────────────────
 
     /// Delete expired/dismissed rows resolved more than `older_than_secs` ago.

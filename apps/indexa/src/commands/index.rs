@@ -1,6 +1,8 @@
 use anyhow::Result;
 use indexa_core::config::Config;
+use indexa_core::store::Store;
 
+use super::helpers::index_db_path;
 use super::{cmd_deep, cmd_scan, cmd_summarize};
 
 /// One-shot context build: scan → deep embed → summarize.
@@ -27,8 +29,29 @@ pub(crate) async fn cmd_index(
     println!("\n── Phase 3 / 3 · Summaries ─────────────────────────────────");
     cmd_summarize(paths, mode, passes, cfg).await?;
 
+    // ── Phase 4 (quiet): decision detectors ───────────────────────────────────
+    // An inbox question is a bonus, never a gate — a detector failure must not
+    // fail an index build that already succeeded.
+    let questions = match detector_pass(cfg) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("decision detector pass failed: {e:#}");
+            0
+        }
+    };
+
     println!("\n✓ Context is ready.");
     println!("  Ask:    indexa ask \"<question>\"");
     println!("  Export: indexa export <path> --format xml > context.xml");
+    if questions > 0 {
+        println!("  {questions} question(s) for you — indexa review list");
+    }
     Ok(())
+}
+
+/// Run the post-index detector pass; returns how many questions it opened.
+fn detector_pass(cfg: &Config) -> Result<usize> {
+    let mut store = Store::open(&index_db_path()?)?;
+    let report = indexa_core::decisions::detectors::run_detectors(&mut store, &cfg.review)?;
+    Ok(report.opened)
 }

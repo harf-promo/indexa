@@ -1,6 +1,9 @@
 use anyhow::Result;
+use indexa_core::config::Config;
+use indexa_core::decisions::detectors::{classification_fingerprint, UNCERTAINTY_FLOOR};
+use indexa_core::decisions::DecisionType;
 use indexa_core::smart_classify::{classify_dir_tier0, SemanticCategory};
-use indexa_core::store::{ClassificationRecord, Store};
+use indexa_core::store::{ClassificationRecord, NewDecision, Store};
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 
@@ -11,7 +14,11 @@ use super::helpers::require_index_db;
 /// `classifications` table. The store already preserves user confirmations and
 /// dismissals across runs; the surface to make them (web UI / CLI) lands in a
 /// later PR of the Smart-classification series.
-pub(crate) async fn cmd_classify(show_paths: bool, category: Option<String>) -> Result<()> {
+pub(crate) async fn cmd_classify(
+    show_paths: bool,
+    category: Option<String>,
+    cfg: &Config,
+) -> Result<()> {
     if let Some(c) = &category {
         if SemanticCategory::parse(c).is_none() {
             anyhow::bail!(
@@ -63,6 +70,109 @@ pub(crate) async fn cmd_classify(show_paths: bool, category: Option<String>) -> 
             ));
         }
     }
+    // ── Decision Ledger hooks (v0.22) ──────────────────────────────────────────
+    // One-time: import pre-ledger user answers so the re-ask detector has priors.
+    store.backfill_classification_decisions()?;
+
+    let review = &cfg.review;
+    let by_path: HashMap<String, ClassificationRecord> = store
+        .list_classifications(None, 0)?
+        .into_iter()
+        .map(|c| (c.path.clone(), c))
+        .collect();
+    let options = serde_json::json!(SemanticCategory::ALL
+        .iter()
+        .map(|c| c.as_str())
+        .chain(std::iter::once("ignore"))
+        .collect::<Vec<_>>());
+    let fp_for = |path: &String| {
+        classification_fingerprint(
+            own_hint.get(path).and_then(|h| h.as_deref()),
+            child_hints.get(path).map(Vec::as_slice).unwrap_or(&[]),
+        )
+    };
+
+    let mut opened = 0usize;
+    let mut open_budget = (review.max_open as i64 - store.open_decision_count()?).max(0) as usize;
+    for (path, _kind, cat, confidence) in &rows {
+        if opened >= review.max_new_per_scan || open_budget == 0 {
+            break;
+        }
+        match by_path.get(path).map(|c| c.source.as_str()) {
+            // Re-ask: the user answered before, and the folder's evidence has
+            // changed enough that the fresh suggestion CONTRADICTS that answer.
+            // Both conditions required — a contradiction on unchanged evidence is
+            // just Tier-0 disagreeing with the user (their answer stands), and
+            // changed evidence that still agrees needs no question.
+            Some("user") => {
+                let Some(prior) =
+                    store.latest_decided(DecisionType::Classification.as_str(), path)?
+                else {
+                    // Confirmed outside the ledger (post-backfill) — nothing to chain to.
+                    continue;
+                };
+                let fp = fp_for(path);
+                let user_chosen = prior.chosen.clone().unwrap_or_default();
+                // '' = backfilled pre-ledger answer with no recorded fingerprint:
+                // the first contradiction is material by definition.
+                let evidence_changed = prior.evidence_hash.is_empty() || prior.evidence_hash != fp;
+                if evidence_changed && *cat != user_chosen {
+                    let opened_id = store.supersede_with(
+                        prior.id,
+                        NewDecision {
+                            decision_type: DecisionType::Classification.as_str().to_owned(),
+                            subject: path.clone(),
+                            params: serde_json::json!({
+                                "category": cat,
+                                "confidence": confidence,
+                                "prior": {"chosen": user_chosen, "decided_at": prior.decided_at},
+                            }),
+                            options: options.clone(),
+                            auto_value: Some(cat.clone()),
+                            confidence: Some(*confidence),
+                            evidence_hash: fp,
+                            priority: 100,
+                            paths: vec![path.clone()],
+                        },
+                    )?;
+                    if opened_id.is_some() {
+                        opened += 1;
+                        open_budget -= 1;
+                    }
+                }
+            }
+            // Sticky tombstone: a dismissed folder is never re-raised here.
+            Some("ignored") => {}
+            // Uncertainty: mid-band confidence becomes a question instead of a
+            // silently-applied label. Confident results stay out of the ledger.
+            _ => {
+                if *confidence >= UNCERTAINTY_FLOOR && *confidence < review.auto_record_below {
+                    let opened_id = store.record_decision(NewDecision {
+                        decision_type: DecisionType::Classification.as_str().to_owned(),
+                        subject: path.clone(),
+                        params: serde_json::json!({"category": cat, "confidence": confidence}),
+                        options: options.clone(),
+                        auto_value: Some(cat.clone()),
+                        confidence: Some(*confidence),
+                        evidence_hash: fp_for(path),
+                        priority: 50,
+                        paths: vec![path.clone()],
+                    })?;
+                    if opened_id.is_some() {
+                        opened += 1;
+                        open_budget -= 1;
+                    }
+                }
+            }
+        }
+    }
+    let print_inbox_note = || {
+        if opened > 0 {
+            println!();
+            println!("{opened} question(s) added to the review inbox — see: indexa review list");
+        }
+    };
+
     store.upsert_auto_classifications(&rows)?;
 
     // ── Render the saved state (auto + user; tombstoned `ignored` excluded) ────
@@ -93,6 +203,7 @@ pub(crate) async fn cmd_classify(show_paths: bool, category: Option<String>) -> 
 content — run `indexa deep` + `indexa summarize`, then a later release can infer them."
             );
         }
+        print_inbox_note();
         return Ok(());
     }
 
@@ -157,6 +268,7 @@ content — run `indexa deep` + `indexa summarize`, then a later release can inf
 inference. Suggestions are saved; confirming or correcting them lands in an upcoming release."
         )
     );
+    print_inbox_note();
     Ok(())
 }
 
