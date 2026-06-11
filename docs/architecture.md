@@ -14,6 +14,8 @@ apps/indexa          — CLI binary (main entry point)
 ├── crates/parsers    — File type parsers (text, Markdown, code, PDF, EPUB, Org, office, image, media)
 ├── crates/embed      — Embedding adapter trait + Ollama/OpenAI/Google/llama.cpp impls
 ├── crates/llm        — LLM adapter trait + Ollama/OpenAI/Anthropic/llama.cpp impls
+├── crates/http-util  — shared HTTP client + retry/backoff policy for the network adapters
+
 ├── crates/query      — Hybrid search (FTS5 + vector), reranking, and the unified RAG answer() pipeline
 ├── crates/web        — Axum HTTP server + embedded single-page UI (live SSE jobs)
 └── crates/mcp        — stdio Model Context Protocol server (`indexa mcp`) exposing the index to AI agents

@@ -14,5 +14,6 @@ serde = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 async-trait = "0.1"
+indexa-http-util = { path = "../http-util" }
 serde_json = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

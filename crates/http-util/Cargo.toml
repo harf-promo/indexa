@@ -1,0 +1,13 @@
+[package]
+name = "indexa-http-util"
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Shared HTTP client construction and retry/backoff for Indexa's network adapters."
+
+[dependencies]
+tokio = { workspace = true }
+# rustls-tls (not native-tls) is a cross-compile invariant — see CLAUDE.md.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
