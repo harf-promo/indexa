@@ -15,11 +15,34 @@ updater keys in `latest.json` (`darwin-aarch64` **and** `darwin-x86_64`), so the
 app's **default** per-arch updater target resolves correctly on either
 architecture — each arch queries its own key and gets the same universal bundle.
 (Do **not** pin `.target("darwin-universal")`: tauri never emits that key, so
-pinning it makes the updater find no update — this was a bug in the v0.20.0
-desktop binary, fixed for v0.21+.) To be safe, **install v0.20.0 manually**: it
-carries the ad-hoc → Developer-ID signing transition, and its baked-in updater
-still queries the missing `darwin-universal` key, so it won't auto-update to
-v0.21 — clean auto-update resumes from v0.21 onward.
+pinning it makes the updater find no update.) **Install v0.20.1 manually** — it
+carries the ad-hoc → Developer-ID signing transition (an older client won't
+auto-update across it); clean auto-update works from v0.20.1 onward.
+
+> **v0.20.0 was withdrawn** (release + tag deleted). Its arm64 binary crashed at
+> launch — it dynamically linked Homebrew's `libpcre2`, which the hardened runtime
+> rejects (see *Self-contained binary* below). **v0.20.1** is the first release that
+> signs, notarizes, **and** launches.
+
+## Self-contained binary (static libpcre2)
+
+macOS release binaries must not depend on Homebrew dylibs: under the hardened
+runtime, **library validation refuses to load a dylib signed by a different Team
+ID**, so a Homebrew dependency aborts the notarized app at launch (DYLD "Library
+missing"). The crate at risk is `pcre2` (pulled in by `hyperpolyglot` for
+file-type classification): `pcre2-sys` links a pkg-config **system** libpcre2
+(Homebrew's, on the arm64 CI runner) unless forced static. The repo-root
+[`.cargo/config.toml`](../.cargo/config.toml) sets `PCRE2_SYS_STATIC = 1`, which
+compiles the **vendored** pcre2 into the binary on every target.
+
+**Verify any macOS release binary is self-contained:**
+
+```bash
+otool -L <binary>    # must list ONLY /usr/lib/* and /System/* — no /opt/homebrew/*
+```
+
+(If a future dependency adds another C-FFI `-sys` crate, re-check with `otool -L`:
+the same Homebrew-dylib trap applies to any of them.)
 
 ## Required GitHub repository secrets
 
