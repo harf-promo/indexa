@@ -15,6 +15,7 @@ mod pack;
 mod prune;
 mod related;
 mod report;
+mod review;
 mod rm;
 mod saved;
 mod scan;
@@ -50,6 +51,10 @@ pub(crate) use pack::{
 pub(crate) use prune::cmd_prune;
 pub(crate) use related::cmd_related;
 pub(crate) use report::cmd_report;
+pub(crate) use review::{
+    cmd_review_answer, cmd_review_dismiss, cmd_review_gc, cmd_review_history, cmd_review_list,
+    cmd_review_revert, cmd_review_scan, cmd_review_show,
+};
 pub(crate) use rm::cmd_rm;
 pub(crate) use saved::{cmd_saved_add, cmd_saved_list, cmd_saved_rm, cmd_saved_run};
 pub(crate) use scan::cmd_scan;

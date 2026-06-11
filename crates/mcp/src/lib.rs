@@ -12,8 +12,9 @@
 //! Tool families: retrieval (`search`, `browse_tree`, `get_summary` l0/l1/l2,
 //! `read_file`, `ask`), code graph (`dependencies`, `who_imports`, `who_calls`,
 //! `blast_radius`, `code_graph`, `related_files`), Context Packs, Smart
-//! classification, Importance weighting, saved searches, Insights, and admin
-//! (`get_stats`, `prune`, `trigger_index`).
+//! classification, Importance weighting, saved searches, Insights, decision
+//! review (the Decision Ledger), and admin (`get_stats`, `prune`,
+//! `trigger_index`).
 
 mod admin;
 mod curation;
@@ -21,6 +22,7 @@ mod graph;
 mod insights;
 mod packs;
 mod retrieval;
+mod review;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,6 +56,10 @@ pub use packs::{
     SearchPackParams,
 };
 pub use retrieval::{AskParams, BrowseParams, GetSummaryParams, ReadFileParams, SearchParams};
+pub use review::{
+    AnswerDecisionParams, DecisionHistoryParams, DismissDecisionParams, GetDecisionParams,
+    ListOpenDecisionsParams,
+};
 
 /// Max bytes returned by `read_file` (L2 raw content).
 const READ_FILE_CAP: usize = 40 * 1024;
@@ -107,6 +113,7 @@ impl IndexaMcp {
             + Self::router_graph()
             + Self::router_packs()
             + Self::router_curation()
+            + Self::router_review()
             + Self::router_insights()
             + Self::router_admin()
     }
@@ -132,7 +139,10 @@ impl ServerHandler for IndexaMcp {
              named, cross-directory bundles ready to paste into any AI tool. \
              Smart classification: `list_classifications`/`confirm_classification`/\
 `ignore_classification`. \
-             Code graph: `dependencies`/`who_imports`/`who_calls`/`blast_radius`/`code_graph`."
+             Code graph: `dependencies`/`who_imports`/`who_calls`/`blast_radius`/`code_graph`. \
+             Decision review: `list_open_decisions`/`get_decision`/`answer_decision`/\
+`dismiss_decision`/`decision_history` — questions Indexa needs a human judgment on; \
+             relay them to your user and answer on their behalf."
                 .to_owned(),
         )
     }
@@ -436,6 +446,80 @@ mod tests {
             caveated.contains("No call edges") || caveated.contains("bare-name"),
             "code_graph must either report emptiness or carry the bare-name caveat, got: {caveated}"
         );
+    }
+
+    /// End-to-end over the review family: a seeded open question is listed
+    /// with its options, and answering it projects onto the domain tables
+    /// (the classification row is the proof the effects actually applied).
+    #[tokio::test]
+    async fn review_tools_list_and_answer_apply_effects() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        let id = {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .record_decision(indexa_core::store::NewDecision {
+                    decision_type: "classification".to_owned(),
+                    subject: "/r/proj".to_owned(),
+                    params: serde_json::json!({"category": "code", "confidence": 0.7}),
+                    options: serde_json::json!(["work", "code", "ignore"]),
+                    auto_value: Some("code".to_owned()),
+                    confidence: Some(0.7),
+                    evidence_hash: "fp1".to_owned(),
+                    priority: 50,
+                    paths: vec!["/r/proj".to_owned()],
+                })
+                .unwrap()
+                .unwrap()
+        };
+        let mcp = IndexaMcp::new(
+            dbpath.clone(),
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let listed = text_of(
+            mcp.list_open_decisions(Parameters(ListOpenDecisionsParams {
+                decision_type: None,
+                limit: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            listed.contains(&format!("#{id}")) && listed.contains("looks like code"),
+            "list_open_decisions must show the seeded question, got: {listed}"
+        );
+        assert!(
+            listed.contains("ignore — Ignore (stop suggesting)"),
+            "options must render as 'value — label' lines, got: {listed}"
+        );
+
+        let answered = text_of(
+            mcp.answer_decision(Parameters(AnswerDecisionParams {
+                id,
+                chosen: "work".to_owned(),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            answered.contains("classification"),
+            "answer_decision must echo the applied effects, got: {answered}"
+        );
+
+        // The projection ran: the answer landed in the domain table as 'user'.
+        let store = Store::open(&dbpath).unwrap();
+        let c = store.classification_for("/r/proj").unwrap().unwrap();
+        assert_eq!((c.category.as_str(), c.source.as_str()), ("work", "user"));
     }
 
     #[tokio::test]

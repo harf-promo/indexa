@@ -34,6 +34,8 @@ pub struct DetectorReport {
     pub skipped: usize,
     /// Decided rows whose projection was re-run by the crash-repair sweep.
     pub repaired: usize,
+    /// Open questions expired because their evidence left the index.
+    pub expired: usize,
 }
 
 /// The detector pass run at the end of `cmd_index`: repair sweep first (so a
@@ -44,6 +46,38 @@ pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorRe
         repaired: super::repair_unapplied(store)?,
         ..DetectorReport::default()
     };
+
+    // Expiry sweep: an open question whose evidence left the index would
+    // otherwise linger forever and permanently consume the open budget —
+    // starving new questions by attrition. "Left the index" = a member path
+    // has neither an entries row NOR a summary row (the deep-without-scan
+    // workflow legitimately produces summaries with no entries row, so
+    // entries-absence alone is not evidence of removal). Expired is recorded,
+    // never silently dropped; and expiry is not a sticky dismissal, so the
+    // question returns if the evidence does.
+    for d in store.open_decisions(None, cfg.max_open.max(64))? {
+        let params: serde_json::Value = serde_json::from_str(&d.params).unwrap_or_default();
+        let members: Vec<String> = params
+            .get("paths")
+            .and_then(|p| p.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![d.subject.clone()]);
+        let mut vanished = None;
+        for m in &members {
+            if !store.entry_exists(m)? && !store.summary_exists(m)? {
+                vanished = Some(m.clone());
+                break;
+            }
+        }
+        if let Some(gone) = vanished {
+            store.expire_decision(d.id, &format!("{gone} left the index"))?;
+            report.expired += 1;
+        }
+    }
 
     // Exact clusters first: they are certain, so they deserve the cap budget
     // before the probabilistic near-duplicates.
@@ -229,6 +263,32 @@ mod tests {
         super::super::decide_and_apply(&mut store, open[0].id, "/r/a.txt", "user").unwrap();
         let report = run_detectors(&mut store, &cfg).unwrap();
         assert_eq!((report.opened, report.skipped), (0, 1));
+    }
+
+    #[test]
+    fn run_detectors_expires_questions_whose_evidence_left_the_index() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_summary(&file_summary("/r/a.txt", "H1"))
+            .unwrap();
+        store
+            .upsert_summary(&file_summary("/r/b.txt", "H1"))
+            .unwrap();
+        let cfg = crate::config::ReviewConfig::default();
+        let report = run_detectors(&mut store, &cfg).unwrap();
+        assert_eq!(report.opened, 1);
+
+        // One member's evidence disappears entirely (no entries row existed;
+        // now its summary goes too — e.g. the file was deleted and pruned).
+        store.delete_summary("/r/b.txt").unwrap();
+        let report = run_detectors(&mut store, &cfg).unwrap();
+        assert_eq!(report.expired, 1, "the orphaned question must expire");
+        assert_eq!(store.open_decision_count().unwrap(), 0);
+        // Recorded, not dropped: history shows the expired row with its note.
+        let hist = store.decision_history("duplicate", "/r/a.txt").unwrap();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].status, "expired");
+        assert!(hist[0].params.contains("left the index"));
     }
 
     #[test]

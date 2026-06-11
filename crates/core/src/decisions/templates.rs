@@ -33,13 +33,14 @@ pub fn render_question(d: &DecisionRecord) -> RenderedQuestion {
 
     let (title, detail) = match DecisionType::parse(&d.decision_type) {
         Some(DecisionType::Classification) => classification_text(d, &params),
-        Some(DecisionType::Duplicate) => duplicate_text(&params, &option_values),
+        Some(DecisionType::Duplicate) => duplicate_text(d, &params, &option_values),
         None => (
             format!("{}: {}", d.decision_type, d.subject),
             "This question was recorded by a newer indexa — update to see it properly.".to_owned(),
         ),
     };
 
+    let suggested = d.auto_value.as_deref();
     RenderedQuestion {
         id: d.id,
         decision_type: d.decision_type.clone(),
@@ -48,7 +49,7 @@ pub fn render_question(d: &DecisionRecord) -> RenderedQuestion {
         options: option_values
             .into_iter()
             .map(|v| {
-                let label = option_label(&v);
+                let label = option_label(&v, suggested);
                 (v, label)
             })
             .collect(),
@@ -95,14 +96,24 @@ fn classification_text(d: &DecisionRecord, params: &serde_json::Value) -> (Strin
     (title, detail)
 }
 
-fn duplicate_text(params: &serde_json::Value, option_values: &[String]) -> (String, String) {
+fn duplicate_text(
+    d: &DecisionRecord,
+    params: &serde_json::Value,
+    option_values: &[String],
+) -> (String, String) {
     let member_count = params
         .get("paths")
         .and_then(|p| p.as_array())
         .map(|a| a.len())
         // Fall back to the options minus keep_all.
         .unwrap_or_else(|| option_values.len().saturating_sub(1));
-    let title = format!("{member_count} files appear to be copies — which is canonical?");
+    // Name the cluster by the subject's basename so the title orients the user
+    // even where option labels get truncated (web buttons).
+    let name = std::path::Path::new(&d.subject)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| d.subject.clone());
+    let title = format!("{member_count} copies of {name} — which is canonical?");
     let evidence = if params
         .get("exact")
         .and_then(|v| v.as_bool())
@@ -126,12 +137,19 @@ fn duplicate_text(params: &serde_json::Value, option_values: &[String]) -> (Stri
     (title, detail)
 }
 
-/// Human label for an option value. Path/category values label themselves.
-fn option_label(value: &str) -> String {
-    match value {
+/// Human label for an option value. Path/category values label themselves;
+/// the system's own suggestion is marked so the default choice is visible
+/// among otherwise identically-styled options.
+fn option_label(value: &str, suggested: Option<&str>) -> String {
+    let base = match value {
         "ignore" => "Ignore (stop suggesting)".to_owned(),
         "keep_all" => "Keep all (no canonical)".to_owned(),
         other => other.to_owned(),
+    };
+    if suggested == Some(value) {
+        format!("{base} (suggested)")
+    } else {
+        base
     }
 }
 
@@ -232,11 +250,26 @@ mod tests {
             json!(["/r/a", "/r/b", "/r/c", "keep_all"]),
         );
         let q = render_question(&d);
-        assert_eq!(q.title, "3 files appear to be copies — which is canonical?");
+        // Subject's basename names the cluster — the title must orient the user
+        // even where option labels get truncated (web buttons).
+        assert_eq!(q.title, "3 copies of proj — which is canonical?");
         assert!(q.detail.contains("~97% similar"));
         assert_eq!(
             q.options[3],
             ("keep_all".to_owned(), "Keep all (no canonical)".to_owned())
         );
+    }
+
+    #[test]
+    fn the_suggested_option_is_marked() {
+        let d = record(
+            "classification",
+            json!({"category": "code", "confidence": 0.7}),
+            json!(["work", "code", "ignore"]),
+        );
+        // The fixture's auto_value is "code" — its label carries the marker.
+        let q = render_question(&d);
+        assert_eq!(q.options[1].1, "code (suggested)");
+        assert_eq!(q.options[0].1, "work");
     }
 }

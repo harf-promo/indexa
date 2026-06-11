@@ -1,6 +1,6 @@
 use anyhow::Result;
 use indexa_core::config::Config;
-use indexa_core::decisions::detectors::{classification_fingerprint, UNCERTAINTY_FLOOR};
+use indexa_core::decisions::detectors::classification_fingerprint;
 use indexa_core::decisions::DecisionType;
 use indexa_core::smart_classify::{classify_dir_tier0, SemanticCategory};
 use indexa_core::store::{ClassificationRecord, NewDecision, Store};
@@ -92,6 +92,18 @@ pub(crate) async fn cmd_classify(
         )
     };
 
+    // Spend the question budget deterministically and by importance: paths the
+    // user has answered before (potential priority-100 re-asks) first, then the
+    // most uncertain suggestions — never HashSet-iteration order, which on a
+    // big disk can starve re-asks behind priority-50 noise under the caps.
+    rows.sort_by(|a, b| {
+        let user_first = |p: &String| by_path.get(p).map(|c| c.source == "user").unwrap_or(false);
+        user_first(&b.0)
+            .cmp(&user_first(&a.0))
+            .then(a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+
     let mut opened = 0usize;
     let mut open_budget = (review.max_open as i64 - store.open_decision_count()?).max(0) as usize;
     for (path, _kind, cat, confidence) in &rows {
@@ -143,25 +155,29 @@ pub(crate) async fn cmd_classify(
             }
             // Sticky tombstone: a dismissed folder is never re-raised here.
             Some("ignored") => {}
-            // Uncertainty: mid-band confidence becomes a question instead of a
-            // silently-applied label. Confident results stay out of the ledger.
+            // No live user row. The ledger may still hold a standing answer
+            // (classifications rows vanish with their entry on `indexa rm`;
+            // decisions persist by design) — route_uncertain_classification
+            // restores it, chains a re-ask to it on contradiction, or opens a
+            // plain uncertainty question inside the band. Routing through it
+            // is what keeps the key from ever growing a second live head.
             _ => {
-                if *confidence >= UNCERTAINTY_FLOOR && *confidence < review.auto_record_below {
-                    let opened_id = store.record_decision(NewDecision {
-                        decision_type: DecisionType::Classification.as_str().to_owned(),
-                        subject: path.clone(),
-                        params: serde_json::json!({"category": cat, "confidence": confidence}),
-                        options: options.clone(),
-                        auto_value: Some(cat.clone()),
-                        confidence: Some(*confidence),
-                        evidence_hash: fp_for(path),
-                        priority: 50,
-                        paths: vec![path.clone()],
-                    })?;
-                    if opened_id.is_some() {
+                match indexa_core::decisions::route_uncertain_classification(
+                    &mut store,
+                    path,
+                    cat,
+                    *confidence,
+                    fp_for(path),
+                    options.clone(),
+                    review.auto_record_below,
+                )? {
+                    indexa_core::decisions::SuggestionOutcome::Opened(_) => {
                         opened += 1;
                         open_budget -= 1;
                     }
+                    indexa_core::decisions::SuggestionOutcome::Restored(_)
+                    | indexa_core::decisions::SuggestionOutcome::Deduped
+                    | indexa_core::decisions::SuggestionOutcome::Skipped => {}
                 }
             }
         }

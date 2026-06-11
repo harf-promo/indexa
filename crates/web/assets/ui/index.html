@@ -20,6 +20,7 @@
   <div class="app-topbar-actions">
     <span class="app-stats" id="stats">Loading&#x2026;</span>
     <button class="icon-btn" id="cmd-palette-btn" onclick="openCmdPalette()" title="Command palette (&#x2318;K)" aria-label="Open command palette">&#x2318;K</button>
+    <button class="icon-btn" id="review-btn" onclick="switchTab('review')" title="Review &#x2014; questions needing your judgment" aria-label="Open review inbox">&#x2709; Review <span class="review-badge" id="review-badge" hidden></span></button>
     <button class="icon-btn" id="settings-gear" onclick="switchTab('settings')" title="Settings" aria-label="Settings">&#x2699;</button>
     <button class="icon-btn" id="sound-toggle" onclick="toggleSound()" title="Toggle sound notifications" aria-label="Toggle sound">&#x1F514;</button>
     <button class="icon-btn" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" aria-label="Toggle theme">&#x1F317;</button>
@@ -543,6 +544,20 @@
           </div>
         </div>
       </section>
+    </div>
+  </div>
+</div>
+
+<!-- Review drawer — the Decision Ledger inbox: open questions awaiting user judgment -->
+<div class="drawer-overlay" id="panel-review" onclick="if(event.target===this)closeDrawer('review')" role="dialog" aria-modal="true" aria-label="Review">
+  <div class="drawer">
+    <div class="drawer-head">
+      <span class="drawer-title">Review</span>
+      <button class="icon-btn" onclick="closeDrawer('review')" title="Close" aria-label="Close review">&#x2715;</button>
+    </div>
+    <div class="review-view" id="review-view">
+      <p class="review-intro">Indexa asks here when an indexing judgment call needs your eye. Answers are recorded in the decision ledger and stick across rescans.</p>
+      <div class="review-list" id="review-list" aria-live="polite"></div>
     </div>
   </div>
 </div>

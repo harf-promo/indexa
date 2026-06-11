@@ -189,6 +189,22 @@ impl Store {
         Ok(crumbs)
     }
 
+    /// Delete one summary row by exact path (no children). Returns rows removed.
+    pub fn delete_summary(&mut self, path: &str) -> Result<usize> {
+        self.conn
+            .execute("DELETE FROM summaries WHERE path = ?1", params![path])
+            .map_err(Into::into)
+    }
+
+    /// Does a summary row exist for `path`? (Cheap existence probe — avoids
+    /// materializing the embedding blob that `summary_by_path` would fetch.)
+    pub fn summary_exists(&self, path: &str) -> Result<bool> {
+        self.conn
+            .prepare_cached("SELECT 1 FROM summaries WHERE path = ?1")?
+            .exists(params![path])
+            .map_err(Into::into)
+    }
+
     /// Count of summary rows.
     pub fn summary_count(&self) -> Result<u64> {
         let n: i64 = self

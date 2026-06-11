@@ -69,9 +69,30 @@ fn apply_duplicate(
         return Ok(json!({ "canonical": null, "silenced": [] }));
     }
 
+    // One fetch, per-member lookups: a weight row WITHOUT the `decision:` reason
+    // is the user's explicit intent — silencing must not seize or overwrite it
+    // (set_weight upserts unconditionally, which would rebrand the row as
+    // ledger-owned and a later release would DELETE it instead of restoring it).
+    let ledger_owned: std::collections::HashMap<String, bool> = store
+        .list_weights(Some("file"))?
+        .into_iter()
+        .map(|w| {
+            let owned = w
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.starts_with(DECISION_REASON_PREFIX));
+            (w.target, owned)
+        })
+        .collect();
+
     let mut silenced: Vec<&String> = Vec::new();
+    let mut kept_manual: Vec<&String> = Vec::new();
     for member in &paths {
         if member == chosen {
+            continue;
+        }
+        if ledger_owned.get(member) == Some(&false) {
+            kept_manual.push(member);
             continue;
         }
         store.set_weight(
@@ -88,7 +109,11 @@ fn apply_duplicate(
     }
     // A prior revision may have silenced the path that is canonical now.
     release_decision_weight(store, chosen)?;
-    Ok(json!({ "canonical": chosen, "silenced": silenced }))
+    let mut effects = json!({ "canonical": chosen, "silenced": silenced });
+    if !kept_manual.is_empty() {
+        effects["kept_manual_weight"] = json!(kept_manual);
+    }
+    Ok(effects)
 }
 
 /// Delete the file-weight row on `path` iff the ledger owns it.
@@ -200,5 +225,33 @@ mod tests {
         assert_eq!(weights.len(), 1);
         assert_eq!(weights[0].target, "/r/c.txt");
         assert_eq!(weights[0].weight, 2.0);
+    }
+
+    #[test]
+    fn silencing_never_seizes_a_pre_existing_manual_weight() {
+        let mut store = Store::open_in_memory().unwrap();
+        // The user boosted b.txt by hand BEFORE any duplicate decision existed.
+        store
+            .set_weight("file", "/r/b.txt", 3.0, "user", Some("my important copy"))
+            .unwrap();
+
+        let params = json!({"paths": ["/r/a.txt", "/r/b.txt"], "exact": true, "similarity": 1.0});
+        let d = decided(11, "duplicate", "/r/a.txt", params.clone(), "/r/a.txt");
+        let fx = apply_decision_effects(&mut store, &d).unwrap();
+        assert_eq!(fx["kept_manual_weight"], json!(["/r/b.txt"]));
+        assert_eq!(fx["silenced"], json!([]));
+
+        // The manual weight is untouched — value AND reason.
+        let w = store.list_weights(Some("file")).unwrap();
+        assert_eq!(w.len(), 1);
+        assert_eq!((w[0].target.as_str(), w[0].weight), ("/r/b.txt", 3.0));
+        assert_eq!(w[0].reason.as_deref(), Some("my important copy"));
+
+        // keep_all later must also leave it alone (not delete it as ledger-owned).
+        let d2 = decided(12, "duplicate", "/r/a.txt", params, "keep_all");
+        apply_decision_effects(&mut store, &d2).unwrap();
+        let w = store.list_weights(Some("file")).unwrap();
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].weight, 3.0);
     }
 }

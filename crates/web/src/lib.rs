@@ -103,6 +103,7 @@ pub(crate) const UI_CSS: &str = concat!(
     include_str!("../assets/ui/css/09-model-fit-popover.css"),
     include_str!("../assets/ui/css/10-treemap.css"),
     include_str!("../assets/ui/css/11-graph.css"),
+    include_str!("../assets/ui/css/12-review.css"),
 );
 pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/01-state-theme-tabs.js"),
@@ -124,6 +125,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/17-weights.js"),
     include_str!("../assets/ui/js/18-insights.js"),
     include_str!("../assets/ui/js/19-graph.js"),
+    include_str!("../assets/ui/js/20-review.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -344,6 +346,11 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
                 .delete(api_weights_delete),
         )
         .route("/api/weights/suggest", get(api_weights_suggest))
+        .route("/api/review", get(api_review_list))
+        .route("/api/review/answer", post(api_review_answer))
+        .route("/api/review/dismiss", post(api_review_dismiss))
+        .route("/api/review/history", get(api_review_history))
+        .route("/api/review/count", get(api_review_count))
         .route("/api/saved", get(api_saved_list).post(api_saved_set))
         .route("/api/saved/:name", delete(api_saved_delete))
         .route("/api/insights/duplicates", get(api_insights_duplicates))
@@ -515,6 +522,72 @@ mod tests {
         let (status, json) = get_json(app, "/api/search?q=alpha").await;
         assert_eq!(status, StatusCode::OK);
         assert!(json.is_array());
+    }
+
+    #[tokio::test]
+    async fn api_review_lists_and_answers_open_decisions() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .record_decision(indexa_core::store::NewDecision {
+                decision_type: "classification".to_owned(),
+                subject: "/r/proj".to_owned(),
+                params: serde_json::json!({"category": "code", "confidence": 0.7}),
+                options: serde_json::json!(["work", "code", "ignore"]),
+                auto_value: Some("code".to_owned()),
+                confidence: Some(0.7),
+                evidence_hash: "fp1".to_owned(),
+                priority: 50,
+                paths: vec!["/r/proj".to_owned()],
+            })
+            .unwrap()
+            .unwrap();
+        let state = state_with(store);
+        let app = build_router(state.clone(), 7620);
+
+        let (status, json) = get_json(app.clone(), "/api/review").await;
+        assert_eq!(status, StatusCode::OK);
+        let q = &json.as_array().unwrap()[0];
+        assert_eq!(q["decision_type"], "classification");
+        assert!(q["title"].as_str().unwrap().contains("/r/proj"));
+        let id = q["id"].as_i64().unwrap();
+
+        let (status, json) = get_json(app.clone(), "/api/review/count").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["open"], 1);
+
+        // Answer through the real route: the projection must land in classifications.
+        let body = serde_json::json!({ "id": id, "chosen": "work" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/review/answer")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["answered"], true);
+        assert_eq!(json["effects"]["classification"], "work");
+
+        {
+            let store = state.store.lock().await;
+            let c = store.classification_for("/r/proj").unwrap().unwrap();
+            assert_eq!((c.category.as_str(), c.source.as_str()), ("work", "user"));
+            assert_eq!(store.open_decision_count().unwrap(), 0);
+        }
+        let (status, json) = get_json(app, "/api/review/history?subject=/r/proj").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["status"], "decided");
+        assert_eq!(json[0]["chosen"], "work");
     }
 
     #[tokio::test]

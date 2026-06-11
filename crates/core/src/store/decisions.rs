@@ -65,8 +65,12 @@ fn decide_row(tx: &Transaction, id: i64, chosen: &str, source: &str) -> rusqlite
         |r| r.get(0),
     )?;
     if let Some(pid) = parent_id {
+        // The IS NULL guard makes single-stamp a local invariant rather than an
+        // emergent one (parents are always the latest_decided head today, but
+        // nothing here should rely on that).
         tx.execute(
-            "UPDATE decisions SET superseded_by = ?2 WHERE id = ?1",
+            "UPDATE decisions SET superseded_by = ?2
+              WHERE id = ?1 AND superseded_by IS NULL",
             params![pid, id],
         )?;
     }
@@ -101,7 +105,9 @@ impl Store {
         d: &NewDecision,
         parent_id: Option<i64>,
     ) -> Result<Option<i64>> {
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let dismissed_same_evidence: bool = tx
             .prepare(
                 "SELECT 1 FROM decisions
@@ -234,6 +240,15 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Does an `entries` row exist for `path`? Used by the expiry sweep to spot
+    /// open questions whose subject vanished from the index.
+    pub fn entry_exists(&self, path: &str) -> Result<bool> {
+        self.conn
+            .prepare_cached("SELECT 1 FROM entries WHERE path = ?1")?
+            .exists(params![path])
+            .map_err(Into::into)
+    }
+
     /// Ids of decisions whose `decision_paths` include `path` (exact match) and
     /// that are still live: open, or decided and un-superseded. Lets detectors
     /// skip raising a question a standing decision already covers.
@@ -258,7 +273,9 @@ impl Store {
     /// [`Store::supersede_with`] instead). Stamps the parent's `superseded_by`
     /// in the same transaction when this row is a re-ask.
     pub fn answer_decision(&mut self, id: i64, chosen: &str, source: &str) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         match decision_status(&tx, id)? {
             None => bail!("no decision with id {id}"),
             Some(s) if s != "open" => bail!("decision {id} is '{s}', not open"),
@@ -280,7 +297,9 @@ impl Store {
         source: &str,
     ) -> Result<Vec<i64>> {
         let pattern = like_prefix(dir_prefix);
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let ids: Vec<i64> = {
             let mut stmt = tx.prepare(
                 "SELECT id FROM decisions
@@ -317,7 +336,9 @@ impl Store {
     /// recorded under the `expired` key in `params` so the history explains
     /// itself — recorded, never silently dropped.
     pub fn expire_decision(&mut self, id: i64, note: &str) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let row: Option<(String, String)> = tx
             .query_row(
                 "SELECT status, params FROM decisions WHERE id = ?1",
@@ -374,10 +395,16 @@ impl Store {
 
     /// Decided rows whose projection never stamped its receipt — the repair
     /// sweep re-runs these (projections are idempotent, so re-running is safe).
+    ///
+    /// Superseded rows are excluded even when unstamped: a newer revision's
+    /// projection already expresses the current answer, and re-applying the
+    /// stale one would overwrite it (crash before P's projection → re-ask C
+    /// answered → repairing P would resurrect P's answer over C's).
     pub fn unapplied_decided(&self, limit: usize) -> Result<Vec<DecisionRecord>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {DECISION_COLS} FROM decisions
               WHERE status = 'decided' AND effects_applied_at IS NULL
+                AND superseded_by IS NULL
               ORDER BY id LIMIT ?1"
         ))?;
         let rows = stmt.query_map(params![limit as i64], row_to_decision)?;
@@ -397,7 +424,9 @@ impl Store {
     /// classifications table already reflects these answers, and re-projecting
     /// would pointlessly rewrite `confirmed_at`.
     pub fn backfill_classification_decisions(&mut self) -> Result<usize> {
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let has_any: bool = tx
             .prepare("SELECT 1 FROM decisions WHERE decision_type = 'classification' LIMIT 1")?
             .exists([])?;
