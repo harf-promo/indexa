@@ -167,6 +167,57 @@ pub struct WeightRecord {
     pub updated_at: i64,
 }
 
+/// One Decision Ledger row (v0.22) — a question Indexa asked (or a judgment it
+/// recorded) plus its answer. The row fills in place on answer; revisions append
+/// new rows chained via `parent_id`/`superseded_by` — see store::decisions.
+///
+/// `params`/`options`/`effects` are JSON kept as `String`: the store hands them
+/// through verbatim and only the template/effects layers interpret them.
+#[derive(Debug, Clone)]
+pub struct DecisionRecord {
+    pub id: i64,
+    pub decision_type: String,
+    /// Stable key: a path, cluster key, or symbol.
+    pub subject: String,
+    pub params: String,
+    pub options: String,
+    /// What the automatic pass would pick (shown as the default answer).
+    pub auto_value: Option<String>,
+    pub chosen: Option<String>,
+    /// `auto` | `user` | `system` — who supplied `chosen` (NULL while open).
+    pub source: Option<String>,
+    pub confidence: Option<f32>,
+    /// Re-ask fingerprint: a dismissed/decided question only comes back when
+    /// the evidence behind it changes.
+    pub evidence_hash: String,
+    pub priority: i64,
+    /// `open` | `decided` | `dismissed` | `expired`.
+    pub status: String,
+    pub parent_id: Option<i64>,
+    pub superseded_by: Option<i64>,
+    pub effects: Option<String>,
+    /// NULL on a decided row ⇒ projection not yet applied (repair-sweep target).
+    pub effects_applied_at: Option<i64>,
+    pub created_at: i64,
+    pub decided_at: Option<i64>,
+}
+
+/// Input for [`Store::record_decision`] — everything a detector knows when it
+/// raises a question. `paths` become `decision_paths` rows (include the subject
+/// itself when it is a path; the store inserts exactly what is given).
+#[derive(Debug, Clone)]
+pub struct NewDecision {
+    pub decision_type: String,
+    pub subject: String,
+    pub params: serde_json::Value,
+    pub options: serde_json::Value,
+    pub auto_value: Option<String>,
+    pub confidence: Option<f32>,
+    pub evidence_hash: String,
+    pub priority: i64,
+    pub paths: Vec<String>,
+}
+
 /// A named Context Pack — a user-curated set of cross-directory paths that
 /// form a coherent topic (e.g. "Auth", "Tax 2025", "Client X").
 #[derive(Debug, Clone)]

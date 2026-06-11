@@ -204,6 +204,56 @@ impl Store {
                 created_at INTEGER NOT NULL DEFAULT (unixepoch())
             );
 
+            -- Decision Ledger (v0.22): every uncertain judgment call becomes a row —
+            -- one row = one question + its answer. The row fills in place on answer;
+            -- the ONLY in-place lifecycle transition is open → decided/dismissed/expired.
+            -- Changing or re-asking APPENDS a new row chained via parent_id, and the
+            -- prior row gets superseded_by stamped (the only post-decision mutation).
+            -- Current state = decided rows WHERE superseded_by IS NULL. decision_type
+            -- deliberately has NO CHECK constraint — widening the edges.kind CHECK cost
+            -- a table-recreate migration above; type validation lives in Rust.
+            -- Decisions SURVIVE entry removal, like importance_weights (a recorded
+            -- answer is standing user intent that outlives the entries row): they are
+            -- NOT cleared by the entries.rs delete paths — vanished subjects are
+            -- expired by the sweep, recorded, never silently dropped.
+            CREATE TABLE IF NOT EXISTS decisions (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                decision_type TEXT NOT NULL,
+                subject       TEXT NOT NULL,               -- stable key: path, cluster key, symbol
+                params        TEXT NOT NULL DEFAULT '{}',  -- JSON evidence/template params
+                options       TEXT NOT NULL DEFAULT '[]',  -- JSON array of candidate answers
+                auto_value    TEXT,
+                chosen        TEXT,
+                source        TEXT CHECK(source IN ('auto','user','system')),
+                confidence    REAL,
+                evidence_hash TEXT NOT NULL DEFAULT '',    -- re-ask fingerprint
+                priority      INTEGER NOT NULL DEFAULT 50,
+                status        TEXT NOT NULL DEFAULT 'open'
+                                   CHECK(status IN ('open','decided','dismissed','expired')),
+                parent_id     INTEGER REFERENCES decisions(id),     -- revision chain
+                superseded_by INTEGER REFERENCES decisions(id),
+                effects             TEXT,     -- applied projection (JSON); NULL ⇒ repair-sweep target
+                effects_applied_at  INTEGER,
+                created_at    INTEGER NOT NULL DEFAULT (unixepoch()),
+                decided_at    INTEGER
+            );
+            -- At most one OPEN question per (type, subject); record_decision races
+            -- resolve via ON CONFLICT DO NOTHING against this partial index.
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_open_unique
+                ON decisions(decision_type, subject) WHERE status='open';
+            CREATE INDEX IF NOT EXISTS idx_decisions_inbox
+                ON decisions(priority DESC, created_at DESC) WHERE status='open';
+            CREATE INDEX IF NOT EXISTS idx_decisions_key ON decisions(decision_type, subject);
+
+            -- Every path a decision touches (cluster members, not just the subject) —
+            -- powers the does-an-existing-question-already-cover-this-file lookup.
+            CREATE TABLE IF NOT EXISTS decision_paths (
+                decision_id INTEGER NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+                path        TEXT NOT NULL,
+                PRIMARY KEY (decision_id, path)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_decision_paths_path ON decision_paths(path);
+
             -- Insights (v0.10): first_indexed_at is populated separately via migration.
             ",
         )?;
@@ -348,7 +398,10 @@ impl Store {
         // locked by `delete_entry_leaves_no_orphans` / `delete_subtree_leaves_no_orphans`
         // in store::tests — add any new entry-keyed child table to both the cleanup
         // statements and those tests. (`importance_weights` is intentionally exempt:
-        // weights persist across entry removal by design — see store::weights.)
+        // weights persist across entry removal by design — see store::weights.
+        // `decisions`/`decision_paths` are exempt for the same reason: a recorded
+        // answer is standing user intent; vanished subjects are expired by the sweep,
+        // not deleted — see store::decisions.)
 
         Ok(())
     }
