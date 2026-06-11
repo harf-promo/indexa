@@ -14,7 +14,7 @@ claude "given @.context.xml, find the auth flow and add MFA"
 
 *The index is the substrate; context is the product. Local-first · model-agnostic · Apache-2.0.*
 
-> Indexa is production-ready for daily use on one or more repos. Whole-disk indexing is fast; the storage format stabilises before 1.0. New here? Start with the **[Usage Guide](USAGE.md)** or **[Quickstart](docs/quickstart.md)**.
+> Indexa is production-ready for daily use on one or more repos. Whole-disk indexing is fast; the storage format stabilises before 1.0. New here? Start with the **[Usage Guide](USAGE.md)** or **[Quickstart](docs/quickstart.md)**. Something broken? **[Troubleshooting](docs/TROUBLESHOOTING.md)**.
 
 ---
 
@@ -57,6 +57,13 @@ indexa mcp                                                 # expose the live ind
 ## Why Indexa
 
 **Stop paying to re-teach your AI your own codebase.** Every coding assistant wakes up amnesiac. Before it helps, it reads its way back to orientation — burning context window, paid tokens, and your patience on a lesson it learned five minutes ago. Indexa teaches it *once*: it builds a persistent, hierarchical context store on your machine and serves a small ranked slice on demand, so the model spends its budget on the work you asked for.
+
+> **What that's worth — a worked example** *(illustrative, ~4 chars/token; measured per-session
+> numbers ship with the upcoming usage telemetry)*: an agent orienting itself in a medium repo
+> typically reads ~40 files at ~2,000 tokens each ≈ **80K tokens — every session**. The same
+> orientation through Indexa: one `search` (~300 tokens) + ten L0 one-line abstracts (~30 each) +
+> the two files it actually needs in full (~4K) ≈ **5K tokens**. That's roughly **94% less**,
+> before the session's real work starts — and the index was built locally, for zero tokens.
 
 **There are two kinds of context, and almost everyone conflates them.** *Working context* is what's in the model's window right now — scarce, paid, gone when the session ends. *Searchable context* is everything your AI could know: the store on disk. Indexa separates them. The model never holds your repo; it holds the ~2–4K characters that actually matter, retrieved from a store that can be gigabytes.
 
