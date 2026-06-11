@@ -100,7 +100,15 @@ impl Store {
                 byte_size     INTEGER NOT NULL DEFAULT 0,
                 model         TEXT NOT NULL DEFAULT '',
                 source_hash   TEXT NOT NULL DEFAULT '',
-                generated_at  INTEGER NOT NULL DEFAULT (unixepoch())
+                generated_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                -- Provenance (v0.21): HOW this summary was produced, not just by which
+                -- model. provider = adapter name ('ollama', 'claude-code', …);
+                -- passes = refinement passes actually run; fallback = 1 when a lighter
+                -- model was auto-substituted for the configured one. Substrate for the
+                -- decision ledger (summary-drift questions need to know the lineage).
+                provider      TEXT,
+                passes        INTEGER,
+                fallback      INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_summaries_parent ON summaries(parent_path);
             CREATE INDEX IF NOT EXISTS idx_summaries_depth  ON summaries(depth);
@@ -230,6 +238,31 @@ impl Store {
         if !has_l0 {
             self.conn
                 .execute_batch("ALTER TABLE summaries ADD COLUMN summary_l0 TEXT;")?;
+        }
+
+        // Migration: summaries provenance columns (v0.21) — provider / passes / fallback.
+        // Checked per column (not as a trio) so a DB that somehow has a subset still
+        // converges; each ALTER is independently idempotent.
+        for (col, ddl) in [
+            (
+                "provider",
+                "ALTER TABLE summaries ADD COLUMN provider TEXT;",
+            ),
+            ("passes", "ALTER TABLE summaries ADD COLUMN passes INTEGER;"),
+            (
+                "fallback",
+                "ALTER TABLE summaries ADD COLUMN fallback INTEGER;",
+            ),
+        ] {
+            let present: bool = self
+                .conn
+                .prepare(&format!(
+                    "SELECT 1 FROM pragma_table_info('summaries') WHERE name = '{col}'"
+                ))?
+                .exists([])?;
+            if !present {
+                self.conn.execute_batch(ddl)?;
+            }
         }
 
         // Migration: give `chunks.id` AUTOINCREMENT on databases created before stable ids

@@ -125,6 +125,24 @@ impl Store {
         Ok(())
     }
 
+    /// Stamp provenance onto an existing summary row (v0.21): which adapter produced it,
+    /// how many refinement passes actually ran, and whether a lighter model was
+    /// auto-substituted for the configured one. Kept off `SummaryRecord` on purpose —
+    /// write-path only for now; read surfaces arrive with the decision ledger.
+    pub fn set_summary_provenance(
+        &mut self,
+        path: &str,
+        provider: &str,
+        passes: i64,
+        fallback: bool,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE summaries SET provider = ?2, passes = ?3, fallback = ?4 WHERE path = ?1",
+            params![path, provider, passes, fallback as i64],
+        )?;
+        Ok(())
+    }
+
     /// Look up a single summary row by exact path.
     pub fn summary_by_path(&self, path: &str) -> Result<Option<SummaryRecord>> {
         let mut stmt = self.conn.prepare_cached(

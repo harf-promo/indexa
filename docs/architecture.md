@@ -14,6 +14,7 @@ apps/indexa          — CLI binary (main entry point)
 ├── crates/parsers    — File type parsers (text, Markdown, code, PDF, EPUB, Org, office, image, media)
 ├── crates/embed      — Embedding adapter trait + Ollama/OpenAI/Google/llama.cpp impls
 ├── crates/llm        — LLM adapter trait + Ollama/OpenAI/Anthropic/llama.cpp impls
+├── crates/http-util  — shared HTTP client + retry/backoff policy for the network adapters
 ├── crates/query      — Hybrid search (FTS5 + vector), reranking, and the unified RAG answer() pipeline
 ├── crates/web        — Axum HTTP server + embedded single-page UI (live SSE jobs)
 └── crates/mcp        — stdio Model Context Protocol server (`indexa mcp`) exposing the index to AI agents
@@ -55,7 +56,7 @@ window. See [Why an external context store helps local models](methodology.md#wh
                  → persisted to platform data dir (~/.local/share/indexa/index.db on Linux)
 ```
 
-Files: [`apps/indexa/src/main.rs`](../apps/indexa/src/main.rs) · [`crates/parsers/src/registry.rs`](../crates/parsers/src/registry.rs) · [`crates/core/src/store.rs`](../crates/core/src/store.rs)
+Files: [`apps/indexa/src/main.rs`](../apps/indexa/src/main.rs) · [`crates/parsers/src/registry.rs`](../crates/parsers/src/registry.rs) · [`crates/core/src/store/`](../crates/core/src/store/)
 
 ---
 
@@ -89,7 +90,7 @@ so the future is `Send` (required by the axum web server and the rmcp MCP server
                  → Answer { answer: String, sources: Vec<SourceCitation> }
 ```
 
-Files: [`crates/query/src/qa.rs`](../crates/query/src/qa.rs) · [`crates/query/src/rerank.rs`](../crates/query/src/rerank.rs) · [`crates/core/src/store.rs`](../crates/core/src/store.rs) · [`crates/llm/src/lib.rs`](../crates/llm/src/lib.rs)
+Files: [`crates/query/src/qa.rs`](../crates/query/src/qa.rs) · [`crates/query/src/rerank.rs`](../crates/query/src/rerank.rs) · [`crates/core/src/store/`](../crates/core/src/store/) · [`crates/llm/src/lib.rs`](../crates/llm/src/lib.rs)
 
 ---
 
@@ -155,3 +156,31 @@ Source: [`crates/core/src/surface.rs`](../crates/core/src/surface.rs)
 `indexa watch <path>` uses `notify-debouncer-full` (over cross-platform `notify` — inotify/FSEvents/ReadDirectoryChanges) to detect `Create` / `Modify` / `Remove` events. The debouncer coalesces editor save bursts into a single re-index. On each event the affected file is re-parsed and re-embedded; removed files are deleted from the store.
 
 Source: [`crates/core/src/watcher.rs`](../crates/core/src/watcher.rs)
+
+---
+
+## Where to add things (contributor map)
+
+The workspace is a strict DAG — `core` at the bottom, surfaces at the top. New code almost always
+slots into one of these seams:
+
+| You want to… | Touch | Pattern to copy |
+|---|---|---|
+| Support a new file format | `crates/parsers/` | any existing parser + register it in `registry.rs` (or ship it out-of-tree via the Plugin SDK) |
+| Add an embedding/LLM provider | `crates/embed/` / `crates/llm/` | the Ollama adapter; keep `reqwest` on `rustls-tls` (cross-compile invariant) |
+| Add a store table or query | `crates/core/src/store/` | one file per concern (`weights.rs`, `classify.rs`, …); DDL + migration in `schema.rs` (manual `sqlite_master` detection + IMMEDIATE tx — no `user_version`); invariant tests in `store/tests.rs` |
+| Add a CLI command | `apps/indexa/src/commands/` | one file per command, wire in `main.rs` |
+| Add a web endpoint | `crates/web/src/handlers/` | one handler module per feature; **new JS/CSS files must be appended to the `include_str!` concat in `crates/web/src/lib.rs` or they are silently dead** |
+| Add an MCP tool | `crates/mcp/src/lib.rs` | `#[tool(description = …)]` method; each tool opens its own `Store`; update the tool-count in README/CLAUDE.md (CI checks it) |
+
+Two store rules that are easy to violate accidentally:
+
+- **No FK cascades.** Referential integrity is manual — entry deletion cleans up chunks / FTS /
+  edges / summaries / queue / classifications in `entries.rs`. `importance_weights` is *deliberately
+  exempt* (standing user intent survives re-indexing). A new child table must choose a side and add
+  a test either way.
+- **`chunks` IDs are AUTOINCREMENT and never reused** — the in-memory ANN index keys on them.
+
+Verification gate for every PR: `cargo fmt --check && cargo clippy --workspace -- -D warnings &&
+cargo test --workspace`. The desktop app builds separately
+(`cargo build --manifest-path apps/indexa-desktop/Cargo.toml`) — it is excluded from `--workspace`.

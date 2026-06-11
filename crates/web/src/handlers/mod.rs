@@ -16,6 +16,7 @@ mod models;
 mod packs;
 mod providers;
 mod queue;
+mod saved;
 mod stats;
 mod summary;
 mod telemetry;
@@ -53,6 +54,7 @@ pub(crate) use packs::{
 };
 pub(crate) use providers::api_providers_status;
 pub(crate) use queue::{api_queue_failed, api_queue_retry, api_queue_stats};
+pub(crate) use saved::{api_saved_delete, api_saved_list, api_saved_set};
 pub(crate) use stats::{api_map, api_map_treemap, api_roots, api_search, api_stats};
 pub(crate) use summary::{api_summarize_enqueue, api_summary};
 pub(crate) use telemetry::{api_telemetry, api_telemetry_stream};

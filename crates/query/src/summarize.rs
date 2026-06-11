@@ -151,6 +151,7 @@ fn is_preamble_label(label: &str) -> bool {
 ///
 /// When `on_fragment` is `Some`, each generated token is forwarded to the
 /// callback for live streaming to the web UI.  Pass `None` for the CLI path.
+#[allow(clippy::too_many_arguments)]
 pub async fn summarize_file(
     store: &mut Store,
     describer: &dyn Describer,
@@ -158,6 +159,7 @@ pub async fn summarize_file(
     path: &str,
     model: &str,
     passes: u32,
+    model_fallback: bool,
     mut on_fragment: Option<&mut (dyn FnMut(String) + Send)>,
 ) -> Result<bool> {
     // Try to get a content sample. Prefer first chunk text (already parsed),
@@ -172,6 +174,7 @@ pub async fn summarize_file(
     };
 
     let mut summary_text: Option<String> = None;
+    let mut passes_run: i64 = 0;
     for i in 0..passes.max(1) {
         let next = match on_fragment {
             Some(ref mut f) => {
@@ -198,6 +201,7 @@ pub async fn summarize_file(
         }
         tracing::info!("summarize {path} pass {}/{passes}", i + 1);
         summary_text = Some(next);
+        passes_run = i64::from(i) + 1;
     }
     let Some(summary_text) = summary_text else {
         return Ok(false);
@@ -225,6 +229,7 @@ pub async fn summarize_file(
         source_hash: String::new(),
         generated_at: now_secs(),
     })?;
+    store.set_summary_provenance(path, describer.provider_name(), passes_run, model_fallback)?;
 
     Ok(true)
 }
@@ -242,6 +247,7 @@ pub async fn summarize_directory(
     dir_model: &str,
     max_children: usize,
     passes: u32,
+    model_fallback: bool,
     mut on_fragment: Option<&mut (dyn FnMut(String) + Send)>,
 ) -> Result<bool> {
     let children = store.children_summaries(dir_path)?;
@@ -263,6 +269,7 @@ pub async fn summarize_directory(
         .collect();
 
     let mut summary_text: Option<String> = None;
+    let mut passes_run: i64 = 0;
     for i in 0..passes.max(1) {
         let next = match on_fragment {
             Some(ref mut f) => {
@@ -289,6 +296,7 @@ pub async fn summarize_directory(
         }
         tracing::info!("summarize {dir_path} pass {}/{passes}", i + 1);
         summary_text = Some(next);
+        passes_run = i64::from(i) + 1;
     }
     let Some(summary_text) = summary_text else {
         return Ok(false);
@@ -317,6 +325,12 @@ pub async fn summarize_directory(
         source_hash: String::new(),
         generated_at: now_secs(),
     })?;
+    store.set_summary_provenance(
+        dir_path,
+        describer.provider_name(),
+        passes_run,
+        model_fallback,
+    )?;
 
     Ok(true)
 }
@@ -421,6 +435,7 @@ pub async fn process_queue_item_with_passes(
             &item.path,
             &cfg.file_model,
             passes,
+            cfg.model_fallback,
             on_fragment,
         )
         .await
@@ -433,6 +448,7 @@ pub async fn process_queue_item_with_passes(
             &cfg.dir_model,
             cfg.max_children_per_summary,
             passes,
+            cfg.model_fallback,
             on_fragment,
         )
         .await

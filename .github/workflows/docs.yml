@@ -1,0 +1,26 @@
+name: Docs
+
+# Offline-only link check: validates relative file links and anchors across all
+# Markdown (the drift class that actually bites — renamed/moved docs), without
+# the flakiness or rate limits of fetching external URLs. Path-filtered so it
+# only spends Actions minutes on docs PRs.
+on:
+  pull_request:
+    paths:
+      - "**/*.md"
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  link-check:
+    name: Markdown link check (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check internal links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --offline --include-fragments --no-progress "**/*.md"
+          fail: true

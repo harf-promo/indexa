@@ -14,71 +14,9 @@ pub use google::GoogleEmbedder;
 pub use ollama::OllamaEmbedder;
 pub use openai::OpenAIEmbedder;
 
-/// Build a reqwest client with a finite request + connect timeout, shared by every
-/// embedding adapter. Without this a stalled cloud endpoint (no FIN, no bytes) would hang
-/// `embed()` forever — and these run inside the indexing worker and web/MCP request paths.
-/// `expect` is appropriate: `build()` only fails if the rustls TLS backend can't initialize,
-/// which is unrecoverable at startup (and never silently yields a no-timeout client, unlike
-/// the old `.unwrap_or_default()`).
-pub(crate) fn http_client(timeout_secs: u64) -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .expect("building reqwest client (rustls TLS init)")
-}
-
-/// HTTP status codes worth retrying — transient server errors and rate limits.
-pub(crate) fn is_retryable_status(status: u16) -> bool {
-    matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504 | 529)
-}
-
-/// Backoff before retry `attempt` (0-based): honor `Retry-After` if present (capped at 30s),
-/// otherwise exponential `0.5s · 2^attempt`, capped at 8s.
-pub(crate) fn backoff_delay(
-    attempt: u32,
-    retry_after: Option<std::time::Duration>,
-) -> std::time::Duration {
-    use std::time::Duration;
-    if let Some(ra) = retry_after {
-        return ra.min(Duration::from_secs(30));
-    }
-    (Duration::from_millis(500) * 2u32.saturating_pow(attempt)).min(Duration::from_secs(8))
-}
-
-/// Send a freshly-built request with bounded retries on transient failures (retryable status
-/// codes + connection/timeout errors). `build` is called once per attempt because `send()`
-/// consumes the builder. Bulk indexing routinely hits 429/503 from cloud providers; without
-/// this each such response permanently fails that file's embedding/summary.
-pub(crate) async fn send_with_retry(
-    build: impl Fn() -> reqwest::RequestBuilder,
-    max_retries: u32,
-) -> reqwest::Result<reqwest::Response> {
-    let mut attempt = 0u32;
-    loop {
-        match build().send().await {
-            Ok(resp) if attempt < max_retries && is_retryable_status(resp.status().as_u16()) => {
-                let retry_after = resp
-                    .headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .map(std::time::Duration::from_secs);
-                tokio::time::sleep(backoff_delay(attempt, retry_after)).await;
-                attempt += 1;
-            }
-            Ok(resp) => return Ok(resp),
-            Err(e)
-                if attempt < max_retries
-                    && (e.is_timeout() || e.is_connect() || e.is_request()) =>
-            {
-                tokio::time::sleep(backoff_delay(attempt, None)).await;
-                attempt += 1;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
+// HTTP client construction + transient-failure retry policy live in the shared
+// `indexa-http-util` crate (one source of truth with `indexa-llm`).
+pub(crate) use indexa_http_util::{http_client, send_with_retry};
 
 /// Produces a vector embedding for a piece of text.
 /// `dim()` reports the vector length so callers can allocate the right buffer.
@@ -209,36 +147,7 @@ pub fn from_config_with_keep_alive(
     }
 }
 
-#[cfg(test)]
-mod retry_tests {
-    use super::*;
-    use std::time::Duration;
-
-    #[test]
-    fn retryable_status_classification() {
-        for s in [408, 425, 429, 500, 502, 503, 504, 529] {
-            assert!(is_retryable_status(s), "{s} should retry");
-        }
-        for s in [200, 201, 400, 401, 403, 404, 422] {
-            assert!(!is_retryable_status(s), "{s} should not retry");
-        }
-    }
-
-    #[test]
-    fn backoff_exponential_and_capped() {
-        assert!(backoff_delay(0, None) < backoff_delay(2, None));
-        assert!(backoff_delay(20, None) <= Duration::from_secs(8));
-        // Retry-After honored and capped at 30s.
-        assert_eq!(
-            backoff_delay(0, Some(Duration::from_secs(3))),
-            Duration::from_secs(3)
-        );
-        assert_eq!(
-            backoff_delay(5, Some(Duration::from_secs(120))),
-            Duration::from_secs(30)
-        );
-    }
-}
+// Retry/backoff behavior is tested where it now lives: `indexa-http-util`.
 
 #[cfg(test)]
 mod batch_tests {

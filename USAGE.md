@@ -69,8 +69,13 @@ Indexa builds context in layers. **The index is the substrate; context is the pr
 - **Use it** — `ask` questions, `export` a context file for any AI tool, `serve` a web UI, or expose it
   to AI agents over `mcp`.
 
-Everything lives in one SQLite file. On macOS: `~/Library/Application Support/dev.indexa.Indexa/indexa.db`
-(Linux: `~/.local/share/dev.indexa.Indexa/indexa.db`).
+Everything lives in one SQLite file named `index.db`:
+
+| Platform | Index database |
+|---|---|
+| macOS | `~/Library/Application Support/dev.indexa.Indexa/index.db` |
+| Linux | `~/.local/share/indexa/index.db` |
+| Windows | `%LOCALAPPDATA%\indexa\Indexa\data\index.db` |
 
 ---
 
@@ -330,9 +335,15 @@ to drain summaries in the background. (Roadmap: a native desktop app replaces le
 **Right-size for a small machine.** `indexa doctor` shows what fits; set `[resource] profile =
 "conservative"` and/or `mode = "summaries-only"`; keep `auto_select_model = true`.
 
+**Keep dense search fast on a huge index.** Past ~50K chunks, brute-force cosine starts to drag.
+Set `[retrieval] ann = true` to switch dense retrieval to an in-memory HNSW index (it only engages
+above `ann_min_chunks`, default 50 000 — below that brute-force is faster than building the index).
+
 ---
 
 ## Troubleshooting
+
+The quick hits are below; the full guide is [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 - **`indexa: command not found`** after `cargo build` — the binary is at `target/release/indexa`. Run
   `cargo install --path apps/indexa` to put it on your PATH.

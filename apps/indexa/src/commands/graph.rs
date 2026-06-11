@@ -123,5 +123,9 @@ pub(crate) async fn cmd_graph(
     println!(
         "(edge weight = number of shared call→define symbols; centrality = weighted PageRank)"
     );
+    println!(
+        "(approximate: {} — see docs/methodology.md)",
+        indexa_core::store::BARE_NAME_CAVEAT
+    );
     Ok(())
 }

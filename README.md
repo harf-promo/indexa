@@ -14,7 +14,7 @@ claude "given @.context.xml, find the auth flow and add MFA"
 
 *The index is the substrate; context is the product. Local-first · model-agnostic · Apache-2.0.*
 
-> Indexa is production-ready for daily use on one or more repos. Whole-disk indexing is fast; the storage format stabilises before 1.0. New here? Start with the **[Usage Guide](USAGE.md)** or **[Quickstart](docs/quickstart.md)**.
+> Indexa is production-ready for daily use on one or more repos. Whole-disk indexing is fast; the storage format stabilises before 1.0. New here? Start with the **[Usage Guide](USAGE.md)** or **[Quickstart](docs/quickstart.md)**. Something broken? **[Troubleshooting](docs/TROUBLESHOOTING.md)**.
 
 ---
 
@@ -58,6 +58,13 @@ indexa mcp                                                 # expose the live ind
 
 **Stop paying to re-teach your AI your own codebase.** Every coding assistant wakes up amnesiac. Before it helps, it reads its way back to orientation — burning context window, paid tokens, and your patience on a lesson it learned five minutes ago. Indexa teaches it *once*: it builds a persistent, hierarchical context store on your machine and serves a small ranked slice on demand, so the model spends its budget on the work you asked for.
 
+> **What that's worth — a worked example** *(illustrative, ~4 chars/token; measured per-session
+> numbers ship with the upcoming usage telemetry)*: an agent orienting itself in a medium repo
+> typically reads ~40 files at ~2,000 tokens each ≈ **80K tokens — every session**. The same
+> orientation through Indexa: one `search` (~300 tokens) + ten L0 one-line abstracts (~30 each) +
+> the two files it actually needs in full (~4K) ≈ **5K tokens**. That's roughly **94% less**,
+> before the session's real work starts — and the index was built locally, for zero tokens.
+
 **There are two kinds of context, and almost everyone conflates them.** *Working context* is what's in the model's window right now — scarce, paid, gone when the session ends. *Searchable context* is everything your AI could know: the store on disk. Indexa separates them. The model never holds your repo; it holds the ~2–4K characters that actually matter, retrieved from a store that can be gigabytes.
 
 **Local isn't the compromise — it's the unlock.** Your data never leaves the machine unless *you* point it at a cloud model, and zero tokens leave while Indexa builds context. A small local model stops being small: feed it a retrieved slice instead of the whole project and a 4K-window model reasons over a 100 MB codebase — fast, even on CPU, with a KV-cache sized by your choice, not your repo. One engine, two wins: it saves cloud tools their tokens **and** gives local models the context they can't hold.
@@ -83,7 +90,7 @@ This is not a repo-to-prompt converter. It is not a document chat app. It is not
 - **Hybrid retrieval** — keyword (BM25) + semantic (vector) fused with RRF, plus an **opt-in ANN index** that keeps dense search fast on 50K-plus-chunk corpora.
 - **Local multimodal** *(opt-in, on-device)* — caption images with a local vision model and transcribe audio with a local whisper CLI, so you can find media by what's *in* it, not just its filename.
 - **Code intelligence** — a code-relationship graph (imports + defined symbols + call edges) across Rust, Python, JS/TS, Go, and Java, plus `who_calls`, `blast_radius`, and an interactive **call-graph visualization** in the web Map tab — all queryable over MCP.
-- **Four ways to reach the index** — a CLI, a live web workspace with an Engine status bar, a native macOS desktop app (menu-bar, auto-updating), and an MCP server (29 tools) that AI agents call directly.
+- **Four ways to reach the index** — a CLI, a live web workspace with an Engine status bar, a native macOS desktop app (menu-bar, auto-updating), and an MCP server (34 tools) that AI agents call directly.
 - **Resource-aware** — a memory watchdog that won't freeze your machine, and a hardware-aware model picker that annotates every model with its memory footprint, fit against your live RAM, and a per-job ETA.
 - **Use your Claude subscription** — the `claude-code` provider runs summaries and answers on your Claude Pro/Max plan (no per-token billing); embeddings always stay local.
 - **Export** — XML (the format Anthropic's own docs recommend for context windows), Markdown, or JSON. **Watch** keeps the context current as files change.
@@ -98,7 +105,7 @@ This is not a repo-to-prompt converter. It is not a document chat app. It is not
   Engine  Building · 42 files/s · ETA 1m12s · gemma3:4b    CPU 38%   RAM 9.1 / 16 GB   pressure: ok
   ```
 - **Desktop app** — a native macOS app that lives in the menu bar. Auto-updates silently. Bundles the web workspace — no separate `indexa serve` needed.
-- **MCP server** — `indexa mcp` exposes the live index to any [MCP](https://modelcontextprotocol.io) client (Claude Desktop, Cursor, Claude Code) over **29 tools** — retrieval (`search · browse_tree · get_summary · read_file · ask`), code graph (`dependencies · who_imports · who_calls · blast_radius · code_graph`), Context Packs, importance weights, insights, and indexing triggers.
+- **MCP server** — `indexa mcp` exposes the live index to any [MCP](https://modelcontextprotocol.io) client (Claude Desktop, Cursor, Claude Code) over **34 tools** — retrieval (`search · browse_tree · get_summary · read_file · ask`), code graph (`dependencies · who_imports · who_calls · blast_radius · code_graph`), Context Packs, importance weights, smart classification, insights, and indexing triggers.
 
 ---
 

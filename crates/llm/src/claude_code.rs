@@ -154,6 +154,10 @@ impl Generator for ClaudeCodeLlm {
 
 #[async_trait::async_trait]
 impl Describer for ClaudeCodeLlm {
+    fn provider_name(&self) -> &'static str {
+        "claude-code"
+    }
+
     async fn describe(
         &self,
         path: &str,

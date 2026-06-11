@@ -9,6 +9,12 @@ use anyhow::Result;
 use rusqlite::params;
 use std::collections::HashMap;
 
+/// The one honesty caveat every surface rendering D2 call-graph results must carry
+/// (CLI, MCP, web). Full discussion in docs/methodology.md.
+pub const BARE_NAME_CAVEAT: &str = "call edges are bare-name matched (case-sensitive, no import \
+resolution) — a symbol defined in multiple files conflates their callers; strict mode keeps only \
+uniquely-defined symbols";
+
 /// Tarjan's strongly-connected-components, iterative (no recursion → no stack-overflow risk
 /// on deep graphs). `adj[v]` lists v's out-neighbors. Returns every SCC (including singletons);
 /// the caller keeps those with len > 1 as cycles.

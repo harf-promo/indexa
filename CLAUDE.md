@@ -42,7 +42,7 @@ table + `boost_with_weights` in QA) · Insights (v0.16, `find_*_duplicates`/`fin
 MCP `agentic` / web "Agentic" checkbox — bounded plan→search→refine loop, fails open) · **universal
 macOS desktop build** (v0.20, `--target universal-apple-darwin`, `darwin-universal` updater key).
 
-**MCP server:** **29 tools** (`crates/mcp/src/lib.rs`). Code-graph tools: `dependencies` /
+**MCP server:** **34 tools** (`crates/mcp/src/lib.rs`). Code-graph tools: `dependencies` /
 `who_imports` / `who_calls` / `blast_radius` / `code_graph`. The call graph is bare-name matched
 (case-sensitive, 1-hop, 7 languages) — caveats in `docs/methodology.md`; label honestly in any UI.
 
@@ -108,6 +108,8 @@ CI for the desktop uses the release workflow, not the standard CI workflow.
 ```
 ~/Library/Application Support/dev.indexa.Indexa/index.db
 ```
+
+(Per-platform paths are tabled in `USAGE.md` §2 — Linux uses `~/.local/share/indexa/`.)
 
 Quick queue health check:
 ```bash

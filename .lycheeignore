@@ -1,0 +1,7 @@
+# GitHub-UI relative links (../../releases etc.) resolve on github.com but not on
+# disk. lychee matches AFTER path resolution, so these patterns target the resolved
+# file:// URL tails, not the ../../ source text.
+/(issues|discussions|releases|milestones)$
+/issues\?
+/discussions/categories/
+/security/advisories/

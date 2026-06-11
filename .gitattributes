@@ -4,3 +4,7 @@
 # reassembled byte-for-byte into the served app.css/app.js via concat!(include_str!).
 crates/web/assets/ui/js/*.js text eol=lf
 crates/web/assets/ui/css/*.css text eol=lf
+
+# Golden test fixtures are byte-compared by the contract tests — pin LF so a
+# Windows checkout (autocrlf) can't turn an equality assert into a CRLF diff.
+crates/mcp/golden_tools.txt text eol=lf

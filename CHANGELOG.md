@@ -9,6 +9,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Saved searches everywhere.** The `saved_queries` table (CLI-only since v0.20) is now reachable
+  from the web Ask bar (a recall dropdown + a one-click ☆ save) and from agents via a new
+  `list_saved_queries` MCP tool (**34 tools** total).
+- **Summary provenance.** Every summary row now records *how* it was made: the adapter
+  (`provider`), the refinement passes actually run (`passes`), and whether a lighter model was
+  auto-substituted for the configured one (`fallback`). Substrate for the upcoming decision ledger.
+- **Honesty caveat in code-graph results.** `blast_radius` and `code_graph` responses (MCP) and
+  `indexa graph` output now carry the bare-name-matching caveat inline, so agents reading result
+  bodies see the approximation warning — not just readers of the tool docs.
+- **Grouped CLI help.** `indexa --help` presents the 28 commands as five ordered families
+  (Core · Manage · Analyze · Pipeline · System) and the quick-start headlines one-command
+  `indexa index`.
+- **docs:** a real [Troubleshooting guide](docs/TROUBLESHOOTING.md); per-client MCP setup
+  (Claude Code / Claude Desktop / Cursor / VS Code) in the MCP how-to; a contributor map in
+  `docs/architecture.md`; ANN opt-in recipe in USAGE.md; an illustrative token-savings worked
+  example in the README.
+
+### Fixed
+
+- **Summary `model` column lied under auto-downgrade.** When the memory-fit pre-flight (CLI) or
+  the web "ask me first" popover substituted a lighter model, the summary row still recorded the
+  *configured* model. The substituted models are now recorded, with `fallback = 1`.
+- Stale docs reconciled with the code: MCP tool count (29 → 34), CHANGELOG release sections for
+  v0.20.x backfilled (including both maturity sprints), COMPETITIVE.md re-baselined to v0.20.1
+  with a staleness header, wrong DB filename/paths in USAGE.md corrected.
+
+### Internal
+
+- **The doc-drift class is now CI-enforced:** a golden MCP tool list + contract calls
+  (`crates/mcp/golden_tools.txt`), a test failing the build when any doc's "N tools" claim
+  drifts from the code, a release gate requiring a CHANGELOG section for the tag, and an
+  offline Markdown link check on docs PRs.
+- HTTP retry/backoff consolidated into a new `indexa-http-util` crate (was duplicated across
+  `indexa-llm` and `indexa-embed`).
+
+## [0.20.1] — 2026-06-11
+
+The first **working** Developer-ID-signed, notarized, universal macOS release — v0.20.0's desktop
+binaries crashed at launch (see below). Coming from v0.19.0 or v0.20.0, install this one manually;
+auto-update resumes from here.
+
+### Fixed
+
+- **Desktop app statically links libpcre2** (`PCRE2_SYS_STATIC=1` via `.cargo/config.toml`). The
+  v0.20.0 binary dynamically linked Homebrew's `libpcre2` (pulled in by hyperpolyglot → pcre2 →
+  pcre2-sys); the hardened runtime's library validation rejected the different-Team-ID dylib and the
+  app died at `dyld` before reaching `main`. (#189)
+- **Updater publishes under the default per-arch targets** (`darwin-aarch64` / `darwin-x86_64`)
+  instead of a custom `darwin-universal` key, so existing installs actually find the update
+  artifact. (#188)
+
+## [0.20.0] — 2026-06-10 — **withdrawn**
+
+> **Withdrawn:** the macOS desktop app in this release crashed at launch (dynamically linked
+> Homebrew `libpcre2` rejected by hardened-runtime library validation). Every feature below shipped
+> here and works; use **v0.20.1** for working binaries.
+
+### Added
+
 - **Agentic multi-step `ask`.** `indexa ask --agentic` (also MCP `ask` `agentic: true`, and an
   "Agentic" checkbox in the web chat) runs a bounded *plan → search → refine* loop: search, ask the
   model whether an important part of the question is still uncovered, take one focused follow-up query,
@@ -35,6 +94,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.gitignore` (default on; `[scan] respect_gitignore`) and any extra gitignore-style patterns in
   `[scan] ignore` — so project-specific build/output dirs stay out of the index.
 
+Two maturity sprints (#169–#175, #176–#184) also landed in this release:
+
+- **`indexa snapshot`** — portable index snapshots bundling summaries + graph + weights. (#184)
+- **`indexa report`** — a multi-question digest document synthesized from the index. (#183)
+- **Saved searches** — `indexa saved add/list/run/rm` for named, reusable ask queries. (#182)
+- **`indexa related` + dependency-cycle detection** in the code graph. (#181)
+- **Insights: largest files + language breakdown** across CLI + MCP. (#180)
+- **`indexa search` primitive** (hits only, no synthesis), **pack rename**, and an MCP `prune`
+  tool. (#179)
+- **Export: token-count estimate** + `--include-weights` / `--include-graph`. (#178)
+- **Truncation marker + wider summary-boost scan** in retrieval. (#177)
+- **Worker `--auto-reindex`** — refresh stale roots before draining the queue. (#175)
+- **Strict resolution mode for the code graph** — a precision filter that keeps only
+  unique-definition call edges. (#174)
+- **Web a11y pass** — tablist arrow-keys, live regions, modal focus traps, AA contrast. (#172)
+- **`--json` for `ask`/`status`, `ask --explain` retrieval trace, `doctor` Ollama probe.** (#170)
+
 ### Fixed
 
 - **`deep` now self-heals a partially-embedded index.** A file whose chunks were stored without a
@@ -47,6 +123,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (notably in light theme). Added `--surface-3` + `--accent-muted` and reconciled every reference; plus
   a subtle treemap fade-in on render.
 - The web `ask` path no longer silently drops the `[retrieval] use_weights` setting.
+- **Hardening:** Claude-Code adapter timeout, Ollama retry parity in the LLM client, an
+  embedding-dimension guard on `deep` (#176); poison-safe job mutexes + surfaced
+  previously-swallowed job errors in the web server (#169); integration tests for web handlers and
+  MCP tools (#171).
 
 ## [0.19.0] — 2026-06-05
 
@@ -795,7 +875,34 @@ locally. Feedback welcome via [Discussions](../../discussions).
 
 ---
 
-[0.1.0-rc1]: https://github.com/harf-promo/indexa/releases/tag/v0.1.0-rc1
+[Unreleased]: https://github.com/harf-promo/indexa/compare/v0.20.1...HEAD
+[0.20.1]: https://github.com/harf-promo/indexa/compare/v0.20.0...v0.20.1
+[0.20.0]: https://github.com/harf-promo/indexa/compare/v0.19.0...v0.20.0
+[0.19.0]: https://github.com/harf-promo/indexa/compare/v0.18.0...v0.19.0
+[0.18.0]: https://github.com/harf-promo/indexa/compare/v0.17.0...v0.18.0
+[0.17.0]: https://github.com/harf-promo/indexa/compare/v0.16.0...v0.17.0
+[0.16.0]: https://github.com/harf-promo/indexa/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/harf-promo/indexa/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/harf-promo/indexa/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/harf-promo/indexa/compare/v0.12.3...v0.13.0
+[0.12.3]: https://github.com/harf-promo/indexa/compare/v0.12.2...v0.12.3
+[0.12.2]: https://github.com/harf-promo/indexa/compare/v0.12.1...v0.12.2
+[0.12.1]: https://github.com/harf-promo/indexa/compare/v0.12.0...v0.12.1
+[0.12.0]: https://github.com/harf-promo/indexa/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/harf-promo/indexa/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/harf-promo/indexa/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/harf-promo/indexa/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/harf-promo/indexa/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/harf-promo/indexa/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/harf-promo/indexa/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/harf-promo/indexa/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/harf-promo/indexa/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/harf-promo/indexa/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/harf-promo/indexa/compare/v0.3.5...v0.4.0
-[Unreleased]: https://github.com/harf-promo/indexa/compare/v0.5.0...HEAD
+[0.3.5]: https://github.com/harf-promo/indexa/compare/v0.3.4...v0.3.5
+[0.3.4]: https://github.com/harf-promo/indexa/compare/v0.3.3...v0.3.4
+[0.3.3]: https://github.com/harf-promo/indexa/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/harf-promo/indexa/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/harf-promo/indexa/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/harf-promo/indexa/compare/v0.2.3...v0.3.0
+[0.1.0-rc1]: https://github.com/harf-promo/indexa/releases/tag/v0.1.0-rc1

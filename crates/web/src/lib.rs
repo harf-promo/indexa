@@ -344,6 +344,8 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
                 .delete(api_weights_delete),
         )
         .route("/api/weights/suggest", get(api_weights_suggest))
+        .route("/api/saved", get(api_saved_list).post(api_saved_set))
+        .route("/api/saved/:name", delete(api_saved_delete))
         .route("/api/insights/duplicates", get(api_insights_duplicates))
         .route("/api/insights/stale", get(api_insights_stale))
         .route("/api/insights/diff", get(api_insights_diff))

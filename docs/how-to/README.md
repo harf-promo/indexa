@@ -12,3 +12,5 @@ Task-focused recipes. For the conceptual overview start with the
   and how to read them honestly (bare-name matching caveat).
 - **[Tune Indexa for a small machine](tune-for-a-small-machine.md)** — keep an 8–16 GB laptop
   responsive while it builds context.
+
+When something misbehaves, see [Troubleshooting](../TROUBLESHOOTING.md) (doctor-first triage).

@@ -289,6 +289,12 @@ pub struct DescriberConfig {
     /// summaries/answers on the user's Claude subscription instead of the metered
     /// API). Empty → resolved as "claude" on PATH.
     pub claude_bin: String,
+    /// RUNTIME flag, not a config option (never read from / written to TOML):
+    /// set by callers that auto-downgraded `file_model`/`dir_model` to fit the
+    /// memory budget, so summary provenance records that a lighter model was
+    /// substituted for the configured one.
+    #[serde(skip)]
+    pub model_fallback: bool,
 }
 
 impl Default for DescriberConfig {
@@ -308,6 +314,7 @@ impl Default for DescriberConfig {
             passes_refresh: 1,
             passes_cap: 3,
             claude_bin: "claude".into(),
+            model_fallback: false,
         }
     }
 }

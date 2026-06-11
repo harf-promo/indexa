@@ -25,7 +25,22 @@ indexa mcp        # waits on stdin/stdout; Ctrl-C to stop
 
 ## 3. Register it with a client
 
-**Claude Desktop / Claude Code** — add to the MCP servers config:
+In every client the registration is the same idea — *launch `indexa` with the arg `mcp` over
+stdio* — only the config file differs. Use an absolute path to the binary (`which indexa`) if it
+isn't on the client's `PATH`.
+
+**Claude Code** — one command, no file editing:
+
+```bash
+claude mcp add indexa -- indexa mcp        # current project
+claude mcp add --scope user indexa -- indexa mcp   # all your projects
+```
+
+(Or check a `.mcp.json` into the repo to share it with collaborators:
+`{"mcpServers": {"indexa": {"command": "indexa", "args": ["mcp"]}}}`.)
+
+**Claude Desktop** — add to `claude_desktop_config.json`
+(macOS: `~/Library/Application Support/Claude/`, Windows: `%APPDATA%\Claude\`):
 
 ```json
 {
@@ -35,12 +50,25 @@ indexa mcp        # waits on stdin/stdout; Ctrl-C to stop
 }
 ```
 
-**Cursor** and other MCP clients use the same `command` + `args` shape. Use an absolute path to the
-binary (e.g. `/usr/local/bin/indexa`) if `indexa` isn't on the client's `PATH`.
+**Cursor** — same JSON shape in `~/.cursor/mcp.json` (all projects) or `.cursor/mcp.json`
+(one project).
+
+**VS Code (Copilot agent mode)** — `.vscode/mcp.json` in the workspace, note the `servers` key:
+
+```json
+{
+  "servers": {
+    "indexa": { "command": "indexa", "args": ["mcp"] }
+  }
+}
+```
+
+To verify any of them: ask the agent *"using indexa, what's in `<some indexed folder>`?"* — you
+should see a `browse_tree` or `search` call.
 
 ## 4. What the agent can do
 
-The server exposes ~29 tools. The ones you'll see used most:
+The server exposes 34 tools. The ones you'll see used most:
 
 | Tool | Purpose |
 |---|---|
