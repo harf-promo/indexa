@@ -1,6 +1,9 @@
 # Competitive landscape
 
-Where Indexa sits, who's nearby, and what makes it defensible. Honest, with the gaps named. Snapshot updated June 2026 (v0.11.0).
+Where Indexa sits, who's nearby, and what makes it defensible. Honest, with the gaps named.
+
+> **Snapshot updated 2026-06-11 (v0.20.1).** Competitor capabilities drift; for what Indexa has
+> shipped since this date, [CHANGELOG.md](../CHANGELOG.md) is canonical, not this file.
 
 ## The one-line position
 
@@ -15,7 +18,7 @@ No competitor occupies all six of these at once. Indexa does:
 1. **Local-first** — offline, private, free; your data never leaves the machine unless you point it at a cloud model.
 2. **Whole-disk *and* code** — documents, code, images, audio, video; not repo-only, not docs-only.
 3. **Persistent index + retrieval** — a queryable store with hybrid search, not a one-shot context dump.
-4. **Three interfaces** — CLI, local web workspace, and a native **MCP** server for agents.
+4. **Four interfaces** — CLI, local web workspace, a signed/notarized macOS desktop app, and a native **MCP** server for agents.
 5. **Resource-aware** — a memory watchdog that won't freeze the machine running local models.
 6. **Dual-audience** — saves *cloud* tools their paid tokens **and** gives *local* models context they can't hold.
 
@@ -75,10 +78,12 @@ an LLM, with a **web-dashboard graph visualization** and export to wiki/Obsidian
   (opt-in image captioning + audio transcription).
 - ✅ A **code-relationship graph** — they prove the demand; Indexa does it in **local SQLite, behind
   MCP** (`dependencies` / `who_imports`), not Neo4j/cloud. (Cross-file call edges are the next step.)
-- Still open: a **signature graph/treemap visualization** as the brand visual (the per-node
-  `context: N%` coverage data already supports it); **making token-savings visible** in `export` and
-  the workspace; and an **Indexa MCP/skill distribution** so AI assistants can invoke it as easily as
-  these skills.
+- ✅ A **signature graph visualization** — the Map tab's force-directed call graph (v0.18), with
+  weighted-PageRank node sizing (v0.20), plus the coverage treemap (v0.13).
+- Still open: **making token-savings visible** in `export` and the workspace (export gained a
+  token-count estimate in v0.20; per-session "tokens saved" telemetry is the next step); and an
+  **Indexa MCP/skill distribution** so AI assistants can adopt it as easily as a one-line skill
+  (an `indexa mcp install --client …` configurator is planned).
 
 ## Capability arc — what we closed, and what's next
 
@@ -91,15 +96,39 @@ an LLM, with a **web-dashboard graph visualization** and export to wiki/Obsidian
 - ✅ **ANN/HNSW + batch embedding** — an opt-in HNSW index lifts the brute-force ceiling on large
   corpora, and deep-phase embedding now batches.
 - ✅ **First-run onboarding + streaming `ask`** — guided empty-state flow; answers stream token-by-token.
+- ✅ **Cross-file call edges / blast-radius (D2)** — `who_calls` / `blast_radius` (v0.12; bare-name
+  matched, honestly labeled), plus a strict precision mode (v0.20).
+- ✅ **The Map, as a real map** — coverage treemap (v0.13) and the force-directed call-graph view
+  (v0.18) with PageRank centrality sizing (v0.20).
+- ✅ **Context Packs** — subject-scoped portable bundles (v0.14), with `--auto` semantic gathering.
+- ✅ **Agentic, multi-step `ask`** — bounded plan → search → refine loop, opt-in, fails open (v0.20).
 
 **Still open (honest, ranked):**
 
-1. **Cross-file call edges / blast-radius (D2)** — D1 records imports + defines; "what calls this / what
-   breaks if I change it" is the next step.
-2. **Agentic, multi-step `ask`** — retrieve → reflect → retrieve for hard cross-cutting questions.
-3. **The Map, as a real map** — a coverage-colored treemap/sunburst, not a table.
-4. **Context Packs** — subject-scoped portable bundles auto-gathered from across the disk.
-5. **GraphRAG-style thematic answers** — would build on the code/knowledge graph.
+1. **Token-savings telemetry** — measure and show "Indexa served N KB where whole-file context would
+   have been M MB"; the core pitch, currently unquantified.
+2. **Decision Ledger** — record uncertain indexing judgments + user answers with history and re-ask;
+   no competitor has anything like "your index learns and remembers your judgment."
+3. **Scoped (tree-sitter) call resolution** — earn back the bare-name asterisk on the D2 graph.
+4. **GraphRAG-style thematic answers** — would build on the code/knowledge graph.
+
+## What we deliberately won't build
+
+Positioning, not backlog. These are rejected because they dilute the moat, not because they're hard:
+
+- **Team / multi-user features.** A personal whole-disk index is the *last* thing that should ever be
+  multi-user — auth, ACLs, and shared corpora are a different product with different buyers, and they
+  contradict the privacy story outright. The team-shaped need ("share context with a colleague") is
+  already met by `pack export`: sharing by **deliberate act**, as a reviewable self-contained file,
+  not by standing access.
+- **Cross-machine index sync.** The index is *derived data* — the correct sync is re-indexing on the
+  other machine, and Context Packs cover the portable-context case. Real sync would mean conflict
+  resolution, cross-version schema compatibility, and a credibility tax on "nothing leaves your
+  machine," even peer-to-peer.
+- **A VS Code / JetBrains extension.** MCP already puts Indexa inside Cursor, VS Code, Claude Code,
+  and every MCP client; an extension would duplicate that surface and add a second release train. The
+  real gap is setup friction — solved by docs and a one-shot `mcp install` configurator at ~5% of the
+  cost. Revisit only if a feature genuinely needs editor UI.
 
 ## 2026 trends to ride
 

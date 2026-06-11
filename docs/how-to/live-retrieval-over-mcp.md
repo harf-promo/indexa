@@ -40,7 +40,7 @@ binary (e.g. `/usr/local/bin/indexa`) if `indexa` isn't on the client's `PATH`.
 
 ## 4. What the agent can do
 
-The server exposes ~29 tools. The ones you'll see used most:
+The server exposes 33 tools. The ones you'll see used most:
 
 | Tool | Purpose |
 |---|---|

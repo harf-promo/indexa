@@ -69,8 +69,13 @@ Indexa builds context in layers. **The index is the substrate; context is the pr
 - **Use it** — `ask` questions, `export` a context file for any AI tool, `serve` a web UI, or expose it
   to AI agents over `mcp`.
 
-Everything lives in one SQLite file. On macOS: `~/Library/Application Support/dev.indexa.Indexa/indexa.db`
-(Linux: `~/.local/share/dev.indexa.Indexa/indexa.db`).
+Everything lives in one SQLite file named `index.db`:
+
+| Platform | Index database |
+|---|---|
+| macOS | `~/Library/Application Support/dev.indexa.Indexa/index.db` |
+| Linux | `~/.local/share/indexa/index.db` |
+| Windows | `%LOCALAPPDATA%\indexa\Indexa\data\index.db` |
 
 ---
 
