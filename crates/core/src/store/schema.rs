@@ -244,9 +244,15 @@ impl Store {
         // Checked per column (not as a trio) so a DB that somehow has a subset still
         // converges; each ALTER is independently idempotent.
         for (col, ddl) in [
-            ("provider", "ALTER TABLE summaries ADD COLUMN provider TEXT;"),
+            (
+                "provider",
+                "ALTER TABLE summaries ADD COLUMN provider TEXT;",
+            ),
             ("passes", "ALTER TABLE summaries ADD COLUMN passes INTEGER;"),
-            ("fallback", "ALTER TABLE summaries ADD COLUMN fallback INTEGER;"),
+            (
+                "fallback",
+                "ALTER TABLE summaries ADD COLUMN fallback INTEGER;",
+            ),
         ] {
             let present: bool = self
                 .conn

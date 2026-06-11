@@ -151,6 +151,7 @@ fn is_preamble_label(label: &str) -> bool {
 ///
 /// When `on_fragment` is `Some`, each generated token is forwarded to the
 /// callback for live streaming to the web UI.  Pass `None` for the CLI path.
+#[allow(clippy::too_many_arguments)]
 pub async fn summarize_file(
     store: &mut Store,
     describer: &dyn Describer,

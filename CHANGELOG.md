@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Saved searches everywhere.** The `saved_queries` table (CLI-only since v0.20) is now reachable
+  from the web Ask bar (a recall dropdown + a one-click ☆ save) and from agents via a new
+  `list_saved_queries` MCP tool (**34 tools** total).
+- **Summary provenance.** Every summary row now records *how* it was made: the adapter
+  (`provider`), the refinement passes actually run (`passes`), and whether a lighter model was
+  auto-substituted for the configured one (`fallback`). Substrate for the upcoming decision ledger.
+- **Honesty caveat in code-graph results.** `blast_radius` and `code_graph` responses (MCP) and
+  `indexa graph` output now carry the bare-name-matching caveat inline, so agents reading result
+  bodies see the approximation warning — not just readers of the tool docs.
+- **Grouped CLI help.** `indexa --help` presents the 28 commands as five ordered families
+  (Core · Manage · Analyze · Pipeline · System) and the quick-start headlines one-command
+  `indexa index`.
+- **docs:** a real [Troubleshooting guide](docs/TROUBLESHOOTING.md); per-client MCP setup
+  (Claude Code / Claude Desktop / Cursor / VS Code) in the MCP how-to; a contributor map in
+  `docs/architecture.md`; ANN opt-in recipe in USAGE.md; an illustrative token-savings worked
+  example in the README.
+
+### Fixed
+
+- **Summary `model` column lied under auto-downgrade.** When the memory-fit pre-flight (CLI) or
+  the web "ask me first" popover substituted a lighter model, the summary row still recorded the
+  *configured* model. The substituted models are now recorded, with `fallback = 1`.
+- Stale docs reconciled with the code: MCP tool count (29 → 34), CHANGELOG release sections for
+  v0.20.x backfilled (including both maturity sprints), COMPETITIVE.md re-baselined to v0.20.1
+  with a staleness header, wrong DB filename/paths in USAGE.md corrected.
+
+### Internal
+
+- **The doc-drift class is now CI-enforced:** a golden MCP tool list + contract calls
+  (`crates/mcp/golden_tools.txt`), a test failing the build when any doc's "N tools" claim
+  drifts from the code, a release gate requiring a CHANGELOG section for the tag, and an
+  offline Markdown link check on docs PRs.
+- HTTP retry/backoff consolidated into a new `indexa-http-util` crate (was duplicated across
+  `indexa-llm` and `indexa-embed`).
+
 ## [0.20.1] — 2026-06-11
 
 The first **working** Developer-ID-signed, notarized, universal macOS release — v0.20.0's desktop

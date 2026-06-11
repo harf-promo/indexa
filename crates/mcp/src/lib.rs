@@ -1294,7 +1294,10 @@ impl IndexaMcp {
                     .as_deref()
                     .map(|s| format!(", scope: {s}"))
                     .unwrap_or_default();
-                format!("• {} — \"{}\" (mode: {}{scope})", q.name, q.question, q.mode)
+                format!(
+                    "• {} — \"{}\" (mode: {}{scope})",
+                    q.name, q.question, q.mode
+                )
             })
             .collect();
         Ok(ok_text(format!(
@@ -1771,14 +1774,14 @@ mod tests {
         names.sort();
         let actual = names.join("\n") + "\n";
 
-        let golden_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("golden_tools.txt");
+        let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("golden_tools.txt");
         if std::env::var("INDEXA_UPDATE_GOLDEN").is_ok() {
             std::fs::write(&golden_path, &actual).unwrap();
             return;
         }
-        let golden = std::fs::read_to_string(&golden_path)
-            .expect("crates/mcp/golden_tools.txt missing — INDEXA_UPDATE_GOLDEN=1 cargo test -p indexa-mcp");
+        let golden = std::fs::read_to_string(&golden_path).expect(
+            "crates/mcp/golden_tools.txt missing — INDEXA_UPDATE_GOLDEN=1 cargo test -p indexa-mcp",
+        );
         assert_eq!(
             actual, golden,
             "MCP tool surface changed. If intentional: INDEXA_UPDATE_GOLDEN=1 cargo test -p indexa-mcp, \
