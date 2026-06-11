@@ -1521,6 +1521,103 @@ fn find_near_duplicates_clusters_similar_embeddings() {
     assert!(!clusters[0].exact);
 }
 
+/// Seeded item set for the LSH near-dup tests: one cluster of near-identical
+/// vectors per entry in `group_sizes`, plus `noise` unrelated random vectors.
+/// Fully deterministic (SplitMix64 from `seed`) so test outcomes never flake.
+fn seeded_near_dup_items(
+    group_sizes: &[usize],
+    noise: usize,
+    dim: usize,
+    seed: u64,
+) -> Vec<(String, Vec<f32>)> {
+    let mut rng = super::insights::SplitMix64(seed);
+    let mut items = Vec::new();
+    for (g, &size) in group_sizes.iter().enumerate() {
+        let base: Vec<f32> = (0..dim).map(|_| rng.next_unit()).collect();
+        for m in 0..size {
+            // Tiny perturbation → in-group cosine ≈ 0.999, far above the 0.9
+            // test threshold; random 24-dim vectors sit near cosine 0.
+            let v: Vec<f32> = base.iter().map(|x| x + rng.next_unit() * 0.005).collect();
+            items.push((format!("/group{g}/file{m}.txt"), v));
+        }
+    }
+    for k in 0..noise {
+        let v: Vec<f32> = (0..dim).map(|_| rng.next_unit()).collect();
+        items.push((format!("/noise/file{k:04}.txt"), v));
+    }
+    items
+}
+
+#[test]
+fn near_dup_lsh_matches_exact_clusters_on_seeded_set() {
+    use super::insights::{near_dup_clusters_exact, near_dup_clusters_lsh};
+    let items = seeded_near_dup_items(&[4, 3, 2], 40, 24, 0xC0FFEE);
+    let exact = near_dup_clusters_exact(&items, 0.9);
+    let lsh = near_dup_clusters_lsh(&items, 0.9);
+    assert_eq!(
+        exact.len(),
+        3,
+        "exact path should find the 3 planted groups"
+    );
+    // Same clusters: compare order-normalized path sets.
+    let norm = |clusters: &[DuplicateCluster]| {
+        let mut v: Vec<Vec<String>> = clusters.iter().map(|c| c.paths.clone()).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        norm(&exact),
+        norm(&lsh),
+        "LSH clusters must match the exact path on this seeded set"
+    );
+    for c in &lsh {
+        assert!(!c.exact);
+        assert!(c.similarity >= 0.9);
+    }
+}
+
+#[test]
+fn near_dup_lsh_is_deterministic_across_runs() {
+    use super::insights::near_dup_clusters_lsh;
+    let items = seeded_near_dup_items(&[5, 2], 60, 24, 0xDECAF);
+    let a = near_dup_clusters_lsh(&items, 0.9);
+    let b = near_dup_clusters_lsh(&items, 0.9);
+    assert!(!a.is_empty());
+    assert_eq!(a.len(), b.len());
+    for (x, y) in a.iter().zip(&b) {
+        assert_eq!(x.paths, y.paths);
+        // Bitwise-identical averages: candidate order is sorted, not
+        // HashSet-iteration order, so float sums must not drift.
+        assert_eq!(x.similarity.to_bits(), y.similarity.to_bits());
+    }
+}
+
+#[test]
+fn find_near_duplicates_uses_lsh_above_exact_cap() {
+    use super::insights::{SplitMix64, NEAR_DUP_EXACT_MAX};
+    let mut store = Store::open_in_memory().unwrap();
+    let mut rng = SplitMix64(7);
+    // Two planted near-identical files in a sea of random vectors big enough
+    // to cross the exact→LSH switchover (the old code silently capped at 5K).
+    let dup: Vec<f32> = (0..16).map(|_| rng.next_unit()).collect();
+    for path in ["/dup/one.txt", "/dup/two.txt"] {
+        let mut s = dummy_summary(path, "file", Some("/dup"), 1);
+        s.embedding = Some(dup.iter().map(|x| x + rng.next_unit() * 0.001).collect());
+        store.upsert_summary(&s).unwrap();
+    }
+    for k in 0..(NEAR_DUP_EXACT_MAX + 10) {
+        let mut s = dummy_summary(&format!("/sea/file{k:05}.txt"), "file", Some("/sea"), 1);
+        s.embedding = Some((0..16).map(|_| rng.next_unit()).collect());
+        store.upsert_summary(&s).unwrap();
+    }
+    let clusters = store.find_near_duplicates(0.95).unwrap();
+    let dup_cluster = clusters
+        .iter()
+        .find(|c| c.paths.contains(&"/dup/one.txt".to_owned()))
+        .expect("planted near-dup pair must be found by the LSH path");
+    assert!(dup_cluster.paths.contains(&"/dup/two.txt".to_owned()));
+}
+
 #[test]
 fn find_stale_entries_returns_old_dirs() {
     let mut store = Store::open_in_memory().unwrap();
@@ -2595,4 +2692,137 @@ fn counterfactual_dedups_paths_and_falls_back_to_summary_byte_size() {
         .counterfactual_bytes_for_paths(&["/p/a.rs", "/p/a.rs", "/p", "/nope.txt"])
         .unwrap();
     assert_eq!(total, 1_234 + 100);
+}
+
+// ── Incremental re-summarize: source hashes + stale candidates (v0.24) ────────
+
+fn entry_with_mtime(path: &str, kind: EntryKind, mtime_secs: u64) -> Entry {
+    Entry {
+        modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime_secs)),
+        ..dummy_entry(path, kind, 1)
+    }
+}
+
+#[test]
+fn file_source_hash_tracks_content_and_degrades_to_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("a.txt");
+
+    std::fs::write(&f, "hello").unwrap();
+    let h1 = file_source_hash(&f);
+    assert_eq!(h1.len(), 64, "lowercase-hex SHA-256");
+    assert_eq!(h1, file_source_hash(&f), "same bytes ⇒ same hash");
+
+    std::fs::write(&f, "hello!").unwrap();
+    assert_ne!(h1, file_source_hash(&f), "changed bytes ⇒ changed hash");
+
+    // Unreadable ⇒ "" (freshness unknown — must never enable a skip).
+    assert_eq!(file_source_hash(&tmp.path().join("missing.txt")), "");
+}
+
+#[test]
+fn dir_source_hash_is_order_independent_and_tracks_children() {
+    let a = || {
+        let mut r = dummy_summary("/d/a", "file", Some("/d"), 2);
+        r.source_hash = "h1".into();
+        r
+    };
+    let b = || {
+        let mut r = dummy_summary("/d/b", "file", Some("/d"), 2);
+        r.source_hash = "h2".into();
+        r
+    };
+
+    let fwd = dir_source_hash(&[a(), b()]);
+    let rev = dir_source_hash(&[b(), a()]);
+    assert!(!fwd.is_empty());
+    assert_eq!(fwd, rev, "row order must not change the roll-up hash");
+
+    // A child's hash moving moves the dir hash.
+    let mut a2 = a();
+    a2.source_hash = "h1-changed".into();
+    assert_ne!(dir_source_hash(&[a2, b()]), fwd);
+
+    // Membership change moves the dir hash.
+    assert_ne!(dir_source_hash(&[a()]), fwd);
+
+    // Any unhashed child (legacy/unreadable) ⇒ "" — the dir must never skip on
+    // a hash it can't trust. Same for no children at all.
+    let mut blank = b();
+    blank.source_hash = String::new();
+    assert_eq!(dir_source_hash(&[a(), blank]), "");
+    assert_eq!(dir_source_hash(&[]), "");
+}
+
+#[test]
+fn stale_summary_candidates_flags_only_mtime_newer_than_summary() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            entry_with_mtime("/r", EntryKind::Dir, 100),
+            entry_with_mtime("/r/stale.txt", EntryKind::File, 100),
+            entry_with_mtime("/r/fresh.txt", EntryKind::File, 100),
+            entry_with_mtime("/r/skipped.txt", EntryKind::File, 100),
+            // No summary row at all → not a *stale-summary* candidate (it's a new
+            // path, handled by the INSERT OR IGNORE half of enqueue).
+            entry_with_mtime("/r/unsummarized.txt", EntryKind::File, 100),
+            dummy_entry("/r/no-mtime.txt", EntryKind::File, 1),
+        ])
+        .unwrap();
+    store
+        .db_connection()
+        .execute_batch("UPDATE entries SET deep_policy = 'Skip' WHERE path = '/r/skipped.txt'")
+        .unwrap();
+    for (path, generated_at) in [
+        ("/r", 200i64),          // dir summary newer than dir mtime → fresh
+        ("/r/stale.txt", 50),    // summary predates the edit → stale
+        ("/r/fresh.txt", 200),   // summary postdates the mtime → fresh
+        ("/r/skipped.txt", 50),  // stale by time, but deep_policy = Skip
+        ("/r/no-mtime.txt", 50), // NULL mtime → unknowable, not flagged
+    ] {
+        let mut rec = dummy_summary(path, "file", Some("/r"), 2);
+        rec.generated_at = generated_at;
+        store.upsert_summary(&rec).unwrap();
+    }
+
+    let stale = store.stale_summary_candidates("/r").unwrap();
+    assert_eq!(stale, vec![("/r/stale.txt".to_owned(), "file".to_owned())]);
+}
+
+#[test]
+fn mark_for_resummary_batch_resets_done_but_not_in_flight() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .enqueue_summary_items(&[
+            ("/q/done.txt".into(), "file".into(), 2),
+            ("/q/busy.txt".into(), "file".into(), 2),
+        ])
+        .unwrap();
+    store.mark_queue_state("/q/done.txt", "done", None).unwrap();
+    store
+        .mark_queue_state("/q/busy.txt", "in_flight", None)
+        .unwrap();
+
+    store
+        .mark_for_resummary_batch(&[
+            ("/q/done.txt".into(), "file".into(), 2),
+            ("/q/busy.txt".into(), "file".into(), 2),
+            ("/q/new.txt".into(), "file".into(), 2),
+        ])
+        .unwrap();
+
+    assert_eq!(
+        store.queue_state("/q/done.txt").unwrap().as_deref(),
+        Some("pending")
+    );
+    // An in_flight row is a worker's active claim — the batch must not steal it.
+    assert_eq!(
+        store.queue_state("/q/busy.txt").unwrap().as_deref(),
+        Some("in_flight")
+    );
+    assert_eq!(
+        store.queue_state("/q/new.txt").unwrap().as_deref(),
+        Some("pending")
+    );
+    assert_eq!(store.queue_state("/q/absent.txt").unwrap(), None);
 }

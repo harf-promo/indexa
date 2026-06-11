@@ -92,6 +92,10 @@ pub(crate) async fn cmd_insights_duplicates(threshold: f32, exact: bool) -> Resu
             return Ok(());
         }
         println!("Near-duplicate clusters ({}):", clusters.len());
+        println!(
+            "  (approximate on indexes past ~2,000 summarized files — borderline pairs can be \
+missed; exact-duplicate grouping is unaffected)"
+        );
         for (i, cluster) in clusters.iter().enumerate() {
             println!(
                 "\n  Cluster {} ({} files, similarity {:.2}):",

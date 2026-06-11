@@ -31,9 +31,11 @@ pub fn render_question(d: &DecisionRecord) -> RenderedQuestion {
         serde_json::from_str(&d.params).unwrap_or(serde_json::Value::Null);
     let option_values: Vec<String> = serde_json::from_str(&d.options).unwrap_or_default();
 
-    let (title, detail) = match DecisionType::parse(&d.decision_type) {
+    let ty = DecisionType::parse(&d.decision_type);
+    let (title, detail) = match ty {
         Some(DecisionType::Classification) => classification_text(d, &params),
         Some(DecisionType::Duplicate) => duplicate_text(d, &params, &option_values),
+        Some(DecisionType::Archive) => archive_text(d, &params),
         None => (
             format!("{}: {}", d.decision_type, d.subject),
             "This question was recorded by a newer indexa — update to see it properly.".to_owned(),
@@ -49,7 +51,7 @@ pub fn render_question(d: &DecisionRecord) -> RenderedQuestion {
         options: option_values
             .into_iter()
             .map(|v| {
-                let label = option_label(&v, suggested);
+                let label = option_label(ty, &v, suggested);
                 (v, label)
             })
             .collect(),
@@ -137,14 +139,36 @@ fn duplicate_text(
     (title, detail)
 }
 
+fn archive_text(d: &DecisionRecord, params: &serde_json::Value) -> (String, String) {
+    let days = params.get("days").and_then(|v| v.as_i64()).unwrap_or(0);
+    let files = params.get("files").and_then(|v| v.as_i64()).unwrap_or(0);
+    let title = format!("{} hasn't changed in {days} days — archive it?", d.subject);
+    let detail = format!(
+        "It holds {files} file(s). Archiving keeps everything indexed and searchable but \
+         down-weights it in results (reversible); keeping it active changes nothing, and \
+         the question returns if the folder stays untouched."
+    );
+    (title, detail)
+}
+
 /// Human label for an option value. Path/category values label themselves;
 /// the system's own suggestion is marked so the default choice is visible
 /// among otherwise identically-styled options.
-fn option_label(value: &str, suggested: Option<&str>) -> String {
-    let base = match value {
-        "ignore" => "Ignore (stop suggesting)".to_owned(),
-        "keep_all" => "Keep all (no canonical)".to_owned(),
-        other => other.to_owned(),
+///
+/// Archive labels are type-scoped on purpose: `archive` is ALSO a legitimate
+/// classification category, and a classification option must keep labeling
+/// itself plainly — only the Archive question's option means "down-weight".
+fn option_label(ty: Option<DecisionType>, value: &str, suggested: Option<&str>) -> String {
+    let base = match (ty, value) {
+        (Some(DecisionType::Archive), "archive") => {
+            "Archive (kept indexed, down-weighted in search)".to_owned()
+        }
+        (Some(DecisionType::Archive), "keep_active") => {
+            "Keep active (ask again if it stays untouched)".to_owned()
+        }
+        (_, "ignore") => "Ignore (stop suggesting)".to_owned(),
+        (_, "keep_all") => "Keep all (no canonical)".to_owned(),
+        (_, other) => other.to_owned(),
     };
     if suggested == Some(value) {
         format!("{base} (suggested)")
@@ -258,6 +282,39 @@ mod tests {
             q.options[3],
             ("keep_all".to_owned(), "Keep all (no canonical)".to_owned())
         );
+    }
+
+    #[test]
+    fn archive_question_renders_title_detail_and_typed_labels() {
+        let d = record(
+            "archive",
+            json!({"days": 400, "files": 12}),
+            json!(["archive", "keep_active"]),
+        );
+        let q = render_question(&d);
+        assert_eq!(q.title, "/r/proj hasn't changed in 400 days — archive it?");
+        assert!(q.detail.contains("12 file(s)"));
+        assert_eq!(
+            q.options[0].1,
+            "Archive (kept indexed, down-weighted in search)"
+        );
+        assert_eq!(
+            q.options[1].1,
+            "Keep active (ask again if it stays untouched)"
+        );
+    }
+
+    #[test]
+    fn archive_as_a_classification_category_keeps_its_plain_label() {
+        // "archive" is also a legitimate category value — only the Archive
+        // question's option may carry the down-weighting label.
+        let d = record(
+            "classification",
+            json!({"category": "archive", "confidence": 0.7}),
+            json!(["archive", "ignore"]),
+        );
+        let q = render_question(&d);
+        assert_eq!(q.options[0].1, "archive");
     }
 
     #[test]

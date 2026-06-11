@@ -1,9 +1,10 @@
-//! Insights REST API (v0.10).
+//! Insights REST API (v0.10) + the insights→ledger bridge (v0.24).
 //!
 //! Routes:
-//!   GET /api/insights/duplicates?threshold=0.95&exact=false
-//!   GET /api/insights/stale?days=365
-//!   GET /api/insights/diff?days=7
+//!   GET  /api/insights/duplicates?threshold=0.95&exact=false
+//!   GET  /api/insights/stale?days=365
+//!   GET  /api/insights/diff?days=7
+//!   POST /api/review/dismiss-evidence  — "don't ask about this" from insights
 
 use axum::{
     extract::{Query, State},
@@ -11,6 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use indexa_core::decisions::detectors;
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -124,6 +126,55 @@ pub(crate) async fn api_insights_diff(
             "modified_count": diff.modified_count,
         }))
         .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DismissEvidenceBody {
+    /// `"duplicate"` (one cluster per call) or `"archive"` (one or more dirs).
+    kind: String,
+    paths: Vec<String>,
+}
+
+/// "Don't ask about this" from the insights tab: record the question the
+/// detector would raise as an already-DISMISSED ledger row, so sticky
+/// dismissal suppresses it before it ever reaches the inbox. Returns how many
+/// dismissal rows now stand (archive paths without an indexed mtime are
+/// skipped — the detector never asks about those anyway).
+pub(crate) async fn api_review_dismiss_evidence(
+    State(state): State<AppState>,
+    Json(body): Json<DismissEvidenceBody>,
+) -> Response {
+    if body.paths.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "paths must not be empty");
+    }
+    let mut store = state.store.lock().await;
+    let result: anyhow::Result<usize> = match body.kind.as_str() {
+        "duplicate" => {
+            if body.paths.len() < 2 {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "a duplicate cluster needs at least 2 paths",
+                );
+            }
+            // The server re-derives the cluster from the detector's own scan —
+            // client-echoed threshold/exact flags can never byte-match the
+            // detector's evidence fingerprint, which is what stickiness keys on.
+            detectors::predismiss_duplicate(&mut store, &body.paths).map(usize::from)
+        }
+        "archive" => body.paths.iter().try_fold(0usize, |n, p| {
+            Ok(n + usize::from(detectors::predismiss_archive(&mut store, p)?))
+        }),
+        other => {
+            return err_json(
+                StatusCode::BAD_REQUEST,
+                format!("unknown evidence kind '{other}' (known: duplicate, archive)"),
+            )
+        }
+    };
+    match result {
+        Ok(n) => Json(serde_json::json!({ "dismissed": n })).into_response(),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
 }

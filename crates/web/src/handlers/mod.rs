@@ -39,7 +39,9 @@ pub(crate) use config::{
 pub(crate) use export::api_export;
 pub(crate) use fs::api_fs_ls;
 pub(crate) use graph::api_graph;
-pub(crate) use insights_handler::{api_insights_diff, api_insights_duplicates, api_insights_stale};
+pub(crate) use insights_handler::{
+    api_insights_diff, api_insights_duplicates, api_insights_stale, api_review_dismiss_evidence,
+};
 pub(crate) use jobs::{
     api_job_deep, api_job_delete, api_job_estimate, api_job_get, api_job_index, api_job_scan,
     api_job_summarize, api_jobs_events, api_jobs_list,

@@ -8,11 +8,11 @@
 use anyhow::{Context, Result};
 use indexa_core::{
     config::{DescriberConfig, SummaryMode},
-    store::{QueueItem, Store, SummaryRecord},
+    store::{dir_source_hash, file_source_hash, QueueItem, Store, SummaryRecord},
 };
 use indexa_embed::Embedder;
 use indexa_llm::{ChildSummary, Describer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -161,7 +161,28 @@ pub async fn summarize_file(
     passes: u32,
     model_fallback: bool,
     mut on_fragment: Option<&mut (dyn FnMut(String) + Send)>,
-) -> Result<bool> {
+) -> Result<SummaryWrite> {
+    // Freshness gate (incremental re-summarize): hash the file's current content
+    // and skip the LLM entirely when it matches the stored summary's source_hash —
+    // the existing summary is still true for these exact bytes, so the row (and its
+    // provenance) is left untouched. An empty hash (unreadable file) never matches,
+    // so an unhashable file degrades to "always re-summarize", never a stale skip.
+    // The skip is a success: the caller's queue item still completes as `done`.
+    // Stamped BEFORE reading content: generated_at must lower-bound the bytes
+    // the summary describes, so an edit landing during the (seconds-to-minutes)
+    // LLM run still reads as modified_s >= generated_at on the next refresh.
+    let generated_at = now_secs();
+    let source_hash = file_source_hash(Path::new(path));
+    if !source_hash.is_empty() {
+        // A read error degrades to "not summarized yet" (re-summarize), never a skip.
+        if let Ok(Some(existing)) = store.summary_by_path(path) {
+            if existing.source_hash == source_hash {
+                tracing::debug!("summarize {path}: content unchanged, skipping");
+                return Ok(SummaryWrite::Skipped);
+            }
+        }
+    }
+
     // Try to get a content sample. Prefer first chunk text (already parsed),
     // fall back to raw file bytes.
     let sample: Vec<u8> = if let Ok(Some(first_chunk)) = store.first_chunk_text(path) {
@@ -169,7 +190,7 @@ pub async fn summarize_file(
     } else {
         match std::fs::read(path) {
             Ok(bytes) => bytes.into_iter().take(4096).collect(),
-            Err(_) => return Ok(false), // skip unreadable files
+            Err(_) => return Ok(SummaryWrite::NoContent), // unreadable file
         }
     };
 
@@ -204,7 +225,7 @@ pub async fn summarize_file(
         passes_run = i64::from(i) + 1;
     }
     let Some(summary_text) = summary_text else {
-        return Ok(false);
+        return Ok(SummaryWrite::NoContent);
     };
 
     let embedding = embedder.embed(&summary_text).await.ok();
@@ -226,12 +247,12 @@ pub async fn summarize_file(
         child_count: 0,
         byte_size,
         model: model.to_owned(),
-        source_hash: String::new(),
-        generated_at: now_secs(),
+        source_hash,
+        generated_at,
     })?;
     store.set_summary_provenance(path, describer.provider_name(), passes_run, model_fallback)?;
 
-    Ok(true)
+    Ok(SummaryWrite::Written)
 }
 
 /// Summarise a directory by composing its children's summaries.
@@ -249,10 +270,27 @@ pub async fn summarize_directory(
     passes: u32,
     model_fallback: bool,
     mut on_fragment: Option<&mut (dyn FnMut(String) + Send)>,
-) -> Result<bool> {
+) -> Result<SummaryWrite> {
+    // Start-of-run stamp — same reasoning as summarize_file's.
+    let generated_at = now_secs();
     let children = store.children_summaries(dir_path)?;
     if children.is_empty() {
-        return Ok(false);
+        return Ok(SummaryWrite::NoContent);
+    }
+
+    // Freshness gate: Merkle-style roll-up over ALL children's hashes (not the
+    // max_children LLM truncation, so membership changes and far-child edits still
+    // re-roll). Equal non-empty hash ⇒ the subtree's content is byte-identical to
+    // what this roll-up was built from — skip the LLM, keep the row + provenance.
+    // Any child with an empty hash (legacy/unreadable) yields "" ⇒ never skip.
+    let source_hash = dir_source_hash(&children);
+    if !source_hash.is_empty() {
+        if let Ok(Some(existing)) = store.summary_by_path(dir_path) {
+            if existing.source_hash == source_hash {
+                tracing::debug!("summarize {dir_path}: children unchanged, skipping roll-up");
+                return Ok(SummaryWrite::Skipped);
+            }
+        }
     }
 
     let truncated: Vec<&SummaryRecord> = children.iter().take(max_children).collect();
@@ -299,7 +337,7 @@ pub async fn summarize_directory(
         passes_run = i64::from(i) + 1;
     }
     let Some(summary_text) = summary_text else {
-        return Ok(false);
+        return Ok(SummaryWrite::NoContent);
     };
 
     let embedding = embedder.embed(&summary_text).await.ok();
@@ -322,8 +360,8 @@ pub async fn summarize_directory(
         child_count,
         byte_size,
         model: dir_model.to_owned(),
-        source_hash: String::new(),
-        generated_at: now_secs(),
+        source_hash,
+        generated_at,
     })?;
     store.set_summary_provenance(
         dir_path,
@@ -332,14 +370,29 @@ pub async fn summarize_directory(
         model_fallback,
     )?;
 
-    Ok(true)
+    Ok(SummaryWrite::Written)
+}
+
+/// What one summarize call actually did — distinguishes real LLM work from the
+/// freshness gate's no-op, so surfaces can report "N unchanged (skipped)"
+/// instead of letting a near-instant refresh look broken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummaryWrite {
+    /// A summary row was (re)generated and written.
+    Written,
+    /// Content hash matched the stored row — no LLM call, row untouched.
+    Skipped,
+    /// Nothing to summarize (unreadable file / no children).
+    NoContent,
 }
 
 /// Outcome of processing one summary-queue item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueOutcome {
-    /// Summarized (or a no-op success) and marked `done`.
+    /// Summarized and marked `done`.
     Completed,
+    /// Content unchanged — the freshness gate skipped the LLM; marked `done`.
+    CompletedUnchanged,
     /// Marked `failed` (summarization error).
     Failed,
     /// A directory whose subtree still has unfinished children — re-enqueued `pending`
@@ -455,9 +508,12 @@ pub async fn process_queue_item_with_passes(
     };
 
     match result {
-        Ok(_) => {
+        Ok(write) => {
             store.mark_queue_state(&item.path, "done", None)?;
-            Ok(QueueOutcome::Completed)
+            Ok(match write {
+                SummaryWrite::Skipped => QueueOutcome::CompletedUnchanged,
+                _ => QueueOutcome::Completed,
+            })
         }
         Err(e) => {
             // The item is recorded as `failed` (with the message); callers distinguish a
@@ -470,11 +526,28 @@ pub async fn process_queue_item_with_passes(
     }
 }
 
-/// Enqueue all files + directories under `root` that are not yet in the queue.
-/// Returns the number of items enqueued.
+/// Path's `/`-or-`\`-separator count — the same depth metric the queue sorts on
+/// (deepest first), so re-pended ancestors roll up after their children.
+fn path_depth(path: &str) -> i64 {
+    path.chars().filter(|&c| c == '/' || c == '\\').count() as i64
+}
+
+/// Enqueue everything under `root` that needs (re-)summarization. Returns the
+/// number of distinct items now pending for this run.
 ///
-/// Uses `INSERT OR IGNORE` — already-queued rows (including `done` and `failed`) are
-/// left untouched. Use [`requeue_subtree`] when the user explicitly asks to regenerate.
+/// Two halves:
+/// 1. **New paths** — `INSERT OR IGNORE`: anything not yet in the queue.
+/// 2. **Dirty propagation** (incremental re-summarize) — `INSERT OR IGNORE` cannot
+///    reset a `done` row, so on a refresh a *changed* file (and the ancestor dirs
+///    whose roll-ups it staled) would otherwise never re-run. Re-pend entries whose
+///    on-disk mtime is newer than their summary (cheap SQL pre-filter; the precise
+///    content-hash gate in `summarize_file`/`summarize_directory` makes a
+///    touched-but-identical path a no-op), plus the ancestor chains — up to `root` —
+///    of every stale or newly discovered path (a new file stales its ancestors'
+///    roll-ups too; a deletion bumps the parent dir's mtime, which seeds the same
+///    walk). Unchanged paths are never re-pended, so they re-pend no ancestors.
+///
+/// Use [`requeue_subtree`] when the user explicitly asks to regenerate everything.
 pub fn enqueue_subtree(store: &mut Store, root: &Path) -> Result<usize> {
     let root_str = root.to_string_lossy();
     let items = store.entries_for_summarization(&root_str)?;
@@ -482,14 +555,52 @@ pub fn enqueue_subtree(store: &mut Store, root: &Path) -> Result<usize> {
     let depth_items: Vec<(String, String, i64)> = items
         .into_iter()
         .map(|(path, kind)| {
-            let depth = path.chars().filter(|&c| c == '/' || c == '\\').count() as i64;
+            let depth = path_depth(&path);
             (path, kind, depth)
         })
         .collect();
 
-    let n = depth_items.len();
     store.enqueue_summary_items(&depth_items)?;
-    Ok(n)
+
+    // Dirty propagation: stale entries + ancestors of stale/new paths.
+    let stale = store.stale_summary_candidates(&root_str)?;
+    let mut seen: HashSet<String> = depth_items.iter().map(|(p, _, _)| p.clone()).collect();
+    let mut dirty: Vec<(String, String, i64)> = Vec::new();
+    for (path, kind) in &stale {
+        if seen.insert(path.clone()) {
+            dirty.push((path.clone(), kind.clone(), path_depth(path)));
+        }
+    }
+    // Ancestor walk for every seed (stale + newly enqueued). On a first build all
+    // ancestors are already in `seen` (everything was just enqueued), so this adds
+    // nothing; on a refresh it re-pends exactly the chains that changed.
+    let seeds: Vec<String> = stale
+        .iter()
+        .map(|(p, _)| p.clone())
+        .chain(depth_items.iter().map(|(p, _, _)| p.clone()))
+        .collect();
+    for seed in &seeds {
+        let mut cur = Path::new(seed).parent();
+        while let Some(d) = cur {
+            // Stay within the enqueued subtree: ancestors above `root` belong to a
+            // different root's roll-up scope (mirrors the watcher's ancestor walk).
+            if !d.starts_with(root) {
+                break;
+            }
+            let d_str = d.to_string_lossy().into_owned();
+            if seen.insert(d_str.clone()) {
+                let depth = path_depth(&d_str);
+                dirty.push((d_str, "dir".to_owned(), depth));
+            }
+            if d == root {
+                break;
+            }
+            cur = d.parent();
+        }
+    }
+    store.mark_for_resummary_batch(&dirty)?;
+
+    Ok(depth_items.len() + dirty.len())
 }
 
 /// Force-requeue all files + directories under `root` for (re-)summarization,
@@ -502,6 +613,10 @@ pub fn enqueue_subtree(store: &mut Store, root: &Path) -> Result<usize> {
 /// Returns the number of items reset or newly enqueued.
 pub fn requeue_subtree(store: &mut Store, root: &Path) -> Result<usize> {
     let root_str = root.to_string_lossy();
+    // Explicit regenerate: blank the stored hashes FIRST so the freshness gate
+    // can't skip byte-identical content — Regenerate exists precisely for the
+    // cases the hash can't see (model switch, prompt change, user judgment).
+    store.clear_summary_hashes_under(&root_str)?;
     let items = store.entries_for_resummary(&root_str)?;
     let n = items.len();
     for (path, kind, depth) in &items {
@@ -520,12 +635,13 @@ pub async fn summarize_subtree_sync(
     root: &Path,
     cfg: &DescriberConfig,
     passes_override: Option<u32>,
-) -> Result<usize> {
+) -> Result<(usize, usize)> {
     let enqueued = enqueue_subtree(store, root)
         .with_context(|| format!("enqueuing subtree {}", root.display()))?;
     println!("Enqueued {enqueued} items for summarization.");
 
     let mut done = 0usize;
+    let mut skipped = 0usize;
     let mut errors = 0usize;
     let mut first_error: Option<String> = None;
     // Per-dir defer count for the force-rollup cap. In a solo serial drain this never
@@ -552,6 +668,10 @@ pub async fn summarize_subtree_sync(
             Ok(QueueOutcome::Completed) => {
                 defers.remove(&item.path);
                 done += 1;
+            }
+            Ok(QueueOutcome::CompletedUnchanged) => {
+                defers.remove(&item.path);
+                skipped += 1;
             }
             Ok(QueueOutcome::Failed) => {
                 defers.remove(&item.path);
@@ -582,15 +702,15 @@ pub async fn summarize_subtree_sync(
                 }
             }
         }
-        if (done + errors).is_multiple_of(10) {
+        if (done + skipped + errors).is_multiple_of(10) {
             println!(
                 "  {}/{enqueued} processed ({errors} errors)...",
-                done + errors
+                done + skipped + errors
             );
         }
     }
 
-    if errors > 0 && done == 0 {
+    if errors > 0 && done == 0 && skipped == 0 {
         // Most failures now arrive as Ok(false) (the item is marked `failed` in the queue),
         // so fall back to the queue's recorded error for the guidance message.
         let msg = first_error
@@ -621,7 +741,7 @@ pub async fn summarize_subtree_sync(
     }
 
     println!("Done. {done} summaries generated.");
-    Ok(done)
+    Ok((done, skipped))
 }
 
 #[cfg(test)]
@@ -891,6 +1011,514 @@ mod scheduler_tests {
         assert!(
             dir_calls.load(Ordering::SeqCst) >= 1,
             "force_rollup summarizes the dir despite the pending child"
+        );
+    }
+}
+
+#[cfg(test)]
+mod incremental_tests {
+    //! Incremental re-summarize: the content-hash skip gates and the dirty
+    //! propagation in `enqueue_subtree`. The describers count calls so a test can
+    //! assert the LLM was (not) re-paid.
+
+    use super::{
+        enqueue_subtree, process_queue_item_with_passes, summarize_directory, summarize_file,
+        QueueOutcome, SummaryWrite,
+    };
+    use indexa_core::config::DescriberConfig;
+    use indexa_core::store::{Store, SummaryRecord};
+    use indexa_core::walker::{Entry, EntryKind};
+    use indexa_embed::Embedder;
+    use indexa_llm::{ChildSummary, Describer};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct StubEmbedder;
+    #[async_trait::async_trait]
+    impl Embedder for StubEmbedder {
+        async fn embed(&self, _t: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.1; 8])
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+
+    /// Counts file describes and dir roll-ups separately, so a skip can be proven
+    /// as "zero calls", not just "no row change".
+    struct CountingDescriber {
+        file_calls: Arc<AtomicUsize>,
+        dir_calls: Arc<AtomicUsize>,
+    }
+    impl CountingDescriber {
+        fn new() -> (Self, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+            let f = Arc::new(AtomicUsize::new(0));
+            let d = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    file_calls: f.clone(),
+                    dir_calls: d.clone(),
+                },
+                f,
+                d,
+            )
+        }
+    }
+    #[async_trait::async_trait]
+    impl Describer for CountingDescriber {
+        async fn describe(
+            &self,
+            _p: &str,
+            _c: &[u8],
+            _prev: Option<&str>,
+        ) -> anyhow::Result<String> {
+            self.file_calls.fetch_add(1, Ordering::SeqCst);
+            Ok("file summary".into())
+        }
+        async fn summarize_dir(
+            &self,
+            _d: &str,
+            _children: &[ChildSummary],
+            _prev: Option<&str>,
+        ) -> anyhow::Result<String> {
+            self.dir_calls.fetch_add(1, Ordering::SeqCst);
+            Ok("dir summary".into())
+        }
+    }
+
+    fn child_summary(path: &str, parent: &str, hash: &str) -> SummaryRecord {
+        SummaryRecord {
+            path: path.to_owned(),
+            kind: "file".into(),
+            parent_path: Some(parent.to_owned()),
+            depth: super::path_depth(path),
+            summary: format!("summary of {path}"),
+            summary_l0: None,
+            embedding: None,
+            child_count: 0,
+            byte_size: 1,
+            model: "stub".into(),
+            source_hash: hash.to_owned(),
+            generated_at: 1,
+        }
+    }
+
+    // ── File skip gate ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn unchanged_file_skips_the_describer_entirely() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("f.txt");
+        std::fs::write(&f, "stable content").unwrap();
+        let path = f.to_string_lossy().into_owned();
+        let mut store = Store::open_in_memory().unwrap();
+        let (dsc, file_calls, _) = CountingDescriber::new();
+
+        let first = summarize_file(&mut store, &dsc, &StubEmbedder, &path, "m", 1, false, None)
+            .await
+            .unwrap();
+        assert_eq!(first, SummaryWrite::Written);
+        assert_eq!(file_calls.load(Ordering::SeqCst), 1);
+        let row = store.summary_by_path(&path).unwrap().unwrap();
+        assert!(
+            !row.source_hash.is_empty(),
+            "summarize_file must persist the content hash"
+        );
+
+        let second = summarize_file(&mut store, &dsc, &StubEmbedder, &path, "m", 1, false, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            second,
+            SummaryWrite::Skipped,
+            "the skip is a no-op success, not a failure"
+        );
+        assert_eq!(
+            file_calls.load(Ordering::SeqCst),
+            1,
+            "an unchanged file must not re-pay the LLM"
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_file_resummarizes_and_updates_the_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("f.txt");
+        std::fs::write(&f, "version one").unwrap();
+        let path = f.to_string_lossy().into_owned();
+        let mut store = Store::open_in_memory().unwrap();
+        let (dsc, file_calls, _) = CountingDescriber::new();
+
+        summarize_file(&mut store, &dsc, &StubEmbedder, &path, "m", 1, false, None)
+            .await
+            .unwrap();
+        let hash1 = store.summary_by_path(&path).unwrap().unwrap().source_hash;
+
+        std::fs::write(&f, "version two — different bytes").unwrap();
+        summarize_file(&mut store, &dsc, &StubEmbedder, &path, "m", 1, false, None)
+            .await
+            .unwrap();
+        let hash2 = store.summary_by_path(&path).unwrap().unwrap().source_hash;
+
+        assert_eq!(
+            file_calls.load(Ordering::SeqCst),
+            2,
+            "changed content re-runs"
+        );
+        assert_ne!(hash1, hash2, "the stored hash must track the new content");
+        assert!(!hash2.is_empty());
+    }
+
+    // ── Dir skip gate (Merkle roll-up) ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn dir_skips_when_children_unchanged() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_summary(&child_summary("/d/a.txt", "/d", "h1"))
+            .unwrap();
+        store
+            .upsert_summary(&child_summary("/d/b.txt", "/d", "h2"))
+            .unwrap();
+        let (dsc, _, dir_calls) = CountingDescriber::new();
+
+        summarize_directory(
+            &mut store,
+            &dsc,
+            &StubEmbedder,
+            "/d",
+            "m",
+            10,
+            1,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(dir_calls.load(Ordering::SeqCst), 1);
+        let row = store.summary_by_path("/d").unwrap().unwrap();
+        assert!(
+            !row.source_hash.is_empty(),
+            "dir roll-up hash must be stored"
+        );
+
+        let again = summarize_directory(
+            &mut store,
+            &dsc,
+            &StubEmbedder,
+            "/d",
+            "m",
+            10,
+            1,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(again, SummaryWrite::Skipped, "the skip is a no-op success");
+        assert_eq!(
+            dir_calls.load(Ordering::SeqCst),
+            1,
+            "unchanged children must not re-pay the roll-up"
+        );
+    }
+
+    #[tokio::test]
+    async fn dir_rerolls_when_a_child_hash_changed() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_summary(&child_summary("/d/a.txt", "/d", "h1"))
+            .unwrap();
+        store
+            .upsert_summary(&child_summary("/d/b.txt", "/d", "h2"))
+            .unwrap();
+        let (dsc, _, dir_calls) = CountingDescriber::new();
+
+        summarize_directory(
+            &mut store,
+            &dsc,
+            &StubEmbedder,
+            "/d",
+            "m",
+            10,
+            1,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        // A child was re-summarized from new content → its hash moved.
+        store
+            .upsert_summary(&child_summary("/d/a.txt", "/d", "h1-changed"))
+            .unwrap();
+        summarize_directory(
+            &mut store,
+            &dsc,
+            &StubEmbedder,
+            "/d",
+            "m",
+            10,
+            1,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            dir_calls.load(Ordering::SeqCst),
+            2,
+            "a changed child must re-roll the dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn dir_never_skips_on_a_legacy_empty_child_hash() {
+        // A child with hash "" (legacy row / unreadable file) means the dir's
+        // freshness is unknown — it must re-roll every time rather than lie.
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_summary(&child_summary("/d/a.txt", "/d", "h1"))
+            .unwrap();
+        store
+            .upsert_summary(&child_summary("/d/b.txt", "/d", ""))
+            .unwrap();
+        let (dsc, _, dir_calls) = CountingDescriber::new();
+
+        for _ in 0..2 {
+            summarize_directory(
+                &mut store,
+                &dsc,
+                &StubEmbedder,
+                "/d",
+                "m",
+                10,
+                1,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            dir_calls.load(Ordering::SeqCst),
+            2,
+            "an unhashable child disables the skip, never enables a stale one"
+        );
+    }
+
+    // ── Queue state machine: a skip still completes ──────────────────────────
+
+    #[tokio::test]
+    async fn skipped_file_still_completes_for_the_queue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("f.txt");
+        std::fs::write(&f, "stable content").unwrap();
+        let path = f.to_string_lossy().into_owned();
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .enqueue_summary_items(&[(path.clone(), "file".into(), super::path_depth(&path))])
+            .unwrap();
+        let (dsc, file_calls, _) = CountingDescriber::new();
+        let cfg = DescriberConfig::default();
+
+        // First drain: summarizes for real (passes pinned to 1 for a stable count).
+        let item = store.next_queue_item().unwrap().unwrap();
+        let out = process_queue_item_with_passes(
+            &mut store,
+            &dsc,
+            &StubEmbedder,
+            &item,
+            &cfg,
+            Some(1),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, QueueOutcome::Completed);
+        assert_eq!(file_calls.load(Ordering::SeqCst), 1);
+
+        // Re-pend (as watch / a refresh would) and drain again: content unchanged →
+        // the skip must still terminalize the row as `done`, or the queue would
+        // claim it forever.
+        store
+            .mark_for_resummary(&path, "file", super::path_depth(&path))
+            .unwrap();
+        let item = store.next_queue_item().unwrap().unwrap();
+        let out = process_queue_item_with_passes(
+            &mut store,
+            &dsc,
+            &StubEmbedder,
+            &item,
+            &cfg,
+            Some(1),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out,
+            QueueOutcome::CompletedUnchanged,
+            "a skip completes the queue item, distinguishably"
+        );
+        assert_eq!(
+            file_calls.load(Ordering::SeqCst),
+            1,
+            "the skip must not call the describer"
+        );
+        assert_eq!(store.queue_state(&path).unwrap().as_deref(), Some("done"));
+    }
+
+    // ── Dirty propagation in enqueue_subtree ─────────────────────────────────
+
+    fn entry(path: &str, kind: EntryKind, mtime_secs: u64) -> Entry {
+        Entry {
+            path: PathBuf::from(path),
+            kind,
+            size: 1,
+            modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime_secs)),
+            hint: None,
+        }
+    }
+
+    fn done_with_summary(store: &mut Store, path: &str, kind: &str, generated_at: i64) {
+        store.mark_queue_state(path, "done", None).unwrap();
+        store
+            .upsert_summary(&SummaryRecord {
+                path: path.to_owned(),
+                kind: kind.to_owned(),
+                parent_path: Path::new(path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned()),
+                depth: super::path_depth(path),
+                summary: "s".into(),
+                summary_l0: None,
+                embedding: None,
+                child_count: 0,
+                byte_size: 1,
+                model: "stub".into(),
+                source_hash: "h".into(),
+                generated_at,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn enqueue_subtree_repends_changed_files_and_their_ancestors_only() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                entry("/r", EntryKind::Dir, 100),
+                entry("/r/a", EntryKind::Dir, 100),
+                entry("/r/a/f1", EntryKind::File, 100),
+                entry("/r/b", EntryKind::Dir, 100),
+                entry("/r/b/f2", EntryKind::File, 100),
+            ])
+            .unwrap();
+
+        // First build: everything is newly enqueued.
+        let n = enqueue_subtree(&mut store, Path::new("/r")).unwrap();
+        assert_eq!(n, 5);
+
+        // Simulate a completed drain. f1's summary predates its mtime (stale);
+        // every other summary postdates it (fresh).
+        done_with_summary(&mut store, "/r", "dir", 200);
+        done_with_summary(&mut store, "/r/a", "dir", 200);
+        done_with_summary(&mut store, "/r/a/f1", "file", 50);
+        done_with_summary(&mut store, "/r/b", "dir", 200);
+        done_with_summary(&mut store, "/r/b/f2", "file", 200);
+
+        // Refresh: exactly the stale file + its ancestor chain up to the root.
+        let n2 = enqueue_subtree(&mut store, Path::new("/r")).unwrap();
+        assert_eq!(n2, 3, "stale file + its two ancestor dirs");
+        assert_eq!(
+            store.queue_state("/r/a/f1").unwrap().as_deref(),
+            Some("pending")
+        );
+        assert_eq!(
+            store.queue_state("/r/a").unwrap().as_deref(),
+            Some("pending")
+        );
+        assert_eq!(store.queue_state("/r").unwrap().as_deref(), Some("pending"));
+        // The unchanged branch is untouched — unchanged files re-pend no ancestors.
+        assert_eq!(
+            store.queue_state("/r/b/f2").unwrap().as_deref(),
+            Some("done")
+        );
+        assert_eq!(store.queue_state("/r/b").unwrap().as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn enqueue_subtree_repends_new_files_ancestors() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                entry("/r", EntryKind::Dir, 100),
+                entry("/r/a", EntryKind::Dir, 100),
+                entry("/r/a/f1", EntryKind::File, 100),
+            ])
+            .unwrap();
+        enqueue_subtree(&mut store, Path::new("/r")).unwrap();
+        done_with_summary(&mut store, "/r", "dir", 200);
+        done_with_summary(&mut store, "/r/a", "dir", 200);
+        done_with_summary(&mut store, "/r/a/f1", "file", 200);
+
+        // A new file appears in the summarized tree (rescan stored its entry).
+        // Its `done` ancestors' roll-ups are now stale and must re-pend.
+        store
+            .upsert_entries(&[entry("/r/a/f2", EntryKind::File, 150)])
+            .unwrap();
+        let n = enqueue_subtree(&mut store, Path::new("/r")).unwrap();
+        assert_eq!(n, 3, "new file + its two ancestor dirs");
+        assert_eq!(
+            store.queue_state("/r/a/f2").unwrap().as_deref(),
+            Some("pending")
+        );
+        assert_eq!(
+            store.queue_state("/r/a").unwrap().as_deref(),
+            Some("pending")
+        );
+        assert_eq!(store.queue_state("/r").unwrap().as_deref(), Some("pending"));
+        // The pre-existing unchanged file stays done.
+        assert_eq!(
+            store.queue_state("/r/a/f1").unwrap().as_deref(),
+            Some("done")
+        );
+    }
+
+    #[test]
+    fn enqueue_subtree_repends_dir_whose_mtime_bumped() {
+        // A deletion/rename inside a dir bumps the dir's mtime without any
+        // surviving file changing — the dir (and its ancestors) must re-roll.
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                entry("/r", EntryKind::Dir, 100),
+                entry("/r/a", EntryKind::Dir, 100),
+                entry("/r/a/f1", EntryKind::File, 100),
+            ])
+            .unwrap();
+        enqueue_subtree(&mut store, Path::new("/r")).unwrap();
+        done_with_summary(&mut store, "/r", "dir", 200);
+        done_with_summary(&mut store, "/r/a", "dir", 200);
+        done_with_summary(&mut store, "/r/a/f1", "file", 200);
+
+        // Rescan after a deletion in /r/a: only the dir's mtime moved.
+        store
+            .upsert_entries(&[entry("/r/a", EntryKind::Dir, 300)])
+            .unwrap();
+        let n = enqueue_subtree(&mut store, Path::new("/r")).unwrap();
+        assert_eq!(n, 2, "the bumped dir + its ancestor");
+        assert_eq!(
+            store.queue_state("/r/a").unwrap().as_deref(),
+            Some("pending")
+        );
+        assert_eq!(store.queue_state("/r").unwrap().as_deref(), Some("pending"));
+        assert_eq!(
+            store.queue_state("/r/a/f1").unwrap().as_deref(),
+            Some("done")
         );
     }
 }

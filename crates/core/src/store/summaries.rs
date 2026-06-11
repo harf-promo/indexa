@@ -4,6 +4,58 @@ use super::search::{blob_to_embedding, embedding_to_blob, like_prefix};
 use super::{Store, SummaryRecord};
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension, Row};
+use sha2::{Digest, Sha256};
+use std::io::Read;
+
+/// Full-content SHA-256 of the file at `path`, lowercase hex. Streams in 64 KiB
+/// reads so a 100 MB file never loads into RAM. Returns `""` when the file can't
+/// be read — an empty hash means "freshness unknown" and must never enable a
+/// skip (and never block the summary itself).
+pub fn file_source_hash(path: &std::path::Path) -> String {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            // A mid-read failure leaves a partial digest — discard it; a wrong
+            // hash (enabling a false skip later) is worse than no hash.
+            Err(_) => return String::new(),
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// Merkle-style roll-up hash for a directory: SHA-256 over the sorted
+/// (child path, child source_hash) pairs, so a dir's hash changes iff its
+/// subtree's content or membership did — without touching the disk.
+///
+/// Returns `""` when there are no children or any child's hash is empty
+/// (legacy/unreadable rows): an unknown child means the dir's freshness is
+/// unknown, and it must re-roll rather than skip on a hash it can't trust.
+pub fn dir_source_hash(children: &[SummaryRecord]) -> String {
+    if children.is_empty() || children.iter().any(|c| c.source_hash.is_empty()) {
+        return String::new();
+    }
+    let mut pairs: Vec<(&str, &str)> = children
+        .iter()
+        .map(|c| (c.path.as_str(), c.source_hash.as_str()))
+        .collect();
+    // children_summaries orders dirs-then-files; sort by path so the hash is
+    // independent of the caller's row order.
+    pairs.sort_unstable();
+    let mut hasher = Sha256::new();
+    for (path, hash) in pairs {
+        hasher.update(path.as_bytes());
+        hasher.update([0u8]); // NUL separators: ("ab","c") must hash unlike ("a","bc")
+        hasher.update(hash.as_bytes());
+        hasher.update([0u8]);
+    }
+    format!("{:x}", hasher.finalize())
+}
 
 /// Derive an L0 one-line abstract from a fuller (L1) summary: the first sentence,
 /// truncated to ~120 chars on a char boundary. Used both when writing new summaries
@@ -248,5 +300,54 @@ impl Store {
             Ok((path, kind, depth))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// (path, kind) of summarized entries under `root` whose on-disk mtime
+    /// (`entries.modified_s`, refreshed by scan) is newer than their summary's
+    /// `generated_at` — i.e. summaries that *may* be stale.
+    ///
+    /// A cheap SQL-only pre-filter for incremental re-summarize: the precise gate
+    /// is the content hash in the summarize path (a touched-but-identical file
+    /// skips there). Dirs are included on purpose — a dir's mtime bumps when a
+    /// direct child is created/removed/renamed, which is exactly when its roll-up
+    /// (and its ancestors') goes stale without any surviving file changing.
+    pub fn stale_summary_candidates(&self, root: &str) -> Result<Vec<(String, String)>> {
+        // Boundary-scoped (exact + "root/" children, mirroring delete_subtree):
+        // a bare prefix would bleed /projects-archive into /projects, stealing
+        // its staleness signal without the matching ancestor propagation.
+        let exact = root.trim_end_matches('/');
+        let child_pattern = like_prefix(&format!("{exact}/"));
+        // `>=`, not `>`: summarize stamps generated_at at the START of its run,
+        // so an edit landing the same second (or during the LLM call) stays
+        // flagged. False positives are free — the content-hash gate skips them.
+        let mut stmt = self.conn.prepare(
+            "SELECT e.path, e.kind FROM entries e
+             JOIN summaries s ON s.path = e.path
+             WHERE (e.path = ?1 OR e.path LIKE ?2 ESCAPE '\\')
+               AND (e.deep_policy IS NULL OR e.deep_policy != 'Skip')
+               AND e.modified_s IS NOT NULL
+               AND e.modified_s >= s.generated_at",
+        )?;
+        let rows = stmt.query_map(params![exact, child_pattern], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Blank the stored source hashes for `root`'s subtree (exact + children).
+    /// An explicit "Regenerate" must defeat the freshness gate even for
+    /// byte-identical content (model/prompt/passes changes, user intent) —
+    /// clearing the hash IS the force signal, so the gate itself stays
+    /// parameter-free. Returns rows cleared.
+    pub fn clear_summary_hashes_under(&mut self, root: &str) -> Result<usize> {
+        let exact = root.trim_end_matches('/');
+        let child_pattern = like_prefix(&format!("{exact}/"));
+        self.conn
+            .execute(
+                "UPDATE summaries SET source_hash = ''
+                  WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+                params![exact, child_pattern],
+            )
+            .map_err(Into::into)
     }
 }
