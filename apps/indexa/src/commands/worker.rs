@@ -133,7 +133,13 @@ pub(crate) async fn cmd_worker(concurrency: usize, auto_reindex: bool, cfg: &Con
     );
     println!("Press Ctrl-C to stop.");
 
-    let summary_cfg = cfg.describer.clone();
+    let mut summary_cfg = cfg.describer.clone();
+    // Keep the cfg models truthful under auto-downgrade: summary rows record
+    // cfg.file_model/dir_model as their `model`, and provenance marks the substitution.
+    summary_cfg.model_fallback =
+        file_model != cfg.describer.file_model || dir_model != cfg.describer.dir_model;
+    summary_cfg.file_model = file_model.clone();
+    summary_cfg.dir_model = dir_model.clone();
     let headroom = cfg.resource.effective_headroom_bytes();
     let mut handles = Vec::new();
     for _ in 0..concurrency {

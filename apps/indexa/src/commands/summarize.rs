@@ -30,6 +30,13 @@ pub(crate) async fn cmd_summarize(
     } else {
         select_summary_models(cfg)
     };
+    // Keep the cfg models truthful: the summary rows record cfg.file_model/dir_model
+    // as their `model`, so a silent downgrade must be reflected there too (otherwise
+    // provenance records a model that never ran). model_fallback marks the substitution.
+    summary_cfg.model_fallback =
+        file_model != cfg.describer.file_model || dir_model != cfg.describer.dir_model;
+    summary_cfg.file_model = file_model.clone();
+    summary_cfg.dir_model = dir_model.clone();
     let describer = indexa_llm::describer_from_config(
         &cfg.describer.provider,
         &file_model,

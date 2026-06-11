@@ -933,22 +933,29 @@ pub(crate) async fn run_summarize_phase(
     );
 
     let db_path = (*state.db_path).clone();
-    let cfg = state.config.describer.clone();
+    let mut cfg = state.config.describer.clone();
     let resource_cfg = state.config.resource.clone();
     let spec = state.machine_spec.clone();
     let headroom = resource_cfg.effective_headroom_bytes();
     let embedder = state.embedder.clone();
     let root = std::path::PathBuf::from(path);
     let (file_model, dir_model, num_ctx) = match &model_override {
-        Some((f, d, n)) => (f.as_str(), d.as_str(), *n),
-        None => (cfg.file_model.as_str(), cfg.dir_model.as_str(), cfg.num_ctx),
+        Some((f, d, n)) => (f.clone(), d.clone(), *n),
+        None => (cfg.file_model.clone(), cfg.dir_model.clone(), cfg.num_ctx),
     };
+    // Keep cfg truthful under an "ask me first" override: summary rows record
+    // cfg.file_model/dir_model as their `model`, so a substituted model must be
+    // reflected there too; model_fallback marks the substitution in provenance.
+    cfg.model_fallback = file_model != cfg.file_model || dir_model != cfg.dir_model;
+    cfg.file_model = file_model.clone();
+    cfg.dir_model = dir_model.clone();
+    cfg.num_ctx = num_ctx;
     // Route through the factory so `provider = "claude-code"` (the user's Claude
     // subscription) is honored here too, not just on the CLI summarize path.
     let describer = match indexa_llm::describer_from_config(
         &cfg.provider,
-        file_model,
-        dir_model,
+        &file_model,
+        &dir_model,
         &cfg.base_url,
         num_ctx,
         &cfg.claude_bin,

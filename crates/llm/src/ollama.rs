@@ -435,6 +435,10 @@ impl Generator for OllamaLlm {
 
 #[async_trait::async_trait]
 impl Describer for OllamaLlm {
+    fn provider_name(&self) -> &'static str {
+        "ollama"
+    }
+
     async fn describe(
         &self,
         path: &str,

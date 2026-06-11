@@ -2031,3 +2031,45 @@ fn prune_noops_on_entryless_index() {
     );
     assert_eq!(store.chunk_count().unwrap(), 1);
 }
+
+#[test]
+fn summary_provenance_stamp_and_replace() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_summary(&dummy_summary("/docs/file.txt", "file", Some("/docs"), 2))
+        .unwrap();
+    store
+        .set_summary_provenance("/docs/file.txt", "ollama", 2, true)
+        .unwrap();
+
+    let read = |store: &Store| -> (Option<String>, Option<i64>, Option<i64>) {
+        store
+            .conn
+            .query_row(
+                "SELECT provider, passes, fallback FROM summaries WHERE path = '/docs/file.txt'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        read(&store),
+        (Some("ollama".into()), Some(2), Some(1)),
+        "provenance must be stamped onto the summary row"
+    );
+
+    // INSERT OR REPLACE on re-summarize clears the old provenance (no stale lineage);
+    // the new stamp lands after the new row.
+    store
+        .upsert_summary(&dummy_summary("/docs/file.txt", "file", Some("/docs"), 2))
+        .unwrap();
+    assert_eq!(
+        read(&store),
+        (None, None, None),
+        "re-summarize must not carry forward the previous row's provenance"
+    );
+    store
+        .set_summary_provenance("/docs/file.txt", "claude-code", 1, false)
+        .unwrap();
+    assert_eq!(read(&store), (Some("claude-code".into()), Some(1), Some(0)));
+}

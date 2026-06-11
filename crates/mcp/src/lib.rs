@@ -540,9 +540,15 @@ impl IndexaMcp {
             .map(|p| format!("📄 {p}"))
             .collect::<Vec<_>>()
             .join("\n");
+        let mode = if params.0.strict {
+            "strict transitive hop"
+        } else {
+            "fuzzy — consider strict:true"
+        };
         Ok(ok_text(format!(
-            "Blast radius of '{}' ({total} file(s)):\n{body}",
-            params.0.symbol
+            "Blast radius of '{}' ({total} file(s)):\n{body}\n\n⚠ Approximate ({mode}): {}.",
+            params.0.symbol,
+            indexa_core::store::BARE_NAME_CAVEAT
         )))
     }
 
@@ -621,9 +627,10 @@ impl IndexaMcp {
         Ok(ok_text(format!(
             "Call graph under '{scope}': {} files, {} edges{trunc}\n\n\
              Most central files (centrality 0–100):\n{central}\n\n\
-             Heaviest edges:\n{body}",
+             Heaviest edges:\n{body}\n\n⚠ Approximate: {}.",
             graph.nodes.len(),
-            graph.edges.len()
+            graph.edges.len(),
+            indexa_core::store::BARE_NAME_CAVEAT
         )))
     }
 

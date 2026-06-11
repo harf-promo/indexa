@@ -127,6 +127,11 @@ pub(crate) const SUMMARY_OUTPUT_RULE: &str =
 /// Generates natural-language descriptions for files and directory roll-ups.
 #[async_trait::async_trait]
 pub trait Describer: Send + Sync {
+    /// Short adapter name stamped into summary provenance ("ollama", "claude-code").
+    fn provider_name(&self) -> &'static str {
+        "unspecified"
+    }
+
     /// One-sentence file description from a content sample.
     /// `previous_summary` is the prior draft on a refinement pass (None on first pass).
     async fn describe(
