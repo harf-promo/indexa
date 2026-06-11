@@ -18,6 +18,16 @@ Vote on upcoming features and suggest new ones in [Discussions → Ideas](../../
 > in local SQLite behind MCP). Together they widen the moat against cloud-only, repo-only, and
 > assistant-plugin tools. See [docs/COMPETITIVE.md](docs/COMPETITIVE.md).
 
+## 2026-06-11: v0.21–v0.25 — five releases in one day
+
+A trust-and-accuracy sprint, each release one theme:
+
+- **v0.21 — Truth & Trust** *(shipped)*: every claim the project makes — in docs, tool output, summary rows — is now either true or build-breaking (doc-drift CI gates, summary provenance, honesty caveats inline in code-graph results, saved searches everywhere).
+- **v0.22 — The Ledger** *(shipped)*: the Decision Ledger — Indexa asks instead of guessing (uncertain classifications, "which duplicate is canonical?") and remembers your answers as revision chains, across CLI / web / MCP.
+- **v0.23 — Measure It** *(shipped)*: the pitch becomes a measurement — token-savings telemetry, answer-confidence labels on `ask`, `status --deep` index health report, `indexa eval` retrieval regression harness, one-shot `mcp install`.
+- **v0.24 — Always Current** *(shipped)*: the index never lies about freshness — hash-gated incremental re-summarize, near-duplicate detection without the file cap (LSH), ledger archive questions, a real-browser web smoke test in CI.
+- **v0.25 — Deep Accuracy** *(this release)*: scoped call-graph resolution — same-file/same-dir/import tiers past bare-name matching, Decision Ledger phase 3, and a first experimental Linux desktop build (AppImage + .deb).
+
 ---
 
 ## v0.1 — Index + Ask  *(shipped)*
@@ -146,7 +156,7 @@ A native macOS desktop app — Indexa runs as a menu-bar app instead of a termin
 - **Silent auto-update** — Tauri updater downloads and installs new releases in the background; asks before restarting
 - **Window hides on close** — clicking ✕ hides to the tray instead of quitting (standard macOS menu-bar behavior)
 - **Native error dialogs** — port-conflict and update-confirmation alerts shown via native macOS dialogs
-- macOS Apple Silicon (aarch64); Intel Mac via CLI binary
+- macOS universal (Intel + Apple Silicon) since v0.20.1; experimental Linux x86_64 build (AppImage + .deb, no auto-update yet) since v0.25
 
 ---
 
@@ -160,7 +170,7 @@ Query your desktop context store from your phone.
 
 ---
 
-## v0.13 — Plugin SDK
+## v0.13 — Plugin SDK  *(shipped — v0.15.0)*
 
 Open the platform to third-party extensions.
 
@@ -178,7 +188,7 @@ Today Indexa stores **metadata** for images, audio, and video (EXIF, ffprobe). T
 
 - **Images** — caption with a local vision model (Ollama); the caption becomes a searchable chunk
 - **Audio** — local transcription → searchable chunks
-- **Video** — sample frames → caption; optional transcript
+- **Video** — sample frames → caption; optional transcript *(captioning shipped — v0.16.0)*
 - Opt-in per region; goes through the same parse → embed → store pipeline and the resource watchdog
 - Default vision/audio models follow the project's model policy (non-Chinese defaults; user-configurable)
 
@@ -194,6 +204,8 @@ A real code graph kept in local SQLite (no Neo4j, no cloud), queryable over MCP:
 - **Weighted PageRank centrality** *(shipped — v0.20.0)*: each file in the call graph carries a
   centrality score; the Map "Graph" view sizes nodes by it, and `indexa graph` / the `code_graph` MCP
   tool surface the most-central hub files. Deeper reachability analysis remains a future iteration.
+- **Phase 4 — scoped call resolution** *(v0.25)*: scoped resolution (same-file/same-dir/import-string tiers, heuristic not semantic) replaces pure
+  bare-name matching for call edges, cutting false-positive `who_calls` / `blast_radius` hits.
 
 ---
 

@@ -147,6 +147,12 @@ Global flag (all commands): `--config <PATH>` overrides the default config locat
 | `doctor` | `--profile`, `--files N`, `--chunks N` | Machine specs, per-model memory fit, ETA estimates, Ollama env checks. |
 | `fingerprint` | `--paths` | Detect installed software / project types by file-pattern signatures. |
 | `classify` | `--paths`, `--category <cat>` | Suggest a semantic category (work/personal/archive/media/code/system) per folder. |
+| `report [questions…]` | `--saved NAME`, `--format <md\|xml>`, `--output FILE` | Run several `ask` questions and render one cited document (TOC + answers + sources). |
+| `insights <largest\|languages\|duplicates\|stale\|diff>` | `--json`, `--threshold`, `--days` | Analytical reports computed directly from the index — no AI calls. |
+
+> **Why both `report` and `insights`?** They answer different questions with different engines.
+> `report` is a multi-question **ask** digest — retrieval + LLM synthesis rendered as one citable document (an onboarding / design-doc generator).
+> `insights` is **index analytics** — pure SQLite queries over what's indexed (duplicates, stale dirs, sizes, languages, weekly diff); no LLM, no retrieval.
 
 ---
 

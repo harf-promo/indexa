@@ -45,7 +45,10 @@ mod tests;
 // Re-export every public record type so external paths (`indexa_core::store::*`)
 // are unchanged by the split.
 pub use ann::AnnIndex;
-pub use edges::BARE_NAME_CAVEAT;
+pub use edges::{
+    BlastRadius, ResolutionTier, ResolvedCaller, ResolvedRelatedFile, ScopedCodeGraph,
+    BARE_NAME_CAVEAT,
+};
 pub use entries::CoverageEntry;
 pub use insights::{DuplicateCluster, LanguageStat, LargestEntry, StaleEntry, WeeklyDiff};
 pub use prune::OrphanCounts;

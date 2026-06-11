@@ -23,25 +23,41 @@ with node size proportional to PageRank centrality so the hubs stand out.
 
 ## How to read it — the honest caveats
 
-The call graph is **bare-name matched**: a call to `parse(...)` links to *every* file that defines a
-symbol named `parse`, case-sensitive, **1 hop**, across the 7 supported languages. It does **not**
-resolve imports, namespaces, types, or overloads. So:
+Since v0.25 every call is **scope-resolved at query time** before it becomes an edge. A call to
+`parse(...)` is resolved against `parse`'s definition sites in tier order:
 
-- **`who_calls parse` can over-report.** If three unrelated modules each define `parse`, a caller of
-  any one of them links to all three. Common names (`run`, `new`, `get`, `parse`) are the noisiest.
-- **It can under-report** across dynamic dispatch, macros, reflection, or re-exports the parser
-  doesn't follow.
-- Treat the output as **"candidates to inspect," not "ground truth."** It's a fast way to find where
-  to look, not a substitute for the compiler.
+1. **same-file** — the caller defines `parse` itself → binds locally, no repo-wide fan-out.
+2. **same-dir** — a definer sits in the caller's own directory → only those are linked.
+3. **import** — a definer's path matches one of the caller's imports (JS/TS relative specifiers,
+   Rust `crate::`/`super::` paths, Python dotted modules — see
+   [`methodology.md`](../methodology.md) for the exact forms).
+4. **bare** — nothing resolved: falls back to *every* file defining the name, **labeled `(bare)`**.
 
-Prefer **distinctive symbol names** when using `who_calls` / `blast_radius` — the rarer the name,
-the more trustworthy the edge.
+The CLI and MCP surfaces tell you which is which (the web Map view and `indexa related` show
+scoped edges without per-edge tier labels yet): `who_calls` groups callers by tier, `indexa graph` and
+`code_graph` print `edges: N scoped (… same-dir, … import-resolved) + M bare-name` and mark bare
+edges inline. **Only the bare remainder is approximate** — when every edge is scoped, there is no
+caveat to apply. `--strict` / `strict: true` drops the bare tier entirely.
 
-The full methodology and per-language coverage are in [`methodology.md`](../methodology.md).
+For the bare remainder, the old rules still hold:
+
+- **Bare matches can over-report.** If three unrelated modules each define `parse`, an unresolved
+  caller links to all three. Common names (`run`, `new`, `get`, `parse`) are the noisiest.
+- **The graph can under-report** across dynamic dispatch, macros, reflection, re-exports, path
+  aliases, or use-renames the import matcher doesn't follow (it is lexical matching, not a compiler).
+- Treat bare edges as **"candidates to inspect," not "ground truth"**; scoped edges as "structurally
+  confirmed, still worth an eyeball."
+
+Prefer **distinctive symbol names** when using `who_calls` / `blast_radius` — the input name itself
+is always matched bare (there is no definer to disambiguate against until the callers are resolved).
+
+The full methodology, tier definitions, and per-language matcher coverage are in
+[`methodology.md`](../methodology.md).
 
 ## A practical workflow
 
 1. `indexa graph <scope>` → find the hub files (highest centrality).
 2. `dependencies <hub-file>` → see what it pulls in and exposes.
-3. Before changing a function, `blast_radius <function>` → the 1-hop callers to check — then
-   eyeball each, because of the bare-name caveat above.
+3. Before changing a function, `blast_radius <function>` → the 1-hop callers to check. The
+   transitive hop is resolution-confirmed where possible; eyeball anything counted under
+   "bare-name" in the summary line.

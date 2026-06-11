@@ -99,8 +99,104 @@ function buildReviewCard(q) {
   dismiss.title = 'Stop asking — this question only returns if the evidence changes';
   dismiss.onclick = function () { dismissReview(q.id, card); };
   row.appendChild(dismiss);
+
+  // Time-travel (v0.25): toggle the subject's full revision chain inline.
+  var hist = document.createElement('button');
+  hist.className = 'review-history-btn';
+  hist.textContent = 'History';
+  hist.title = 'Every decision recorded for this subject, oldest first';
+  hist.setAttribute('aria-expanded', 'false');
+  hist.onclick = function () { toggleReviewHistory(card, q, hist); };
+  row.appendChild(hist);
+
   card.appendChild(row);
   return card;
+}
+
+/* ── Time-travel: per-subject revision chain ──────────────────────────────────
+   Same XSS rule as the cards: every value from the API (subjects, chosen
+   answers, types are user file paths / symbols) is rendered via textContent,
+   never as HTML. The history endpoint walks ALL decision types for the
+   subject, so archive/duplicate chains render here too. */
+function toggleReviewHistory(card, q, btn) {
+  var existing = card.querySelector('.review-history');
+  if (existing) { existing.remove(); btn.setAttribute('aria-expanded', 'false'); return; }
+  var box = document.createElement('div');
+  box.className = 'review-history';
+  box.textContent = 'Loading history…';
+  card.appendChild(box);
+  btn.setAttribute('aria-expanded', 'true');
+  fetch('/api/review/history?subject=' + encodeURIComponent(q.subject))
+    .then(function (r) { return r.json(); })
+    .then(function (rows) { renderReviewHistory(box, rows); })
+    .catch(function (e) { box.textContent = 'Failed to load history: ' + e.message; });
+}
+
+function renderReviewHistory(box, rows) {
+  box.textContent = '';
+  if (!Array.isArray(rows) || !rows.length) {
+    box.textContent = 'No decisions recorded yet for this subject.';
+    return;
+  }
+  rows.forEach(function (rev) {
+    var line = document.createElement('div');
+    var isCurrent = rev.status === 'decided' && !rev.superseded_by;
+    line.className = 'review-history-row' + (isCurrent ? ' current' : '');
+
+    var when = document.createElement('span');
+    when.className = 'review-history-when';
+    when.textContent = fmtReviewDate(rev.decided_at || rev.created_at);
+    line.appendChild(when);
+
+    var what = document.createElement('span');
+    what.className = 'review-history-what';
+    var outcome = rev.status;
+    if (rev.chosen) outcome += ': ' + rev.chosen;
+    if (isCurrent) outcome += ' (current)';
+    what.textContent = '#' + rev.id + ' [' + rev.decision_type + '] ' + outcome;
+    what.title = 'subject: ' + rev.subject;
+    line.appendChild(what);
+
+    // Only a superseded decided revision is restorable — an open row is
+    // answerable above, and the current head is already in force.
+    if (rev.status === 'decided' && rev.superseded_by) {
+      var btn = document.createElement('button');
+      btn.className = 'btn-sm review-restore-btn';
+      btn.textContent = 'Restore this answer';
+      btn.title = 'Append a new revision carrying this answer and re-apply it';
+      btn.onclick = function () { revertReview(rev.id, box); };
+      line.appendChild(btn);
+    }
+    box.appendChild(line);
+  });
+}
+
+/* Restore routes through POST /api/review/revert — the same shared
+   core::decisions::revert_decision the CLI uses. On success the inbox and the
+   chain are both stale → reload the list (the chain re-opens on demand). */
+function revertReview(id, box) {
+  fetch('/api/review/revert', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: id }),
+  })
+    .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+    .then(function (res) {
+      if (!res.ok) {
+        toast(res.d.error || 'Failed to restore', 'error');
+      } else {
+        toast('Restored: ' + res.d.chosen, 'info');
+        loadReview();
+        loadReviewCount();
+      }
+    })
+    .catch(function (e) { toast('Network error: ' + e.message, 'error'); });
+}
+
+function fmtReviewDate(ts) {
+  if (!ts) return '—';
+  // Unix seconds → YYYY-MM-DD (UTC): compact, sortable, locale-stable.
+  return new Date(ts * 1000).toISOString().slice(0, 10);
 }
 
 /* Optimistic: the card leaves immediately; a failure reloads the list so the

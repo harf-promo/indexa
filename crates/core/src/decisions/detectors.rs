@@ -2,12 +2,14 @@
 //! (duplicate clusters, mid-band Tier-0 confidence) into open ledger questions.
 //!
 //! The classification detectors fire inline in `cmd_classify` (they need the
-//! Tier-0 hint maps that only exist there); [`run_detectors`] is the standalone
-//! pass appended to `cmd_index` and covers the duplicate and archive detectors
+//! Tier-0 hint maps that only exist there) and the summary-drift detector fires
+//! inline in `summarize_file` (it needs both embeddings in hand);
+//! [`run_detectors`] is the standalone pass appended to `cmd_index` and covers
+//! the duplicate, archive, language-fallback, and symbol-ambiguity detectors
 //! plus the crash-repair and expiry sweeps.
 
 use crate::config::ReviewConfig;
-use crate::store::{DuplicateCluster, NewDecision, Store};
+use crate::store::{abstract_from, DuplicateCluster, NewDecision, Store, SummaryRecord};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
@@ -33,8 +35,26 @@ const ARCHIVE_STALE_DAYS: i64 = 365;
 /// next one (~every 3 months of continued inactivity) — no timer code needed.
 const ARCHIVE_BUCKET_DAYS: i64 = 90;
 
-/// What a detector pass did. Totals are across detector types (duplicate +
-/// archive); a per-type split waits until a surface actually needs it.
+/// Cosine below which a regenerated same-content summary counts as drifted.
+/// 0.80 is deliberately low: same-model re-runs of identical content typically
+/// land > 0.9, so only a real disagreement (model switch, prompt change, LLM
+/// mood swing) interrupts the user.
+const DRIFT_COSINE_THRESHOLD: f32 = 0.80;
+
+/// A language question only fires for files with at least this many untagged
+/// chunks — a 1-chunk file isn't worth an interruption.
+const LANGUAGE_MIN_CHUNKS: i64 = 3;
+
+/// Bounded sweep size for the language detector's candidate query (the
+/// per-scan caps below bound how many *questions* open; this bounds the scan).
+const LANGUAGE_SCAN_LIMIT: usize = 200;
+
+/// Top-K ambiguous symbols considered per scan, ranked by caller count — the
+/// hottest ambiguities first; the rest wait for a later scan.
+const SYMBOL_AMBIGUITY_TOP_K: usize = 10;
+
+/// What a detector pass did. Totals are across detector types; a per-type
+/// split waits until a surface actually needs it.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DetectorReport {
     /// Questions opened this pass.
@@ -50,7 +70,9 @@ pub struct DetectorReport {
 
 /// The detector pass run at the end of `cmd_index`: repair sweep first (so a
 /// crashed projection heals before new questions stack on top), then the
-/// duplicate and archive detectors, honoring the fatigue caps in `cfg`.
+/// duplicate, archive, language, and symbol detectors — in that order, so the
+/// higher-priority question types get the cap budget first — honoring the
+/// fatigue caps in `cfg`.
 pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorReport> {
     let mut report = DetectorReport {
         repaired: super::repair_unapplied(store)?,
@@ -201,6 +223,85 @@ pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorRe
             None => report.skipped += 1,
         }
     }
+
+    // Language-fallback detector (priority 20). Implemented as a cheap
+    // post-hoc heuristic over the chunks table — chunks whose `language` IS
+    // NULL on a file whose extension says "code" — rather than plumbing a
+    // per-file fallback flag from the parsers up through the deep path: the
+    // parse results cross three crates (parsers → cli/web deep loops → store)
+    // and every Extracted consumer's signature would have churned for a flag
+    // the detector can derive from what's already persisted. The two are
+    // equivalent because the tree-sitter CodeParser always tags its chunks;
+    // an untagged chunk on a code extension *is* the fallback-to-text case.
+    for (path, n_chunks) in store.unlabeled_chunk_files(LANGUAGE_MIN_CHUNKS, LANGUAGE_SCAN_LIMIT)? {
+        if report.opened >= cfg.max_new_per_scan || open_budget == 0 {
+            break;
+        }
+        let ext = std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        let Some(lang) = ext.as_deref().and_then(code_language_for_extension) else {
+            continue; // not code-shaped — plain text is correct untagged
+        };
+        if let Some(prior) = store.latest_decided(DecisionType::Language.as_str(), &path)? {
+            // A re-deep rewrote the chunks (language NULL again) — re-apply the
+            // standing answer silently instead of asking twice; "ignore"
+            // projects to nothing, which also (correctly) re-suppresses.
+            let fx = super::effects::apply_decision_effects(store, &prior)?;
+            store.mark_effects_applied(prior.id, &fx)?;
+            report.skipped += 1;
+            continue;
+        }
+        match store.record_decision(language_question(&path, lang, n_chunks))? {
+            Some(_) => {
+                report.opened += 1;
+                open_budget -= 1;
+            }
+            None => report.skipped += 1,
+        }
+    }
+
+    // Symbol-ambiguity detector (priority 20): bare names with `calls` edges
+    // that are *defined* in more than one file — exactly the case where the
+    // bare-name call graph (who_calls / blast_radius) can't tell definitions
+    // apart. Top-K hottest by caller count per scan; the answer is stored as
+    // the question's effects only (no projection table — graph surfaces
+    // consult the ledger's answer separately).
+    for (symbol, callers) in store.ambiguous_called_symbols(SYMBOL_AMBIGUITY_TOP_K)? {
+        if report.opened >= cfg.max_new_per_scan || open_budget == 0 {
+            break;
+        }
+        let definers = store.edges_to("defines", &symbol)?;
+        if definers.len() < 2 {
+            continue; // racing re-deep shrank the set since the GROUP BY
+        }
+        let fingerprint = symbol_fingerprint(&definers);
+        let mut reask_parent: Option<i64> = None;
+        if let Some(prior) =
+            store.latest_decided(DecisionType::SymbolAmbiguity.as_str(), &symbol)?
+        {
+            if prior.evidence_hash == fingerprint {
+                // The definer set hasn't moved — the standing answer covers it.
+                report.skipped += 1;
+                continue;
+            }
+            // Definer set changed → chained re-ask, never a second head.
+            reask_parent = Some(prior.id);
+        }
+        let q = symbol_ambiguity_question(&symbol, &definers, callers);
+        let opened = match reask_parent {
+            Some(prior) => store.supersede_with(prior, q)?,
+            None => store.record_decision(q)?,
+        };
+        match opened {
+            Some(_) => {
+                report.opened += 1;
+                open_budget -= 1;
+            }
+            None => report.skipped += 1,
+        }
+    }
     Ok(report)
 }
 
@@ -254,6 +355,238 @@ fn archive_question(path: &str, days: i64, files: i64) -> NewDecision {
         priority: 30,
         paths: vec![path.to_owned()],
     }
+}
+
+// ── Summary drift (fired inline from summarize_file, not run_detectors) ──────
+
+/// Open a summary-drift question when a regeneration of IDENTICAL content
+/// produced a summary that semantically disagrees with the old one
+/// (cosine < [`DRIFT_COSINE_THRESHOLD`]). Called from `summarize_file` AFTER
+/// the new row is written — the question never blocks the write; it asks
+/// "keep new / restore old" after the fact.
+///
+/// Skips silently (Ok(None)) when either embedding is missing (nothing to
+/// compare — and a `restore_old` projection clears the row's embedding, so a
+/// later regen of the restored row also lands here instead of nag-looping).
+/// Dedup: an open row for the path blocks via the partial unique index; a
+/// decided row with the same evidence (same content hash + model) means the
+/// user already chose for exactly this regeneration; a decided row with
+/// different evidence becomes a chained re-ask — never a second head.
+pub fn flag_summary_drift(
+    store: &mut Store,
+    old: &SummaryRecord,
+    new: &SummaryRecord,
+) -> Result<Option<i64>> {
+    let (Some(old_emb), Some(new_emb)) = (old.embedding.as_deref(), new.embedding.as_deref())
+    else {
+        return Ok(None);
+    };
+    let c = cosine(old_emb, new_emb);
+    if c >= DRIFT_COSINE_THRESHOLD {
+        return Ok(None);
+    }
+    let fingerprint = drift_fingerprint(&new.source_hash, &new.model);
+    let mut reask_parent: Option<i64> = None;
+    if let Some(prior) = store.latest_decided(DecisionType::SummaryDrift.as_str(), &new.path)? {
+        if prior.evidence_hash == fingerprint {
+            return Ok(None);
+        }
+        reask_parent = Some(prior.id);
+    }
+    let old_l0 = old
+        .summary_l0
+        .clone()
+        .unwrap_or_else(|| abstract_from(&old.summary));
+    let q = NewDecision {
+        decision_type: DecisionType::SummaryDrift.as_str().to_owned(),
+        subject: new.path.clone(),
+        // The full old summary is stashed in params because `restore_old`'s
+        // projection re-writes it from here — the summaries row already holds
+        // the NEW text by the time anyone answers.
+        params: serde_json::json!({
+            "old_summary": old.summary,
+            "old_l0": old_l0,
+            "new_l0": abstract_from(&new.summary),
+            "cosine": c,
+            "old_model": old.model,
+            "new_model": new.model,
+        }),
+        options: serde_json::json!(["keep_new", "restore_old"]),
+        // The new summary already landed — keeping it is the no-action default.
+        auto_value: Some("keep_new".to_owned()),
+        confidence: None,
+        evidence_hash: fingerprint,
+        // Above archive (30), below classification (50): drift is a quality
+        // regression on data the user already trusted, but nothing is lost
+        // while the question waits.
+        priority: 40,
+        paths: vec![new.path.clone()],
+    };
+    match reask_parent {
+        Some(prior) => store.supersede_with(prior, q),
+        None => store.record_decision(q),
+    }
+}
+
+/// Drift evidence fingerprint: the content hash + the model that produced the
+/// new summary. A decided answer stays standing for this exact (bytes, model)
+/// pair; switching models or changing the file re-arms the question.
+pub fn drift_fingerprint(source_hash: &str, model: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(source_hash.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(model.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    for (x, y) in a.iter().zip(b) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+// ── Language fallback ─────────────────────────────────────────────────────────
+
+/// Build the open question for one untagged code file. `lang` is the
+/// extension-derived guess; chunk count is the evidence weight shown to the
+/// user. A hyperpolyglot content-detection candidate is appended when it
+/// disagrees with the extension (best-effort: the file must still exist).
+fn language_question(path: &str, lang: &'static str, n_chunks: i64) -> NewDecision {
+    let mut options: Vec<String> = vec![lang.to_owned()];
+    // Content-based second opinion. hyperpolyglot reads the file; an unreadable
+    // or vanished file simply contributes no candidate.
+    if let Ok(Some(detection)) = hyperpolyglot::detect(std::path::Path::new(path)) {
+        let candidate = detection.language().to_ascii_lowercase();
+        if candidate != lang {
+            options.push(candidate);
+        }
+    }
+    options.push("ignore".to_owned());
+    NewDecision {
+        decision_type: DecisionType::Language.as_str().to_owned(),
+        subject: path.to_owned(),
+        params: serde_json::json!({ "language": lang, "chunks": n_chunks }),
+        options: serde_json::json!(options),
+        auto_value: Some(lang.to_owned()),
+        confidence: None,
+        // Keyed to the guess + chunk count: a re-chunk that changes the file's
+        // shape re-arms a dismissed question; an untouched file stays quiet.
+        evidence_hash: language_fingerprint(lang, n_chunks),
+        // Lowest priority alongside symbol ambiguity: a missing tag degrades
+        // stats/filters, not retrieval.
+        priority: 20,
+        paths: vec![path.to_owned()],
+    }
+}
+
+/// Language evidence fingerprint: the extension-derived guess + chunk count.
+fn language_fingerprint(lang: &str, n_chunks: i64) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(lang.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(n_chunks.to_le_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Extension → language name for files that *should* be code. Mirrors the
+/// CodeParser's names for its 7 tree-sitter languages and extends to common
+/// languages the parser has no grammar for (which is exactly when chunks fall
+/// back to untagged plain text). Deliberately a short curated list — the
+/// detector asks questions, so a wrong mapping nags; obscure extensions can
+/// wait until someone hits them.
+fn code_language_for_extension(ext: &str) -> Option<&'static str> {
+    Some(match ext {
+        // Tree-sitter-covered (normally tagged; appear here only if an older
+        // index or a non-code parser produced the chunks).
+        "rs" => "rust",
+        "py" => "python",
+        "js" | "mjs" | "cjs" => "javascript",
+        "ts" | "mts" | "cts" => "typescript",
+        "tsx" => "tsx",
+        "go" => "go",
+        "java" => "java",
+        // No grammar shipped → the actual fallback cases.
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" => "cpp",
+        "cs" => "csharp",
+        "rb" => "ruby",
+        "php" => "php",
+        "swift" => "swift",
+        "kt" | "kts" => "kotlin",
+        "scala" => "scala",
+        "sh" | "bash" | "zsh" => "shell",
+        "pl" | "pm" => "perl",
+        "lua" => "lua",
+        "r" => "r",
+        "dart" => "dart",
+        "ex" | "exs" => "elixir",
+        "erl" => "erlang",
+        "hs" => "haskell",
+        "clj" | "cljs" => "clojure",
+        "vue" => "vue",
+        "svelte" => "svelte",
+        "sql" => "sql",
+        "zig" => "zig",
+        "jl" => "julia",
+        "nim" => "nim",
+        "ml" | "mli" => "ocaml",
+        "fs" | "fsx" => "fsharp",
+        "groovy" => "groovy",
+        "m" => "objective-c",
+        _ => return None,
+    })
+}
+
+// ── Symbol ambiguity ──────────────────────────────────────────────────────────
+
+/// Build the open question for one ambiguous symbol. Subject = the bare symbol
+/// name; options = every defining file ("this one is authoritative") plus
+/// `all`. `params.paths` carries the definers so the expiry sweep checks THEM
+/// against the index (the subject is a symbol, not a path — without this the
+/// sweep would expire the question immediately).
+fn symbol_ambiguity_question(symbol: &str, definers: &[String], callers: i64) -> NewDecision {
+    let mut sorted = definers.to_vec();
+    sorted.sort_unstable();
+    let mut options: Vec<String> = sorted.clone();
+    options.push("all".to_owned());
+    NewDecision {
+        decision_type: DecisionType::SymbolAmbiguity.as_str().to_owned(),
+        subject: symbol.to_owned(),
+        params: serde_json::json!({
+            "definers": sorted,
+            "callers": callers,
+            "paths": sorted,
+        }),
+        options: serde_json::json!(options),
+        auto_value: None, // no defensible automatic pick between definitions
+        confidence: None,
+        evidence_hash: symbol_fingerprint(&sorted),
+        priority: 20,
+        paths: sorted,
+    }
+}
+
+/// Symbol evidence fingerprint: the sorted definer set. The question (or a
+/// standing answer) stays quiet until a definition is added or removed.
+fn symbol_fingerprint(definers: &[String]) -> String {
+    let mut sorted: Vec<&str> = definers.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    let mut hasher = Sha256::new();
+    for p in sorted {
+        hasher.update(p.as_bytes());
+        hasher.update([0u8]);
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 /// Archive evidence fingerprint: staleness bucketed to [`ARCHIVE_BUCKET_DAYS`]
@@ -733,6 +1066,342 @@ mod tests {
         // A horizon in the past keeps the (re-recorded) fresh row.
         predismiss_duplicate(&mut store, &["/r/a.txt".to_owned(), "/r/b.txt".to_owned()]).unwrap();
         assert_eq!(store.gc_decisions_count(365 * 86_400).unwrap(), 0);
+    }
+
+    // ── Summary drift ─────────────────────────────────────────────────────────
+
+    fn embedded_summary(path: &str, summary: &str, emb: Vec<f32>, model: &str) -> SummaryRecord {
+        SummaryRecord {
+            path: path.to_owned(),
+            kind: "file".into(),
+            parent_path: Some("/r".to_owned()),
+            depth: 1,
+            summary: summary.to_owned(),
+            summary_l0: None,
+            embedding: Some(emb),
+            child_count: 0,
+            byte_size: 10,
+            model: model.to_owned(),
+            source_hash: "H".to_owned(),
+            generated_at: 1,
+        }
+    }
+
+    #[test]
+    fn drift_fires_below_threshold_and_skips_above_or_without_embeddings() {
+        let mut store = Store::open_in_memory().unwrap();
+        let old = embedded_summary("/r/f.txt", "Old summary. More.", vec![1.0, 0.0], "m1");
+        let new = embedded_summary("/r/f.txt", "New summary. Else.", vec![0.0, 1.0], "m2");
+
+        // Orthogonal embeddings → cosine 0 → question.
+        let id = flag_summary_drift(&mut store, &old, &new).unwrap().unwrap();
+        let d = store.decision_by_id(id).unwrap().unwrap();
+        assert_eq!(d.decision_type, "summary_drift");
+        assert_eq!(d.subject, "/r/f.txt");
+        assert_eq!(d.priority, 40);
+        let options: Vec<String> = serde_json::from_str(&d.options).unwrap();
+        assert_eq!(options, vec!["keep_new", "restore_old"]);
+        let params: serde_json::Value = serde_json::from_str(&d.params).unwrap();
+        assert_eq!(params["old_summary"], "Old summary. More.");
+        assert_eq!(params["old_l0"], "Old summary.");
+        assert_eq!(params["new_l0"], "New summary.");
+        assert_eq!(params["old_model"], "m1");
+        assert_eq!(params["new_model"], "m2");
+        assert!(params["cosine"].as_f64().unwrap() < 0.8);
+
+        // Open row dedups a second fire.
+        assert!(flag_summary_drift(&mut store, &old, &new)
+            .unwrap()
+            .is_none());
+
+        // Near-identical embeddings → no question.
+        let mut store2 = Store::open_in_memory().unwrap();
+        let similar = embedded_summary("/r/f.txt", "New.", vec![0.99, 0.05], "m2");
+        assert!(flag_summary_drift(&mut store2, &old, &similar)
+            .unwrap()
+            .is_none());
+
+        // A missing embedding on either side skips silently.
+        let mut no_emb = old.clone();
+        no_emb.embedding = None;
+        assert!(flag_summary_drift(&mut store2, &no_emb, &new)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn drift_skips_when_the_user_already_chose_for_this_evidence() {
+        let mut store = Store::open_in_memory().unwrap();
+        let old = embedded_summary("/r/f.txt", "Old.", vec![1.0, 0.0], "m1");
+        let new = embedded_summary("/r/f.txt", "New.", vec![0.0, 1.0], "m2");
+        let id = flag_summary_drift(&mut store, &old, &new).unwrap().unwrap();
+        super::super::decide_and_apply(&mut store, id, "keep_new", "user").unwrap();
+
+        // Same content + same model → the standing answer covers it.
+        assert!(flag_summary_drift(&mut store, &old, &new)
+            .unwrap()
+            .is_none());
+
+        // A different model is new evidence → chained re-ask, never a second head.
+        let mut new2 = new.clone();
+        new2.model = "m3".into();
+        let reask = flag_summary_drift(&mut store, &old, &new2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.decision_by_id(reask).unwrap().unwrap().parent_id,
+            Some(id)
+        );
+    }
+
+    // ── Language fallback ─────────────────────────────────────────────────────
+
+    fn null_lang_chunks(path: &str, n: usize) -> Vec<crate::store::ChunkRecord> {
+        (0..n)
+            .map(|i| crate::store::ChunkRecord {
+                entry_path: path.to_owned(),
+                seq: i,
+                heading: String::new(),
+                text: format!("chunk {i}"),
+                language: None,
+                embedding: None,
+                embed_model: None,
+            })
+            .collect()
+    }
+
+    /// A fresh entries row (recent mtime so the archive detector stays quiet).
+    fn fresh_entry(path: &str, kind: EntryKind) -> Entry {
+        Entry {
+            path: PathBuf::from(path),
+            kind,
+            size: 0,
+            modified: Some(std::time::SystemTime::now()),
+            hint: None,
+        }
+    }
+
+    #[test]
+    fn language_detector_asks_for_untagged_code_files_only() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                fresh_entry("/r/script.rb", EntryKind::File),
+                fresh_entry("/r/notes.txt", EntryKind::File),
+                fresh_entry("/r/tiny.php", EntryKind::File),
+            ])
+            .unwrap();
+        store
+            .upsert_chunks(&null_lang_chunks("/r/script.rb", 3))
+            .unwrap();
+        // Plain text: untagged is correct — never a question.
+        store
+            .upsert_chunks(&null_lang_chunks("/r/notes.txt", 5))
+            .unwrap();
+        // Code, but below the chunk floor — not worth an interruption.
+        store
+            .upsert_chunks(&null_lang_chunks("/r/tiny.php", 2))
+            .unwrap();
+
+        let cfg = crate::config::ReviewConfig::default();
+        let report = run_detectors(&mut store, &cfg).unwrap();
+        assert_eq!(report.opened, 1);
+        let open = store.open_decisions(Some("language"), 10).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].subject, "/r/script.rb");
+        assert_eq!(open[0].priority, 20);
+        let options: Vec<String> = serde_json::from_str(&open[0].options).unwrap();
+        // The file doesn't exist on disk → no hyperpolyglot candidate.
+        assert_eq!(options, vec!["ruby", "ignore"]);
+        let params: serde_json::Value = serde_json::from_str(&open[0].params).unwrap();
+        assert_eq!(params["chunks"], 3);
+
+        // Second pass: the open question dedups, nothing new.
+        let report = run_detectors(&mut store, &cfg).unwrap();
+        assert_eq!(report.opened, 0);
+    }
+
+    #[test]
+    fn language_answer_tags_chunks_and_is_silently_reapplied_after_rechunk() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[fresh_entry("/r/script.rb", EntryKind::File)])
+            .unwrap();
+        store
+            .upsert_chunks(&null_lang_chunks("/r/script.rb", 3))
+            .unwrap();
+        let cfg = crate::config::ReviewConfig::default();
+        assert_eq!(run_detectors(&mut store, &cfg).unwrap().opened, 1);
+        let id = store.open_decisions(Some("language"), 1).unwrap()[0].id;
+
+        let fx = super::super::decide_and_apply(&mut store, id, "ruby", "user").unwrap();
+        assert_eq!(fx, serde_json::json!({"language": "ruby", "chunks": 3}));
+        assert!(store.unlabeled_chunk_files(1, 10).unwrap().is_empty());
+
+        // A re-deep rewrites the chunks untagged — the standing answer is
+        // re-applied silently instead of re-asking.
+        store
+            .upsert_chunks(&null_lang_chunks("/r/script.rb", 4))
+            .unwrap();
+        let report = run_detectors(&mut store, &cfg).unwrap();
+        assert_eq!(report.opened, 0);
+        assert!(store.unlabeled_chunk_files(1, 10).unwrap().is_empty());
+    }
+
+    // ── Symbol ambiguity ──────────────────────────────────────────────────────
+
+    fn edge(from: &str, kind: &str, to: &str) -> crate::store::EdgeRecord {
+        crate::store::EdgeRecord {
+            from_path: from.to_owned(),
+            kind: kind.to_owned(),
+            to_ref: to.to_owned(),
+        }
+    }
+
+    /// Seed `foo` defined in two files with one caller; entries rows keep the
+    /// expiry sweep satisfied (params.paths = the definers).
+    fn seed_ambiguous_foo(store: &mut Store) {
+        store
+            .upsert_entries(&[
+                fresh_entry("/a.rs", EntryKind::File),
+                fresh_entry("/b.rs", EntryKind::File),
+                fresh_entry("/c.rs", EntryKind::File),
+            ])
+            .unwrap();
+        store
+            .upsert_edges(&[
+                edge("/a.rs", "defines", "foo"),
+                edge("/b.rs", "defines", "foo"),
+                edge("/c.rs", "calls", "foo"),
+            ])
+            .unwrap();
+    }
+
+    #[test]
+    fn symbol_detector_asks_once_and_projects_the_choice() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                fresh_entry("/a.rs", EntryKind::File),
+                fresh_entry("/b.rs", EntryKind::File),
+                fresh_entry("/c.rs", EntryKind::File),
+            ])
+            .unwrap();
+        // One batch (upsert_edges replaces by from_path): `foo` is ambiguous,
+        // `bar` (one definition) must NOT fire.
+        store
+            .upsert_edges(&[
+                edge("/a.rs", "defines", "foo"),
+                edge("/b.rs", "defines", "foo"),
+                edge("/c.rs", "calls", "foo"),
+                edge("/a.rs", "defines", "bar"),
+                edge("/c.rs", "calls", "bar"),
+            ])
+            .unwrap();
+
+        let cfg = crate::config::ReviewConfig::default();
+        let report = run_detectors(&mut store, &cfg).unwrap();
+        assert_eq!(report.opened, 1);
+        let open = store.open_decisions(Some("symbol_ambiguity"), 10).unwrap();
+        assert_eq!(open.len(), 1);
+        let d = &open[0];
+        assert_eq!(d.subject, "foo");
+        assert_eq!(d.priority, 20);
+        let options: Vec<String> = serde_json::from_str(&d.options).unwrap();
+        assert_eq!(options, vec!["/a.rs", "/b.rs", "all"]);
+        let params: serde_json::Value = serde_json::from_str(&d.params).unwrap();
+        assert_eq!(params["definers"], serde_json::json!(["/a.rs", "/b.rs"]));
+        assert_eq!(params["callers"], 1);
+        // paths carries the definers so the expiry sweep checks files, not the
+        // bare symbol name.
+        assert_eq!(params["paths"], serde_json::json!(["/a.rs", "/b.rs"]));
+
+        // Open row dedups the second pass.
+        let report = run_detectors(&mut store, &cfg).unwrap();
+        assert_eq!(report.opened, 0);
+
+        // Answering stores the choice as effects only — no domain-table writes.
+        let fx = super::super::decide_and_apply(&mut store, d.id, "/a.rs", "user").unwrap();
+        assert_eq!(fx, serde_json::json!({"authoritative": "/a.rs"}));
+
+        // Decided + unchanged definer set → skipped, not re-asked.
+        let report = run_detectors(&mut store, &cfg).unwrap();
+        assert_eq!(report.opened, 0);
+    }
+
+    #[test]
+    fn symbol_detector_reasks_chained_when_the_definer_set_changes() {
+        let mut store = Store::open_in_memory().unwrap();
+        seed_ambiguous_foo(&mut store);
+        let cfg = crate::config::ReviewConfig::default();
+        assert_eq!(run_detectors(&mut store, &cfg).unwrap().opened, 1);
+        let id = store.open_decisions(Some("symbol_ambiguity"), 1).unwrap()[0].id;
+        super::super::decide_and_apply(&mut store, id, "all", "user").unwrap();
+        assert_eq!(
+            store
+                .decision_by_id(id)
+                .unwrap()
+                .unwrap()
+                .effects
+                .as_deref(),
+            Some(r#"{"authoritative":null}"#)
+        );
+
+        // A third definition appears → new evidence → chained re-ask.
+        // (upsert_edges replaces /c.rs's rows — keep its existing call edge.)
+        store
+            .upsert_edges(&[
+                edge("/c.rs", "calls", "foo"),
+                edge("/c.rs", "defines", "foo"),
+            ])
+            .unwrap();
+        let report = run_detectors(&mut store, &cfg).unwrap();
+        assert_eq!(report.opened, 1);
+        let reask = &store.open_decisions(Some("symbol_ambiguity"), 1).unwrap()[0];
+        assert_eq!(reask.parent_id, Some(id), "re-ask chains to the prior");
+        let options: Vec<String> = serde_json::from_str(&reask.options).unwrap();
+        assert_eq!(options, vec!["/a.rs", "/b.rs", "/c.rs", "all"]);
+    }
+
+    #[test]
+    fn symbol_detector_honors_top_k_and_scan_caps() {
+        let mut store = Store::open_in_memory().unwrap();
+        // 12 ambiguous symbols, each defined twice and called once.
+        let mut edges = Vec::new();
+        let mut entries = Vec::new();
+        for i in 0..12 {
+            let (a, b, c) = (
+                format!("/a{i}.rs"),
+                format!("/b{i}.rs"),
+                format!("/c{i}.rs"),
+            );
+            for p in [&a, &b, &c] {
+                entries.push(fresh_entry(p, EntryKind::File));
+            }
+            let sym = format!("sym{i}");
+            edges.push(edge(&a, "defines", &sym));
+            edges.push(edge(&b, "defines", &sym));
+            edges.push(edge(&c, "calls", &sym));
+        }
+        store.upsert_entries(&entries).unwrap();
+        store.upsert_edges(&edges).unwrap();
+
+        // max_new_per_scan below top-K: the scan cap wins.
+        let cfg = crate::config::ReviewConfig {
+            max_new_per_scan: 4,
+            ..crate::config::ReviewConfig::default()
+        };
+        assert_eq!(run_detectors(&mut store, &cfg).unwrap().opened, 4);
+
+        // With a generous cap the per-scan top-K (10) bounds the rest:
+        // 6 remaining of the K=10 hottest open on the second pass.
+        let cfg = crate::config::ReviewConfig::default();
+        let report = run_detectors(&mut store, &cfg).unwrap();
+        assert_eq!(
+            report.opened + 4,
+            10,
+            "top-K bounds the per-scan candidates"
+        );
     }
 
     #[test]

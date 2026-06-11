@@ -177,6 +177,46 @@ impl Store {
         Ok(())
     }
 
+    /// Restore a summary row's TEXT from a Decision-Ledger stash (summary_drift →
+    /// `restore_old`) and NULL its embedding. Returns `false` when no row exists.
+    ///
+    /// Why the embedding is cleared rather than kept or regenerated: the row's
+    /// stored vector embeds the NEW (rejected) wording — leaving it would make
+    /// dense retrieval rank the restored text by a summary the user explicitly
+    /// rejected, which is dishonest. The projection has no embedder (effects run
+    /// in store-only contexts: CLI answer, web answer, crash repair), and
+    /// re-enqueueing the path would just regenerate the same drifting summary
+    /// and re-ask the question. So the embedding goes NULL: dense retrieval
+    /// skips the row until the path is next regenerated for real (content
+    /// change or an explicit Regenerate). Acceptable because the summary TEXT
+    /// is what users, exports, and FTS read. `source_hash`/`generated_at` stay
+    /// untouched — the restored text describes the same bytes, and keeping the
+    /// hash stops the freshness gate from immediately re-running the very
+    /// regeneration the user rejected.
+    /// Known residues, fixed by the next genuine refresh rather than here:
+    /// the provenance row still describes the REJECTED regeneration (provider/
+    /// passes), and a parent roll-up that already consumed the drifted text is
+    /// not re-queued — both converge on the next summarize pass.
+    pub fn restore_summary_text(
+        &mut self,
+        path: &str,
+        summary: &str,
+        summary_l0: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<bool> {
+        let l0 = summary_l0
+            .map(str::to_owned)
+            .unwrap_or_else(|| abstract_from(summary));
+        let n = self.conn.execute(
+            "UPDATE summaries
+                SET summary = ?2, summary_l0 = ?3, embedding = NULL,
+                    model = COALESCE(?4, model)
+              WHERE path = ?1",
+            params![path, summary, l0, model],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Stamp provenance onto an existing summary row (v0.21): which adapter produced it,
     /// how many refinement passes actually ran, and whether a lighter model was
     /// auto-substituted for the configured one. Kept off `SummaryRecord` on purpose —

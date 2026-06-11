@@ -200,3 +200,74 @@ jobs:
           echo "Developer Programs Support; see docs/signing.md):"
           xcrun notarytool history \
             --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" || true
+
+  desktop-linux:
+    # First-ever Linux desktop build. continue-on-error keeps the whole job advisory:
+    # a Tauri/Linux bundling failure must NOT be able to block or red-X the CLI release
+    # (the five CLI binaries above are the product; this is an experiment until it has
+    # shipped green a few times). Promote to blocking by deleting continue-on-error.
+    name: Desktop (Linux x86_64) (experimental)
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Tauri v2 Linux dependencies
+        # The documented Tauri v2 Ubuntu prerequisite list, plus:
+        #   - libayatana-appindicator3-dev — NOT libappindicator3-dev: Ubuntu ≥22.04 only
+        #     ships the ayatana fork, and the desktop app enables tauri's "tray-icon".
+        #   - patchelf + file — required by linuxdeploy for AppImage bundling.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            patchelf \
+            curl \
+            wget \
+            file
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/indexa-desktop -> target
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install Tauri CLI
+        run: npm install -g @tauri-apps/cli@^2
+
+      - name: Build + bundle desktop app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # tauri.conf.json sets createUpdaterArtifacts: true, so the bundler insists on
+          # signing updater artifacts — the key is required even though Linux has no
+          # updater wiring yet (see includeUpdaterJson below).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/indexa-desktop
+          tauriScript: npx tauri
+          tagName: ${{ github.ref_name }}
+          # No updater wiring for Linux yet: latest.json is produced by the macOS job and
+          # is darwin-keyed (main.rs resolves the per-arch darwin updater targets). Writing
+          # it from here too would race the macOS job over the same release asset — so this
+          # job must not touch it. AppImage users re-download new releases by hand.
+          includeUpdaterJson: false
+          # Per-platform bundle selection at the CLI instead of forking tauri.conf.json
+          # (whose `targets: "all"` would also attempt rpm). First run sticks to the two
+          # documented Linux targets: .AppImage (portable) + .deb (Debian/Ubuntu).
+          args: --bundles deb,appimage

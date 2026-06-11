@@ -45,6 +45,80 @@ pub fn apply_decision_effects(store: &mut Store, d: &DecisionRecord) -> Result<s
         }
         DecisionType::Duplicate => apply_duplicate(store, d, chosen),
         DecisionType::Archive => apply_archive(store, d, chosen),
+        DecisionType::SummaryDrift => apply_summary_drift(store, d, chosen),
+        DecisionType::Language => apply_language(store, d, chosen),
+        DecisionType::SymbolAmbiguity => apply_symbol_ambiguity(d, chosen),
+    }
+}
+
+/// Summary-drift projection. `keep_new` = nothing to do (the regenerated
+/// summary already landed when the question was raised); `restore_old` =
+/// re-write the summary text from the params stash and NULL the row's
+/// embedding — see `Store::restore_summary_text` for why the embedding is
+/// cleared rather than kept (it embeds the rejected wording) or regenerated
+/// (the projection has no embedder, and a re-summarize would just reproduce
+/// the drift). Idempotent: re-writing the same text and re-NULLing converge.
+fn apply_summary_drift(
+    store: &mut Store,
+    d: &DecisionRecord,
+    chosen: &str,
+) -> Result<serde_json::Value> {
+    match chosen {
+        "keep_new" => Ok(json!({ "summary": "kept_new" })),
+        "restore_old" => {
+            let params: serde_json::Value = serde_json::from_str(&d.params)
+                .map_err(|e| anyhow!("decision {} has malformed params: {e}", d.id))?;
+            let old_summary = params
+                .get("old_summary")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("decision {} params carry no old_summary", d.id))?;
+            let restored = store.restore_summary_text(
+                &d.subject,
+                old_summary,
+                params.get("old_l0").and_then(|v| v.as_str()),
+                params.get("old_model").and_then(|v| v.as_str()),
+            )?;
+            if restored {
+                Ok(json!({ "summary": "restored", "embedding": null }))
+            } else {
+                // The summary row vanished since the question was asked (rm /
+                // prune). Nothing to express — a no-op receipt, not an error,
+                // so the repair sweep doesn't retry a restore that can never
+                // succeed.
+                Ok(json!({ "summary": null }))
+            }
+        }
+        other => bail!(
+            "decision {} has unknown summary_drift answer '{other}'",
+            d.id
+        ),
+    }
+}
+
+/// Language projection: tag the file's chunks with the chosen language;
+/// `ignore` projects nothing (the standing "ignore" answer also suppresses the
+/// detector's silent re-apply). Idempotent — the UPDATE converges.
+fn apply_language(
+    store: &mut Store,
+    d: &DecisionRecord,
+    chosen: &str,
+) -> Result<serde_json::Value> {
+    if chosen == "ignore" {
+        return Ok(json!({ "language": null }));
+    }
+    let n = store.set_chunks_language(&d.subject, chosen)?;
+    Ok(json!({ "language": chosen, "chunks": n }))
+}
+
+/// Symbol-ambiguity projection: the answer IS the artifact — no domain table
+/// changes. The effects JSON records the authoritative definer (`null` for
+/// "all"); graph surfaces (who_calls / blast_radius) consult the ledger's
+/// latest decided row separately (wired in a follow-up).
+fn apply_symbol_ambiguity(_d: &DecisionRecord, chosen: &str) -> Result<serde_json::Value> {
+    if chosen == "all" {
+        Ok(json!({ "authoritative": null }))
+    } else {
+        Ok(json!({ "authoritative": chosen }))
     }
 }
 
@@ -336,6 +410,117 @@ mod tests {
         assert_eq!(w.len(), 1);
         assert_eq!((w[0].target.as_str(), w[0].weight), ("/old", 2.0));
         assert_eq!(w[0].reason.as_deref(), Some("my hot project"));
+    }
+
+    #[test]
+    fn summary_drift_restore_rewrites_text_and_clears_the_embedding() {
+        let mut store = Store::open_in_memory().unwrap();
+        // The row currently holds the NEW (drifted) summary + its embedding.
+        store
+            .upsert_summary(&crate::store::SummaryRecord {
+                path: "/r/f.txt".into(),
+                kind: "file".into(),
+                parent_path: Some("/r".into()),
+                depth: 1,
+                summary: "New drifted summary.".into(),
+                summary_l0: None,
+                embedding: Some(vec![0.0, 1.0]),
+                child_count: 0,
+                byte_size: 10,
+                model: "m2".into(),
+                source_hash: "H".into(),
+                generated_at: 5,
+            })
+            .unwrap();
+        let params = json!({
+            "old_summary": "Old summary. More detail.",
+            "old_l0": "Old summary.",
+            "new_l0": "New drifted summary.",
+            "cosine": 0.1, "old_model": "m1", "new_model": "m2",
+        });
+        let d = decided(
+            41,
+            "summary_drift",
+            "/r/f.txt",
+            params.clone(),
+            "restore_old",
+        );
+
+        let first = apply_decision_effects(&mut store, &d).unwrap();
+        let second = apply_decision_effects(&mut store, &d).unwrap();
+        assert_eq!(first, second, "projection must be idempotent");
+        assert_eq!(first, json!({"summary": "restored", "embedding": null}));
+        let row = store.summary_by_path("/r/f.txt").unwrap().unwrap();
+        assert_eq!(row.summary, "Old summary. More detail.");
+        assert_eq!(row.summary_l0.as_deref(), Some("Old summary."));
+        assert!(
+            row.embedding.is_none(),
+            "the rejected wording's embedding must not rank the restored text"
+        );
+        assert_eq!(row.model, "m1", "provenance follows the restored text");
+        assert_eq!(
+            row.source_hash, "H",
+            "hash stays — the restored text describes the same bytes, and \
+             clearing it would re-run the very regeneration the user rejected"
+        );
+
+        // keep_new is a recorded no-op.
+        let k = decided(42, "summary_drift", "/r/f.txt", params.clone(), "keep_new");
+        assert_eq!(
+            apply_decision_effects(&mut store, &k).unwrap(),
+            json!({"summary": "kept_new"})
+        );
+
+        // A vanished row (rm/prune) is a no-op receipt, never a repair loop.
+        let gone = decided(43, "summary_drift", "/r/gone.txt", params, "restore_old");
+        assert_eq!(
+            apply_decision_effects(&mut store, &gone).unwrap(),
+            json!({"summary": null})
+        );
+    }
+
+    #[test]
+    fn language_projection_tags_chunks_and_ignore_is_a_noop() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_chunks(&[crate::store::ChunkRecord {
+                entry_path: "/r/x.rb".into(),
+                seq: 0,
+                heading: String::new(),
+                text: "puts 1".into(),
+                language: None,
+                embedding: None,
+                embed_model: None,
+            }])
+            .unwrap();
+        let d = decided(51, "language", "/r/x.rb", json!({}), "ruby");
+        let first = apply_decision_effects(&mut store, &d).unwrap();
+        let second = apply_decision_effects(&mut store, &d).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first, json!({"language": "ruby", "chunks": 1}));
+        assert!(store.unlabeled_chunk_files(1, 10).unwrap().is_empty());
+
+        let ig = decided(52, "language", "/r/x.rb", json!({}), "ignore");
+        assert_eq!(
+            apply_decision_effects(&mut store, &ig).unwrap(),
+            json!({"language": null})
+        );
+    }
+
+    #[test]
+    fn symbol_projection_records_the_choice_only() {
+        let mut store = Store::open_in_memory().unwrap();
+        let params = json!({"definers": ["/a.rs", "/b.rs"], "callers": 3});
+        let d = decided(61, "symbol_ambiguity", "foo", params.clone(), "/a.rs");
+        assert_eq!(
+            apply_decision_effects(&mut store, &d).unwrap(),
+            json!({"authoritative": "/a.rs"})
+        );
+        let all = decided(62, "symbol_ambiguity", "foo", params, "all");
+        assert_eq!(
+            apply_decision_effects(&mut store, &all).unwrap(),
+            json!({"authoritative": null})
+        );
     }
 
     #[test]
