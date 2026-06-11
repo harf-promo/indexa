@@ -28,6 +28,8 @@ pub enum DecisionType {
     Classification,
     /// "These files are copies — which is canonical?" (subject = first member path).
     Duplicate,
+    /// "This dir hasn't changed in a year — archive it?" (subject = the dir path).
+    Archive,
 }
 
 impl DecisionType {
@@ -36,6 +38,7 @@ impl DecisionType {
         match self {
             DecisionType::Classification => "classification",
             DecisionType::Duplicate => "duplicate",
+            DecisionType::Archive => "archive",
         }
     }
 
@@ -45,12 +48,17 @@ impl DecisionType {
         Some(match s {
             "classification" => DecisionType::Classification,
             "duplicate" => DecisionType::Duplicate,
+            "archive" => DecisionType::Archive,
             _ => return None,
         })
     }
 
     /// Every type, for UI filters and `--type` validation.
-    pub const ALL: [DecisionType; 2] = [DecisionType::Classification, DecisionType::Duplicate];
+    pub const ALL: [DecisionType; 3] = [
+        DecisionType::Classification,
+        DecisionType::Duplicate,
+        DecisionType::Archive,
+    ];
 }
 
 impl fmt::Display for DecisionType {

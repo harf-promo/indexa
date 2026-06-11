@@ -156,6 +156,43 @@ impl Store {
         Ok(())
     }
 
+    /// Batched [`mark_for_resummary`](Self::mark_for_resummary): one transaction for
+    /// the whole set (per-row autocommit would pay a commit per path on a large
+    /// refresh). Same semantics — `in_flight` rows are left untouched. Used by the
+    /// incremental re-summarize path to re-pend changed files + their stale ancestor
+    /// roll-ups in one shot.
+    pub fn mark_for_resummary_batch(&mut self, items: &[(String, String, i64)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO summary_queue (path, kind, depth, state, attempts, error)
+                 VALUES (?1, ?2, ?3, 'pending', 0, NULL)
+                 ON CONFLICT(path) DO UPDATE SET
+                     state='pending', attempts=0, error=NULL, updated_at=unixepoch()
+                     WHERE summary_queue.state <> 'in_flight'",
+            )?;
+            for (path, kind, depth) in items {
+                stmt.execute(params![path, kind, depth])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// A queue row's state, or `None` when the path isn't queued. A diagnostics/test
+    /// probe — the drain loops use the atomic claim in
+    /// [`next_queue_item`](Self::next_queue_item), never this.
+    pub fn queue_state(&self, path: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT state FROM summary_queue WHERE path = ?1",
+                params![path],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Queue statistics for status display.
     pub fn queue_stats(&self) -> Result<QueueStats> {
         let mut stmt = self

@@ -249,6 +249,37 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Days since `path`'s entry was last modified — evidence for archive
+    /// questions. `None` when the entry is missing OR has no recorded mtime
+    /// (NULL mtime is "unknown", not evidence of age, so the archive detector
+    /// and pre-dismissal both refuse to fingerprint it).
+    pub fn entry_age_days(&self, path: &str) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT (unixepoch() - modified_s) / 86400 FROM entries
+                  WHERE path = ?1 AND modified_s IS NOT NULL",
+                params![path],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// File count in the subtree rooted at `dir` — the cheap half of the
+    /// archive evidence fingerprint. Subtree-exact via `subtree_match`, so a
+    /// sibling sharing the string prefix (`/proj` vs `/projector`) never counts.
+    pub fn count_files_under(&self, dir: &str) -> Result<i64> {
+        let (exact, child) = super::entries::subtree_match(dir);
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries
+                  WHERE kind = 'file' AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
+                params![exact, child],
+                |r| r.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     /// Ids of decisions whose `decision_paths` include `path` (exact match) and
     /// that are still live: open, or decided and un-superseded. Lets detectors
     /// skip raising a question a standing decision already covers.
@@ -484,17 +515,32 @@ impl Store {
     /// sticky dismissal: past the horizon the question may be asked again.
     pub fn gc_decisions(&mut self, older_than_secs: i64) -> Result<usize> {
         let n = self.conn.execute(
-            "DELETE FROM decisions
-              WHERE status IN ('expired', 'dismissed')
-                AND COALESCE(decided_at, created_at) < (unixepoch() - ?1)
-                AND id NOT IN (SELECT parent_id FROM decisions WHERE parent_id IS NOT NULL)
-                AND id NOT IN (SELECT superseded_by FROM decisions
-                                WHERE superseded_by IS NOT NULL)",
+            &format!("DELETE FROM decisions WHERE {GC_DECISIONS_WHERE}"),
             params![older_than_secs],
         )?;
         Ok(n)
     }
+
+    /// Count what [`Store::gc_decisions`] would delete, without deleting —
+    /// the dry-run twin (`indexa prune --dry-run`). Shares the WHERE clause so
+    /// the two can never drift apart.
+    pub fn gc_decisions_count(&self, older_than_secs: i64) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM decisions WHERE {GC_DECISIONS_WHERE}"),
+            params![older_than_secs],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
 }
+
+/// Shared GC candidate predicate — see [`Store::gc_decisions`] for the
+/// conservative rationale. `?1` = horizon in seconds.
+const GC_DECISIONS_WHERE: &str = "status IN ('expired', 'dismissed')
+    AND COALESCE(decided_at, created_at) < (unixepoch() - ?1)
+    AND id NOT IN (SELECT parent_id FROM decisions WHERE parent_id IS NOT NULL)
+    AND id NOT IN (SELECT superseded_by FROM decisions
+                    WHERE superseded_by IS NOT NULL)";
 
 fn decision_status(tx: &Transaction, id: i64) -> Result<Option<String>> {
     tx.query_row(

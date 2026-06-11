@@ -256,6 +256,23 @@ mis-synthesize from good evidence (and the sources are always listed so you can 
 
 ---
 
+## Near-duplicate detection accuracy
+
+`insights duplicates` clusters by summary-embedding cosine similarity. Up to ~2,000 summarized
+files the comparison is exhaustive (exact). Past that, candidate pairs come from locality-sensitive
+hashing (random-hyperplane signatures, deterministic seed), then exact cosine verification — which
+means **pairs whose similarity sits near the threshold can be missed** (recall ≈93% at the 0.95
+default, approaching 100% as similarity → 1). False positives are not possible (every candidate is
+exactly verified), and exact-duplicate grouping (identical content hashes) is always exhaustive.
+
+## Freshness limits of incremental re-summarize
+
+Refresh skips files whose full-content hash matches the stored summary's — cheap and exact. But the
+*pre-filter* that decides which files get hashed is mtime-based (`modified_s >= generated_at`), so a
+change that **preserves the file's mtime** (rsync `-t`, `tar -x`, `cp -p`, some sync clients) is not
+re-examined until something else touches it. The web "Regenerate" action bypasses all of this
+(clears stored hashes) when you need certainty.
+
 ## Decision log
 
 Changes to defaults are recorded here with rationale.
@@ -263,6 +280,7 @@ Changes to defaults are recorded here with rationale.
 | Date | Decision | Rationale |
 |---|---|---|
 | 2025-05 | Default embedding: `nomic-embed-text` via Ollama | Apache-2.0, strong MTEB, zero ops, local-first |
+| 2026-06 | Near-dup candidates via LSH above 2,000 files | O(n²) cosine silently capped at 5K files — the cap was worse than disclosed approximation; exact verify keeps precision at 100% |
 | 2025-05 | PDF parser: `pdf-extract` (pure Rust) | No C++ build dep, sufficient for text-layer PDFs |
 | 2025-05 | Vector storage: SQLite f32 blobs | Zero ops, single file, adequate for <300K vectors |
 | 2025-05 | Fusion: RRF k=60 | Parameter-free, matches industry defaults, robust |

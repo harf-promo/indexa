@@ -49,3 +49,40 @@ jobs:
 
       - name: Tests
         run: cargo test --all
+
+  # Headless-Chrome smoke test of the served web UI. The JS bundle is
+  # compile-time-concatenated, so only executing the page in a real browser
+  # catches runtime ReferenceErrors that fmt/clippy/test cannot. Additive job —
+  # NOT in the branch-protection required-checks list.
+  web-smoke:
+    name: web smoke (headless Chrome)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build indexa (debug)
+        run: cargo build -p indexa
+
+      # ubuntu-latest runner images ship Google Chrome preinstalled at
+      # /usr/bin/google-chrome — no setup action needed. Node >= 22 (global
+      # fetch + WebSocket) is also preinstalled.
+      - name: Run web smoke test
+        env:
+          INDEXA_BIN: ./target/debug/indexa
+          CHROME_BIN: /usr/bin/google-chrome
+          PORT: "7787"
+        run: node scripts/web-smoke.mjs

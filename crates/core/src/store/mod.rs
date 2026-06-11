@@ -58,7 +58,9 @@ pub use types::{
 pub use usage::{UsageSummary, USAGE_WEEK_SECS};
 
 // `abstract_from` is part of the public surface (used by `indexa_core::store::abstract_from`).
-pub use summaries::abstract_from;
+// The source-hash helpers (incremental re-summarize) live beside the summary writes
+// they gate: the query crate computes them, the store persists them.
+pub use summaries::{abstract_from, dir_source_hash, file_source_hash};
 
 pub struct Store {
     conn: Connection,

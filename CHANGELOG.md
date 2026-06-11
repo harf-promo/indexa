@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Incremental re-summarize.** `summaries.source_hash` is now real (full-content SHA-256 for
+  files, a Merkle-style roll-up over child hashes for directories) and gates the LLM: a refresh
+  skips every file whose bytes are unchanged — `indexa summarize` now reports
+  *"N summaries written, M unchanged (skipped)"* — and re-rolls a directory only when its subtree
+  actually changed. Stale candidates are found by an mtime pre-filter (timestamped at the START of
+  each summarize run, so edits landing mid-run aren't lost) and changed files re-pend their
+  ancestor roll-ups automatically. The web **Regenerate** action clears stored hashes first, so an
+  explicit regenerate always re-runs the AI (model/prompt switches included). Freshness limits
+  (mtime-preserving copies) are documented in
+  [methodology](docs/methodology.md#freshness-limits-of-incremental-re-summarize).
+- **Near-duplicate detection without the 5,000-file cap.** Above ~2,000 summarized files,
+  candidate pairs come from deterministic locality-sensitive hashing with exact cosine
+  verification — linear-ish in index size, no silent truncation. Disclosed as approximate
+  (borderline pairs can be missed; exact-content groups stay exhaustive) in the CLI, web,
+  MCP tool description, and [methodology](docs/methodology.md#near-duplicate-detection-accuracy).
+- **Decision Ledger: archive questions.** Top-level folders untouched for a year become a
+  question — *"~/old-project hasn't changed in 400 days — archive it?"* — where **archive** keeps
+  everything indexed and searchable but down-weights it in results (reversible), and
+  **keep active** asks again only after another ~3 months of inactivity. Insights gains
+  **"Don't ask about this"** on duplicate clusters and stale entries: a sticky dismissal recorded
+  through the same ledger (returns only if the evidence changes). `indexa prune` now also GCs
+  old dismissed/expired questions.
+- **Web smoke test in CI.** A zero-dependency headless-Chrome harness (scripts/web-smoke.mjs)
+  boots a fixture index, drives the real UI over CDP, and fails on any console error — running on
+  every PR.
+
 ## [0.23.0] — 2026-06-11
 
 "Measure It": the pitch becomes a measurement.

@@ -40,6 +40,8 @@ impl IndexaMcp {
     #[tool(description = "Find duplicate files (v0.10 Insights). \
                        With exact=true, groups files with identical content hashes. \
                        With exact=false (default), groups files with similar summary embeddings \
+                       (approximate above ~2,000 files via LSH — borderline pairs may be \
+                       missed; exact-duplicate grouping is exhaustive) \
                        above the similarity threshold.")]
     pub(crate) async fn insights_duplicates(
         &self,

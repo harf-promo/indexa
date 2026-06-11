@@ -217,6 +217,12 @@ per-cluster, so answer those individually (indexa review answer <id> <path>)"
                 );
             }
         }
+        // Archive menus are fixed (no per-row values), so both answers batch safely.
+        DecisionType::Archive => {
+            if choose != "archive" && choose != "keep_active" {
+                anyhow::bail!("archive questions accept: archive, keep_active");
+            }
+        }
     }
 
     let dir = shellexpand::tilde(under).into_owned();
@@ -460,7 +466,22 @@ fn parse_type(s: &str) -> Result<DecisionType> {
 
 /// Compact, human description of an effects JSON blob (the projection receipt).
 fn effects_summary(effects: &serde_json::Value) -> String {
+    // keep_active: explicitly answered, nothing projected — say so calmly
+    // instead of leaking the raw effects JSON.
+    if effects
+        .get("classification")
+        .map(serde_json::Value::is_null)
+        == Some(true)
+    {
+        return "kept active — will ask again if it stays untouched".to_owned();
+    }
     if let Some(cat) = effects.get("classification").and_then(|v| v.as_str()) {
+        if cat == "archive" && effects.get("weight").is_some() {
+            // The down-weight is the consequential part — confirm it at the
+            // moment of action, not only in the question detail.
+            return "archived — kept indexed and searchable, down-weighted in search (reversible)"
+                .to_owned();
+        }
         return if cat == "ignore" {
             "classification suggestions for this folder are off".to_owned()
         } else {

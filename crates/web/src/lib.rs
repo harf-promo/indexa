@@ -351,6 +351,10 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/api/review/dismiss", post(api_review_dismiss))
         .route("/api/review/history", get(api_review_history))
         .route("/api/review/count", get(api_review_count))
+        .route(
+            "/api/review/dismiss-evidence",
+            post(api_review_dismiss_evidence),
+        )
         .route("/api/saved", get(api_saved_list).post(api_saved_set))
         .route("/api/saved/:name", delete(api_saved_delete))
         .route("/api/insights/duplicates", get(api_insights_duplicates))
@@ -588,6 +592,89 @@ mod tests {
         assert_eq!(json.as_array().unwrap().len(), 1);
         assert_eq!(json[0]["status"], "decided");
         assert_eq!(json[0]["chosen"], "work");
+    }
+
+    #[tokio::test]
+    async fn api_review_dismiss_evidence_records_sticky_dismissal() {
+        // The endpoint re-derives the cluster from the detector's own scan, so
+        // the duplicate evidence must really exist (shared content hash).
+        let mut seeded = Store::open_in_memory().unwrap();
+        for p in ["/r/a.txt", "/r/b.txt"] {
+            seeded
+                .upsert_summary(&indexa_core::store::SummaryRecord {
+                    path: p.to_owned(),
+                    kind: "file".into(),
+                    parent_path: Some("/r".into()),
+                    depth: 2,
+                    summary: format!("summary of {p}"),
+                    summary_l0: None,
+                    embedding: None,
+                    child_count: 0,
+                    byte_size: 10,
+                    model: "test".into(),
+                    source_hash: "H1".into(),
+                    generated_at: 1,
+                })
+                .unwrap();
+        }
+        let state = state_with(seeded);
+        let app = build_router(state.clone(), 7620);
+
+        async fn post_dismiss(
+            app: Router,
+            body: serde_json::Value,
+        ) -> (StatusCode, serde_json::Value) {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/review/dismiss-evidence")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = resp.status();
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+            )
+        }
+
+        let body = serde_json::json!({
+            "kind": "duplicate",
+            "paths": ["/r/a.txt", "/r/b.txt"],
+        });
+        let (status, json) = post_dismiss(app.clone(), body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["dismissed"], 1);
+
+        // The dismissal never surfaces as an open question.
+        {
+            let store = state.store.lock().await;
+            assert_eq!(store.open_decision_count().unwrap(), 0);
+            let hist = store.decision_history("duplicate", "/r/a.txt").unwrap();
+            assert_eq!(hist.len(), 1);
+            assert_eq!(hist[0].status, "dismissed");
+        }
+
+        // Client-input shaped errors are 400s, never 500s.
+        let (status, _) = post_dismiss(
+            app.clone(),
+            serde_json::json!({"kind": "nonsense", "paths": ["/x"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = post_dismiss(
+            app,
+            serde_json::json!({"kind": "duplicate", "paths": ["/only-one"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

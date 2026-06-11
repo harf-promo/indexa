@@ -1107,7 +1107,10 @@ pub(crate) async fn run_summarize_phase(
         };
         let llm_secs = llm_start.elapsed().as_secs_f64();
         match r {
-            Ok(QueueOutcome::Completed) => {
+            // CompletedUnchanged = the freshness gate skipped the LLM; for job
+            // progress both are a completed item (the per-item event stream
+            // already shows zero LLM fragments for skips).
+            Ok(QueueOutcome::Completed) | Ok(QueueOutcome::CompletedUnchanged) => {
                 defers.remove(&item.path);
                 done += 1;
             }

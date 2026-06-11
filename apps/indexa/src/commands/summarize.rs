@@ -52,7 +52,7 @@ pub(crate) async fn cmd_summarize(
 
     for root in &roots {
         println!("Summarizing {} …", root.display());
-        let done = summarize_subtree_sync(
+        let (done, skipped) = summarize_subtree_sync(
             &mut store,
             describer.as_ref(),
             &embedder,
@@ -61,7 +61,12 @@ pub(crate) async fn cmd_summarize(
             passes,
         )
         .await?;
-        println!("  {done} summaries written.");
+        if skipped > 0 {
+            // A near-instant refresh must explain itself, or it looks broken.
+            println!("  {done} summaries written, {skipped} unchanged (skipped).");
+        } else {
+            println!("  {done} summaries written.");
+        }
     }
 
     Ok(())
