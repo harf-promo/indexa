@@ -1779,9 +1779,13 @@ mod tests {
             std::fs::write(&golden_path, &actual).unwrap();
             return;
         }
-        let golden = std::fs::read_to_string(&golden_path).expect(
-            "crates/mcp/golden_tools.txt missing — INDEXA_UPDATE_GOLDEN=1 cargo test -p indexa-mcp",
-        );
+        let golden = std::fs::read_to_string(&golden_path)
+            .expect(
+                "crates/mcp/golden_tools.txt missing — INDEXA_UPDATE_GOLDEN=1 cargo test -p indexa-mcp",
+            )
+            // A Windows checkout can materialize the file with CRLF; the contract
+            // is the tool list, not the line endings (.gitattributes also pins LF).
+            .replace("\r\n", "\n");
         assert_eq!(
             actual, golden,
             "MCP tool surface changed. If intentional: INDEXA_UPDATE_GOLDEN=1 cargo test -p indexa-mcp, \
