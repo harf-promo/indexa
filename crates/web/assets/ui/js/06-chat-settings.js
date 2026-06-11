@@ -241,3 +241,62 @@ async function pollQueue() {
 setInterval(pollQueue, 5000);
 pollQueue();
 
+/* ── Saved searches (the saved_queries table; `indexa saved` on the CLI) ── */
+const savedSel = document.getElementById('saved-q');
+const saveQBtn = document.getElementById('save-q');
+
+async function loadSavedQueries() {
+  if (!savedSel) return;
+  try {
+    const r = await fetch('/api/saved');
+    if (!r.ok) return;
+    const items = await r.json();
+    savedSel.innerHTML = '<option value="">&#9733; Saved&#8230;</option>' +
+      items.map(function(s) {
+        return '<option value="' + escapeHtml(s.name) + '">' + escapeHtml(s.name) + '</option>';
+      }).join('');
+    savedSel._items = items;
+    savedSel.hidden = items.length === 0;
+  } catch(_) {}
+}
+
+if (savedSel) {
+  savedSel.addEventListener('change', function() {
+    const name = savedSel.value;
+    savedSel.value = '';
+    const item = (savedSel._items || []).find(function(s) { return s.name === name; });
+    if (!item) return;
+    qInput.value = item.question;
+    const agenticEl = document.getElementById('ask-agentic');
+    if (agenticEl) agenticEl.checked = item.mode === 'agentic';
+    doAsk();
+  });
+  loadSavedQueries();
+}
+
+if (saveQBtn) {
+  saveQBtn.addEventListener('click', async function() {
+    const q = qInput.value.trim();
+    if (!q) { qInput.focus(); return; }
+    const agenticEl = document.getElementById('ask-agentic');
+    // The name IS the (truncated) question — recognizable in the dropdown, and
+    // saving the same question again just overwrites its row (upsert by name).
+    const name = q.length > 48 ? q.slice(0, 47).trimEnd() + '…' : q;
+    try {
+      const r = await fetch('/api/saved', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          name: name,
+          question: q,
+          mode: (agenticEl && agenticEl.checked) ? 'agentic' : 'rrf'
+        })
+      });
+      if (r.ok) {
+        saveQBtn.textContent = '★'; // brief filled-star confirmation
+        setTimeout(function() { saveQBtn.textContent = '☆'; }, 1200);
+        loadSavedQueries();
+      }
+    } catch(_) {}
+  });
+}

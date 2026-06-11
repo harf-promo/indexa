@@ -90,7 +90,7 @@ This is not a repo-to-prompt converter. It is not a document chat app. It is not
 - **Hybrid retrieval** — keyword (BM25) + semantic (vector) fused with RRF, plus an **opt-in ANN index** that keeps dense search fast on 50K-plus-chunk corpora.
 - **Local multimodal** *(opt-in, on-device)* — caption images with a local vision model and transcribe audio with a local whisper CLI, so you can find media by what's *in* it, not just its filename.
 - **Code intelligence** — a code-relationship graph (imports + defined symbols + call edges) across Rust, Python, JS/TS, Go, and Java, plus `who_calls`, `blast_radius`, and an interactive **call-graph visualization** in the web Map tab — all queryable over MCP.
-- **Four ways to reach the index** — a CLI, a live web workspace with an Engine status bar, a native macOS desktop app (menu-bar, auto-updating), and an MCP server (33 tools) that AI agents call directly.
+- **Four ways to reach the index** — a CLI, a live web workspace with an Engine status bar, a native macOS desktop app (menu-bar, auto-updating), and an MCP server (34 tools) that AI agents call directly.
 - **Resource-aware** — a memory watchdog that won't freeze your machine, and a hardware-aware model picker that annotates every model with its memory footprint, fit against your live RAM, and a per-job ETA.
 - **Use your Claude subscription** — the `claude-code` provider runs summaries and answers on your Claude Pro/Max plan (no per-token billing); embeddings always stay local.
 - **Export** — XML (the format Anthropic's own docs recommend for context windows), Markdown, or JSON. **Watch** keeps the context current as files change.
@@ -105,7 +105,7 @@ This is not a repo-to-prompt converter. It is not a document chat app. It is not
   Engine  Building · 42 files/s · ETA 1m12s · gemma3:4b    CPU 38%   RAM 9.1 / 16 GB   pressure: ok
   ```
 - **Desktop app** — a native macOS app that lives in the menu bar. Auto-updates silently. Bundles the web workspace — no separate `indexa serve` needed.
-- **MCP server** — `indexa mcp` exposes the live index to any [MCP](https://modelcontextprotocol.io) client (Claude Desktop, Cursor, Claude Code) over **33 tools** — retrieval (`search · browse_tree · get_summary · read_file · ask`), code graph (`dependencies · who_imports · who_calls · blast_radius · code_graph`), Context Packs, importance weights, smart classification, insights, and indexing triggers.
+- **MCP server** — `indexa mcp` exposes the live index to any [MCP](https://modelcontextprotocol.io) client (Claude Desktop, Cursor, Claude Code) over **34 tools** — retrieval (`search · browse_tree · get_summary · read_file · ask`), code graph (`dependencies · who_imports · who_calls · blast_radius · code_graph`), Context Packs, importance weights, smart classification, insights, and indexing triggers.
 
 ---
 

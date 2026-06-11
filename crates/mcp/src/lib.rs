@@ -1277,6 +1277,39 @@ impl IndexaMcp {
         )))
     }
 
+    /// List the user's saved searches.
+    #[tool(
+        description = "List the user's saved searches: named, reusable ask queries (question + \
+                       retrieval mode + optional path scope), managed via `indexa saved` or the \
+                       web Ask bar. Re-run one by passing its question (and scope) to the `ask` \
+                       tool — use mode 'agentic' as agentic: true."
+    )]
+    async fn list_saved_queries(&self) -> Result<CallToolResult, ErrorData> {
+        let store = self.store()?;
+        let queries = store.list_saved_queries().map_err(mcp_err)?;
+        if queries.is_empty() {
+            return Ok(ok_text(
+                "No saved searches. Create one with `indexa saved add` or the web Ask bar's ☆.",
+            ));
+        }
+        let lines: Vec<String> = queries
+            .iter()
+            .map(|q| {
+                let scope = q
+                    .scope
+                    .as_deref()
+                    .map(|s| format!(", scope: {s}"))
+                    .unwrap_or_default();
+                format!("• {} — \"{}\" (mode: {}{scope})", q.name, q.question, q.mode)
+            })
+            .collect();
+        Ok(ok_text(format!(
+            "{} saved search(es):\n\n{}",
+            queries.len(),
+            lines.join("\n")
+        )))
+    }
+
     /// Set an importance weight for a file, directory, or category.
     #[tool(
         description = "Set an importance weight (v0.8) for a file path, directory path, or \

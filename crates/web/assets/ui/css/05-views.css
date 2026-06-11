@@ -129,6 +129,19 @@
 .input-bar button:disabled { opacity: 0.4; cursor: default; }
 .ask-agentic-toggle { flex-shrink: 0; white-space: nowrap; align-self: center; }
 
+/* Saved searches: recall dropdown + save-star, both in the Ask bar. */
+#saved-q {
+  flex: 0 1 180px; max-width: 180px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text); padding: 9px 10px;
+  font-family: var(--font-sans); font-size: 13px; outline: none; cursor: pointer;
+}
+#saved-q:focus { border-color: var(--accent); }
+.input-bar button#save-q {
+  background: var(--bg); color: var(--accent); border: 1px solid var(--border);
+  padding: 9px 13px; font-size: 16px; line-height: 1;
+}
+.input-bar button#save-q:hover { border-color: var(--accent); opacity: 1; }
+
 /* Agentic retrieval hops, shown as subtle chips above the streamed answer. */
 .ask-steps { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 .ask-step {
