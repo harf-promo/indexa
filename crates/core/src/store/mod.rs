@@ -13,6 +13,7 @@
 //! - [`packs`] — Context Pack CRUD (v0.9).
 //! - [`weights`] — importance weight CRUD + search boost (v0.8).
 //! - [`insights`] — duplicate/stale/diff analysis (v0.10).
+//! - [`usage`] — token-savings telemetry (v0.23; the counterfactual definition lives there).
 //! - [`types`] — the public record structs.
 
 use anyhow::{Context, Result};
@@ -35,6 +36,7 @@ mod schema;
 mod search;
 mod summaries;
 mod types;
+mod usage;
 mod weights;
 
 #[cfg(test)]
@@ -50,9 +52,10 @@ pub use prune::OrphanCounts;
 pub use saved::SavedQuery;
 pub use types::{
     ChunkRecord, ClassificationRecord, CodeGraph, CodeGraphEdge, CodeGraphNode, DecisionRecord,
-    EdgeRecord, FailedQueueItem, NewDecision, PackRecord, QueueItem, QueueStats, RegionSummary,
-    RelatedFile, SearchHit, SummaryRecord, TreeNode, WeightRecord,
+    EdgeRecord, FailedQueueItem, HealthStats, NewDecision, PackRecord, QueueItem, QueueStats,
+    RegionSummary, RelatedFile, SearchHit, SummaryRecord, TreeNode, WeightRecord,
 };
+pub use usage::{UsageSummary, USAGE_WEEK_SECS};
 
 // `abstract_from` is part of the public surface (used by `indexa_core::store::abstract_from`).
 pub use summaries::abstract_from;

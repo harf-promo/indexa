@@ -20,7 +20,7 @@ are individually scriptable.)",
     after_help = "Command groups:\n  \
 Core      index · ask · search · export · serve · status\n  \
 Manage    pack · weight · classify · saved · rm · prune · review\n  \
-Analyze   insights · graph · related · report · map · describe · fingerprint · snapshot\n  \
+Analyze   insights · graph · related · report · map · describe · fingerprint · snapshot · eval\n  \
 Pipeline  scan · deep · summarize · worker · watch   (the stages behind `index`)\n  \
 System    doctor · mcp · update"
 )]
@@ -248,6 +248,42 @@ pub enum Commands {
         action: SnapshotAction,
     },
 
+    /// Regression-test retrieval quality against a golden-questions file (no LLM).
+    ///
+    /// Runs each question through the same retrieval the `ask` pipeline uses and
+    /// scores the ranked hits against the paths you expect: hit@k, MRR, and citation
+    /// precision. Sparse mode (the default) needs no embedder or Ollama, so it can
+    /// gate CI. Golden file format: docs/how-to/evaluate-retrieval.md.
+    #[command(after_help = "Examples:
+  indexa eval golden.json
+  indexa eval golden.json --mode rrf --top-k 20
+  indexa eval golden.json --json --min-hit-rate 0.8   # exit 1 below 80% hit rate")]
+    #[command(display_order = 38)]
+    Eval {
+        /// Golden-questions JSON file (see docs/how-to/evaluate-retrieval.md).
+        golden: String,
+
+        /// Retrieval mode: sparse (default; no embedder needed), rrf, dense.
+        #[arg(long, default_value = "sparse")]
+        mode: String,
+
+        /// Hits to retrieve per question when a question doesn't set its own `k`.
+        #[arg(long, default_value_t = 10)]
+        top_k: usize,
+
+        /// Limit retrieval to files under this path.
+        #[arg(long)]
+        scope: Option<String>,
+
+        /// Emit per-question metrics and the aggregate as JSON.
+        #[arg(long)]
+        json: bool,
+
+        /// Exit 1 when the aggregate hit rate falls below this fraction (0.0–1.0).
+        #[arg(long, default_value_t = 0.0)]
+        min_hit_rate: f64,
+    },
+
     /// Run several questions and render one document (answers + cited sources + TOC).
     #[command(after_help = "Examples:
   indexa report \"what is the architecture?\" \"how does auth work?\" > onboarding.md
@@ -467,20 +503,33 @@ pub enum Commands {
     /// read_file, ask, get_stats) so clients like Claude Desktop and Cursor can
     /// browse your local context live. Communicates over stdin/stdout.
     #[command(after_help = "Examples:
-  indexa mcp
+  indexa mcp                                  # run the stdio server
+  indexa mcp install --client claude-code     # register with a client
+  indexa mcp install --client cursor,vscode --dry-run
   # Claude Desktop config: { \"command\": \"indexa\", \"args\": [\"mcp\"] }")]
     #[command(display_order = 51)]
-    Mcp {},
+    Mcp {
+        // Optional so bare `indexa mcp` keeps running the stdio server —
+        // that invocation is what every client config points at.
+        #[command(subcommand)]
+        action: Option<McpAction>,
+    },
 
     /// Show context store statistics.
     #[command(after_help = "Examples:
   indexa status
+  indexa status --deep
   indexa status --unknown")]
     #[command(display_order = 15)]
     Status {
         /// Print the top-20 file extensions that could not be classified.
         #[arg(long)]
         unknown: bool,
+
+        /// Append an index-health report: chunk/embedding/summary coverage,
+        /// stale summaries, and per-root last-indexed times.
+        #[arg(long)]
+        deep: bool,
 
         /// Emit the status as a JSON object for scripting/CI.
         #[arg(long)]
@@ -774,6 +823,29 @@ pub enum InsightsAction {
 }
 
 /// Sub-commands for `indexa snapshot`.
+/// Sub-commands for `indexa mcp`.
+#[derive(clap::Subcommand, Debug)]
+pub enum McpAction {
+    /// Register Indexa as an MCP server in one or more AI clients.
+    ///
+    /// Writes only the `indexa` server entry into each client's config,
+    /// leaving every other key untouched (a .bak is kept when the file existed).
+    #[command(after_help = "Examples:
+  indexa mcp install --client claude-code
+  indexa mcp install --client claude-desktop --client cursor
+  indexa mcp install --client cursor,vscode --dry-run")]
+    Install {
+        /// Client(s) to configure: claude-code, claude-desktop, cursor, vscode.
+        /// Repeat the flag or pass a comma-separated list.
+        #[arg(long, required = true, value_delimiter = ',')]
+        client: Vec<String>,
+
+        /// Print the commands/JSON that would be written without touching anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
 #[derive(clap::Subcommand, Debug)]
 pub enum SnapshotAction {
     /// Export a versioned snapshot (summaries + call graph + weights) as JSON.
@@ -1080,6 +1152,30 @@ mod tests {
             Commands::Rm { paths, recursive } => {
                 assert!(recursive);
                 assert_eq!(paths, vec!["~/old"]);
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_eval_with_defaults_and_threshold() {
+        let cli = Cli::try_parse_from(["indexa", "eval", "golden.json", "--min-hit-rate", "0.8"])
+            .unwrap();
+        match cli.command {
+            Commands::Eval {
+                golden,
+                mode,
+                top_k,
+                scope,
+                json,
+                min_hit_rate,
+            } => {
+                assert_eq!(golden, "golden.json");
+                assert_eq!(mode, "sparse", "hermetic sparse is the default");
+                assert_eq!(top_k, 10);
+                assert!(scope.is_none());
+                assert!(!json);
+                assert!((min_hit_rate - 0.8).abs() < 1e-9);
             }
             _ => panic!("wrong command"),
         }

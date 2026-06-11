@@ -16,6 +16,16 @@ use uuid::Uuid;
 pub(crate) struct StatsResponse {
     pub(crate) entries: u64,
     pub(crate) chunks: u64,
+    /// Token-savings telemetry over the last week (zeros until retrieval calls
+    /// are recorded). Bytes, not tokens — the ≈4 chars/token estimate is a UI
+    /// concern. See `store::usage` for the counterfactual definition.
+    pub(crate) usage_week: UsageWeekDto,
+}
+
+#[derive(Serialize)]
+pub(crate) struct UsageWeekDto {
+    pub(crate) served: u64,
+    pub(crate) counterfactual: u64,
 }
 
 /// One node in the coverage treemap tree (nested; children omitted when empty).
@@ -314,6 +324,16 @@ pub(crate) struct UpdateRequest {
 pub(crate) struct AskResponse {
     pub(crate) answer: String,
     pub(crate) sources: Vec<AskSource>,
+    /// Retrieval-shape confidence; absent for the no-match short-circuit
+    /// (and on older servers — clients must tolerate the field missing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) confidence: Option<AskConfidence>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct AskConfidence {
+    pub(crate) level: &'static str,
+    pub(crate) basis: String,
 }
 
 #[derive(Serialize)]

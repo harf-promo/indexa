@@ -214,6 +214,34 @@ Centrality drives node **size** in the Map graph view and the ranked "most centr
 
 ---
 
+## What "tokens saved" means
+
+`indexa status`, MCP `get_stats`, and the web header report an **estimated** token saving:
+
+- **Served** is measured: the UTF-8 bytes of what retrieval actually returned (answers, summaries,
+  snippets, capped file reads).
+- **The counterfactual is an estimate, not a measured baseline**: the full on-disk size of every
+  distinct file behind what was served — i.e. what a client would have read if it had opened those
+  files whole instead of querying the index. A real client might have read fewer files, or more
+  (re-reading across sessions); nothing claims otherwise.
+- Tokens ≈ bytes / 4, labeled as such everywhere. Both quantities are bytes, so on
+  multibyte-heavy text (CJK, Arabic) the token estimate skews high — treat it as an
+  order-of-magnitude signal, not an invoice.
+- Only retrieval that serves *content* records usage (`ask`, `search`, `get_summary`,
+  `read_file`); UI navigation like the sidebar path filter deliberately does not.
+
+## What `confidence` on an answer means
+
+`ask` labels each answer **high / medium / low** from the *retrieval evidence*, before synthesis:
+how many hits came back relative to the request, how strong the top fusion score is, whether
+keyword and semantic retrieval corroborate each other, and how steep the drop-off is. The basis
+is stated next to the label ("4 moderate matches").
+
+It is a **heuristic, not a calibrated probability** — "high" means the retrieval evidence is
+strong, not that the synthesized answer is 90% likely to be correct. The LLM can still
+mis-synthesize from good evidence (and the sources are always listed so you can check it).
+`ask --explain` prints the inputs behind the label.
+
 ## What's opt-in (not default)
 
 | Feature | Why opt-in | How to enable |

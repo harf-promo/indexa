@@ -182,6 +182,7 @@ mod tests {
                 heading: "login".to_owned(),
                 snippet: "…".to_owned(),
             }],
+            confidence: None,
         }]
     }
 

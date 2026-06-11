@@ -1,6 +1,7 @@
 //! Surface-scan entry writes, counts, and subtree reconciliation/deletion.
 
 use super::search::like_prefix;
+use super::types::HealthStats;
 use super::Store;
 use crate::walker::{Entry, EntryKind};
 use anyhow::Result;
@@ -348,5 +349,46 @@ impl Store {
             total_chunks,
             total_files,
         ))
+    }
+
+    /// Whole-index coverage aggregates for the `status --deep` health report.
+    /// One SELECT of scalar subqueries — no per-row work in Rust. Chunk and
+    /// summary counts join back to `entries` so orphan rows left by a removed
+    /// root (cleaned by `prune`) never inflate a coverage ratio past 100%.
+    /// The stale count compares `summaries.generated_at` to the entry's
+    /// on-disk mtime (`modified_s`): older means the file changed after its
+    /// summary was written.
+    pub fn health_stats(&self) -> Result<HealthStats> {
+        self.conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM entries WHERE kind = 'file'),
+                   (SELECT COUNT(*) FROM entries WHERE kind = 'dir'),
+                   (SELECT COUNT(DISTINCT c.entry_path) FROM chunks c
+                      JOIN entries e ON e.path = c.entry_path AND e.kind = 'file'),
+                   (SELECT COUNT(*) FROM chunks),
+                   (SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL),
+                   (SELECT COUNT(*) FROM summaries s
+                      JOIN entries e ON e.path = s.path WHERE s.kind = 'file'),
+                   (SELECT COUNT(*) FROM summaries s
+                      JOIN entries e ON e.path = s.path WHERE s.kind = 'dir'),
+                   (SELECT COUNT(*) FROM summaries s
+                      JOIN entries e ON e.path = s.path
+                     WHERE e.modified_s IS NOT NULL AND s.generated_at < e.modified_s)",
+                [],
+                |r| {
+                    Ok(HealthStats {
+                        files: r.get::<_, i64>(0)? as u64,
+                        dirs: r.get::<_, i64>(1)? as u64,
+                        files_with_chunks: r.get::<_, i64>(2)? as u64,
+                        chunks: r.get::<_, i64>(3)? as u64,
+                        embedded_chunks: r.get::<_, i64>(4)? as u64,
+                        files_summarized: r.get::<_, i64>(5)? as u64,
+                        dirs_summarized: r.get::<_, i64>(6)? as u64,
+                        stale_summaries: r.get::<_, i64>(7)? as u64,
+                    })
+                },
+            )
+            .map_err(Into::into)
     }
 }

@@ -10,6 +10,8 @@ Task-focused recipes. For the conceptual overview start with the
   Cursor, or any MCP client browse and search your local index live.
 - **[Debug the code graph](debug-the-code-graph.md)** — `graph` / `who_calls` / `blast_radius`,
   and how to read them honestly (bare-name matching caveat).
+- **[Evaluate retrieval quality](evaluate-retrieval.md)** — `indexa eval` with a golden-questions
+  file: hit@k / MRR / precision as a CI regression gate (no LLM needed).
 - **[Tune Indexa for a small machine](tune-for-a-small-machine.md)** — keep an 8–16 GB laptop
   responsive while it builds context.
 

@@ -204,6 +204,22 @@ impl Store {
                 created_at INTEGER NOT NULL DEFAULT (unixepoch())
             );
 
+            -- Token-savings telemetry (v0.23): one row per retrieval call, across every
+            -- surface ('mcp' | 'web' | 'cli'). surface deliberately has NO CHECK — widening
+            -- the edges.kind CHECK cost a table-recreate migration above; valid values live
+            -- in Rust. bytes_counterfactual = full on-disk size of every file behind what
+            -- was served — the honest definition is documented in store::usage. Growth is
+            -- capped by gc_usage(), called opportunistically from record_tool_usage.
+            CREATE TABLE IF NOT EXISTS tool_usage (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                surface              TEXT NOT NULL,
+                tool                 TEXT NOT NULL,
+                bytes_served         INTEGER NOT NULL DEFAULT 0,
+                bytes_counterfactual INTEGER NOT NULL DEFAULT 0,
+                at                   INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE INDEX IF NOT EXISTS idx_tool_usage_at ON tool_usage(at);
+
             -- Decision Ledger (v0.22): every uncertain judgment call becomes a row —
             -- one row = one question + its answer. The row fills in place on answer;
             -- the ONLY in-place lifecycle transition is open → decided/dismissed/expired.

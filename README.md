@@ -58,8 +58,8 @@ indexa mcp                                                 # expose the live ind
 
 **Stop paying to re-teach your AI your own codebase.** Every coding assistant wakes up amnesiac. Before it helps, it reads its way back to orientation — burning context window, paid tokens, and your patience on a lesson it learned five minutes ago. Indexa teaches it *once*: it builds a persistent, hierarchical context store on your machine and serves a small ranked slice on demand, so the model spends its budget on the work you asked for.
 
-> **What that's worth — a worked example** *(illustrative, ~4 chars/token; measured per-session
-> numbers ship with the upcoming usage telemetry)*: an agent orienting itself in a medium repo
+> **What that's worth — a worked example** *(illustrative, ~4 chars/token — run `indexa status`
+> after a few sessions to see your own measured usage and estimated savings)*: an agent orienting itself in a medium repo
 > typically reads ~40 files at ~2,000 tokens each ≈ **80K tokens — every session**. The same
 > orientation through Indexa: one `search` (~300 tokens) + ten L0 one-line abstracts (~30 each) +
 > the two files it actually needs in full (~4K) ≈ **5K tokens**. That's roughly **94% less**,

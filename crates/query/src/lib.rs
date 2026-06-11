@@ -1,11 +1,16 @@
 //! Hybrid search (FTS5 + vector) and RAG-based Q&A pipeline.
 
+pub mod eval;
 pub mod export;
 pub mod qa;
 pub mod rerank;
 pub mod summarize;
 pub mod worker;
 
+pub use eval::{
+    aggregate, evaluate_question, score_ranking, EvalQuestion, EvalSummary, GoldenSet,
+    QuestionMetrics,
+};
 pub use export::{
     approx_tokens, build_tree, render_graph, render_json, render_markdown, render_weights,
     render_xml,
@@ -13,8 +18,9 @@ pub use export::{
 pub use indexa_core::config::HybridMode;
 pub use qa::{
     answer, answer_agentic, answer_agentic_stream, answer_stream, answer_stream_with_ann,
-    answer_with_ann, explain_retrieval, Answer, AnswerChunk, QaConfig, RetrievalStage,
-    RetrievalTrace, SourceCitation, AGENTIC_MAX_STEPS_CAP,
+    answer_with_ann, assess_confidence, explain_retrieval, Answer, AnswerChunk, Confidence,
+    ConfidenceInputs, ConfidenceReport, QaConfig, RetrievalStage, RetrievalTrace, SourceCitation,
+    AGENTIC_MAX_STEPS_CAP,
 };
 pub use summarize::{
     enqueue_subtree, process_queue_item_with_passes, requeue_subtree, summarize_subtree_sync,
