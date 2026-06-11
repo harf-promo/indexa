@@ -6,20 +6,14 @@
 //!
 //! **stdout is the protocol channel** — all logging must go to stderr.
 //!
-//! Tools (33): `search`, `browse_tree`, `get_summary` (tier l0/l1/l2 — progressive
-//! disclosure), `read_file`, `ask`, `dependencies` (a file's imports, defined symbols,
-//! and calls), `who_imports` (reverse code-graph lookup), `who_calls` (D2 — reverse
-//! call lookup), `blast_radius` (D2 — 1-hop call blast radius), `code_graph` (file-to-file
-//! call graph for a scope), `related_files` (call-graph neighbors), `get_stats`,
-//! `prune` (orphan-row GC),
-//! `list_packs`, `get_pack`, `export_pack`, `create_pack`, `add_pack_paths`,
-//! `remove_pack_paths`, `delete_pack` (Context Packs),
-//! `list_classifications`, `confirm_classification`, `ignore_classification`
-//! (Smart classification), `trigger_index` (indexing trigger),
-//! `search_pack` (scoped content search within a pack),
-//! `list_weights`, `set_weight`, `delete_weight` (v0.8 Importance weighting),
-//! `insights_duplicates`, `insights_stale`, `insights_diff`, `insights_largest`,
-//! `insights_languages` (Insights).
+//! The authoritative tool list is `golden_tools.txt` (enforced by the contract tests
+//! below — `tool_contract_golden_list` fails on any add/remove/rename, and
+//! `doc_tool_count_matches_code` keeps the counts in README/CLAUDE.md/docs honest).
+//! Tool families: retrieval (`search`, `browse_tree`, `get_summary` l0/l1/l2,
+//! `read_file`, `ask`), code graph (`dependencies`, `who_imports`, `who_calls`,
+//! `blast_radius`, `code_graph`, `related_files`), Context Packs, Smart
+//! classification, Importance weighting, saved searches, Insights, and admin
+//! (`get_stats`, `prune`, `trigger_index`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1759,6 +1753,159 @@ mod tests {
         assert!(
             format!("{err:?}").contains("not within an indexed root"),
             "expected an indexed-root rejection, got: {err:?}"
+        );
+    }
+
+    // ── Contract tests: the MCP tool surface is a published API ──
+
+    /// Golden tool list: any added/removed/renamed tool must be a deliberate,
+    /// reviewable diff of `golden_tools.txt`. Regenerate with
+    /// `INDEXA_UPDATE_GOLDEN=1 cargo test -p indexa-mcp`.
+    #[test]
+    fn tool_contract_golden_list() {
+        let mut names: Vec<String> = IndexaMcp::tool_router()
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        names.sort();
+        let actual = names.join("\n") + "\n";
+
+        let golden_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("golden_tools.txt");
+        if std::env::var("INDEXA_UPDATE_GOLDEN").is_ok() {
+            std::fs::write(&golden_path, &actual).unwrap();
+            return;
+        }
+        let golden = std::fs::read_to_string(&golden_path)
+            .expect("crates/mcp/golden_tools.txt missing — INDEXA_UPDATE_GOLDEN=1 cargo test -p indexa-mcp");
+        assert_eq!(
+            actual, golden,
+            "MCP tool surface changed. If intentional: INDEXA_UPDATE_GOLDEN=1 cargo test -p indexa-mcp, \
+             commit golden_tools.txt, and update the tool counts in README.md / CLAUDE.md / \
+             docs/how-to/live-retrieval-over-mcp.md (doc_tool_count_matches_code enforces them)."
+        );
+    }
+
+    /// Every tool must carry a non-empty description — agents pick tools by it.
+    #[test]
+    fn every_tool_has_a_description() {
+        for tool in IndexaMcp::tool_router().list_all() {
+            let desc = tool.description.as_deref().unwrap_or("");
+            assert!(
+                !desc.trim().is_empty(),
+                "tool '{}' has no description",
+                tool.name
+            );
+        }
+    }
+
+    /// Extract every "<N> tools" count from a doc body (digits immediately
+    /// preceding the literal " tools"; prose like "AI tools" has none and is skipped).
+    fn tool_counts_in(text: &str) -> Vec<usize> {
+        let bytes = text.as_bytes();
+        let mut counts = Vec::new();
+        let mut i = 0;
+        while let Some(pos) = text[i..].find(" tools") {
+            let abs = i + pos;
+            let mut start = abs;
+            while start > 0 && bytes[start - 1].is_ascii_digit() {
+                start -= 1;
+            }
+            if start < abs {
+                counts.push(text[start..abs].parse().unwrap());
+            }
+            i = abs + " tools".len();
+        }
+        counts
+    }
+
+    /// The "N tools" claims in the docs must equal the real tool count — this is
+    /// the guard that retires the "docs said 29, code had 33" drift class.
+    #[test]
+    fn doc_tool_count_matches_code() {
+        let real = IndexaMcp::tool_router().list_all().len();
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for rel in [
+            "README.md",
+            "CLAUDE.md",
+            "docs/how-to/live-retrieval-over-mcp.md",
+        ] {
+            let text = std::fs::read_to_string(repo.join(rel)).unwrap();
+            let counts = tool_counts_in(&text);
+            assert!(
+                !counts.is_empty(),
+                "{rel}: expected at least one '<N> tools' claim (wording changed?)"
+            );
+            for c in counts {
+                assert_eq!(
+                    c, real,
+                    "{rel} claims {c} MCP tools but the code defines {real} — update the doc"
+                );
+            }
+        }
+    }
+
+    /// Golden calls: a few representative tools, end-to-end against a seeded temp
+    /// index, asserting the response phrasing agents rely on.
+    #[tokio::test]
+    async fn contract_golden_calls() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .set_weight("dir", "/proj", 2.0, "user", Some("test"))
+                .unwrap();
+            store
+                .save_query("auth", "where is auth handled?", "rrf", None)
+                .unwrap();
+        }
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let stats = text_of(mcp.get_stats().await.unwrap());
+        assert!(
+            stats.contains("entries") || stats.contains("Entries"),
+            "get_stats must report entry counts, got: {stats}"
+        );
+
+        let weights = text_of(mcp.list_weights().await.unwrap());
+        assert!(
+            weights.contains("/proj") && weights.contains("2.0"),
+            "list_weights must show the seeded weight, got: {weights}"
+        );
+
+        let saved = text_of(mcp.list_saved_queries().await.unwrap());
+        assert!(
+            saved.contains("auth") && saved.contains("where is auth handled?"),
+            "list_saved_queries must show the seeded query, got: {saved}"
+        );
+
+        let caveated = text_of(
+            mcp.code_graph(Parameters(CodeGraphParams {
+                scope: "/proj".into(),
+                limit: None,
+                strict: false,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            caveated.contains("No call edges") || caveated.contains("bare-name"),
+            "code_graph must either report emptiness or carry the bare-name caveat, got: {caveated}"
         );
     }
 

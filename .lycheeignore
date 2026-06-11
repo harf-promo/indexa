@@ -1,0 +1,7 @@
+# GitHub-UI relative links (resolve on github.com, not on disk) — used in
+# README/ROADMAP/SECURITY for releases, milestones, issues, discussions.
+\.\./\.\./releases
+\.\./\.\./milestones
+\.\./\.\./issues
+\.\./\.\./discussions
+\.\./\.\./security/advisories

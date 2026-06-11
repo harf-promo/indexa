@@ -13,8 +13,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # A tag must have its release notes cut out of [Unreleased] before anything builds —
+  # v0.20.x shipped with no CHANGELOG sections because nothing enforced this.
+  changelog-gate:
+    name: CHANGELOG has this release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Require a CHANGELOG section matching the tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if ! grep -qE "^## \[${VERSION//./\\.}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [${VERSION}]' section for tag ${GITHUB_REF_NAME}. Move the notes out of [Unreleased] before tagging."
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.target }}
+    needs: changelog-gate
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:

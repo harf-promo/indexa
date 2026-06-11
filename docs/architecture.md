@@ -15,7 +15,6 @@ apps/indexa          — CLI binary (main entry point)
 ├── crates/embed      — Embedding adapter trait + Ollama/OpenAI/Google/llama.cpp impls
 ├── crates/llm        — LLM adapter trait + Ollama/OpenAI/Anthropic/llama.cpp impls
 ├── crates/http-util  — shared HTTP client + retry/backoff policy for the network adapters
-
 ├── crates/query      — Hybrid search (FTS5 + vector), reranking, and the unified RAG answer() pipeline
 ├── crates/web        — Axum HTTP server + embedded single-page UI (live SSE jobs)
 └── crates/mcp        — stdio Model Context Protocol server (`indexa mcp`) exposing the index to AI agents
@@ -57,7 +56,7 @@ window. See [Why an external context store helps local models](methodology.md#wh
                  → persisted to platform data dir (~/.local/share/indexa/index.db on Linux)
 ```
 
-Files: [`apps/indexa/src/main.rs`](../apps/indexa/src/main.rs) · [`crates/parsers/src/registry.rs`](../crates/parsers/src/registry.rs) · [`crates/core/src/store.rs`](../crates/core/src/store.rs)
+Files: [`apps/indexa/src/main.rs`](../apps/indexa/src/main.rs) · [`crates/parsers/src/registry.rs`](../crates/parsers/src/registry.rs) · [`crates/core/src/store/`](../crates/core/src/store/)
 
 ---
 
@@ -91,7 +90,7 @@ so the future is `Send` (required by the axum web server and the rmcp MCP server
                  → Answer { answer: String, sources: Vec<SourceCitation> }
 ```
 
-Files: [`crates/query/src/qa.rs`](../crates/query/src/qa.rs) · [`crates/query/src/rerank.rs`](../crates/query/src/rerank.rs) · [`crates/core/src/store.rs`](../crates/core/src/store.rs) · [`crates/llm/src/lib.rs`](../crates/llm/src/lib.rs)
+Files: [`crates/query/src/qa.rs`](../crates/query/src/qa.rs) · [`crates/query/src/rerank.rs`](../crates/query/src/rerank.rs) · [`crates/core/src/store/`](../crates/core/src/store/) · [`crates/llm/src/lib.rs`](../crates/llm/src/lib.rs)
 
 ---
 
