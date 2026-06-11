@@ -11,11 +11,18 @@ use clap::{Parser, Subcommand};
 The index is the substrate; context is the product.\n\n\
 Local-first, model-agnostic, free of token-budget tax. Fully open source.\n\n\
 Quick start:\n  \
-indexa scan ~/code/myrepo           # build surface context map\n  \
-indexa deep ~/code/myrepo           # build deep context (parses, embeds)\n  \
-indexa summarize ~/code/myrepo      # generate hierarchical summaries\n  \
+indexa index ~/code/myrepo             # build full context in one command\n  \
+indexa ask \"where is auth handled?\"    # grounded answer with sources\n  \
 indexa export ~/code/myrepo > ctx.xml  # export as XML for your AI tool\n  \
-indexa serve                        # open local web UI"
+indexa serve                           # open local web UI\n\n\
+(Power users: the pipeline stages behind `index` — scan, deep, summarize, worker, watch — \
+are individually scriptable.)",
+    after_help = "Command groups:\n  \
+Core      index · ask · search · export · serve · status\n  \
+Manage    pack · weight · classify · saved · rm · prune\n  \
+Analyze   insights · graph · related · report · map · describe · fingerprint · snapshot\n  \
+Pipeline  scan · deep · summarize · worker · watch   (the stages behind `index`)\n  \
+System    doctor · mcp · update"
 )]
 pub struct Cli {
     /// Path to config file (default: platform config dir / config.toml).
@@ -37,6 +44,7 @@ pub enum Commands {
   indexa index ~/code/my-repo
   indexa index ~/Documents --passes 2
   indexa index ~/Projects --embed-model nomic-embed-text:v1.5")]
+    #[command(display_order = 10)]
     Index {
         /// Path(s) to index. Omit to index all existing roots.
         #[arg(num_args = 0..)]
@@ -60,6 +68,7 @@ pub enum Commands {
   indexa scan ~/Documents
   indexa scan ~/Projects ~/Notes
   indexa scan --all")]
+    #[command(display_order = 40)]
     Scan {
         /// Paths to scan. Omit to scan the home directory.
         #[arg(num_args = 0..)]
@@ -74,6 +83,7 @@ pub enum Commands {
     #[command(after_help = "Examples:
   indexa map
   indexa map --depth 2")]
+    #[command(display_order = 34)]
     Map {
         /// Maximum depth to display (default: 3).
         #[arg(long, default_value_t = 3)]
@@ -88,6 +98,7 @@ pub enum Commands {
   indexa deep ~/Documents
   indexa deep ~/Projects --embed-model nomic-embed-text:v1.5
   indexa deep --dry-run ~/Documents")]
+    #[command(display_order = 41)]
     Deep {
         /// Path to deep-scan. Omit to deep-scan the entire existing index.
         #[arg(num_args = 0..)]
@@ -111,6 +122,7 @@ pub enum Commands {
   indexa summarize ~/Documents
   indexa summarize ~/Documents --mode compress
   indexa summarize ~/Documents --passes 2")]
+    #[command(display_order = 42)]
     Summarize {
         /// Path to summarize. Omit to summarize the entire existing index.
         #[arg(num_args = 0..)]
@@ -129,6 +141,7 @@ pub enum Commands {
     /// Print the summary and breadcrumb chain for a specific path.
     #[command(after_help = "Examples:
   indexa describe ~/Documents/taxes")]
+    #[command(display_order = 35)]
     Describe {
         /// Path to describe.
         path: String,
@@ -138,6 +151,7 @@ pub enum Commands {
     #[command(after_help = "Examples:
   indexa worker
   indexa worker --concurrency 4")]
+    #[command(display_order = 43)]
     Worker {
         /// Number of concurrent summarization tasks.
         #[arg(short, long, default_value_t = 2)]
@@ -160,6 +174,7 @@ pub enum Commands {
   indexa pack export \"Auth\" --format xml > auth-context.xml
   indexa pack show \"Auth\"
   indexa pack delete \"Auth\"")]
+    #[command(display_order = 20)]
     Pack {
         #[command(subcommand)]
         action: PackAction,
@@ -174,6 +189,7 @@ pub enum Commands {
   indexa weight list
   indexa weight suggest --days 30              # show recency-based suggestions
   indexa weight apply --days 7                 # auto-apply recency boosts")]
+    #[command(display_order = 21)]
     Weight {
         #[command(subcommand)]
         action: WeightAction,
@@ -185,6 +201,7 @@ pub enum Commands {
   indexa insights duplicates --exact
   indexa insights stale --days 365
   indexa insights diff --days 7")]
+    #[command(display_order = 30)]
     Insights {
         #[command(subcommand)]
         action: InsightsAction,
@@ -195,6 +212,7 @@ pub enum Commands {
   indexa saved add priorities \"what are my current priorities?\"
   indexa saved run priorities
   indexa saved list")]
+    #[command(display_order = 23)]
     Saved {
         #[command(subcommand)]
         action: SavedAction,
@@ -204,6 +222,7 @@ pub enum Commands {
     #[command(after_help = "Examples:
   indexa snapshot export -o myindex.snapshot.json
   indexa snapshot import myindex.snapshot.json   # into a fresh index")]
+    #[command(display_order = 37)]
     Snapshot {
         #[command(subcommand)]
         action: SnapshotAction,
@@ -213,6 +232,7 @@ pub enum Commands {
     #[command(after_help = "Examples:
   indexa report \"what is the architecture?\" \"how does auth work?\" > onboarding.md
   indexa report --saved priorities --saved risks --format xml -o report.xml")]
+    #[command(display_order = 33)]
     Report {
         /// Questions to answer (any number).
         #[arg(num_args = 0..)]
@@ -232,6 +252,7 @@ pub enum Commands {
     #[command(after_help = "Examples:
   indexa graph ~/code/myrepo
   indexa graph ~/code/myrepo/src --limit 50")]
+    #[command(display_order = 31)]
     Graph {
         /// Directory to scope the graph to.
         path: String,
@@ -252,6 +273,7 @@ pub enum Commands {
     #[command(after_help = "Examples:
   indexa related src/store/mod.rs
   indexa related --json --limit 5 crates/core/src/lib.rs")]
+    #[command(display_order = 32)]
     Related {
         /// File to find relations for.
         path: String,
@@ -268,6 +290,7 @@ pub enum Commands {
   indexa export ~/code/myrepo --format xml > .context.xml
   indexa export ~/code/myrepo --format md
   indexa export ~/code/myrepo --format json --depth 3 --output context.json")]
+    #[command(display_order = 13)]
     Export {
         /// Path(s) to export. Omit to export the entire index.
         #[arg(num_args = 0..)]
@@ -301,6 +324,7 @@ pub enum Commands {
   indexa ask --scope ~/Work \"what are my current priorities?\"
   indexa ask --sparse-only \"IndexOutOfBoundsException\"
   indexa ask --top-k 20 \"Python files using async\"")]
+    #[command(display_order = 11)]
     Ask {
         /// Natural-language question.
         question: String,
@@ -357,6 +381,7 @@ pub enum Commands {
   indexa search \"async runtime\"
   indexa search --hybrid --top-k 20 \"retry backoff\"
   indexa search --json \"TODO\" | jq -r '.[].path'")]
+    #[command(display_order = 12)]
     Search {
         /// Search query.
         query: String,
@@ -381,6 +406,7 @@ pub enum Commands {
     #[command(after_help = "Examples:
   indexa watch ~/Documents
   indexa watch ~/Documents ~/Projects")]
+    #[command(display_order = 44)]
     Watch {
         /// Paths to watch. Omit to watch the home directory.
         #[arg(num_args = 0..)]
@@ -396,6 +422,7 @@ pub enum Commands {
   indexa serve
   indexa serve --port 8080
   indexa serve --host 0.0.0.0          # LAN access (⚠ exposes all indexed files on network)")]
+    #[command(display_order = 14)]
     Serve {
         #[arg(short, long, default_value_t = 7620)]
         port: u16,
@@ -422,12 +449,14 @@ pub enum Commands {
     #[command(after_help = "Examples:
   indexa mcp
   # Claude Desktop config: { \"command\": \"indexa\", \"args\": [\"mcp\"] }")]
+    #[command(display_order = 51)]
     Mcp {},
 
     /// Show context store statistics.
     #[command(after_help = "Examples:
   indexa status
   indexa status --unknown")]
+    #[command(display_order = 15)]
     Status {
         /// Print the top-20 file extensions that could not be classified.
         #[arg(long)]
@@ -442,6 +471,7 @@ pub enum Commands {
     #[command(after_help = "Examples:
   indexa rm ~/Documents/old-project
   indexa rm -r ~/Documents/old-folder")]
+    #[command(display_order = 24)]
     Rm {
         /// Paths to remove from the index.
         #[arg(required = true, num_args = 1..)]
@@ -457,6 +487,7 @@ pub enum Commands {
     #[command(after_help = "Examples:
   indexa prune --dry-run   # show what would be removed
   indexa prune             # remove orphaned chunks/summaries")]
+    #[command(display_order = 25)]
     Prune {
         /// Show what would be removed without deleting anything.
         #[arg(long)]
@@ -471,6 +502,7 @@ pub enum Commands {
   indexa doctor
   indexa doctor --profile conservative
   indexa doctor --files 500 --chunks 2000")]
+    #[command(display_order = 50)]
     Doctor {
         /// Resource profile to evaluate: conservative, balanced (default), performance.
         #[arg(long, default_value = "balanced")]
@@ -493,6 +525,7 @@ pub enum Commands {
     #[command(after_help = "Examples:
   indexa fingerprint
   indexa fingerprint --paths   # also list the matching directories")]
+    #[command(display_order = 36)]
     Fingerprint {
         /// List the matching directory paths under each detected type.
         #[arg(long)]
@@ -508,6 +541,7 @@ pub enum Commands {
     #[command(after_help = "Examples:
   indexa classify
   indexa classify --category code --paths")]
+    #[command(display_order = 22)]
     Classify {
         /// Show the matching folder paths under each category.
         #[arg(long)]
@@ -528,6 +562,7 @@ pub enum Commands {
   indexa update --check      # report only (exit 1 = update available, 0 = current)
   indexa update -y           # update without interactive prompt
   indexa update --pin v0.12.1  # install a specific release")]
+    #[command(display_order = 52)]
     Update {
         /// Only check and report — do not download or replace.
         /// Exits 1 if an update is available, 0 if already current.
