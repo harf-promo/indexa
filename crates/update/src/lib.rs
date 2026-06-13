@@ -106,6 +106,43 @@ pub async fn check() -> anyhow::Result<ReleaseInfo> {
     })
 }
 
+/// True when `exe` lives inside a macOS `.app` bundle (`…/Foo.app/Contents/MacOS/bin`).
+///
+/// The binary self-replace [`apply`] performs is for the standalone CLI only.
+/// Inside a `.app`, replacing the Mach-O downloads the wrong artifact (the
+/// headless CLI binary, not the GUI app), leaves the bundle's `Info.plist` and
+/// resources stale, and ad-hoc re-signing strips the Developer-ID + notarization
+/// — bricking the app. The desktop must update through its own (Tauri) updater.
+fn is_inside_app_bundle(exe: &std::path::Path) -> bool {
+    use std::path::Component;
+    exe.components().collect::<Vec<_>>().windows(3).any(|w| {
+        matches!(w[0], Component::Normal(s) if s.to_string_lossy().ends_with(".app"))
+            && matches!(w[1], Component::Normal(s) if s == "Contents")
+            && matches!(w[2], Component::Normal(s) if s == "MacOS")
+    })
+}
+
+/// The reason a binary self-replace must be refused, or `None` when it is safe.
+/// Pure (no env/fs access) so the guard is unit-tested directly; [`apply`] feeds
+/// it the live `current_exe()` and `INDEXA_DESKTOP` state.
+fn self_replace_refusal(exe: Option<&std::path::Path>, is_desktop: bool) -> Option<String> {
+    if is_desktop {
+        return Some(
+            "self-update is disabled inside the Indexa desktop app — use the menu-bar \
+             \"Check for Updates…\" to update the app instead"
+                .to_string(),
+        );
+    }
+    match exe {
+        Some(p) if is_inside_app_bundle(p) => Some(format!(
+            "refusing to self-replace a binary inside a macOS .app bundle ({}) — \
+             this would corrupt the bundle; update the app through its own updater",
+            p.display()
+        )),
+        _ => None,
+    }
+}
+
 /// Download the release asset for `tag` and atomically replace the running
 /// binary. Returns the semver version string that was installed (without
 /// leading `v`), e.g. `"0.12.1"`.
@@ -113,13 +150,30 @@ pub async fn check() -> anyhow::Result<ReleaseInfo> {
 /// `tag` may be `"v0.12.1"` or `"0.12.1"` — a leading `v` is added if
 /// needed for the download URL.
 ///
+/// Refuses to run inside the Indexa desktop app (binary self-replace would
+/// corrupt the `.app` bundle — see [`is_inside_app_bundle`]); the desktop
+/// updates via its built-in updater.
+///
 /// # Errors
 ///
 /// Returns a human-readable, actionable error on:
+/// - Running inside a `.app` bundle / the desktop app.
 /// - Permission denied (binary in root-owned dir like `/usr/local/bin`).
 /// - Truncated or empty download.
 /// - Non-existent release/asset (404).
 pub async fn apply(tag: &str) -> anyhow::Result<String> {
+    // Guard (defense in depth): never self-replace the desktop app's bundled
+    // Mach-O. Both signals are checked because either alone is sufficient and
+    // they fail independently — INDEXA_DESKTOP is set by the desktop process,
+    // and the path shape catches any other way the desktop binary could invoke
+    // this (e.g. a future caller that doesn't set the env var).
+    if let Some(reason) = self_replace_refusal(
+        std::env::current_exe().ok().as_deref(),
+        std::env::var("INDEXA_DESKTOP").as_deref() == Ok("1"),
+    ) {
+        anyhow::bail!(reason);
+    }
+
     let tag_str = if tag.starts_with('v') {
         tag.to_string()
     } else {
@@ -265,4 +319,53 @@ fn permission_error(source: impl std::fmt::Display, path: &std::path::Path) -> a
             replace the binary manually",
         path = path.display(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_inside_app_bundle, self_replace_refusal};
+    use std::path::Path;
+
+    #[test]
+    fn detects_macos_app_bundle_binaries() {
+        assert!(is_inside_app_bundle(Path::new(
+            "/Applications/Indexa.app/Contents/MacOS/indexa-desktop"
+        )));
+        // Nested .app, and a non-standard install location, still match.
+        assert!(is_inside_app_bundle(Path::new(
+            "/Users/x/Applications/Indexa.app/Contents/MacOS/indexa-desktop"
+        )));
+    }
+
+    #[test]
+    fn plain_cli_binaries_are_not_app_bundles() {
+        for p in [
+            "/usr/local/bin/indexa",
+            "/Users/x/.cargo/bin/indexa",
+            "/opt/homebrew/bin/indexa",
+            // A directory merely named with .app somewhere but not the bundle shape.
+            "/Users/x/my.app-notes/indexa",
+            "/tmp/Contents/MacOS/indexa", // no *.app ancestor
+        ] {
+            assert!(!is_inside_app_bundle(Path::new(p)), "false positive on {p}");
+        }
+    }
+
+    #[test]
+    fn refuses_self_replace_in_desktop_or_bundle() {
+        // Desktop env flag alone refuses, regardless of path.
+        assert!(self_replace_refusal(Some(Path::new("/usr/local/bin/indexa")), true).is_some());
+        // .app bundle path refuses even without the env flag.
+        let r = self_replace_refusal(
+            Some(Path::new(
+                "/Applications/Indexa.app/Contents/MacOS/indexa-desktop",
+            )),
+            false,
+        );
+        assert!(r.unwrap().contains(".app bundle"));
+        // A plain CLI binary, not desktop → allowed (no refusal).
+        assert!(self_replace_refusal(Some(Path::new("/usr/local/bin/indexa")), false).is_none());
+        // Unknown exe path, not desktop → allowed (we don't block what we can't classify).
+        assert!(self_replace_refusal(None, false).is_none());
+    }
 }

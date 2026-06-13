@@ -10,11 +10,16 @@ use crate::dto::{err_json, UpdateRequest};
 /// modifying anything. Network errors are swallowed so a transient GitHub
 /// outage never breaks the page load.
 pub(crate) async fn api_update_check() -> Response {
+    // The desktop app updates itself (Tauri native updater); the web UI must NOT
+    // offer a self-replace button there. Surface this so 15-update.js can render
+    // the menu-bar pointer instead of "Update now".
+    let desktop = std::env::var("INDEXA_DESKTOP").as_deref() == Ok("1");
     match indexa_update::check().await {
         Ok(info) => Json(serde_json::json!({
             "current":          info.current,
             "latest":           info.latest,
             "update_available": info.update_available,
+            "desktop":          desktop,
         }))
         .into_response(),
         Err(e) => {
@@ -24,6 +29,7 @@ pub(crate) async fn api_update_check() -> Response {
                 "current":          env!("CARGO_PKG_VERSION"),
                 "latest":           null,
                 "update_available": false,
+                "desktop":          desktop,
                 "error":            format!("{e:#}"),
             }))
             .into_response()
@@ -41,6 +47,18 @@ pub(crate) async fn api_update_check() -> Response {
 /// After a successful update the new binary is on disk; the running server
 /// keeps its old code in memory until the process is restarted.
 pub(crate) async fn api_update_apply(Json(body): Json<UpdateRequest>) -> Response {
+    // Hard refusal inside the desktop app: the binary self-replace corrupts the
+    // `.app` bundle (downloads the headless CLI binary over the GUI Mach-O, strips
+    // notarization). The desktop updates via its built-in updater. This holds even
+    // if INDEXA_WEB_ALLOW_UPDATE is somehow set, and `indexa_update::apply` refuses
+    // again as a third layer.
+    if std::env::var("INDEXA_DESKTOP").as_deref() == Ok("1") {
+        return err_json(
+            StatusCode::FORBIDDEN,
+            "The desktop app updates itself — use the menu-bar \"Check for Updates…\". \
+             One-click web updates are disabled here to protect the app bundle.",
+        );
+    }
     if std::env::var("INDEXA_WEB_ALLOW_UPDATE").as_deref() != Ok("1") {
         return err_json(
             StatusCode::FORBIDDEN,

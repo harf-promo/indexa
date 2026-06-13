@@ -181,6 +181,26 @@ jobs:
           # Silicon. Published under the darwin-universal updater key (see main.rs).
           args: --target universal-apple-darwin
 
+      - name: Assert the bundle is Developer-ID signed, notarized + stapled
+        # Locks in the signing contract so a tauri-action change or a silent
+        # notarization/staple failure can't ship a bundle that Gatekeeper rejects
+        # or that fails to launch offline (an un-stapled app needs the network to
+        # validate). Only runs when real signing is configured; the ad-hoc
+        # fallback build (no APPLE_SIGNING_IDENTITY) is skipped.
+        if: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
+        run: |
+          set -euo pipefail
+          APP=$(find apps/indexa-desktop/target -path '*/bundle/macos/*.app' -maxdepth 8 -type d | head -1)
+          if [ -z "$APP" ]; then echo "::error::built .app not found"; exit 1; fi
+          echo "Verifying $APP"
+          codesign -dv --verbose=4 "$APP" 2>&1 | grep -q "Authority=Developer ID Application" \
+            || { echo "::error::bundle is not Developer-ID signed"; exit 1; }
+          spctl -a -vvv -t exec "$APP" 2>&1 | grep -q "source=Notarized Developer ID" \
+            || { echo "::error::Gatekeeper does not see a notarized Developer ID"; exit 1; }
+          xcrun stapler validate "$APP" \
+            || { echo "::error::notarization ticket is not stapled (offline launch would fail)"; exit 1; }
+          echo "✓ Developer-ID signed, notarized, and stapled."
+
       - name: Notarization diagnostics (on failure)
         # If the build/notarize step fails or hangs, dump recent notarytool submissions so the
         # failure is self-diagnosing. A long "In Progress" with a "log not yet available" log means

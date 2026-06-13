@@ -33,15 +33,23 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Tell the embedded web server that it is running inside the desktop app:
-    //   INDEXA_DESKTOP=1    — enables `relaunch:"desktop"` in the update handler
-    //   INDEXA_WEB_ALLOW_UPDATE=1 — un-gates the POST /api/update/apply endpoint
+    // Tell the embedded web server it is running inside the desktop app. The
+    // desktop updates ONLY through the Tauri native updater (menu-bar "Check for
+    // Updates…"), which installs the notarized `.app.tar.gz` as a whole bundle.
     //
-    // Safety: set before any threads read these vars.
+    // We deliberately do NOT set INDEXA_WEB_ALLOW_UPDATE here. That gate un-locks
+    // the web "Update now" button → `indexa_update::apply()`, the CLI's *binary*
+    // self-replace: it downloads the headless `indexa-<arch>-apple-darwin` CLI
+    // binary and renames it over `Contents/MacOS/indexa-desktop`, then ad-hoc
+    // re-signs it — stripping Developer-ID + notarization and bricking the app
+    // (Gatekeeper then refuses to launch the quarantined ad-hoc bundle). The web
+    // apply path additionally refuses when INDEXA_DESKTOP=1, and the updater
+    // itself refuses to self-replace inside a `.app` — three independent guards.
+    //
+    // Safety: set before any threads read this var.
     #[allow(unused_unsafe)] // stable Rust pre-1.80 doesn't need unsafe; 1.80+ does
     unsafe {
         std::env::set_var("INDEXA_DESKTOP", "1");
-        std::env::set_var("INDEXA_WEB_ALLOW_UPDATE", "1");
     }
 
     // Start the embedded web server on a background Tokio runtime so Tauri's
@@ -206,18 +214,36 @@ fn resign_app_bundle() {
     };
     let bundle_str = bundle.to_string_lossy();
 
-    // If the installed bundle is already Developer-ID signed, leave it alone — ad-hoc
-    // re-signing would downgrade a notarized signature.
-    if let Ok(info) = std::process::Command::new("codesign")
+    // FAIL CLOSED. Ad-hoc re-signing a Developer-ID + notarized bundle strips the
+    // notarization and bricks the app, so we only ever re-sign when we can
+    // POSITIVELY confirm the installed bundle is ad-hoc/linker-signed with no
+    // Developer-ID authority. Any probe failure, or output we don't recognize, is
+    // treated as "might be notarized" → leave it untouched. (Release builds are
+    // notarized since v0.20, so on a real install this is always a no-op; the
+    // ad-hoc branch only fires for unsigned dev/CI fallback bundles.)
+    let probe = std::process::Command::new("codesign")
         .args(["-dvv", bundle_str.as_ref()])
-        .output()
-    {
-        // codesign prints the signing authority to stderr.
-        let authority = String::from_utf8_lossy(&info.stderr);
-        if authority.contains("Authority=Developer ID Application") {
-            eprintln!("[indexa-desktop] bundle is Developer-ID signed — skipping ad-hoc re-sign");
-            return;
+        .output();
+    let is_confirmed_adhoc = match probe {
+        Ok(info) => {
+            let out = format!(
+                "{}{}",
+                String::from_utf8_lossy(&info.stderr),
+                String::from_utf8_lossy(&info.stdout)
+            );
+            // Must NOT carry a Developer-ID authority, and must positively report
+            // an ad-hoc/linker signature — otherwise we don't know, so don't touch it.
+            !out.contains("Authority=Developer ID Application")
+                && (out.contains("Signature=adhoc") || out.contains("linker-signed"))
         }
+        Err(_) => false, // can't probe → assume notarized → leave it alone
+    };
+    if !is_confirmed_adhoc {
+        eprintln!(
+            "[indexa-desktop] bundle is Developer-ID/notarized (or signature unverifiable) \
+             — skipping ad-hoc re-sign"
+        );
+        return;
     }
 
     match std::process::Command::new("codesign")

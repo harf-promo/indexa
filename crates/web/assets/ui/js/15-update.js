@@ -45,6 +45,22 @@ document.addEventListener('DOMContentLoaded', function () {
           badge.textContent = d.error ? 'check failed' : 'up to date';
         }
       }
+
+      // Inside the desktop app, the in-page "Update now" button is disabled: the
+      // app updates itself via the Tauri native updater (which installs the
+      // notarized .app bundle). A web binary self-replace would corrupt the
+      // bundle. Hide the button and point the user at the menu-bar item.
+      if (d.desktop) {
+        var btn = document.getElementById('update-apply-btn');
+        if (btn) btn.style.display = 'none';
+        var status = document.getElementById('update-apply-status');
+        if (status) {
+          status.textContent = d.update_available
+            ? 'Update v' + d.latest + ' is ready — choose “Check for Updates…” in the Indexa menu-bar icon to install it.'
+            : 'Indexa keeps itself up to date — use “Check for Updates…” in the menu-bar icon.';
+          status.style.color = 'var(--muted)';
+        }
+      }
     })
     .catch(function () {
       // Network/parse error — leave the version slot blank; never break the UI.

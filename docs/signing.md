@@ -98,6 +98,25 @@ spctl -a -vvv -t exec /Applications/Indexa.app       # → accepted, source=Nota
 stapler validate /Applications/Indexa.app            # → The validate action worked!
 ```
 
+The release workflow runs exactly these three assertions on every signed build
+(the "Assert the bundle is Developer-ID signed, notarized + stapled" step in
+`.github/workflows/release.yml`), so a regression to an un-stapled or ad-hoc
+bundle fails the desktop job rather than shipping. **Stapling matters:** an
+un-stapled notarized app needs the network to validate on first launch, and the
+in-app updater extracts the bundle offline — a missing staple would brick it.
+
+### Never re-sign a notarized bundle after the fact
+
+`codesign --force --sign -` (ad-hoc) on an installed app **strips** its Developer-ID
+signature and notarization, after which Gatekeeper rejects the (still-quarantined)
+bundle and it won't launch. The desktop's post-update re-sign is therefore *fail-closed*
+— it only ad-hoc-signs a bundle it can **positively confirm** is already ad-hoc/unsigned
+(see `resign_app_bundle` in `apps/indexa-desktop/src/main.rs`). Relatedly, the binary
+self-replace updater (`indexa update` / `crates/update`) **refuses to run inside a `.app`
+bundle**: it would download the headless CLI binary over the GUI Mach-O and re-sign it
+ad-hoc. The desktop updates only through its built-in Tauri updater (menu-bar "Check for
+Updates…"). This is the v0.25.0 → v0.25.1 fix.
+
 ## Troubleshooting: the **first** notarization can stall for a day or two
 
 The very first time a team notarizes, Apple has to **provision the team for the Notary service** on
