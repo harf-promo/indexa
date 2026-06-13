@@ -89,12 +89,18 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             use tauri::{
-                menu::{Menu, MenuItem},
+                menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu},
                 tray::TrayIconBuilder,
             };
-            let show   = MenuItem::with_id(app, "show",         "Show Indexa",         true, None::<&str>)?;
-            let update = MenuItem::with_id(app, "check-update", "Check for Updates…",  true, None::<&str>)?;
-            let quit   = MenuItem::with_id(app, "quit",         "Quit",                true, None::<&str>)?;
+            let show = MenuItem::with_id(app, "show", "Show Indexa", true, None::<&str>)?;
+            let update = MenuItem::with_id(
+                app,
+                "check-update",
+                "Check for Updates…",
+                true,
+                None::<&str>,
+            )?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &update, &quit])?;
 
             let _tray = TrayIconBuilder::new()
@@ -107,11 +113,73 @@ fn main() {
                             let _ = win.set_focus();
                         }
                     }
-                    "check-update" => run_update_check(app.clone()),
+                    "check-update" => run_update_check(app.clone(), true),
                     "quit" => app.exit(0),
                     _ => {}
                 })
                 .build(app)?;
+
+            // Native macOS menu bar so "Check for Updates" lives where macOS users look
+            // (the app menu), not only in the tray icon. Also gives a standard ⌘Q, an
+            // About box, and working ⌘C/⌘X/⌘V in the webview's text fields. Uses a distinct
+            // id ("app-check-update") from the tray's "check-update" so neither double-fires.
+            let app_check = MenuItem::with_id(
+                app,
+                "app-check-update",
+                "Check for Updates…",
+                true,
+                None::<&str>,
+            )?;
+            let about_meta = AboutMetadata {
+                version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+                ..Default::default()
+            };
+            let app_menu = Submenu::with_items(
+                app,
+                "Indexa",
+                true,
+                &[
+                    &PredefinedMenuItem::about(app, Some("Indexa"), Some(about_meta))?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &app_check,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::hide(app, None)?,
+                    &PredefinedMenuItem::hide_others(app, None)?,
+                    &PredefinedMenuItem::show_all(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::quit(app, None)?,
+                ],
+            )?;
+            let edit_menu = Submenu::with_items(
+                app,
+                "Edit",
+                true,
+                &[
+                    &PredefinedMenuItem::undo(app, None)?,
+                    &PredefinedMenuItem::redo(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::cut(app, None)?,
+                    &PredefinedMenuItem::copy(app, None)?,
+                    &PredefinedMenuItem::paste(app, None)?,
+                    &PredefinedMenuItem::select_all(app, None)?,
+                ],
+            )?;
+            let window_menu = Submenu::with_items(
+                app,
+                "Window",
+                true,
+                &[
+                    &PredefinedMenuItem::minimize(app, None)?,
+                    &PredefinedMenuItem::close_window(app, None)?,
+                ],
+            )?;
+            let menu_bar = Menu::with_items(app, &[&app_menu, &edit_menu, &window_menu])?;
+            app.set_menu(menu_bar)?;
+            app.on_menu_event(|app, event| {
+                if event.id().as_ref() == "app-check-update" {
+                    run_update_check(app.clone(), true);
+                }
+            });
 
             // Hide the window instead of closing when the user clicks ✕.
             // The app stays alive in the menu bar; "Quit" in the tray menu exits.
@@ -125,66 +193,110 @@ fn main() {
                 });
             }
 
-            // Kick off a background update check on every launch.
-            run_update_check(app.handle().clone());
+            // Auto check-on-launch is CHECK-ONLY (manual=false): it never silently
+            // downloads + installs, so reopening Indexa no longer surprises you with a
+            // restart prompt. To actually install, use "Check for Updates…" (app menu
+            // or tray) — the web Settings → Software Update panel points there too.
+            run_update_check(app.handle().clone(), false);
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Indexa desktop app");
+        .build(tauri::generate_context!())
+        .expect("error while building Indexa desktop app")
+        .run(|app_handle, event| {
+            // Re-show the window when the Dock icon is clicked after the window was closed
+            // (close hides to the tray) — without this the app is unreachable from the Dock.
+            if let tauri::RunEvent::Reopen { .. } = event {
+                if let Some(win) = app_handle.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            }
+        });
 }
 
-/// Spawn an async update check. If a newer release is available it downloads and
-/// installs it, then shows a native dialog asking the user to restart.
-fn run_update_check(app: tauri::AppHandle) {
+/// Spawn an async update check.
+///
+/// `manual = true` (the user chose "Check for Updates…" from the app menu or tray) runs the
+/// full flow — check → download → install → re-sign → confirm restart — and reports "you're
+/// up to date" / errors in a dialog. `manual = false` (the automatic check on every launch)
+/// is **check-only**: it never downloads, so reopening Indexa can't surprise the user with a
+/// restart prompt (the bug behind "it tells me to update when I reopen"). An available update
+/// is still surfaced in the web Settings → Software Update panel via `/api/update/check`.
+fn run_update_check(app: tauri::AppHandle, manual: bool) {
     tauri::async_runtime::spawn(async move {
         let updater = match app.updater() {
             Ok(u) => u,
             Err(e) => {
                 eprintln!("[indexa-desktop] updater init failed: {e:#}");
+                if manual {
+                    show_info_dialog("Indexa Update", "Could not start the updater.");
+                }
                 return;
             }
         };
-        let update = match updater.check().await {
-            Ok(Some(u)) => u,
-            Ok(None) => return, // already up to date
+        match updater.check().await {
+            Ok(None) => {
+                if manual {
+                    show_info_dialog("Indexa", "You're on the latest version.");
+                }
+            }
+            Ok(Some(update)) => {
+                if manual {
+                    install_update(app, update).await;
+                } else {
+                    eprintln!(
+                        "[indexa-desktop] update {} available — use “Check for Updates…” to install",
+                        update.version
+                    );
+                }
+            }
             Err(e) => {
-                // Network errors (offline, GitHub unavailable) are expected.
+                // Offline / GitHub unavailable is expected; only surface it on a manual check.
                 eprintln!("[indexa-desktop] update check skipped: {e:#}");
-                return;
+                if manual {
+                    show_info_dialog(
+                        "Indexa Update",
+                        "Couldn't check for updates — check your connection and try again.",
+                    );
+                }
             }
-        };
-
-        let version = update.version.clone();
-        eprintln!("[indexa-desktop] update available: {version} — downloading…");
-
-        if let Err(e) = update
-            .download_and_install(|_chunk, _total| {}, || {})
-            .await
-        {
-            eprintln!("[indexa-desktop] update install failed: {e:#}");
-            return;
-        }
-
-        // macOS 26+ Code Signing Monitor invalidates the trust record when the .app bundle
-        // is overwritten in place — even with an identical ad-hoc signature — so the freshly
-        // installed app would be killed on launch (exit 137). Re-sign the bundle before we
-        // restart into it. Mirrors the CLI's `indexa update` fix (crates/update/src/lib.rs);
-        // non-fatal so a missing/older `codesign` never blocks the update.
-        #[cfg(target_os = "macos")]
-        resign_app_bundle();
-
-        eprintln!("[indexa-desktop] update installed — prompting restart");
-
-        // Ask the user before restarting so they aren't surprised.
-        let msg = format!(
-            "Indexa {version} has been installed.\n\nRestart now to apply the update?"
-        );
-        let wants_restart = show_confirm_dialog("Indexa Update Ready", &msg);
-        if wants_restart {
-            app.restart();
         }
     });
+}
+
+/// Download, install, re-sign (macOS), and offer to restart into an available update.
+async fn install_update(app: tauri::AppHandle, update: tauri_plugin_updater::Update) {
+    let version = update.version.clone();
+    eprintln!("[indexa-desktop] update {version} — downloading…");
+
+    if let Err(e) = update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+    {
+        eprintln!("[indexa-desktop] update install failed: {e:#}");
+        show_info_dialog(
+            "Indexa Update",
+            &format!("The update failed to install: {e}"),
+        );
+        return;
+    }
+
+    // macOS 26+ Code Signing Monitor invalidates the trust record when the .app bundle
+    // is overwritten in place — even with an identical ad-hoc signature — so the freshly
+    // installed app would be killed on launch (exit 137). Re-sign the bundle before we
+    // restart into it. Mirrors the CLI's `indexa update` fix (crates/update/src/lib.rs);
+    // non-fatal so a missing/older `codesign` never blocks the update.
+    #[cfg(target_os = "macos")]
+    resign_app_bundle();
+
+    eprintln!("[indexa-desktop] update installed — prompting restart");
+
+    // Ask the user before restarting so they aren't surprised.
+    let msg = format!("Indexa {version} has been installed.\n\nRestart now to apply the update?");
+    if show_confirm_dialog("Indexa Update Ready", &msg) {
+        app.restart();
+    }
 }
 
 /// Re-sign the running `.app` bundle with an **ad-hoc** signature after an in-place update,
@@ -289,8 +401,8 @@ async fn run_server(port: u16) -> anyhow::Result<()> {
 
     let keep_alive = cfg.resource.effective_keep_alive_secs();
 
-    let embedder: Arc<dyn indexa_embed::Embedder + Send + Sync + 'static> = Arc::from(
-        indexa_embed::from_config_with_keep_alive(
+    let embedder: Arc<dyn indexa_embed::Embedder + Send + Sync + 'static> =
+        Arc::from(indexa_embed::from_config_with_keep_alive(
             &cfg.embedding.provider,
             &cfg.embedding.model,
             cfg.embedding.dim,
@@ -299,11 +411,10 @@ async fn run_server(port: u16) -> anyhow::Result<()> {
             cfg.api_keys.google.as_deref(),
             Some(keep_alive),
             cfg.describer.num_ctx,
-        )?,
-    );
+        )?);
 
-    let llm: Arc<dyn indexa_llm::Generator + Send + Sync + 'static> = Arc::from(
-        indexa_llm::from_config_with_keep_alive(
+    let llm: Arc<dyn indexa_llm::Generator + Send + Sync + 'static> =
+        Arc::from(indexa_llm::from_config_with_keep_alive(
             &cfg.describer.provider,
             &cfg.describer.model,
             &cfg.describer.base_url,
@@ -311,8 +422,7 @@ async fn run_server(port: u16) -> anyhow::Result<()> {
             cfg.api_keys.anthropic.as_deref(),
             Some(keep_alive),
             cfg.describer.num_ctx,
-        )?,
-    );
+        )?);
 
     // Desktop always binds to localhost — never expose on LAN without explicit CLI opt-in.
     indexa_web::serve(port, "127.0.0.1", store, embedder, llm, cfg).await
@@ -348,6 +458,24 @@ fn show_error_dialog(title: &str, message: &str) {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (title, message); // suppress unused warnings
+    }
+}
+
+/// Show a native OS informational alert with a single OK button. No-op off macOS.
+fn show_info_dialog(title: &str, message: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(format!(
+                "display alert {title:?} message {message:?} \
+                 buttons {{\"OK\"}} default button \"OK\""
+            ))
+            .status();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (title, message);
     }
 }
 
