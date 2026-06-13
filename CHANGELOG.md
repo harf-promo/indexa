@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.1] — 2026-06-13
+
+A critical desktop-updater fix. The macOS desktop app's embedded **web** "Update now" button
+(Settings → Software Update) ran the CLI's *binary* self-replace against its own `.app` bundle —
+downloading the headless `indexa-<arch>-apple-darwin` CLI binary, swapping it over the GUI Mach-O,
+and ad-hoc re-signing it. That stripped the Developer-ID signature + notarization, leaving a
+quarantined ad-hoc bundle that Gatekeeper refuses to launch (the app showed *"Updated to v… —
+relaunching…"* and never came back). The Tauri menu-bar updater was never affected.
+
+### Fixed
+
+- **The desktop app no longer exposes a binary self-replace updater.** It stops setting
+  `INDEXA_WEB_ALLOW_UPDATE`, so the web "Update now" button is gone in desktop mode; updates flow
+  only through the menu-bar **"Check for Updates…"** (Tauri's notarized-`.app` updater).
+- **`indexa update` / `crates/update` refuses to self-replace inside a macOS `.app` bundle** (or
+  when `INDEXA_DESKTOP=1`) — a hard guard that fails before any download, so no caller can corrupt
+  a bundle this way again.
+- **`POST /api/update/apply` refuses in desktop mode** (HTTP 403, points to the menu-bar updater),
+  and `GET /api/update/check` now returns a `desktop` flag so the web UI hides the button.
+- **The desktop's post-update ad-hoc re-sign now fails closed** — it only re-signs a bundle it can
+  positively confirm is ad-hoc/unsigned, never a Developer-ID/notarized one.
+- **CI asserts the desktop bundle is Developer-ID signed, notarized, and stapled** on every signed
+  release (an un-stapled bundle would fail the updater's offline launch).
+
+> **If your desktop app is already broken** (won't open after clicking the web "Update now"):
+> reinstall from the notarized DMG — your index data in `~/Library/Application Support/dev.indexa.Indexa/`
+> is untouched. From a working v0.25.0+, updating to v0.25.1 via the **menu-bar** "Check for
+> Updates…" is safe; do not use the web button until you're on v0.25.1 (where it's removed).
+
 ## [0.25.0] — 2026-06-11
 
 "Deep Accuracy": earn back the asterisks.
@@ -1008,7 +1037,8 @@ locally. Feedback welcome via [Discussions](../../discussions).
 
 ---
 
-[Unreleased]: https://github.com/harf-promo/indexa/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/harf-promo/indexa/compare/v0.25.1...HEAD
+[0.25.1]: https://github.com/harf-promo/indexa/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/harf-promo/indexa/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/harf-promo/indexa/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/harf-promo/indexa/compare/v0.22.0...v0.23.0
