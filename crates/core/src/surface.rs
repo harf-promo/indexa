@@ -90,11 +90,60 @@ static HINTS: &[(Predicate, PathHint)] = &[
     (
         |p| {
             ends_with(p, "dist")
-                && p.parent()
-                    .is_some_and(|par| par.join("package.json").exists())
+                && p.parent().is_some_and(|par| {
+                    par.join("package.json").exists()
+                        || par.join("setup.py").exists()
+                        || par.join("pyproject.toml").exists()
+                })
         },
         PathHint {
-            label: "JS/TS build output",
+            label: "JS/Python build output",
+            category: "build-artifact",
+            deep_scan: DeepScanPolicy::Skip,
+        },
+    ),
+    (
+        // CocoaPods vendored pods — skip only when a `Podfile` sits alongside, so a
+        // hand-written directory that merely happens to be named `Pods` isn't pruned.
+        |p| ends_with(p, "Pods") && p.parent().is_some_and(|par| par.join("Podfile").exists()),
+        PathHint {
+            label: "CocoaPods dependencies",
+            category: "build-artifact",
+            deep_scan: DeepScanPolicy::Skip,
+        },
+    ),
+    (
+        // Vendored dependencies (Go modules / PHP Composer / Ruby Bundler) — skip only
+        // next to the manifest that generates them, never a committed source `vendor/`.
+        |p| {
+            ends_with(p, "vendor")
+                && p.parent().is_some_and(|par| {
+                    par.join("go.mod").exists()
+                        || par.join("composer.json").exists()
+                        || par.join("Gemfile").exists()
+                })
+        },
+        PathHint {
+            label: "Vendored dependencies",
+            category: "build-artifact",
+            deep_scan: DeepScanPolicy::Skip,
+        },
+    ),
+    (
+        // Generic `build/` output — skip only next to a recognized build system's manifest,
+        // so a project that keeps source in a `build/` directory is never pruned.
+        |p| {
+            ends_with(p, "build")
+                && p.parent().is_some_and(|par| {
+                    par.join("CMakeLists.txt").exists()
+                        || par.join("Makefile").exists()
+                        || par.join("meson.build").exists()
+                        || par.join("build.gradle").exists()
+                        || par.join("pom.xml").exists()
+                })
+        },
+        PathHint {
+            label: "Build output",
             category: "build-artifact",
             deep_scan: DeepScanPolicy::Skip,
         },

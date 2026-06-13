@@ -36,6 +36,21 @@ pub(crate) async fn cmd_scan(paths: Vec<String>, all: bool, cfg: &Config) -> Res
         } else {
             println!("  {count} entries");
         }
+        // Self-heal: drop chunks/summaries left orphaned (no entry row) — e.g. build
+        // artifacts indexed by an older version, or rows stranded by a partial delete.
+        // `reconcile_entries` only cleans *ghost entries*, never orphans with no entry.
+        let orphans = store.prune_orphans()?;
+        if !orphans.is_empty() {
+            println!(
+                "  pruned {} orphaned chunk(s){}",
+                orphans.chunks,
+                if orphans.summaries > 0 {
+                    format!(" and {} summary(ies)", orphans.summaries)
+                } else {
+                    String::new()
+                }
+            );
+        }
     }
 
     println!("\nIndex saved to {}", db_path.display());

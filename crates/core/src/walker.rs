@@ -249,6 +249,66 @@ mod tests {
     }
 
     #[test]
+    fn prunes_vcs_cache_and_artifact_dirs() {
+        // When scanning a parent of many projects, nested `.gitignore` files are NOT
+        // loaded (only the scan root's), so build/VCS/cache directories must be pruned
+        // by name. `.git/` is the worst offender — left un-skipped it indexes thousands
+        // of git objects/refs. Regression for the "index full of target/.git junk" report.
+        let dir = tempfile::tempdir().unwrap();
+        // Manifests that mark a recognized project, so the guarded build-dir rules
+        // (Pods next to a Podfile, vendor next to go.mod, build next to a Makefile) fire.
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"").unwrap();
+        std::fs::write(dir.path().join("Podfile"), "platform :ios").unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module x").unwrap();
+        std::fs::write(dir.path().join("Makefile"), "all:").unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+
+        let junk = [
+            ".git",
+            ".svn",
+            ".hg",
+            "node_modules",
+            "target",
+            "__pycache__",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
+            ".tox",
+            ".idea",
+            ".dart_tool",
+            "Pods",
+            "vendor",
+            "build",
+        ];
+        for j in junk {
+            let d = dir.path().join(j).join("nested");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(dir.path().join(j).join("junk.txt"), "artifact").unwrap();
+            std::fs::write(d.join("deep.txt"), "deep artifact").unwrap();
+        }
+
+        let entries = walk(dir.path(), &WalkConfig::default()).unwrap();
+        let leaked: Vec<&str> = junk
+            .iter()
+            .copied()
+            .filter(|j| {
+                let needle = format!("/{j}/");
+                entries
+                    .iter()
+                    .any(|e| e.path.to_string_lossy().contains(&needle))
+            })
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "these dirs leaked into the index: {leaked:?}"
+        );
+        assert!(
+            entries.iter().any(|e| e.path.ends_with("main.rs")),
+            "real source must still be indexed"
+        );
+    }
+
+    #[test]
     fn respects_max_depth() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
