@@ -185,11 +185,17 @@ jobs:
         # Locks in the signing contract so a tauri-action change or a silent
         # notarization/staple failure can't ship a bundle that Gatekeeper rejects
         # or that fails to launch offline (an un-stapled app needs the network to
-        # validate). Only runs when real signing is configured; the ad-hoc
-        # fallback build (no APPLE_SIGNING_IDENTITY) is skipped.
-        if: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
+        # validate). Only asserts when real signing is configured; the ad-hoc
+        # fallback build (no APPLE_SIGNING_IDENTITY) is skipped IN-SCRIPT — the
+        # `secrets` context is not allowed in a step-level `if:`.
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "ad-hoc fallback build (no signing identity) — skipping signature assertion."
+            exit 0
+          fi
           APP=$(find apps/indexa-desktop/target -path '*/bundle/macos/*.app' -maxdepth 8 -type d | head -1)
           if [ -z "$APP" ]; then echo "::error::built .app not found"; exit 1; fi
           echo "Verifying $APP"
