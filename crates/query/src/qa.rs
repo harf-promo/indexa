@@ -269,6 +269,10 @@ pub(crate) fn retrieve(
         cfg.rrf_k,
         ann,
     )?;
+    // Belt-and-suspenders: drop any content-free stub chunk that slipped past the SQL filter
+    // (e.g. the ANN dense arm returns ids straight from the HNSW index without running it),
+    // so a "File: icon.png" placeholder can never surface as an answer source.
+    hits.retain(|h| !indexa_core::store::is_stub_chunk(&h.text));
     if let Some(qvec) = query_vec {
         let _ = store.boost_with_summaries(
             &mut hits,
@@ -1331,6 +1335,73 @@ mod tests {
             .collect();
         store.upsert_chunks(&records).unwrap();
         (dir, path)
+    }
+
+    #[test]
+    fn stub_chunks_are_excluded_from_retrieval() {
+        use indexa_core::store::is_stub_chunk;
+        // Truth table for the shared helper.
+        assert!(is_stub_chunk("File: Square44x44Logo.png"));
+        assert!(is_stub_chunk("Image: photo.jpg"));
+        assert!(is_stub_chunk("Media file: clip.mp4"));
+        assert!(!is_stub_chunk("Indexa is the local context engine for AI."));
+        // A long line that merely starts with the prefix is real content, not a stub.
+        assert!(!is_stub_chunk(&format!("File: {}", "x".repeat(90))));
+
+        // A content-free image stub alongside a real chunk; a query matching both must
+        // surface only the real one (filtered in SQL + the retrieve() guard).
+        let (_d, path) = temp_index_with_chunks(&[
+            ("/icons/logo.png", "File: logo.png"),
+            (
+                "/docs/brand.md",
+                "The logo file is the brand mark used across the app.",
+            ),
+        ]);
+        let store = Store::open(&path).unwrap();
+        let cfg = QaConfig {
+            mode: HybridMode::Sparse,
+            top_k: 10,
+            ..QaConfig::default()
+        };
+        let hits = retrieve(&store, "logo", None, &cfg, None).unwrap();
+        assert!(!hits.is_empty(), "the real chunk should match 'logo'");
+        assert!(
+            hits.iter().all(|h| !is_stub_chunk(&h.text)),
+            "stub chunk leaked into retrieval: {:?}",
+            hits.iter().map(|h| h.text.clone()).collect::<Vec<_>>()
+        );
+        assert!(hits.iter().any(|h| h.entry_path == "/docs/brand.md"));
+    }
+
+    #[test]
+    fn scoped_retrieval_limits_to_the_path_prefix() {
+        // Two files under different dirs; scoping to one dir must exclude the other.
+        let (_d, path) = temp_index_with_chunks(&[
+            (
+                "/src/auth.rs",
+                "authentication token refresh and session handling",
+            ),
+            ("/docs/auth.md", "authentication overview for end users"),
+        ]);
+        let store = Store::open(&path).unwrap();
+        let cfg = QaConfig {
+            mode: HybridMode::Sparse,
+            top_k: 10,
+            scope: Some("/src".to_owned()),
+            ..QaConfig::default()
+        };
+        let hits = retrieve(&store, "authentication", None, &cfg, None).unwrap();
+        assert!(
+            !hits.is_empty(),
+            "scoped query should still match in-scope content"
+        );
+        assert!(
+            hits.iter().all(|h| h.entry_path.starts_with("/src")),
+            "out-of-scope chunk leaked: {:?}",
+            hits.iter()
+                .map(|h| h.entry_path.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

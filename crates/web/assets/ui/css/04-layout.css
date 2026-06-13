@@ -94,8 +94,13 @@
   margin-left: 4px;
 }
 .tree-children { padding-left: 14px; }
-.tree-row-actions { display: none; gap: 1px; margin-left: auto; flex-shrink: 0; }
-.tree-node-row:hover .tree-row-actions { display: flex; }
+/* Row actions stay laid out (no reflow) but are revealed on hover, keyboard focus, AND
+   when the row is selected — so clicking a file surfaces what you can do with it, and Tab
+   reaches the buttons (they were previously display:none = hover-only, undiscoverable). */
+.tree-row-actions { display: flex; gap: 1px; margin-left: auto; flex-shrink: 0; opacity: 0; transition: opacity 100ms; }
+.tree-node-row:hover .tree-row-actions,
+.tree-node-row:focus-within .tree-row-actions,
+.tree-node-row.selected .tree-row-actions { opacity: 1; }
 .tree-row-actions button {
   background: none; border: none; color: var(--muted); cursor: pointer;
   font-size: 11px; padding: 1px 4px; border-radius: var(--radius-sm); line-height: 1.5;

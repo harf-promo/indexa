@@ -397,19 +397,23 @@ impl Default for PdfParserConfig {
     }
 }
 
-/// Default Ollama vision model for image captioning. Non-Chinese-vendor per the project's
-/// model-preference guidance; the user pulls it (it is NOT auto-downloaded).
-pub const DEFAULT_CAPTION_MODEL: &str = "llama3.2-vision";
+/// Default Ollama vision model for image captioning. Reuses **gemma3** — the same Google
+/// multimodal model Indexa already pulls for file summaries (per the documented setup) — so
+/// captioning works out of the box with no extra model download, and the watchdog's existing
+/// summary-model budget already covers it. Google-vendor per the project's model-preference
+/// guidance. The user still opts in (`caption = true`); nothing is auto-downloaded. For
+/// richer captions, set `[parsers.image] model = "gemma3:12b"` (also already pulled).
+pub const DEFAULT_CAPTION_MODEL: &str = "gemma3:4b";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ImageParserConfig {
-    /// Set true to caption images with an Ollama vision model (opt-in). NOTE: this loads a
-    /// vision model (~7-8 GB) that the resource watchdog does not yet budget — enable only
-    /// with memory headroom. Images are sent to a local Ollama; nothing leaves the machine.
-    /// Captions are produced on the next `deep` for newly-scanned or modified images;
-    /// images already indexed (unchanged mtime) are skipped, so to caption an existing tree,
-    /// touch the files or rebuild the index.
+    /// Set true to caption images with an Ollama vision model (opt-in). Defaults to the gemma3
+    /// summary model, which is already loaded — so there's no separate ~7-8 GB vision model to
+    /// budget — but enable only with memory headroom. Images are sent to a local Ollama;
+    /// nothing leaves the machine. Captions are produced on the next `deep` for newly-scanned
+    /// or modified images; images already indexed (unchanged mtime) are skipped, so to caption
+    /// an existing tree, touch the files or rebuild the index.
     pub caption: bool,
     /// Vision model to caption with. Defaults to [`DEFAULT_CAPTION_MODEL`] when unset.
     pub model: Option<String>,

@@ -129,6 +129,37 @@
 .input-bar button:disabled { opacity: 0.4; cursor: default; }
 .ask-agentic-toggle { flex-shrink: 0; white-space: nowrap; align-self: center; }
 
+/* File-aware Ask: the "Asking about: <name> ✕" chip takes its own row above the input. */
+.input-bar { flex-wrap: wrap; }
+.ask-scope-chip { flex-basis: 100%; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.ask-scope-chip .ask-scope-label {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 999px;
+  padding: 3px 11px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ask-scope-chip .ask-scope-label strong { color: var(--text); }
+.ask-scope-chip .ask-scope-clear {
+  background: transparent; color: var(--muted); border: 1px solid var(--border); border-radius: 999px;
+  padding: 1px 8px; font-size: 12px; line-height: 1.4; font-weight: 400; cursor: pointer;
+}
+.ask-scope-chip .ask-scope-clear:hover { color: var(--text); border-color: var(--accent); opacity: 1; }
+
+/* "Broaden to folder" offer shown under a thin scoped answer (appended to the message). */
+.ask-broaden { margin-top: 10px; color: var(--muted); font-size: 13px; }
+
+/* "Context not built yet" banner (between the tab bar and the workspace views). */
+.context-notice {
+  display: flex; align-items: center; gap: 12px;
+  padding: 9px 16px; background: var(--surface); border-bottom: 1px solid var(--border);
+  font-size: 13px; color: var(--text);
+}
+.context-notice-msg { flex: 1; color: var(--muted); }
+.context-notice-msg strong { color: var(--text); }
+.context-notice-x {
+  background: transparent; border: none; color: var(--muted); cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 2px 6px; flex-shrink: 0;
+}
+.context-notice-x:hover { color: var(--text); }
+
 /* Saved searches: recall dropdown + save-star, both in the Ask bar. */
 #saved-q {
   flex: 0 1 180px; max-width: 180px; background: var(--bg); border: 1px solid var(--border);
@@ -291,6 +322,11 @@
   margin-bottom: 12px; line-height: 1.5;
 }
 .summary-regen-btn { flex-shrink: 0; }
+/* Primary "Ask about this …" CTA — the bridge from a summary into a scoped Ask. */
+.summary-ask-btn { flex-shrink: 0; background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.summary-ask-btn:hover:not(:disabled) { color: var(--bg); border-color: var(--accent); opacity: 0.9; }
+/* "No summary yet" action row: Ask + Generate side by side. */
+.summary-noctx-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 /* ── Export dropdown ── */
 .export-menu-wrap { position: relative; flex-shrink: 0; }

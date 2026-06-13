@@ -3,6 +3,39 @@ const chat = document.getElementById('chat');
 const qInput = document.getElementById('q');
 const sendBtn = document.getElementById('send');
 
+/* ── Ask scope (file-aware Ask) ───────────────────────────────────────────────
+   Selecting a file/folder auto-scopes Ask to it — a removable "Asking about:
+   <name> ✕" chip. Clearing → whole-index ask; selecting a new node re-arms it.
+   The scope rides as `scope` on /api/ask/stream, mirroring `indexa ask --scope`. */
+var askScope = null;       // current path prefix, or null for whole-index
+var lastAskQuestion = '';  // remembered for the "broaden to folder" retry
+
+function renderAskScopeChip() {
+  var slot = document.getElementById('ask-scope-chip');
+  if (!slot) return;
+  if (!askScope) { slot.hidden = true; slot.textContent = ''; return; }
+  var name = askScope.split('/').pop() || askScope;
+  slot.hidden = false;
+  slot.innerHTML =
+    '<span class="ask-scope-label" title="Answers are limited to paths starting with ' + escapeAttr(askScope) +
+    '">Asking about: <strong>' + escapeHtml(name) + '</strong></span>' +
+    '<button type="button" class="ask-scope-clear" title="Ask across the whole index" ' +
+    'aria-label="Clear scope — ask across the whole index" onclick="clearAskScope()">&#x2715;</button>';
+}
+
+// Arm/replace the scope (called when a file/folder is selected). eslint-disable-line no-unused-vars
+function setAskScope(path) { askScope = path || null; renderAskScopeChip(); }
+
+// Clear to whole-index. Referenced from the chip's ✕ onclick.
+function clearAskScope() { askScope = null; renderAskScopeChip(); }  // eslint-disable-line no-unused-vars
+
+// Bridge from the Context summary header's "Ask about this …" button.
+function askAboutSelection(path) {  // eslint-disable-line no-unused-vars
+  if (path) setAskScope(path);
+  switchTab('chat');
+  if (qInput) qInput.focus();
+}
+
 function appendMsg(role, html) {
   const welcome = chat.querySelector('.welcome');
   if (welcome) welcome.remove();
@@ -28,6 +61,8 @@ function renderSources(sources) {
 async function doAsk() {
   const q = qInput.value.trim();
   if (!q) return;
+  lastAskQuestion = q; // for the "broaden to folder" retry on thin scoped results
+  const scopeForAsk = askScope; // snapshot: the chip may change before the stream returns
 
   // Pre-flight: if no embeddings exist yet, guide the user instead of returning
   // an unhelpful empty/error answer.
@@ -40,7 +75,7 @@ async function doAsk() {
       appendMsg('assistant',
         '<div class="ask-guidance">' +
         '<strong>No context built yet.</strong><br>' +
-        'Select a folder in the sidebar and click <strong>⚡ Build deep context</strong> to index it first.<br>' +
+        'Select a folder in the sidebar and click <strong>⚡ Index for search</strong> to index it first.<br>' +
         '<button class="btn-sm" style="margin-top:10px" onclick="switchTab(\'tree\')">Go to folders →</button>' +
         '</div>');
       return;
@@ -101,7 +136,7 @@ async function doAsk() {
     const r = await fetch('/api/ask/stream', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ question: q, agentic: agentic })
+      body: JSON.stringify({ question: q, agentic: agentic, scope: scopeForAsk })
     });
     if (!r.ok || !r.body) throw new Error('Request failed (' + r.status + ')');
 
@@ -138,9 +173,35 @@ async function doAsk() {
     bubble.innerHTML = answerText ? renderAnswer() + errHtml : errHtml;
   }
 
+  // Few results under a single-file/folder scope? Offer to broaden one level up,
+  // rather than silently falling back to a whole-index search (which re-introduces
+  // the noise scoping was meant to remove). The user stays in control.
+  if (scopeForAsk && (sources.length < 3 || (confidence && confidence.level === 'low'))) {
+    var parent = scopeForAsk.replace(/\/[^/]+$/, '');
+    if (parent && parent !== scopeForAsk) {
+      var pName = parent.split('/').pop() || parent;
+      var offer = document.createElement('div');
+      offer.className = 'ask-broaden';
+      offer.appendChild(document.createTextNode('Few results in this scope. '));
+      var bBtn = document.createElement('button');
+      bBtn.type = 'button';
+      bBtn.className = 'btn-sm';
+      bBtn.textContent = 'Broaden to ' + pName + '/ →';
+      bBtn.addEventListener('click', function() { broadenAskTo(parent); });
+      offer.appendChild(bBtn);
+      thinking.appendChild(offer);
+    }
+  }
+
   sendBtn.disabled = false;
   qInput.focus();
   chat.scrollTop = chat.scrollHeight;
+}
+
+// Re-ask the last question with the scope widened to `path` (the parent folder).
+function broadenAskTo(path) {
+  setAskScope(path);
+  if (qInput) { qInput.value = lastAskQuestion; doAsk(); }
 }
 
 sendBtn.addEventListener('click', doAsk);
@@ -221,10 +282,62 @@ async function saveResource() {
 }
 
 /* ── Queue stats (shown in Jobs tab + sidebar failed badge) ── */
+/* "Context not built yet" banner — shown when the index is embedded (chunks>0) but has no
+   summaries, so Ask falls back to raw chunks. Auto-hides once summaries exist; dismissible
+   for the session. Refreshed alongside the 5 s queue poll. */
+var lastQueuePending = 0;
+var contextNoticeDismissed = false;
+var contextNoticeResolved = false; // summaries confirmed present → stop re-checking
+
+async function refreshContextNotice() {
+  var el = document.getElementById('context-notice');
+  if (!el) return;
+  if (contextNoticeDismissed || contextNoticeResolved) { el.hidden = true; return; }
+  try {
+    var s = await (await fetch('/api/stats')).json();
+    if (s.summaries > 0) { contextNoticeResolved = true; el.hidden = true; return; }
+    if (s.chunks === 0) { el.hidden = true; return; } // empty index → onboarding handles it
+    el.hidden = false;
+    el.innerHTML =
+      '<span class="context-notice-msg">&#x1F4A1; <strong>Context not built yet.</strong> ' +
+      'Answers fall back to raw file chunks' +
+      (lastQueuePending ? ' &mdash; ' + lastQueuePending.toLocaleString() + ' file' +
+        (lastQueuePending === 1 ? '' : 's') + ' queued' : '') +
+      '. Build summaries for sharper, grounded answers.</span>' +
+      '<button type="button" class="btn-sm" onclick="buildContextNow()">Build context</button>' +
+      '<button type="button" class="context-notice-x" title="Dismiss" aria-label="Dismiss" onclick="dismissContextNotice()">&#x2715;</button>';
+  } catch (_) { el.hidden = true; }
+}
+
+function dismissContextNotice() {  // eslint-disable-line no-unused-vars
+  contextNoticeDismissed = true;
+  var el = document.getElementById('context-notice');
+  if (el) el.hidden = true;
+}
+
+// Kick off summarization for every root, draining the queue into real summaries.
+async function buildContextNow() {  // eslint-disable-line no-unused-vars
+  dismissContextNotice();
+  try {
+    var roots = await (await fetch('/api/roots')).json();
+    (roots || []).forEach(function (r) {
+      if (typeof fireJob === 'function') fireJob('summarize', r.path);
+    });
+    if (roots && roots.length && typeof toast === 'function') {
+      toast('Building context for ' + roots.length + ' folder' +
+        (roots.length === 1 ? '' : 's') + '…', 'info');
+    }
+  } catch (e) {
+    if (typeof toast === 'function') toast('Could not start: ' + e.message, 'error');
+  }
+}
+
 async function pollQueue() {
   try {
     const r = await fetch('/api/queue');
     const d = await r.json();
+    lastQueuePending = d.pending; // for the "context not built" banner's queued-count
+    refreshContextNotice();
     // Sidebar failed badge — visible when there are failed summaries
     var badge = document.getElementById('sidebar-failed-badge');
     if (badge) {
