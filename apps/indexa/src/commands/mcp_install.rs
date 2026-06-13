@@ -24,6 +24,43 @@ impl McpClient {
             ),
         }
     }
+
+    /// Canonical name, for echoing what was auto-detected.
+    fn label(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude-code",
+            Self::ClaudeDesktop => "claude-desktop",
+            Self::Cursor => "cursor",
+            Self::VsCode => "vscode",
+        }
+    }
+}
+
+/// Best-effort detection of which supported clients are installed, used when
+/// `indexa mcp install` runs with no `--client`. Each probe is cheap and
+/// side-effect-free: `claude` on PATH, a present Claude Desktop / Cursor config
+/// directory, or a `.vscode` workspace in the current directory. A false
+/// negative just means the user names the client explicitly — never destructive.
+fn detect_installed_clients() -> Vec<McpClient> {
+    let mut found = Vec::new();
+    if find_on_path("claude").is_some() {
+        found.push(McpClient::ClaudeCode);
+    }
+    let dir_exists = |p: Result<PathBuf>| {
+        p.ok()
+            .and_then(|p| p.parent().map(|d| d.is_dir()))
+            .unwrap_or(false)
+    };
+    if dir_exists(claude_desktop_config_path()) {
+        found.push(McpClient::ClaudeDesktop);
+    }
+    if dir_exists(cursor_config_path()) {
+        found.push(McpClient::Cursor);
+    }
+    if Path::new(".vscode").is_dir() {
+        found.push(McpClient::VsCode);
+    }
+    found
 }
 
 /// One-shot MCP registration: point each requested client at this binary.
@@ -36,10 +73,25 @@ pub(crate) async fn cmd_mcp_install(clients: Vec<String>, dry_run: bool) -> Resu
     let exe = exe.to_string_lossy().into_owned();
 
     let mut parsed: Vec<McpClient> = Vec::new();
-    for c in &clients {
-        let client = McpClient::parse(c)?;
-        if !parsed.contains(&client) {
-            parsed.push(client);
+    if clients.is_empty() {
+        // No --client: auto-detect installed clients and configure each one found.
+        parsed = detect_installed_clients();
+        if parsed.is_empty() {
+            println!(
+                "No supported MCP clients detected (looked for: `claude` on PATH, a Claude \
+                 Desktop or Cursor config directory, and a ./.vscode workspace)."
+            );
+            println!("Name one explicitly, e.g.: indexa mcp install --client claude-code");
+            return Ok(());
+        }
+        let names: Vec<&str> = parsed.iter().map(|c| c.label()).collect();
+        println!("Auto-detected installed client(s): {}", names.join(", "));
+    } else {
+        for c in &clients {
+            let client = McpClient::parse(c)?;
+            if !parsed.contains(&client) {
+                parsed.push(client);
+            }
         }
     }
 

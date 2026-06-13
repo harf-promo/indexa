@@ -86,3 +86,27 @@ jobs:
           CHROME_BIN: /usr/bin/google-chrome
           PORT: "7787"
         run: node scripts/web-smoke.mjs
+
+  # The Tauri desktop app is excluded from `cargo --workspace` (its webkit deps
+  # aren't present on the Linux/Windows CI runners), so until now a `main.rs` break
+  # only surfaced at release. This compiles it on every PR — a native arm64 build,
+  # no bundling/signing (that stays in release.yml). RUSTFLAGS is cleared so a
+  # warning in a third-party tauri dependency can't fail the build; we only want to
+  # catch our own compile errors here. Additive — NOT in branch-protection.
+  desktop-build:
+    name: desktop build (macOS)
+    runs-on: macos-latest
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/indexa-desktop -> target
+
+      - name: Build desktop app
+        run: cargo build --manifest-path apps/indexa-desktop/Cargo.toml

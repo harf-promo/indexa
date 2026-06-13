@@ -381,3 +381,16 @@
 .classify-ignore-btn { color: var(--red) !important; border-color: var(--red) !important; }
 .classify-ignore-btn:hover { background: color-mix(in srgb, var(--red) 12%, transparent) !important; }
 .classify-undo-btn { color: var(--muted) !important; }
+
+/* ── Impact dashboard (token-savings telemetry) ── */
+.impact-headline { font-size: 22px; font-weight: 600; color: var(--text); margin-bottom: 4px; line-height: 1.2; }
+.impact-headline .impact-sub { font-size: 13px; font-weight: 400; color: var(--muted); }
+.impact-basis { font-size: 12px; color: var(--muted); line-height: 1.6; margin: 0 0 14px; }
+.impact-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.impact-table th {
+  text-align: left; color: var(--muted); font-weight: 500;
+  padding: 4px 8px; border-bottom: 1px solid var(--border);
+}
+.impact-table th:not(:first-child) { text-align: right; }
+.impact-table td { padding: 4px 8px; border-bottom: 1px solid var(--border-subtle); color: var(--text); }
+.impact-table td.impact-num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); }

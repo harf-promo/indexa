@@ -221,6 +221,7 @@ async function loadSettings() {
   if (typeof loadFeatures === 'function') loadFeatures();
   if (typeof loadPacks === 'function') loadPacks();
   if (typeof loadWeights === 'function') loadWeights();
+  if (typeof loadImpact === 'function') loadImpact();
 }
 
 // Collapse the long Settings drawer into an accordion: each section's <h2> toggles it.

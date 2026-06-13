@@ -269,5 +269,6 @@ async fn main() -> Result<()> {
             commands::cmd_classify(paths, category, &cfg).await
         }
         Commands::Update { check, yes, pin } => commands::cmd_update(check, yes, pin).await,
+        Commands::Completion { shell } => commands::cmd_completion(shell),
     }
 }

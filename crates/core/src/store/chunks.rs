@@ -244,4 +244,28 @@ impl Store {
             .optional()?;
         Ok(text)
     }
+
+    /// Every chunk for a file, ordered by `seq`, capped at `limit` (0 = no cap).
+    /// Embeddings are deliberately left `None`: this backs the MCP
+    /// `get_chunk_context` tool, which displays a file's indexed text/headings
+    /// (and neighbors of a search hit), not vectors — so the BLOB stays off the wire.
+    pub fn chunks_for_path(&self, entry_path: &str, limit: usize) -> Result<Vec<ChunkRecord>> {
+        let lim: i64 = if limit == 0 { -1 } else { limit as i64 };
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, heading, text, language FROM chunks
+              WHERE entry_path = ?1 ORDER BY seq LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![entry_path, lim], |r| {
+            Ok(ChunkRecord {
+                entry_path: entry_path.to_owned(),
+                seq: r.get::<_, i64>(0)? as usize,
+                heading: r.get::<_, String>(1)?,
+                text: r.get::<_, String>(2)?,
+                language: r.get::<_, Option<String>>(3)?,
+                embedding: None,
+                embed_model: None,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
 }

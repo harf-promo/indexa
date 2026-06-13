@@ -114,6 +114,37 @@ impl Store {
         Ok(())
     }
 
+    /// Per-tool aggregate over the last `since_secs` seconds, most-saving first.
+    /// Powers the web "Impact" dashboard and `indexa status --json`'s `by_tool`
+    /// breakdown — same `tool_usage` rows as [`usage_summary`], grouped by `tool`.
+    /// Ordered by avoided bytes (counterfactual − served) descending so the
+    /// highest-leverage tools surface at the top of the table.
+    pub fn usage_by_tool(&self, since_secs: i64) -> Result<Vec<(String, UsageSummary)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT tool,
+                    COUNT(*),
+                    COALESCE(SUM(bytes_served), 0),
+                    COALESCE(SUM(bytes_counterfactual), 0)
+               FROM tool_usage WHERE at >= unixepoch() - ?1
+              GROUP BY tool
+              ORDER BY COALESCE(SUM(bytes_counterfactual), 0) - COALESCE(SUM(bytes_served), 0) DESC,
+                       tool ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![since_secs], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    UsageSummary {
+                        calls: r.get::<_, i64>(1)? as u64,
+                        bytes_served: r.get::<_, i64>(2)? as u64,
+                        bytes_counterfactual: r.get::<_, i64>(3)? as u64,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Aggregate calls/bytes over the last `since_secs` seconds.
     pub fn usage_summary(&self, since_secs: i64) -> Result<UsageSummary> {
         let row = self.conn.query_row(

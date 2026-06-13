@@ -6,8 +6,8 @@ use axum::{
 };
 
 use crate::dto::{
-    err_json, file_name_of, CoverageStats, RootResponse, SearchQuery, StatsResponse,
-    TreeNodeResponse, TreemapNodeDto, UsageWeekDto,
+    err_json, file_name_of, CoverageStats, ImpactResponse, RootResponse, SearchQuery,
+    StatsResponse, ToolUsageDto, TreeNodeResponse, TreemapNodeDto, UsageWeekDto,
 };
 use crate::AppState;
 use indexa_core::store::{CoverageEntry, USAGE_WEEK_SECS};
@@ -30,6 +30,35 @@ pub(crate) async fn api_stats(State(state): State<AppState>) -> Response {
         .into_response(),
         (Err(e), _) | (_, Err(e)) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
+}
+
+/// `GET /api/impact` — the token-savings "Impact" dashboard: weekly totals plus a
+/// per-tool breakdown. Fetched lazily when the Settings → Impact section opens, so
+/// the per-tool aggregate stays off the frequently-polled `/api/stats` path. The
+/// numbers are estimates by definition (see `store::usage`); the UI carries the
+/// ≈4 bytes/token caveat from `savings_line`.
+pub(crate) async fn api_impact(State(state): State<AppState>) -> Response {
+    let store = state.store.lock().await;
+    // Best-effort reads: an empty/zero dashboard over a 500 — telemetry must never
+    // be the reason a settings panel fails to render.
+    let week = store.usage_summary(USAGE_WEEK_SECS).unwrap_or_default();
+    let by_tool = store.usage_by_tool(USAGE_WEEK_SECS).unwrap_or_default();
+    Json(ImpactResponse {
+        calls: week.calls,
+        served: week.bytes_served,
+        counterfactual: week.bytes_counterfactual,
+        savings_line: week.savings_line(),
+        by_tool: by_tool
+            .into_iter()
+            .map(|(tool, u)| ToolUsageDto {
+                tool,
+                calls: u.calls,
+                served: u.bytes_served,
+                counterfactual: u.bytes_counterfactual,
+            })
+            .collect(),
+    })
+    .into_response()
 }
 
 /// Coverage breakdown for the Map → Table view.

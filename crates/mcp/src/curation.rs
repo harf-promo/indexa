@@ -21,6 +21,15 @@ pub struct ListClassificationsParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListFilesByCategoryParams {
+    /// Classification category to list (e.g. `work`, `personal`, `code`, `media`).
+    pub category: String,
+    /// Max rows to return (default 200).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ConfirmClassificationParams {
     /// Absolute path of the file or directory.
     pub path: String,
@@ -92,6 +101,43 @@ impl IndexaMcp {
             .collect();
         Ok(ok_text(format!(
             "{} classification(s):\n\n{}",
+            recs.len(),
+            lines.join("\n")
+        )))
+    }
+
+    /// List every file/dir assigned a given classification category.
+    #[tool(
+        description = "List the files and directories classified under one category (e.g. \
+                       `work`, `code`, `media`), highest-confidence first. Complements \
+                       list_classifications (which filters by source): this answers \
+                       \"what is in category X?\" across auto and user sources."
+    )]
+    pub(crate) async fn list_files_by_category(
+        &self,
+        params: Parameters<ListFilesByCategoryParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ListFilesByCategoryParams { category, limit } = params.0;
+        let store = self.store()?;
+        let recs = store
+            .classifications_in_category(&category, limit.unwrap_or(200))
+            .map_err(mcp_err)?;
+        if recs.is_empty() {
+            return Ok(ok_text(format!("No files classified as \"{category}\".")));
+        }
+        let lines: Vec<String> = recs
+            .iter()
+            .map(|r| {
+                format!(
+                    "[{}] {} (confidence: {:.0}%)",
+                    r.source,
+                    r.path,
+                    r.confidence * 100.0
+                )
+            })
+            .collect();
+        Ok(ok_text(format!(
+            "{} file(s) classified as \"{category}\":\n\n{}",
             recs.len(),
             lines.join("\n")
         )))
