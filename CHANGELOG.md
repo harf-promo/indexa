@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.1] — 2026-06-13
+
+A correctness patch: stop falsely reporting that there's no RAM to run a model.
+
+### Fixed
+
+- **Memory budget no longer counts the macOS compressor as "used."** On a busy Mac, Indexa could
+  report a tiny budget and refuse to load a model ("too much RAM used") while macOS itself showed
+  plenty free and ran the model fine. The budget was computed from `total − used_memory()`, and
+  sysinfo 0.39's `used_memory()` on macOS *includes* the compressor (compressed memory, often 10+ GB).
+  It now uses the OS's own **available-memory** figure (active + inactive + free — what
+  `memory_pressure` reflects), which is the basis for the model-fit check, the engine bar, the
+  watchdog, and `indexa doctor`. Measured on a 36 GB machine: the reported budget went from ~0.5 GB
+  to ~10.5 GB, and the local model loads and answers as expected.
+- **Linux desktop build.** The Dock-reactivation handler used a macOS-only Tauri event
+  (`RunEvent::Reopen`) without a platform guard, breaking the (experimental) Linux desktop build; it's
+  now `#[cfg(target_os = "macos")]`-gated.
+
+### Added
+
+- **`indexa doctor --apply-ollama-env`** — opt-in: applies the recommended Ollama server settings
+  (`OLLAMA_KEEP_ALIVE=30s`, `OLLAMA_MAX_LOADED_MODELS=1`, `OLLAMA_NUM_PARALLEL=1`) via `launchctl
+  setenv` on macOS (prints the `export` lines elsewhere), so models unload promptly and don't stack.
+
 ## [0.28.0] — 2026-06-13
 
 "Better in every sense": one broad polish release — discoverable desktop updates, a self-healing

@@ -88,9 +88,15 @@ pub fn detect_machine() -> MachineSpec {
 /// more expensive `refresh_cpu_usage()` in hot loops.
 #[derive(Debug, Clone, Default)]
 pub struct MemSample {
-    /// Bytes reported as "available" by the OS (unreliable on macOS — see module docs).
+    /// Bytes the OS reports as "available" for a new allocation. On macOS this is
+    /// the XNU `active + inactive + free` metric (correct since sysinfo ≥ 0.31);
+    /// it is the basis for [`compute_budget`].
     pub available_bytes: u64,
-    /// Bytes reported as "used" (includes file cache on macOS).
+    /// Bytes the OS reports as "used". On macOS (sysinfo 0.39) this is
+    /// `internal − purgeable + wired + compressor` — it **includes** the
+    /// compressor, so it is NOT a reliable "unavailable" figure; use
+    /// `available_bytes` for budgeting. Shown as the RAM gauge (matches Activity
+    /// Monitor's "Memory Used").
     pub used_bytes: u64,
     /// Bytes of swap currently in use.  Rising swap is the key freeze signal.
     pub swap_used_bytes: u64,
@@ -456,20 +462,29 @@ impl ResourceProfile {
 
 /// The effective memory budget available for a new model load.
 ///
-/// Uses `min(spec.gpu_wired_limit, total - used) - headroom`.
+/// `min(available, gpu_wired_limit) - headroom`, where `available` is the OS's
+/// own "available memory" reading. On macOS that is the XNU
+/// `AVAILABLE_NON_COMPRESSED_MEMORY` metric (`active + inactive + free`) — the
+/// pages the kernel can hand to a new allocation on demand. It matches what
+/// `memory_pressure` reports and what actually governs whether a model loads.
 ///
-/// We compute available as `total_ram - used_bytes` where `used_bytes` from
-/// sysinfo represents active + wired pages (truly in-use, not reclaimable).
-/// This correctly excludes the ~10-15 GB of inactive file cache that macOS
-/// keeps as reclaimable buffer — that cache is returned to Ollama instantly
-/// when needed.  Using `free_bytes` or `available_bytes` from sysinfo is
-/// unreliable on macOS (sysinfo 0.30 returns 0 for available_memory on macOS).
+/// We deliberately do **not** use `total_ram - used_bytes`: sysinfo's
+/// `used_memory()` (0.39) is `internal − purgeable + wired + compressor`, so it
+/// **includes the macOS compressor** (compressed anonymous pages — often 10+ GB
+/// on a busy Mac). `total - used` therefore understates the budget by the whole
+/// compressor and produces false "out of memory" refusals while the OS still
+/// reports plenty free (verified live: 0.5 GB budget vs ~13 GB actually
+/// available). `available_memory()` is correct since sysinfo ≥ 0.31; the
+/// `total - used` path remains only as a fallback for the (legacy) case where
+/// the OS reports 0 available.
 pub fn compute_budget(spec: &MachineSpec, sample: &MemSample, headroom: u64) -> i64 {
-    // Approximate available = total RAM - actively used (wired + active pages).
-    let truly_available = spec
-        .total_ram_bytes
-        .saturating_sub(sample.used_bytes)
-        .min(spec.gpu_wired_limit_bytes);
+    let available = if sample.available_bytes > 0 {
+        sample.available_bytes
+    } else {
+        // Legacy fallback: an OS/sysinfo build that reports 0 for available.
+        spec.total_ram_bytes.saturating_sub(sample.used_bytes)
+    };
+    let truly_available = available.min(spec.gpu_wired_limit_bytes);
     truly_available as i64 - headroom as i64
 }
 
@@ -953,9 +968,13 @@ mod tests {
         swap_used_mb: u64,
         swap_total_mb: u64,
     ) -> MemSample {
+        // These tests model a 36 GB machine. The budget keys on OS "available"
+        // memory, so available = total − used (the quantity `total − used`
+        // historically encoded). Setting it this way keeps every fit/pressure
+        // assertion below identical to the pre-fix `total − used` behaviour.
         MemSample {
             free_bytes: free_gb * 1024 * 1024 * 1024,
-            available_bytes: free_gb * 1024 * 1024 * 1024,
+            available_bytes: 36u64.saturating_sub(used_gb) * 1024 * 1024 * 1024,
             used_bytes: used_gb * 1024 * 1024 * 1024,
             swap_used_bytes: swap_used_mb * 1024 * 1024,
             swap_total_bytes: swap_total_mb * 1024 * 1024,
@@ -965,9 +984,31 @@ mod tests {
     #[test]
     fn gemma3_4b_fits_on_36gb_balanced() {
         let spec = fake_spec(36, true);
-        // 16 GB used → total - used = 20 GB → budget = 20 - 5 = 15 GB → fits
+        // 16 GB used → available = 20 GB → budget = 20 - 5 = 15 GB → fits
         let sample = fake_sample_with_used(1, 16, 0, 2048);
         let headroom = ResourceProfile::Balanced.headroom_bytes();
+        assert!(check_models_fit(&["gemma3:4b"], &spec, &sample, headroom).is_ok());
+    }
+
+    #[test]
+    fn budget_keys_on_available_not_compressor_inflated_used() {
+        // v0.28.1 regression guard. On macOS sysinfo's used_memory() includes the
+        // compressor, so a busy machine shows ~29 GB "used" + ~97% sticky swap while
+        // the OS still reports ~13 GB AVAILABLE (active+inactive+free). The budget
+        // must follow `available`, not `total − used`, or it falsely refuses models
+        // the OS would load — the exact "too much RAM, can't run the model" report.
+        let spec = fake_spec(36, true);
+        let headroom = ResourceProfile::Balanced.headroom_bytes(); // 5 GB
+        let mut sample = fake_sample_with_used(0, 29, 18_000, 19_000); // compressor-inflated used + 97% swap
+        sample.available_bytes = 13 * 1024 * 1024 * 1024; // what macOS actually reports free
+        let budget = compute_budget(&spec, &sample, headroom);
+        // min(13, 27) − 5 ≈ 8 GB — NOT the −1 GB that total−used (36−29−5) would give.
+        assert!(
+            budget > 7 * 1024 * 1024 * 1024,
+            "budget should track available (~8 GB), got {budget}"
+        );
+        assert_eq!(assess(&sample, &spec, headroom), Pressure::Ok);
+        // gemma3:4b (~4 GB) must fit — the false positive refused it.
         assert!(check_models_fit(&["gemma3:4b"], &spec, &sample, headroom).is_ok());
     }
 

@@ -8,6 +8,7 @@ pub(crate) async fn cmd_doctor(
     profile_str: String,
     files_hint: Option<usize>,
     chunks_hint: Option<usize>,
+    apply_ollama_env: bool,
 ) -> Result<()> {
     let profile = match profile_str.as_str() {
         "conservative" => ResourceProfile::Conservative,
@@ -20,10 +21,15 @@ pub(crate) async fn cmd_doctor(
 
     let total_gb = spec.total_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     let free_gb = sample.free_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-    // "Reclaimable" = total - actively used (wired+active); macOS's inactive file
-    // cache is reclaimable instantly so it counts as available for new allocations.
-    let reclaimable_gb = (spec.total_ram_bytes.saturating_sub(sample.used_bytes)) as f64
-        / (1024.0 * 1024.0 * 1024.0);
+    // "Available" = the OS's own available metric (macOS XNU active+inactive+free) —
+    // the same basis as compute_budget. Do NOT use total − used_bytes: sysinfo's
+    // used_memory() includes the macOS compressor, which would understate this by
+    // 10+ GB and disagree with `memory_pressure`.
+    let reclaimable_gb = if sample.available_bytes > 0 {
+        sample.available_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+    } else {
+        (spec.total_ram_bytes.saturating_sub(sample.used_bytes)) as f64 / (1024.0 * 1024.0 * 1024.0)
+    };
     let wired_limit_gb = spec.gpu_wired_limit_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     let headroom_gb = profile.headroom_bytes() as f64 / (1024.0 * 1024.0 * 1024.0);
     use indexa_core::resource::compute_budget;
@@ -44,7 +50,7 @@ pub(crate) async fn cmd_doctor(
     }
     // Show reclaimable (total − wired/active) alongside truly-free pages.
     // macOS keeps inactive file cache in "free-looking" RAM; only swap = real pressure.
-    println!("  RAM    {total_gb:.0} GB total   {reclaimable_gb:.1} GB reclaimable  ({free_gb:.1} GB truly free)");
+    println!("  RAM    {total_gb:.0} GB total   {reclaimable_gb:.1} GB available  ({free_gb:.1} GB truly free)");
     println!(
         "  CPU    {} physical cores, {} logical threads",
         spec.physical_cores, spec.logical_cores
@@ -94,11 +100,27 @@ pub(crate) async fn cmd_doctor(
     );
     println!();
     println!("  NOTE: these env vars are read by the Ollama server at startup.");
-    println!("  To apply on macOS:");
-    println!("    launchctl setenv OLLAMA_MAX_LOADED_MODELS 1");
-    println!("    launchctl setenv OLLAMA_NUM_PARALLEL 1");
-    println!("    launchctl setenv OLLAMA_KEEP_ALIVE 30s");
-    println!("    # then quit and relaunch Ollama.app");
+    // The recommended trio (name, value) — single source for both the print and --apply.
+    const OLLAMA_ENV: [(&str, &str); 3] = [
+        ("OLLAMA_MAX_LOADED_MODELS", "1"),
+        ("OLLAMA_NUM_PARALLEL", "1"),
+        ("OLLAMA_KEEP_ALIVE", "30s"),
+    ];
+    if apply_ollama_env {
+        apply_ollama_env_vars(&OLLAMA_ENV);
+    } else if cfg!(target_os = "macos") {
+        println!("  To apply: indexa doctor --apply-ollama-env   (runs launchctl setenv for you)");
+        println!("  Or manually:");
+        for (k, v) in OLLAMA_ENV {
+            println!("    launchctl setenv {k} {v}");
+        }
+        println!("    # then quit and relaunch Ollama.app");
+    } else {
+        println!("  To apply, add to your shell profile (then restart Ollama):");
+        for (k, v) in OLLAMA_ENV {
+            println!("    export {k}={v}");
+        }
+    }
     println!();
 
     // Load config once for the probes below (Ollama liveness + Claude provider).
@@ -404,6 +426,44 @@ fn model_installed(installed: &[String], want: &str) -> bool {
             || m == &format!("{want}:latest")
             || (!want.contains(':') && m.split(':').next() == Some(want))
     })
+}
+
+/// Apply the recommended Ollama server env vars for `indexa doctor --apply-ollama-env`.
+/// macOS persists them via `launchctl setenv` (read by the Ollama app on next launch);
+/// off macOS we can't persist a parent shell's environment from a child process, so we
+/// print the `export` lines to add. Never silent: it reports exactly what it did.
+fn apply_ollama_env_vars(vars: &[(&str, &str)]) {
+    #[cfg(target_os = "macos")]
+    {
+        println!("  Applying via launchctl setenv:");
+        let mut ok = true;
+        for (k, v) in vars {
+            match std::process::Command::new("launchctl")
+                .args(["setenv", k, v])
+                .status()
+            {
+                Ok(s) if s.success() => println!("    ✅  {k} = {v}"),
+                Ok(s) => {
+                    ok = false;
+                    println!("    ⚠️   {k}: launchctl exited {:?}", s.code());
+                }
+                Err(e) => {
+                    ok = false;
+                    println!("    ⚠️   {k}: could not run launchctl ({e})");
+                }
+            }
+        }
+        if ok {
+            println!("  Done. Quit and relaunch Ollama.app so the server picks them up.");
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        println!("  Add these to your shell profile, then restart the Ollama service:");
+        for (k, v) in vars {
+            println!("    export {k}={v}");
+        }
+    }
 }
 
 #[cfg(test)]
