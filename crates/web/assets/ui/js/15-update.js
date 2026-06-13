@@ -55,10 +55,15 @@ document.addEventListener('DOMContentLoaded', function () {
         if (btn) btn.style.display = 'none';
         var status = document.getElementById('update-apply-status');
         if (status) {
+          // The desktop installs whole-bundle updates through the Tauri native updater
+          // (a web binary self-replace would corrupt the signed .app). Point the user at
+          // the menu bar — both the app menu and the tray icon expose it.
           status.textContent = d.update_available
-            ? 'Update v' + d.latest + ' is ready — choose “Check for Updates…” in the Indexa menu-bar icon to install it.'
-            : 'Indexa keeps itself up to date — use “Check for Updates…” in the menu-bar icon.';
-          status.style.color = 'var(--muted)';
+            ? '⬆ Update v' + d.latest + ' is ready. In the menu bar, choose ' +
+              '“Indexa → Check for Updates…” to install it.'
+            : '✓ You’re on the latest (v' + d.current + '). To check anytime, choose ' +
+              '“Indexa → Check for Updates…” in the menu bar (or the Indexa tray icon).';
+          status.style.color = d.update_available ? 'var(--accent)' : 'var(--muted)';
         }
       }
     })

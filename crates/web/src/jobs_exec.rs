@@ -326,6 +326,33 @@ async fn run_scan_phase_with_entries(
             },
         );
     }
+    // Self-heal: drop chunks/summaries left orphaned (no entry row) — e.g. build artifacts
+    // indexed by an older version. `reconcile_entries` only cleans ghost *entries*, not
+    // orphans, so without this the index can carry stale junk until a manual `indexa prune`.
+    match store.prune_orphans() {
+        Ok(orphans) if !orphans.is_empty() => push(
+            handle,
+            JobEvent::Warning {
+                stage: "scan".to_owned(),
+                item_path: None,
+                message: format!(
+                    "pruned {} orphaned chunk(s) and {} summary(ies)",
+                    orphans.chunks, orphans.summaries
+                ),
+                pressure: None,
+            },
+        ),
+        Ok(_) => {}
+        Err(e) => push(
+            handle,
+            JobEvent::Warning {
+                stage: "scan".to_owned(),
+                item_path: None,
+                message: format!("orphan prune skipped: {e:#}"),
+                pressure: None,
+            },
+        ),
+    }
     drop(store);
 
     push(
