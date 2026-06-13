@@ -76,6 +76,13 @@
   fill: var(--green);
   stroke: var(--text);
 }
+/* Keyboard focus ring (WS6): the default UA outline on an SVG <g> is unreliable,
+   so draw the ring on the circle itself — mirrors the treemap-cell focus style. */
+.graph-node:focus { outline: none; }
+.graph-node:focus-visible .graph-node-circle {
+  stroke: var(--accent);
+  stroke-width: 2.5;
+}
 .graph-node.dim {
   opacity: 0.18;
 }

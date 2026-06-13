@@ -14,6 +14,7 @@
 
 <!-- Topbar -->
 <header class="app-topbar">
+  <button class="icon-btn sidebar-toggle" id="sidebar-toggle" onclick="toggleSidebar()" aria-label="Show folders" aria-expanded="false" aria-controls="tree-pane" title="Folders">&#x2630;</button>
   <h1 class="app-logo">&#x2B21; Indexa</h1>
   <span class="app-version" id="app-version"></span>
   <span class="app-tagline">the local context engine for AI</span>
@@ -50,8 +51,10 @@
       <span><span class="cov-glyph cov-none">&#x25CB;</span> none</span>
       <span><span class="cov-glyph cov-failed">&#x2717;</span> failed</span>
     </div>
-    <div class="tree-list" id="tree-list"></div>
+    <div class="tree-list" id="tree-list" role="tree" aria-label="Indexed folders"></div>
   </aside>
+  <!-- Scrim behind the sidebar drawer on small viewports (≤1024px); click to close. -->
+  <div id="sidebar-scrim" onclick="closeSidebar()" aria-hidden="true"></div>
 
   <!-- Context workspace — one panel with a Context | Map | Ask view toggle and an
        always-docked Ask bar. Settings + Activity(Jobs) live in drawers (below). -->

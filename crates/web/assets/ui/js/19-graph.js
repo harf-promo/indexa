@@ -155,8 +155,21 @@ function renderGraph(d) {
     g.appendChild(lbl);
     gNodes.appendChild(g);
 
+    // Keyboard a11y (WS6): each node is focusable and describes its relationships;
+    // focus reuses the hover highlight so Tab/arrows surface the same neighbor view
+    // and tooltip a mouse hover does. (SVG <g> takes tabindex in modern browsers.)
+    g.setAttribute('tabindex', '0');
+    g.setAttribute('role', 'button');
+    g.setAttribute('aria-label',
+      o.label + ' — calls ' + o.node.out_degree + ' file(s), called by ' + o.node.in_degree);
     g.addEventListener('mouseenter', function (ev) { onNodeHover(o, true, ev); });
     g.addEventListener('mouseleave', function () { onNodeHover(o, false); });
+    g.addEventListener('focus', function () {
+      // No pointer coords on focus — anchor the tooltip to the node's own rect.
+      var r = g.getBoundingClientRect();
+      onNodeHover(o, true, { clientX: r.left + r.width / 2, clientY: r.top });
+    });
+    g.addEventListener('blur', function () { onNodeHover(o, false); });
     return { el: g, label: lbl, obj: o };
   });
 

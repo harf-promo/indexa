@@ -1,0 +1,71 @@
+/* ── Responsive layer (WS4) ───────────────────────────────────────────────────
+   Desktop-first: the base layout is the 2-column grid (sidebar | workspace). These
+   breakpoints collapse the sidebar into a slide-out drawer (≤1024px) and stack /
+   enlarge controls for touch (≤768px). @media cannot read the --bp-* custom
+   properties, so the literals below mirror --bp-tablet / --bp-mobile in 01-tokens.css
+   (and the matchMedia() literal in 22-responsive.js). */
+
+/* The hamburger and scrim exist in the DOM at all sizes but show only on small
+   viewports; on desktop the sidebar is a normal grid column. */
+.sidebar-toggle { display: none; }
+#sidebar-scrim { display: none; }
+
+/* ── Tablet and below: sidebar becomes an overlay drawer ── */
+@media (max-width: 1024px) {
+  .sidebar-toggle { display: inline-flex; }
+
+  /* Sidebar leaves the grid flow and slides in over the workspace. */
+  .app-body { grid-template-columns: 1fr; }
+  .app-sidebar {
+    position: fixed;
+    top: 52px;            /* below the 52px topbar */
+    left: 0;
+    bottom: 0;
+    width: min(85vw, 320px);
+    z-index: 40;
+    transform: translateX(-100%);
+    transition: transform 180ms ease-out;
+    box-shadow: var(--shadow-lg);
+  }
+  .app-body.sidebar-open .app-sidebar { transform: translateX(0); }
+
+  /* Scrim dims the workspace while the drawer is open; click to dismiss. */
+  #sidebar-scrim {
+    display: block;
+    position: fixed;
+    inset: 52px 0 0 0;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 30;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 180ms;
+  }
+  .app-body.sidebar-open #sidebar-scrim { opacity: 1; pointer-events: auto; }
+}
+
+/* The slide/fade are motion — respect the reduced-motion preference. */
+@media (prefers-reduced-motion: reduce) {
+  .app-sidebar,
+  #sidebar-scrim { transition: none; }
+}
+
+/* ── Phone: stack the workspace and grow tap targets ── */
+@media (max-width: 768px) {
+  /* The tagline is already hidden ≤720px; reclaim the rest of the topbar so the
+     action buttons fit, and drop the inline stats (still shown in the sidebar). */
+  .app-topbar { padding: 0 10px; gap: 6px; }
+  .app-stats { display: none; }
+
+  /* 44px primary tap targets (WCAG 2.5.5). Dense secondary row-actions stay
+     smaller than 44px but clear the 24px AA floor (2.5.8) — the whole row is the
+     primary target and selecting it reveals them. */
+  .icon-btn { min-height: 44px; }
+  .view-tab { min-height: 44px; }
+  .tree-node-row { min-height: 40px; }
+  .tree-row-actions button { min-width: 32px; min-height: 32px; }
+
+  /* Workspace toolbar wraps instead of overflowing; Ask bar stays edge-to-edge. */
+  .workspace-toolbar { flex-wrap: wrap; row-gap: 8px; }
+  .toolbar-export { margin-left: auto; }
+  .input-bar { padding-left: 10px; padding-right: 10px; }
+}
