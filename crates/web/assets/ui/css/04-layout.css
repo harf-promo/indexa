@@ -83,6 +83,13 @@
 .cov-glyph.cov-partial { color: var(--orange); }
 .cov-glyph.cov-none { color: var(--muted); }
 .cov-glyph.cov-failed { color: var(--red); }
+/* Persistent key for the coverage glyphs, under the sidebar search. */
+.cov-legend {
+  display: flex; flex-wrap: wrap; gap: 3px 12px;
+  padding: 6px 14px 8px; font-size: 10px; color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.cov-legend > span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 /* One determinate "covered/total" count per ACTIVE subtree (something still queued),
    replacing N pulsing children with a single quiet number. */
 .cov-count {

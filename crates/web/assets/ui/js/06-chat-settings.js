@@ -212,6 +212,7 @@ let settingsLoaded = false;
 async function loadSettings() {
   if (settingsLoaded) return;
   settingsLoaded = true;
+  initSettingsAccordion();
   loadModels();
   loadKeys();
   loadProviderStatus();
@@ -220,6 +221,40 @@ async function loadSettings() {
   if (typeof loadFeatures === 'function') loadFeatures();
   if (typeof loadPacks === 'function') loadPacks();
   if (typeof loadWeights === 'function') loadWeights();
+}
+
+// Collapse the long Settings drawer into an accordion: each section's <h2> toggles it.
+// The first two (Local models, Cloud providers) start open; the rest start collapsed,
+// so the drawer is scannable instead of a 400-line scroll.
+function initSettingsAccordion() {
+  var sections = document.querySelectorAll('.settings-section');
+  sections.forEach(function (sec, i) {
+    if (i >= 2) sec.classList.add('collapsed');
+    var h2 = sec.querySelector('h2');
+    if (!h2 || h2.dataset.accordion) return;
+    h2.dataset.accordion = '1';
+    h2.setAttribute('role', 'button');
+    h2.setAttribute('tabindex', '0');
+    h2.setAttribute('aria-expanded', i < 2 ? 'true' : 'false');
+    var toggle = function () {
+      var collapsed = sec.classList.toggle('collapsed');
+      h2.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    };
+    h2.addEventListener('click', toggle);
+    h2.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    });
+  });
+}
+
+// Expand a collapsed settings section (used by the update-badge deep-link). eslint-disable-line no-unused-vars
+function expandSettingsSection(id) {
+  var sec = document.getElementById(id);
+  if (sec && sec.classList.contains('collapsed')) {
+    sec.classList.remove('collapsed');
+    var h2 = sec.querySelector('h2');
+    if (h2) h2.setAttribute('aria-expanded', 'true');
+  }
 }
 async function loadPasses() {
   try {
