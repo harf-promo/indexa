@@ -74,7 +74,7 @@ should see a `browse_tree` or `search` call.
 
 ## 4. What the agent can do
 
-The server exposes 39 tools. The ones you'll see used most:
+The server exposes 42 tools. The ones you'll see used most:
 
 | Tool | Purpose |
 |---|---|

@@ -44,7 +44,7 @@ use indexa_llm::Generator;
 pub use admin::TriggerIndexParams;
 pub use curation::{
     ConfirmClassificationParams, DeleteWeightParams, IgnoreClassificationParams,
-    ListClassificationsParams, SetWeightParams,
+    ListClassificationsParams, ListFilesByCategoryParams, SetWeightParams,
 };
 pub use graph::{
     BlastRadiusParams, CodeGraphParams, DependenciesParams, RelatedFilesParams, WhoCallsParams,
@@ -55,7 +55,9 @@ pub use packs::{
     CreatePackMcpParams, DeletePackMcpParams, ExportPackParams, GetPackParams, PackPathsParams,
     SearchPackParams,
 };
-pub use retrieval::{AskParams, BrowseParams, GetSummaryParams, ReadFileParams, SearchParams};
+pub use retrieval::{
+    AskParams, BrowseParams, GetChunkContextParams, GetSummaryParams, ReadFileParams, SearchParams,
+};
 pub use review::{
     AnswerDecisionParams, DecisionHistoryParams, DismissDecisionParams, GetDecisionParams,
     ListOpenDecisionsParams,
@@ -503,6 +505,7 @@ mod tests {
             mcp.list_open_decisions(Parameters(ListOpenDecisionsParams {
                 decision_type: None,
                 limit: None,
+                offset: None,
             }))
             .await
             .unwrap(),

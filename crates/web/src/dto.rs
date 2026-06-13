@@ -32,6 +32,27 @@ pub(crate) struct UsageWeekDto {
     pub(crate) counterfactual: u64,
 }
 
+/// Response for `GET /api/impact` — the token-savings "Impact" dashboard. The
+/// weekly totals plus a per-tool breakdown over the same `tool_usage` window.
+/// `savings_line` is the one honest sentence shared with `indexa status` / MCP
+/// `get_stats` (≈4 bytes/token, labeled approximate); `None` until there is usage.
+#[derive(Serialize)]
+pub(crate) struct ImpactResponse {
+    pub(crate) calls: u64,
+    pub(crate) served: u64,
+    pub(crate) counterfactual: u64,
+    pub(crate) savings_line: Option<String>,
+    pub(crate) by_tool: Vec<ToolUsageDto>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ToolUsageDto {
+    pub(crate) tool: String,
+    pub(crate) calls: u64,
+    pub(crate) served: u64,
+    pub(crate) counterfactual: u64,
+}
+
 /// One node in the coverage treemap tree (nested; children omitted when empty).
 ///
 /// `size` is the subtree chunk count (used to determine cell area).

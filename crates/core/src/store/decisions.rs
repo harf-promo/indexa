@@ -162,19 +162,31 @@ impl Store {
         type_filter: Option<&str>,
         limit: usize,
     ) -> Result<Vec<DecisionRecord>> {
-        let order = "ORDER BY priority DESC, created_at DESC, id DESC LIMIT ?";
+        self.open_decisions_paged(type_filter, limit, 0)
+    }
+
+    /// Like [`open_decisions`], but skips the first `offset` rows — the backing
+    /// query for MCP `list_open_decisions` cursoring through a long inbox.
+    /// `offset = 0` is exactly `open_decisions`.
+    pub fn open_decisions_paged(
+        &self,
+        type_filter: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<DecisionRecord>> {
+        let order = "ORDER BY priority DESC, created_at DESC, id DESC LIMIT ? OFFSET ?";
         if let Some(t) = type_filter {
             let mut stmt = self.conn.prepare(&format!(
                 "SELECT {DECISION_COLS} FROM decisions
-                  WHERE status = 'open' AND decision_type = ?1 {order}2"
+                  WHERE status = 'open' AND decision_type = ?1 {order}"
             ))?;
-            let rows = stmt.query_map(params![t, limit as i64], row_to_decision)?;
+            let rows = stmt.query_map(params![t, limit as i64, offset as i64], row_to_decision)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         } else {
             let mut stmt = self.conn.prepare(&format!(
-                "SELECT {DECISION_COLS} FROM decisions WHERE status = 'open' {order}1"
+                "SELECT {DECISION_COLS} FROM decisions WHERE status = 'open' {order}"
             ))?;
-            let rows = stmt.query_map(params![limit as i64], row_to_decision)?;
+            let rows = stmt.query_map(params![limit as i64, offset as i64], row_to_decision)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         }
     }

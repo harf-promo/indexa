@@ -22,7 +22,7 @@ Core      index · ask · search · export · serve · status\n  \
 Manage    pack · weight · classify · saved · rm · prune · review\n  \
 Analyze   insights · graph · related · report · map · describe · fingerprint · snapshot · eval\n  \
 Pipeline  scan · deep · summarize · worker · watch   (the stages behind `index`)\n  \
-System    doctor · mcp · update"
+System    doctor · mcp · completion · update"
 )]
 pub struct Cli {
     /// Path to config file (default: platform config dir / config.toml).
@@ -379,7 +379,10 @@ pub enum Commands {
   indexa ask \"where is auth handled in this repo?\"
   indexa ask --scope ~/Work \"what are my current priorities?\"
   indexa ask --sparse-only \"IndexOutOfBoundsException\"
-  indexa ask --top-k 20 \"Python files using async\"")]
+  indexa ask --top-k 20 \"Python files using async\"
+  indexa ask --agentic \"how does indexing flow from scan to summary?\"  # multi-hop
+  indexa ask --explain \"where is retrieval scored?\"   # show the retrieval trace
+  indexa ask --json \"list the config files\" | jq -r '.sources[].path'")]
     #[command(display_order = 11)]
     Ask {
         /// Natural-language question.
@@ -608,8 +611,12 @@ pub enum Commands {
     /// web UI. Folders that need content to tell work from personal are left as
     /// "pending" until deeper inference lands.
     #[command(after_help = "Examples:
-  indexa classify
-  indexa classify --category code --paths")]
+  indexa classify                       # suggest a category for every folder
+  indexa classify --paths               # also print the folders under each category
+  indexa classify --category code       # only the 'code' folders
+  indexa classify --category work --paths
+  # Confirm / correct / ignore suggestions in the web UI (Settings → Smart classification)
+  # or over MCP (confirm_classification / ignore_classification / list_files_by_category).")]
     #[command(display_order = 22)]
     Classify {
         /// Show the matching folder paths under each category.
@@ -645,6 +652,23 @@ pub enum Commands {
         /// Install a specific release tag instead of the latest, e.g. `v0.12.1`.
         #[arg(long)]
         pin: Option<String>,
+    },
+
+    /// Print a shell-completion script for your shell.
+    ///
+    /// Pipe it into the right place for your shell, e.g.:
+    ///   bash: indexa completion bash > /usr/local/etc/bash_completion.d/indexa
+    ///   zsh:  indexa completion zsh  > "${fpath[1]}/_indexa"
+    ///   fish: indexa completion fish > ~/.config/fish/completions/indexa.fish
+    #[command(after_help = "Examples:
+  indexa completion zsh > \"${fpath[1]}/_indexa\"
+  indexa completion bash | sudo tee /etc/bash_completion.d/indexa
+  indexa completion fish > ~/.config/fish/completions/indexa.fish")]
+    #[command(display_order = 52)]
+    Completion {
+        /// Target shell: bash, zsh, fish, powershell, or elvish.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
     },
 }
 
@@ -830,14 +854,19 @@ pub enum McpAction {
     ///
     /// Writes only the `indexa` server entry into each client's config,
     /// leaving every other key untouched (a .bak is kept when the file existed).
+    /// With no `--client`, auto-detects which supported clients are installed
+    /// (config present / `claude` on PATH / a `.vscode` workspace) and configures
+    /// each one found.
     #[command(after_help = "Examples:
+  indexa mcp install                          # auto-detect installed clients
   indexa mcp install --client claude-code
   indexa mcp install --client claude-desktop --client cursor
   indexa mcp install --client cursor,vscode --dry-run")]
     Install {
         /// Client(s) to configure: claude-code, claude-desktop, cursor, vscode.
-        /// Repeat the flag or pass a comma-separated list.
-        #[arg(long, required = true, value_delimiter = ',')]
+        /// Repeat the flag or pass a comma-separated list. Omit to auto-detect
+        /// every supported client that appears to be installed.
+        #[arg(long, value_delimiter = ',')]
         client: Vec<String>,
 
         /// Print the commands/JSON that would be written without touching anything.

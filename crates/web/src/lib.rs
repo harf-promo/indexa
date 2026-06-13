@@ -126,6 +126,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/18-insights.js"),
     include_str!("../assets/ui/js/19-graph.js"),
     include_str!("../assets/ui/js/20-review.js"),
+    include_str!("../assets/ui/js/21-impact.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -262,6 +263,7 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/assets/app.css", get(serve_ui_css))
         .route("/assets/app.js", get(serve_ui_js))
         .route("/api/stats", get(api_stats))
+        .route("/api/impact", get(api_impact))
         .route("/api/classifications", get(api_classifications_list))
         .route(
             "/api/classifications/confirm",
@@ -756,5 +758,234 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ── WS8 additions: ask scope/agentic/empty, export empty/depth, stats summaries,
+    //    review batch, and the new /api/impact telemetry endpoint ────────────────────
+
+    /// POST `uri` with a JSON body through the real router; return (status, JSON body).
+    async fn post_json(
+        app: Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    fn summary(
+        path: &str,
+        kind: &str,
+        parent: Option<&str>,
+        depth: i64,
+    ) -> indexa_core::store::SummaryRecord {
+        indexa_core::store::SummaryRecord {
+            path: path.to_owned(),
+            kind: kind.to_owned(),
+            parent_path: parent.map(str::to_owned),
+            depth,
+            summary: format!("Summary of {path}."),
+            summary_l0: None,
+            embedding: None,
+            child_count: 0,
+            byte_size: 100,
+            model: "test".to_owned(),
+            source_hash: String::new(),
+            generated_at: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn api_impact_empty_store_has_no_usage() {
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let (status, json) = get_json(app, "/api/impact").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["calls"], 0);
+        assert!(json["by_tool"].as_array().unwrap().is_empty());
+        // No usage ⇒ no savings sentence (matches UsageSummary::savings_line → None).
+        assert!(json["savings_line"].is_null());
+    }
+
+    #[tokio::test]
+    async fn api_impact_reports_per_tool_breakdown_most_saving_first() {
+        let mut store = Store::open_in_memory().unwrap();
+        // counterfactual > served so there is savings to report; ask saves more than search.
+        store.record_tool_usage("web", "ask", 100, 4000).unwrap();
+        store.record_tool_usage("mcp", "search", 50, 2000).unwrap();
+        store.record_tool_usage("web", "ask", 100, 4000).unwrap();
+        let app = build_router(state_with(store), 7620);
+        let (status, json) = get_json(app, "/api/impact").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["calls"], 3);
+        let by_tool = json["by_tool"].as_array().unwrap();
+        assert_eq!(by_tool.len(), 2);
+        // Ordered by avoided bytes desc: ask (2×3900) outranks search (1950).
+        assert_eq!(by_tool[0]["tool"], "ask");
+        assert_eq!(by_tool[0]["calls"], 2);
+        assert!(json["savings_line"]
+            .as_str()
+            .unwrap()
+            .contains("tokens saved"));
+    }
+
+    #[tokio::test]
+    async fn api_ask_empty_index_answers_without_error() {
+        // No chunks ⇒ the pipeline short-circuits with a graceful answer (Ok, not 500)
+        // and zero sources. Exercises the buffered handler with the stub backends.
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let (status, json) = post_json(
+            app,
+            "/api/ask",
+            serde_json::json!({ "question": "where is auth?" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["answer"].is_string());
+        assert!(json["sources"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn api_ask_accepts_scope_and_agentic_flags() {
+        // The v0.27 scope seam and v0.20 agentic flag must both be accepted and reach a
+        // successful (empty-index) answer rather than a deserialize/500 error.
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let (status, json) = post_json(
+            app,
+            "/api/ask",
+            serde_json::json!({ "question": "what is here?", "scope": "/r/sub", "agentic": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["answer"].is_string());
+    }
+
+    #[tokio::test]
+    async fn api_export_empty_index_is_not_found() {
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let (status, json) = get_json(app, "/api/export").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(json["error"].as_str().unwrap_or("").contains("summarize"));
+    }
+
+    #[tokio::test]
+    async fn api_export_renders_seeded_summary_respecting_depth() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                entry("/r", EntryKind::Dir),
+                entry("/r/a.rs", EntryKind::File),
+            ])
+            .unwrap();
+        store
+            .upsert_summary(&summary("/r", "dir", None, 0))
+            .unwrap();
+        store
+            .upsert_summary(&summary("/r/a.rs", "file", Some("/r"), 1))
+            .unwrap();
+        let app = build_router(state_with(store), 7620);
+        // depth=0 ⇒ root summary only; format defaults to XML.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/export?path=/r&depth=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(ct.contains("xml"), "default export format is XML, got {ct}");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("Summary of /r"));
+    }
+
+    #[tokio::test]
+    async fn api_stats_counts_summaries() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_summary(&summary("/r", "dir", None, 0))
+            .unwrap();
+        let app = build_router(state_with(store), 7620);
+        let (status, json) = get_json(app, "/api/stats").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["summaries"], 1);
+    }
+
+    #[tokio::test]
+    async fn api_review_answer_batch_answers_all_under_prefix() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mk = |subject: &str, hash: &str| indexa_core::store::NewDecision {
+            decision_type: "classification".to_owned(),
+            subject: subject.to_owned(),
+            params: serde_json::json!({"category": "code", "confidence": 0.7}),
+            options: serde_json::json!(["work", "code", "ignore"]),
+            auto_value: Some("code".to_owned()),
+            confidence: Some(0.7),
+            evidence_hash: hash.to_owned(),
+            priority: 50,
+            paths: vec![subject.to_owned()],
+        };
+        store.record_decision(mk("/r/a", "h1")).unwrap().unwrap();
+        store.record_decision(mk("/r/b", "h2")).unwrap().unwrap();
+        let state = state_with(store);
+        let app = build_router(state.clone(), 7620);
+
+        // "work" is a batch-safe classification category (batch_answer_refusal allows it).
+        let (status, json) = post_json(
+            app,
+            "/api/review/answer-batch",
+            serde_json::json!({ "type": "classification", "under": "/r", "chosen": "work" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["answered"], 2);
+        assert_eq!(json["applied"], 2);
+        {
+            let store = state.store.lock().await;
+            assert_eq!(store.open_decision_count().unwrap(), 0);
+            assert_eq!(
+                store.classification_for("/r/a").unwrap().unwrap().category,
+                "work"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn api_review_answer_batch_rejects_unsafe_choice() {
+        // A canonical-pick answer is per-cluster, never batch-safe — the handler must 400
+        // before touching the store (shares batch_answer_refusal with the CLI).
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let (status, _json) = post_json(
+            app,
+            "/api/review/answer-batch",
+            serde_json::json!({ "type": "duplicate", "under": "/r", "chosen": "keep_this_one" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

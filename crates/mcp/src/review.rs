@@ -23,6 +23,10 @@ pub struct ListOpenDecisionsParams {
     /// Max questions to return (default 50).
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Skip the first N questions — page through a long inbox by advancing
+    /// `offset` by `limit` each call (default 0).
+    #[serde(default)]
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -108,6 +112,7 @@ impl IndexaMcp {
         let ListOpenDecisionsParams {
             decision_type,
             limit,
+            offset,
         } = params.0;
         if let Some(t) = decision_type.as_deref() {
             if DecisionType::parse(t).is_none() {
@@ -117,20 +122,43 @@ impl IndexaMcp {
                 )));
             }
         }
+        let limit = limit.unwrap_or(50);
+        let offset = offset.unwrap_or(0);
         let store = self.store()?;
         let rows = store
-            .open_decisions(decision_type.as_deref(), limit.unwrap_or(50))
+            .open_decisions_paged(decision_type.as_deref(), limit, offset)
             .map_err(mcp_err)?;
         if rows.is_empty() {
-            return Ok(ok_text("No open questions — the Decision Ledger is clear."));
+            let cleared = if offset > 0 {
+                format!("No more open questions past offset {offset}.")
+            } else {
+                "No open questions — the Decision Ledger is clear.".to_owned()
+            };
+            return Ok(ok_text(cleared));
         }
+        // Number rows by absolute inbox position so a paged listing stays unambiguous.
         let blocks: Vec<String> = rows
             .iter()
             .enumerate()
-            .map(|(i, d)| format!("{}. {}", i + 1, format_question(&render_question(d))))
+            .map(|(i, d)| {
+                format!(
+                    "{}. {}",
+                    offset + i + 1,
+                    format_question(&render_question(d))
+                )
+            })
             .collect();
+        // Hint the next page only when this one came back full (more may remain).
+        let more = if rows.len() == limit {
+            format!(
+                "\n\n(More may remain — call again with offset: {}.)",
+                offset + limit
+            )
+        } else {
+            String::new()
+        };
         Ok(ok_text(format!(
-            "{} open question(s) — answer with answer_decision(id, chosen):\n\n{}",
+            "{} open question(s) — answer with answer_decision(id, chosen):\n\n{}{more}",
             rows.len(),
             blocks.join("\n")
         )))

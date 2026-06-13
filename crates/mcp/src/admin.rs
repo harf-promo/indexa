@@ -35,6 +35,56 @@ impl IndexaMcp {
         Ok(ok_text(out))
     }
 
+    /// Report the effective Indexa configuration (models, retrieval, scan) — no secrets.
+    #[tool(
+        description = "Return Indexa's effective configuration: embedding + describer models, \
+                       retrieval defaults (mode, top_k, agentic), chunking, scan ignore rules, \
+                       and parser caps. API keys are NEVER included. Read-only — use it to \
+                       understand how retrieval is tuned before asking or searching."
+    )]
+    pub(crate) async fn query_config(&self) -> Result<CallToolResult, ErrorData> {
+        let c = &self.config;
+        // Deliberately excludes `api_keys` — secrets are never returned over a tool.
+        let mode = format!("{:?}", c.retrieval.hybrid).to_lowercase();
+        let out = format!(
+            "Embedding: {} / {} (dim {})\n\
+             Describer: {} / {} (file: {}, dir: {}; passes first/refresh: {}/{})\n\
+             Retrieval: mode={mode}, top_k={}, rerank={}, agentic={} (max {} steps), \
+             use_weights={}, context_budget={} bytes\n\
+             Chunking:  {:?}, size {}, overlap {}\n\
+             Scan:      respect_gitignore={}, auto_reindex={}, ignore=[{}]\n\
+             Parsers:   max_file_mb={}, pdf_backend={}, image_caption={}, \
+             audio_transcribe={}, video_caption={}",
+            c.embedding.provider,
+            c.embedding.model,
+            c.embedding.dim,
+            c.describer.provider,
+            c.describer.model,
+            c.describer.file_model,
+            c.describer.dir_model,
+            c.describer.passes_first,
+            c.describer.passes_refresh,
+            c.retrieval.top_k,
+            c.retrieval.rerank,
+            c.retrieval.agentic,
+            c.retrieval.agentic_max_steps,
+            c.retrieval.use_weights,
+            c.retrieval.context_budget,
+            c.chunking.strategy,
+            c.chunking.size,
+            c.chunking.overlap,
+            c.scan.respect_gitignore,
+            c.scan.auto_reindex,
+            c.scan.ignore.join(", "),
+            c.parsers.max_file_mb,
+            c.parsers.pdf.backend,
+            c.parsers.image.caption,
+            c.parsers.audio.transcribe,
+            c.parsers.video.caption,
+        );
+        Ok(ok_text(out))
+    }
+
     /// Garbage-collect orphaned rows (chunks/summaries left behind after a root was removed).
     #[tool(
         description = "Garbage-collect orphaned index rows — chunks and summaries left behind after their files/roots were removed. Returns how many rows were pruned. Safe: only removes rows with no matching entry."

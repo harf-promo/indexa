@@ -140,6 +140,25 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// All classifications assigned a given `category`, highest-confidence first,
+    /// capped at `limit` (0 = no limit). Backs the MCP `list_files_by_category`
+    /// tool — "show me everything classified as `work`" — across all sources.
+    pub fn classifications_in_category(
+        &self,
+        category: &str,
+        limit: usize,
+    ) -> Result<Vec<ClassificationRecord>> {
+        let lim: i64 = if limit == 0 { -1 } else { limit as i64 };
+        let mut stmt = self.conn.prepare(
+            "SELECT path, kind, category, confidence, source, confirmed_at, created_at
+               FROM classifications WHERE category = ?1
+              ORDER BY confidence DESC, path
+              LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![category, lim], row_to_classification)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// The classification for one exact path, if any.
     pub fn classification_for(&self, path: &str) -> Result<Option<ClassificationRecord>> {
         let mut stmt = self.conn.prepare(

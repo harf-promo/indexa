@@ -48,6 +48,18 @@ struct UsageWeekJson {
     calls: u64,
     served: u64,
     counterfactual: u64,
+    /// Per-tool breakdown (most-saving first). Empty array kept off the wire would
+    /// be indistinguishable from "tool column unsupported"; it is always present
+    /// when `usage_week` is, and is empty only on a telemetry read error.
+    by_tool: Vec<ToolUsageJson>,
+}
+
+#[derive(Serialize)]
+struct ToolUsageJson {
+    tool: String,
+    calls: u64,
+    served: u64,
+    counterfactual: u64,
 }
 
 #[derive(Serialize)]
@@ -107,6 +119,9 @@ pub(crate) async fn cmd_status(
     // Token-savings telemetry (best-effort read; absent = no line printed).
     let usage = store
         .usage_summary(indexa_core::store::USAGE_WEEK_SECS)
+        .unwrap_or_default();
+    let usage_by_tool = store
+        .usage_by_tool(indexa_core::store::USAGE_WEEK_SECS)
         .unwrap_or_default();
     let config_path = config::default_config_path().to_string_lossy().into_owned();
 
@@ -187,6 +202,15 @@ pub(crate) async fn cmd_status(
                 calls: usage.calls,
                 served: usage.bytes_served,
                 counterfactual: usage.bytes_counterfactual,
+                by_tool: usage_by_tool
+                    .iter()
+                    .map(|(tool, u)| ToolUsageJson {
+                        tool: tool.clone(),
+                        calls: u.calls,
+                        served: u.bytes_served,
+                        counterfactual: u.bytes_counterfactual,
+                    })
+                    .collect(),
             }),
             coverage,
         };
@@ -215,6 +239,18 @@ pub(crate) async fn cmd_status(
     // truth in UsageSummary::savings_line; approximate by definition).
     if let Some(line) = usage.savings_line() {
         println!("Savings:  {line}");
+        // Per-tool breakdown: which retrieval calls did the saving. Indented under
+        // the savings line, most-saving first (same order as the --json by_tool).
+        for (tool, u) in &usage_by_tool {
+            let saved = u.bytes_counterfactual.saturating_sub(u.bytes_served) / 4;
+            println!(
+                "  {:<14} {} call{} · ~{} tokens saved",
+                tool,
+                u.calls,
+                if u.calls == 1 { "" } else { "s" },
+                saved
+            );
+        }
     }
 
     println!();

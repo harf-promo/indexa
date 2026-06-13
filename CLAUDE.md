@@ -42,9 +42,12 @@ table + `boost_with_weights` in QA) · Insights (v0.16, `find_*_duplicates`/`fin
 MCP `agentic` / web "Agentic" checkbox — bounded plan→search→refine loop, fails open) · **universal
 macOS desktop build** (v0.20, `--target universal-apple-darwin`, `darwin-universal` updater key).
 
-**MCP server:** **39 tools** (`crates/mcp/src/lib.rs`). Code-graph tools: `dependencies` /
+**MCP server:** **42 tools** (`crates/mcp/src/lib.rs`). Code-graph tools: `dependencies` /
 `who_imports` / `who_calls` / `blast_radius` / `code_graph`. The call graph is bare-name matched
 (case-sensitive, 1-hop, 7 languages) — caveats in `docs/methodology.md`; label honestly in any UI.
+v0.28 added `query_config` (effective config, no secrets), `list_files_by_category` (classification
+category → files), `get_chunk_context` (a file's indexed chunks / neighbors of a search hit), plus
+`offset` pagination on `list_open_decisions`.
 
 **Web UI:** pure vanilla JS + SVG (`createElementNS`), zero frontend libraries. JS/CSS are
 `include_str!`-concatenated in `crates/web/src/lib.rs` — a new `NN-name.js`/`.css` must be added to

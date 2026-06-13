@@ -55,6 +55,20 @@ pub struct ReadFileParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetChunkContextParams {
+    /// Absolute path of an indexed file.
+    pub path: String,
+    /// Center chunk sequence number (e.g. a `search` hit's position). Omit to
+    /// return the file's first chunks.
+    #[serde(default)]
+    pub seq: Option<usize>,
+    /// Neighbor chunks to include on each side of `seq` (default 1). With `seq`
+    /// omitted, the first `2*radius+1` chunks are returned instead.
+    #[serde(default)]
+    pub radius: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct AskParams {
     /// Natural-language question answered against the indexed context.
     pub question: String,
@@ -222,6 +236,67 @@ impl IndexaMcp {
         params: Parameters<ReadFileParams>,
     ) -> Result<CallToolResult, ErrorData> {
         self.read_file_inner(&params.0.path, "read_file")
+    }
+
+    /// Return the indexed chunks of a file, optionally a window around one `seq`.
+    #[tool(
+        description = "Return a file's indexed chunks (the exact text Indexa retrieves over), \
+                       with seq number and heading. Pass `seq` (a search hit's position) to get \
+                       that chunk plus `radius` neighbors on each side — the surrounding context \
+                       a snippet alone omits. Omit `seq` for the file's opening chunks."
+    )]
+    pub(crate) async fn get_chunk_context(
+        &self,
+        params: Parameters<GetChunkContextParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let GetChunkContextParams { path, seq, radius } = params.0;
+        let radius = radius.unwrap_or(1);
+        let mut store = self.store()?;
+        let chunks = store.chunks_for_path(&path, 0).map_err(mcp_err)?;
+        if chunks.is_empty() {
+            return Ok(ok_text(format!(
+                "No indexed chunks for {path}. Run `indexa deep <path>` to make it searchable."
+            )));
+        }
+        let window: Vec<_> = match seq {
+            Some(center) => {
+                let lo = center.saturating_sub(radius);
+                let hi = center.saturating_add(radius);
+                chunks
+                    .iter()
+                    .filter(|c| c.seq >= lo && c.seq <= hi)
+                    .collect()
+            }
+            None => chunks.iter().take(2 * radius + 1).collect(),
+        };
+        if window.is_empty() {
+            return Ok(ok_text(format!(
+                "No chunk near seq {} in {path} (the file has {} chunk(s), seq 0..{}).",
+                seq.unwrap_or(0),
+                chunks.len(),
+                chunks.len().saturating_sub(1)
+            )));
+        }
+        let body = window
+            .iter()
+            .map(|c| {
+                let heading = if c.heading.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", c.heading)
+                };
+                format!("#{}{}\n{}", c.seq, heading, c.text)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n");
+        let out = format!("{} chunk(s) from {path}:\n\n{body}", window.len());
+
+        // Served = bytes returned; counterfactual = the file's full on-disk size
+        // (same basis as read_file — see store::usage for the honest definition).
+        let counterfactual = store.counterfactual_bytes_for_paths(&[&path]).unwrap_or(0);
+        record_usage(&mut store, "get_chunk_context", out.len(), counterfactual);
+
+        Ok(ok_text(out))
     }
 
     /// Answer a natural-language question against the index (grounded RAG).
