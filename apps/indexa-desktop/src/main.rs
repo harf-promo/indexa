@@ -206,12 +206,17 @@ fn main() {
         .run(|app_handle, event| {
             // Re-show the window when the Dock icon is clicked after the window was closed
             // (close hides to the tray) — without this the app is unreachable from the Dock.
+            // `RunEvent::Reopen` is a macOS-only variant (Dock reopen), so the arm must be
+            // gated or the closure fails to compile on Linux/Windows.
+            #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 if let Some(win) = app_handle.get_webview_window("main") {
                     let _ = win.show();
                     let _ = win.set_focus();
                 }
             }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app_handle, event); // Reopen doesn't exist off macOS; nothing to do.
         });
 }
 

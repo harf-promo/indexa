@@ -24,13 +24,20 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.20)
+## Current feature surface (v0.28.1)
 
 **CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize) · `scan` · `deep` ·
 `summarize` · `describe` · `map` · `worker` · `pack` (Context Packs) · `weight` (Importance
 weighting) · `insights` (duplicates/stale/diff) · `graph` (file-to-file call graph) · `export` ·
-`ask` · `watch` · `serve` (`--host 0.0.0.0` for LAN) · `mcp` · `status` · `rm` · `prune` (orphan-row
-GC) · `doctor` · `fingerprint` · `classify` · `update`.
+`ask` · `watch` · `serve` (`--host 0.0.0.0` for LAN) · `mcp` (+ `mcp install [--client]`, auto-detects)
+· `completion <shell>` · `status` (`--json` incl. per-tool savings) · `rm` · `prune` (orphan-row GC) ·
+`doctor` (`--apply-ollama-env`) · `fingerprint` · `classify` · `update`.
+
+**Memory budget invariant (v0.28.1):** `resource::compute_budget` keys on `available_bytes`
+(sysinfo `available_memory()` = macOS XNU active+inactive+free), NOT `total − used_memory()` —
+sysinfo 0.39's `used_memory()` includes the macOS **compressor**, so `total−used` falsely refuses
+models. Don't reintroduce the `total−used` basis. The web Impact dashboard (`/api/impact`),
+responsive layout (≤1024px drawer / ≤768px stack), and arrow-key tree a11y also shipped in v0.28.
 
 **Major features by version:** Context Packs (v0.14) · Importance Weighting (v0.16, `importance_weights`
 table + `boost_with_weights` in QA) · Insights (v0.16, `find_*_duplicates`/`find_stale_entries`/

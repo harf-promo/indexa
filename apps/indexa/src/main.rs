@@ -263,7 +263,8 @@ async fn main() -> Result<()> {
             profile,
             files,
             chunks,
-        } => commands::cmd_doctor(profile, files, chunks).await,
+            apply_ollama_env,
+        } => commands::cmd_doctor(profile, files, chunks, apply_ollama_env).await,
         Commands::Fingerprint { paths } => commands::cmd_fingerprint(paths).await,
         Commands::Classify { paths, category } => {
             commands::cmd_classify(paths, category, &cfg).await

@@ -587,6 +587,12 @@ pub enum Commands {
         /// Estimated number of embedding chunks for ETA calculation.
         #[arg(long)]
         chunks: Option<usize>,
+
+        /// Apply the recommended Ollama server env vars (KEEP_ALIVE=30s,
+        /// MAX_LOADED_MODELS=1, NUM_PARALLEL=1). On macOS runs `launchctl setenv`
+        /// (then quit + relaunch Ollama); elsewhere prints the `export` lines to add.
+        #[arg(long)]
+        apply_ollama_env: bool,
     },
 
     /// Detect software and project types in the index by file-pattern signatures.
