@@ -90,6 +90,13 @@ function buildTreeNode(node) {
     '<button data-act="remove"    title="Remove from context"  aria-label="Remove from context">&#x1F5D1;</button>' +
     '</span>';
 
+  // ARIA tree semantics + roving focus (WS6). Every row is a treeitem reachable by
+  // arrow keys; only one carries tabindex=0 at a time (set in initTree / moved by the
+  // keydown handler below) so the tree is a single Tab stop.
+  row.setAttribute('role', 'treeitem');
+  row.setAttribute('tabindex', '-1');
+  if (isDir) row.setAttribute('aria-expanded', expandedPaths.has(node.path) ? 'true' : 'false');
+
   row.querySelectorAll('.tree-row-actions button').forEach(function(btn) {
     btn.addEventListener('click', async function(e) {
       e.stopPropagation();
@@ -114,6 +121,7 @@ function buildTreeNode(node) {
   const childContainer = document.createElement('div');
   childContainer.className = 'tree-children';
   childContainer.style.display = 'none';
+  childContainer.setAttribute('role', 'group');
 
   row.querySelector('.tree-label').addEventListener('click', function(e) {
     if (e.altKey || e.metaKey) {
@@ -138,15 +146,21 @@ function buildTreeNode(node) {
         expandedPaths.delete(node.path);
         childContainer.style.display = 'none';
         row.querySelector('.tree-toggle').textContent = '▸';
+        row.setAttribute('aria-expanded', 'false');
       } else {
         expandedPaths.add(node.path);
         childContainer.style.display = 'block';
         row.querySelector('.tree-toggle').textContent = '▾';
+        row.setAttribute('aria-expanded', 'true');
         if (!childContainer.dataset.loaded) {
           childContainer.dataset.loaded = '1';
           loadTreeLevel(node.path, childContainer);
         }
       }
+    } else if (typeof closeSidebar === 'function') {
+      // On a small viewport, selecting a file closes the sidebar drawer so the
+      // summary it just opened is visible (no-op on desktop / when not open).
+      closeSidebar();
     }
   });
 
@@ -176,6 +190,63 @@ function buildTreeNode(node) {
     var target = e.target.closest('.cov-retry');
     if (!target) return;
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); target.click(); }
+  });
+
+  // Arrow-key navigation over the tree (WAI-ARIA tree pattern, WS6). Acts only when
+  // a row itself holds focus (e.target is the row) so inner action buttons and the
+  // ✗ retry glyph keep their own key handling. ↑/↓ move between visible rows,
+  // →/← expand/collapse or step into/out of children, Enter/Space activates the row.
+  function visibleRows() {
+    return Array.prototype.filter.call(
+      treeList.querySelectorAll('.tree-node-row'),
+      function (r) { return r.offsetParent !== null; } // excludes rows in collapsed groups
+    );
+  }
+  function focusRow(r) {
+    treeList.querySelectorAll('.tree-node-row[tabindex="0"]').forEach(function (x) {
+      x.setAttribute('tabindex', '-1');
+    });
+    r.setAttribute('tabindex', '0');
+    r.focus();
+  }
+  treeList.addEventListener('keydown', function (e) {
+    var row = e.target;
+    if (!row.classList || !row.classList.contains('tree-node-row')) return;
+    if (['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'Enter', ' ', 'Home', 'End'].indexOf(e.key) === -1) return;
+    e.preventDefault();
+    var rows = visibleRows();
+    var i = rows.indexOf(row);
+    if (i === -1) return;
+    var childGroup = (row.nextElementSibling && row.nextElementSibling.classList.contains('tree-children'))
+      ? row.nextElementSibling : null;
+    var isDir = !!childGroup;
+    var expanded = isDir && childGroup.style.display !== 'none';
+    switch (e.key) {
+      case 'ArrowDown': if (i < rows.length - 1) focusRow(rows[i + 1]); break;
+      case 'ArrowUp':   if (i > 0) focusRow(rows[i - 1]); break;
+      case 'Home':      focusRow(rows[0]); break;
+      case 'End':       focusRow(rows[rows.length - 1]); break;
+      case 'Enter':
+      case ' ':         row.click(); break;
+      case 'ArrowRight':
+        if (isDir && !expanded) { row.click(); }            // expand
+        else if (isDir && expanded) {                       // step into children
+          var first = childGroup.querySelector('.tree-node-row');
+          if (first) focusRow(first);
+        }
+        break;
+      case 'ArrowLeft':
+        if (isDir && expanded) { row.click(); }             // collapse
+        else {                                              // step out to parent row
+          var wrap = row.parentElement;                     // .tree-node
+          var group = wrap ? wrap.parentElement : null;     // .tree-children or #tree-list
+          if (group && group.classList && group.classList.contains('tree-children')) {
+            var parentRow = group.previousElementSibling;
+            if (parentRow && parentRow.classList.contains('tree-node-row')) focusRow(parentRow);
+          }
+        }
+        break;
+    }
   });
 }());
 
@@ -210,6 +281,10 @@ async function initTree() {
       }
       list.appendChild(node);
     });
+    // Roving focus: the first root row is the tree's single Tab stop; arrow keys
+    // move focus from there (see the keydown handler below).
+    var firstRow = list.querySelector('.tree-node-row');
+    if (firstRow) firstRow.setAttribute('tabindex', '0');
     // Sync eye icons with current watch state
     if (typeof updateWatchIcons === 'function') updateWatchIcons();
   } catch(e) {
