@@ -43,6 +43,13 @@
       <input type="text" id="search-input" placeholder="Search files&#x2026;" autocomplete="off" oninput="onSearchInput(this.value)" aria-label="Search files">
       <button id="search-clear" onclick="clearSearchInput()" style="display:none" title="Clear search" aria-label="Clear search">&#x2715;</button>
     </div>
+    <!-- Always-visible key for the tree's context-coverage glyphs (previously tooltip-only). -->
+    <div class="cov-legend" aria-label="Context coverage legend">
+      <span><span class="cov-glyph cov-full">&#x25CF;</span> built</span>
+      <span><span class="cov-glyph cov-partial">&#x25D0;</span> partial</span>
+      <span><span class="cov-glyph cov-none">&#x25CB;</span> none</span>
+      <span><span class="cov-glyph cov-failed">&#x2717;</span> failed</span>
+    </div>
     <div class="tree-list" id="tree-list"></div>
   </aside>
 

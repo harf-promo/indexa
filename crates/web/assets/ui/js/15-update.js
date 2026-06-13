@@ -21,8 +21,9 @@ document.addEventListener('DOMContentLoaded', function () {
           el.style.cursor = 'pointer';
           el.onclick = function () {
             switchTab('settings');
-            // Scroll the update section into view after the panel opens.
+            // Expand (it starts collapsed in the accordion) + scroll into view.
             setTimeout(function () {
+              if (typeof expandSettingsSection === 'function') expandSettingsSection('section-update');
               var sec = document.getElementById('section-update');
               if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
             }, 120);

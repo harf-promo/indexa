@@ -204,6 +204,16 @@
   color: var(--muted); margin-bottom: 14px;
   border-bottom: 1px solid var(--border); padding-bottom: 8px;
 }
+/* Accordion: the <h2> toggles its section (wired in initSettingsAccordion). */
+.settings-section > h2 { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 8px; }
+.settings-section > h2::before {
+  content: '\25BE'; font-size: 10px; color: var(--muted);
+  transition: transform 120ms; flex-shrink: 0;
+}
+.settings-section.collapsed > h2 { margin-bottom: 0; }
+.settings-section.collapsed > h2::before { transform: rotate(-90deg); }
+.settings-section.collapsed > *:not(h2) { display: none; }
+.settings-section > h2:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .model-list { display: flex; flex-direction: column; gap: 6px; }
 .model-row {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
