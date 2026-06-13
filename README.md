@@ -99,8 +99,8 @@ This is not a repo-to-prompt converter. It is not a document chat app. It is not
 
 ## Four ways to use it
 
-- **CLI** — `index · ask · export · scan · deep · summarize · watch · serve · mcp · doctor · classify · update`. Scriptable, pipeable, zero services required.
-- **Web workspace** — `indexa serve` → `http://localhost:7620`. A live Engine status bar shows what the machine is doing while it builds:
+- **CLI** — `index · ask · export · scan · deep · summarize · watch · serve · mcp · doctor · classify · completion · update`. Scriptable, pipeable, zero services required (`indexa completion <shell>` emits tab-completions).
+- **Web workspace** — `indexa serve` → `http://localhost:7620`. Responsive (collapses to a drawer on a phone), keyboard-navigable, and honest about impact — a **token-savings panel** shows what retrieval saved your AI tools this week. A live Engine status bar shows what the machine is doing while it builds:
   ```
   Engine  Building · 42 files/s · ETA 1m12s · gemma3:4b    CPU 38%   RAM 9.1 / 16 GB   pressure: ok
   ```

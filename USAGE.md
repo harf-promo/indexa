@@ -141,8 +141,9 @@ Global flag (all commands): `--config <PATH>` overrides the default config locat
 | `ask <question>` | `--scope PATH`, `--top-k N`, `--sparse-only`, `--dense-only`, `--embed-model`, `--llm-model` | Hybrid retrieval + LLM-synthesized answer with sources. |
 | `watch [paths…]` | `--embed-model` | Keep context current via filesystem events. |
 | `serve` | `--port N` (7620), `--embed-model`, `--llm-model` | Local web UI. |
-| `mcp` | — | Run the MCP stdio server for AI agents (see §7). |
-| `status` | `--unknown` | Index stats; `--unknown` lists top unclassified extensions. |
+| `mcp` | — | Run the MCP stdio server for AI agents (see §7). `mcp install [--client …]` registers Indexa with your AI clients (auto-detects when no `--client`). |
+| `completion <shell>` | — | Print a shell-completion script (`bash`/`zsh`/`fish`/…). |
+| `status` | `--unknown`, `--deep`, `--json` | Index stats (+ token-savings by tool); `--deep` adds a coverage health report; `--unknown` lists top unclassified extensions. |
 | `rm <paths…>` | `-r/--recursive` | Remove paths from the index (files on disk are untouched). |
 | `doctor` | `--profile`, `--files N`, `--chunks N` | Machine specs, per-model memory fit, ETA estimates, Ollama env checks. |
 | `fingerprint` | `--paths` | Detect installed software / project types by file-pattern signatures. |
@@ -301,12 +302,13 @@ Add it to **Claude Desktop** (`claude_desktop_config.json`) — or any MCP clien
 }
 ```
 
-Ten tools are exposed: `search` (find paths), `browse_tree` (one directory level), `get_summary`
-(`tier` = l0 one-liner / l1 full+children / l2 file content — progressive disclosure), `read_file`
-(content, confined to indexed roots), `ask` (full retrieval+answer pipeline), `dependencies` (a code
-file's imports, defined symbols, and calls), `who_imports` (reverse code-graph lookup), `who_calls`
-(D2 — which files call a given function name), `blast_radius` (D2 — 1-hop transitive call impact
-set for "what breaks if I change X?"), and `get_stats`.
+**42 tools** are exposed (see [docs/how-to/live-retrieval-over-mcp.md](docs/how-to/live-retrieval-over-mcp.md)
+for the full table). The ones you'll reach for most: `search` (content search), `browse_tree` (one
+directory level), `get_summary` (`tier` = l0 one-liner / l1 full+children / l2 file content —
+progressive disclosure), `get_chunk_context` (a file's indexed chunks, or the neighbors of a search
+hit), `read_file` (content, confined to indexed roots), `ask` (full retrieval+answer pipeline),
+`dependencies` / `who_imports` / `who_calls` / `blast_radius` (the code graph), `query_config`
+(effective config, no secrets), and `get_stats`.
 
 A local agent pulls `get_summary("auth")` on demand instead of pre-loading the repo — staying coherent
 across long tasks without hitting the context-window cliff.
@@ -344,6 +346,48 @@ to drain summaries in the background. (Roadmap: a native desktop app replaces le
 **Keep dense search fast on a huge index.** Past ~50K chunks, brute-force cosine starts to drag.
 Set `[retrieval] ann = true` to switch dense retrieval to an in-memory HNSW index (it only engages
 above `ann_min_chunks`, default 50 000 — below that brute-force is faster than building the index).
+
+**Index in the background.** Leave `indexa worker` draining the summary queue, and `indexa watch <path>`
+re-embedding files as you save them — no foreground build to babysit. `indexa worker --auto-reindex`
+also re-scans roots that go stale past `[scan] auto_reindex`.
+
+**Share one topic, not the whole repo.** Group scattered files into a named **Context Pack** and export
+just that bundle: `indexa pack create "Auth" --auto` → `indexa pack export "Auth" --format xml > auth.xml`.
+Paste `auth.xml` into any AI tool — it's the subject, not the directory tree.
+
+**Debug a wrong answer.** `indexa ask --explain "…"` prints the sparse + dense + fused/reranked hits with
+scores, so you can see exactly which sources were chosen and why (see TROUBLESHOOTING → *Ask returns
+irrelevant results*).
+
+**Feed a small local model.** Point Ollama/llama.cpp at Indexa instead of stuffing whole files into a
+tiny context window: register `indexa mcp` (or export a slice) so the model retrieves a bounded, relevant
+context on demand — the KV-cache stays small and the model stays coherent. Caveats live in
+[docs/methodology.md](docs/methodology.md).
+
+**Get shell completions.** `indexa completion zsh > "${fpath[1]}/_indexa"` (or `bash`/`fish`).
+
+---
+
+## 9. Extending Indexa
+
+Three seams take new capabilities without forking the core. Each is small and has a worked example in
+the tree; the contract is "match the existing pattern in the same file."
+
+- **A new file parser.** Implement `indexa_parsers::Parser` (`accepts_path` / `accepts_mime` / `parse`)
+  and register it with `Registry::register` — it's checked before the built-ins. See the worked plugin
+  example at the top of `crates/parsers/src/registry.rs`, and mirror the **graceful-degradation
+  contract**: malformed input returns a stub chunk, never `Err`/panic (`crates/parsers/tests/error_cases.rs`).
+- **A new web handler.** Add the async fn under `crates/web/src/handlers/`, export it from `handlers/mod.rs`,
+  and register the route in `build_router` (`crates/web/src/lib.rs`). Test it through the real router with
+  the `build_router` + `tower::oneshot` harness already in `lib.rs` (no live server needed).
+- **A new MCP tool.** Add a `#[tool(description = …)]` method to the relevant `#[tool_router]` impl in
+  `crates/mcp/src/` (template: `admin.rs`), opening a fresh `Store` via `self.store()`. Then **regenerate
+  the golden list** (`INDEXA_UPDATE_GOLDEN=1 cargo test -p indexa-mcp`) and bump the "N tools" count in
+  `README.md` / `CLAUDE.md` / `docs/how-to/live-retrieval-over-mcp.md` — the `doc_tool_count_matches_code`
+  test fails the build otherwise.
+
+A new web `NN-*.js` / `NN-*.css` asset is **dead unless added to the `include_str!` concat list** in
+`crates/web/src/lib.rs`.
 
 ---
 
