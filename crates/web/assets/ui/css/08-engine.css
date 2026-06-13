@@ -62,6 +62,26 @@
   transition: background 120ms, border-color 120ms, color 120ms;
 }
 .engine-activity:hover { background: var(--surface-2); border-color: var(--border); color: var(--text); }
+
+/* "Free models" button — same low-key treatment as the activity button. */
+.engine-release {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  padding: 2px 8px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  transition: background 120ms, border-color 120ms, color 120ms;
+}
+.engine-release:hover { background: var(--surface-2); border-color: var(--border); color: var(--text); }
+.engine-release:disabled, .engine-release.busy { opacity: 0.5; cursor: default; }
+
+/* Token-savings widget — muted, accent value; hidden until there's data. */
+.engine-savings .engine-val { color: var(--accent); }
 .engine-activity-badge {
   display: inline-block; background: var(--accent); color: var(--bg);
   border-radius: 8px; padding: 0 5px; font-size: 9px; font-weight: 700;

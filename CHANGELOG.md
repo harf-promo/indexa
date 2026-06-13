@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] — 2026-06-13
+
+"Honest memory": tell the truth about RAM, and finish the loose ends.
+
+The engine bar used to read like a generic system monitor — "most of your RAM is used" — which on
+macOS is always true (the OS keeps memory resident as reclaimable cache) and told you nothing about
+whether Indexa could load another model. It now reports the number the resource engine actually
+reasons about: how much room there is for a new model above the keep-free band. And the one piece of
+memory Indexa genuinely owns — its resident Ollama models — now has a button to release it.
+
+### Added
+
+- **Engine bar "free for a new model" memory readout.** The bar shows `used · free` where *free* is
+  the model **budget** (`total − used − headroom`), not OS-free RAM, with a tooltip that explains
+  *used* excludes reclaimable cache and *free* is room above the keep-free band. Pressure now reads
+  **memory ok / tight / low**, derived from that budget — the old swap-percentage wording (which was
+  misleading on a healthy machine) is gone from the engine bar and the warnings panel. See the new
+  *"What the engine bar's memory numbers mean"* section in `docs/methodology.md`.
+- **"Free models" button** (`POST /api/engine/release`). Unloads Indexa's **own** loaded local
+  models (Ollama `keep_alive=0` eviction) on demand — explicitly **not** a system purge; it cannot
+  touch other processes' memory, and the RAM frees as Ollama evicts. No-op and safe for cloud
+  providers.
+- **Token-savings widget** in the engine bar — "~N tok/wk" with a tooltip showing the served-vs-
+  whole-file basis (`≈4 bytes/token, estimated`). Hidden until there's a week of usage to report.
+- **Web batch-answer for the review inbox.** A "Batch answer…" control answers every open question
+  of a type under a folder at once (blank = all folders), mirroring the CLI's
+  `review answer --type … --under … --choose …`. Confirms before applying; only batch-safe answers
+  per type are offered (the shared `decisions::batch_answer_refusal` guard is now the single source
+  of truth for both CLI and web).
+
+### Changed
+
+- **`indexa related` and the web Map graph now show resolution tiers.** `related` gained a **Tier**
+  column (same-file / import / same-dir / bare) in both the table and `--json`; the Map graph styles
+  scoped edges solid and bare-name edges dashed/muted, and reports the bare-name caveat only on the
+  bare remainder. In `strict` mode the graph now says *"strict (bare-name dropped)"* rather than
+  claiming *"all scope-resolved"* — bare edges were filtered out, not resolved. (Completes the v0.25
+  scoped-resolution surfacing.)
+
 ## [0.25.1] — 2026-06-13
 
 A critical desktop-updater fix. The macOS desktop app's embedded **web** "Update now" button

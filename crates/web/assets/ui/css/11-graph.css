@@ -52,6 +52,14 @@
 .graph-edge.dim {
   opacity: 0.08;
 }
+/* Resolution tiers (v0.25): scoped edges are solid; bare name-only matches are
+   dashed + dimmer so "approximate" reads at a glance. import is the most
+   trusted (structural), so give it a touch more presence. */
+.graph-edge.tier-import { opacity: 0.7; }
+.graph-edge.tier-bare {
+  stroke-dasharray: 3 3;
+  opacity: 0.32;
+}
 
 /* Nodes */
 .graph-node {

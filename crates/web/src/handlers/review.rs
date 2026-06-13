@@ -19,7 +19,8 @@ use axum::{
     Json,
 };
 use indexa_core::decisions::{
-    decide_and_apply, revert_decision, templates::render_question, DecisionType,
+    batch_answer_refusal, decide_and_apply, effects, revert_decision, templates::render_question,
+    DecisionType,
 };
 use indexa_core::store::DecisionRecord;
 use serde::Deserialize;
@@ -48,6 +49,19 @@ pub(crate) struct DismissBody {
 #[derive(Deserialize)]
 pub(crate) struct RevertBody {
     id: i64,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct BatchAnswerBody {
+    /// Decision type to batch-answer (`classification` / `archive` / …).
+    #[serde(rename = "type")]
+    decision_type: String,
+    /// Path prefix — every OPEN question of `decision_type` whose subject is
+    /// under this directory is answered.
+    under: String,
+    /// The answer to apply to all of them. Must be batch-safe for the type
+    /// (see `batch_answer_refusal`).
+    chosen: String,
 }
 
 #[derive(Deserialize)]
@@ -131,6 +145,41 @@ pub(crate) async fn api_review_answer(
         // surface got there first) — all client-input shaped, never a 500.
         Err(e) => err_json(StatusCode::BAD_REQUEST, format!("{e:#}")),
     }
+}
+
+/// Answer every open question of a type under a directory at once. Mirrors the
+/// CLI `review answer --type T --under DIR --choose V`: validate batch-safety,
+/// answer the matching open rows, then project each (a failed projection is left
+/// for the repair sweep, never blocking the rest).
+pub(crate) async fn api_review_answer_batch(
+    State(state): State<AppState>,
+    Json(body): Json<BatchAnswerBody>,
+) -> Response {
+    let Some(ty) = DecisionType::parse(&body.decision_type) else {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            format!("unknown decision type '{}'", body.decision_type),
+        );
+    };
+    if let Some(msg) = batch_answer_refusal(ty, &body.chosen) {
+        return err_json(StatusCode::BAD_REQUEST, msg);
+    }
+    let mut store = state.store.lock().await;
+    let ids = match store.answer_decisions_under(&body.under, ty.as_str(), &body.chosen, "user") {
+        Ok(ids) => ids,
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    };
+    let mut applied = 0usize;
+    for aid in &ids {
+        let Ok(Some(d)) = store.decision_by_id(*aid) else {
+            continue;
+        };
+        if let Ok(e) = effects::apply_decision_effects(&mut store, &d) {
+            let _ = store.mark_effects_applied(*aid, &e);
+            applied += 1;
+        }
+    }
+    Json(serde_json::json!({ "answered": ids.len(), "applied": applied })).into_response()
 }
 
 /// Dismiss an open question (sticky: returns only when the evidence changes).

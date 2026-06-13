@@ -41,6 +41,10 @@ struct EdgeDto {
     from: String,
     to: String,
     weight: usize,
+    /// Resolution tier: `same_file` / `same_dir` / `import` (scoped) or `bare`
+    /// (approximate name-only match). Lets the Map render scoped vs bare edges
+    /// distinctly and apply the bare-name caveat only where it belongs.
+    tier: String,
 }
 
 fn basename(path: &str) -> String {
@@ -79,15 +83,16 @@ pub(crate) async fn api_graph(
 
     let db_path = state.db_path.clone();
     let scope_for_task = scope.clone();
-    let graph = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+    let scoped = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let store = indexa_core::store::Store::open(&db_path)?;
-        store.code_graph(&scope_for_task, limit, strict)
+        store.code_graph_scoped(&scope_for_task, limit, strict)
     })
     .await
     .unwrap_or_else(|e| Err(anyhow::anyhow!("graph task panicked: {e}")));
 
-    match graph {
-        Ok(g) => {
+    match scoped {
+        Ok(sg) => {
+            let g = sg.graph;
             let nodes: Vec<NodeDto> = g
                 .nodes
                 .into_iter()
@@ -99,20 +104,31 @@ pub(crate) async fn api_graph(
                     pagerank: n.pagerank,
                 })
                 .collect();
+            // edge_tiers is parallel to edges (same order, same length).
             let edges: Vec<EdgeDto> = g
                 .edges
                 .into_iter()
-                .map(|e| EdgeDto {
+                .zip(sg.edge_tiers.iter())
+                .map(|(e, tier)| EdgeDto {
                     from: e.from,
                     to: e.to,
                     weight: e.weight,
+                    tier: tier.as_str().to_owned(),
                 })
                 .collect();
+            let bare_edges = sg.edge_tiers.iter().filter(|t| t.is_bare()).count();
             Json(serde_json::json!({
                 "scope": scope,
                 "nodes": nodes,
                 "edges": edges,
                 "truncated": g.truncated,
+                // The bare-name caveat applies only to the bare remainder; the UI
+                // shows it conditionally on this count.
+                "bare_edges": bare_edges,
+                // In strict mode bare edges are *dropped*, not resolved — so a zero
+                // bare count here means "filtered out", which the UI must not report
+                // as "all scope-resolved". Echo the flag so it can word it honestly.
+                "strict": strict,
             }))
             .into_response()
         }

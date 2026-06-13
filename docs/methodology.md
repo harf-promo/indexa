@@ -251,6 +251,23 @@ Centrality drives node **size** in the Map graph view and the ranked "most centr
 - Only retrieval that serves *content* records usage (`ask`, `search`, `get_summary`,
   `read_file`); UI navigation like the sidebar path filter deliberately does not.
 
+## What the engine bar's memory numbers mean
+
+The engine bar reports memory the way the resource engine reasons about it, not the way Activity
+Monitor does — these are deliberately different numbers:
+
+- **"free"** is the **model budget**: room for a new model to load *above* the keep-free headroom
+  band (`total − used − headroom`, clamped at 0). It is not OS "free RAM". On macOS the OS keeps
+  memory resident as reclaimable cache ("free RAM is wasted RAM"), so OS-free reads as near-zero
+  even when there is plenty of room for another model.
+- **"used"** excludes that reclaimable cache, for the same reason.
+- **Pressure** (`memory ok` / `memory tight` / `memory low`) is derived from the budget, **not from
+  swap**. Earlier builds labeled it from swap percentage, which was misleading on a healthy machine
+  that pages lazily; the swap figure is no longer surfaced.
+- **Release models** (`POST /api/engine/release`) unloads only **Indexa's own** loaded Ollama
+  models (`keep_alive=0` eviction). It is **not a system purge** — it cannot and does not touch
+  other processes' memory, and the freed RAM appears only as Ollama actually evicts.
+
 ## What `confidence` on an answer means
 
 `ask` labels each answer **high / medium / low** from the *retrieval evidence*, before synthesis:

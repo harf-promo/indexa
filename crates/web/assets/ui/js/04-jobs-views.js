@@ -533,7 +533,7 @@ function applyWarnFilter() {
       const budgetMb = Math.round((p.budget_bytes || 0) / 1048576);
       const sign = budgetMb >= 0 ? '+' : '';
       pressureChip = '<span class="warn-pressure warn-pressure-' + escapeAttr(p.level) +
-        '" title="budget ' + sign + budgetMb + ' MB · swap ' + p.swap_percent + '%">' +
+        '" title="budget ' + sign + budgetMb + ' MB (room for a new model above the keep-free band)">' +
         escapeHtml(p.level) + ' · budget ' + sign + budgetMb + ' MB</span>';
     }
     return '<div class="warn-row' + (w.pressure ? ' warn-row-pressure' : '') + '" onclick="this.classList.toggle(\'expanded\')">' +

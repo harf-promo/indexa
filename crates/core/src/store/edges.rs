@@ -39,6 +39,7 @@ pub enum ResolutionTier {
 }
 
 impl ResolutionTier {
+    /// Stable wire/JSON form (snake_case).
     pub fn as_str(self) -> &'static str {
         match self {
             ResolutionTier::SameFile => "same_file",
@@ -46,6 +47,23 @@ impl ResolutionTier {
             ResolutionTier::Import => "import",
             ResolutionTier::Bare => "bare",
         }
+    }
+
+    /// Human display label (hyphenated) for CLI tables and UI badges.
+    pub fn label(self) -> &'static str {
+        match self {
+            ResolutionTier::SameFile => "same-file",
+            ResolutionTier::SameDir => "same-dir",
+            ResolutionTier::Import => "import",
+            ResolutionTier::Bare => "bare",
+        }
+    }
+
+    /// Whether this tier is the approximate, name-only fallback (carries
+    /// [`BARE_NAME_CAVEAT`]). The scoped tiers (same-file/import/same-dir) are
+    /// structural or proximity-backed.
+    pub fn is_bare(self) -> bool {
+        matches!(self, ResolutionTier::Bare)
     }
 }
 

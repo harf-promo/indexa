@@ -2,8 +2,9 @@
    Subscribes to /api/telemetry/stream (SSE) and renders the always-on bottom bar:
    CPU sparkline, RAM meter with the keep-free headroom band, and a memory-pressure
    pip. Live whether the engine is idle or building — independent of any job.
-   Honest two-signal design: RAM-fit (budget/headroom) and swap-pressure are shown
-   separately, so "elevated swap while RAM is free" reads as exactly that. */
+   Honest readout: RAM shows used + how much is actually free for a new model
+   (the engine's budget), and the pressure pip reflects that same budget — not
+   swap. A "Free models" button unloads Indexa's own resident models on demand. */
 (function () {
   var CPU_HISTORY = [];
   var CPU_HISTORY_MAX = 25;
@@ -116,16 +117,31 @@
     if (band) band.style.width = clampPct((s.headroom_bytes / total) * 100) + '%';
     var meter = el('engine-ram-meter');
     if (meter) meter.classList.toggle('in-band', !!s.in_headroom_band);
+    // Honest value: show how much RAM is actually free for a NEW model (the
+    // budget the engine computes) — not just used/total, which on macOS reads as
+    // "almost full" because the OS keeps reclaimable cache resident. `budget` can
+    // go negative when used+headroom exceed total; clamp at 0.
+    var freeForModels = Math.max(0, (s.budget_bytes || 0));
     var rv = el('engine-ram-val');
-    if (rv && s.ram) rv.textContent = fmtGB(s.ram.used_bytes) + ' / ' + fmtGB(total);
+    if (rv && s.ram) {
+      rv.textContent = fmtGB(s.ram.used_bytes) + ' used \xb7 ' + fmtGB(freeForModels) + ' free';
+    }
+    var ramMetric = el('engine-ram-metric');
+    if (ramMetric && s.ram) {
+      ramMetric.title = fmtGB(s.ram.used_bytes) + ' used of ' + fmtGB(total)
+        + ' (excludes reclaimable cache) \xb7 ' + fmtGB(freeForModels)
+        + ' free for a new model above the ' + fmtGB(s.headroom_bytes || 0) + ' keep-free band';
+    }
 
-    // Pressure pip + neutral, honest label
+    // Pressure pip + honest, budget-based label. Pressure is derived from the
+    // memory BUDGET (room above the keep-free headroom), not swap — so the label
+    // must not say "swap" (it used to, misleadingly).
     var pip = el('engine-pressure-pip');
     if (pip) pip.className = 'pressure-pip p-' + pressure;
     var pv = el('engine-pressure-val');
     if (pv) {
-      pv.textContent = pressure === 'critical' ? 'high swap'
-        : (pressure === 'throttle' ? 'elevated swap' : 'no pressure');
+      pv.textContent = pressure === 'critical' ? 'memory low'
+        : (pressure === 'throttle' ? 'memory tight' : 'memory ok');
     }
 
     // Live build progress (fused from the per-job SSE the UI already holds).
@@ -147,6 +163,22 @@
       // EventSource reconnects automatically on transient errors; nothing to do.
     } catch (e) { /* SSE unsupported — bar stays at its default placeholders */ }
   }
+
+  // "Free models" button → unload Indexa's own resident local models. Exposed on
+  // window because this module is an IIFE and the button uses an inline onclick.
+  // This is NOT a system RAM purge — it only releases the models Indexa loaded;
+  // the engine bar's streamed `used`/`free` updates a moment later as Ollama evicts.
+  window.releaseModels = function () {
+    var btn = el('engine-release-btn');
+    if (btn) { btn.disabled = true; btn.classList.add('busy'); }
+    fetch('/api/engine/release', { method: 'POST' })
+      .then(function (r) { return r.json().catch(function () { return {}; }); })
+      .then(function () {
+        toast("Released Indexa's loaded models — memory frees as Ollama evicts them.", 'info');
+      })
+      .catch(function (e) { toast('Could not release models: ' + e.message, 'error'); })
+      .finally(function () { if (btn) { btn.disabled = false; btn.classList.remove('busy'); } });
+  };
 
   function init() {
     if (el('engine-bar')) connect();

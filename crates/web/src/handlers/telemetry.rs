@@ -19,6 +19,22 @@ use tokio_stream::{wrappers::WatchStream, StreamExt};
 
 use crate::AppState;
 
+/// `POST /api/engine/release` — unload the local models Indexa loaded, freeing
+/// their wired RAM. This frees ONLY Indexa's own footprint: the Ollama models it
+/// keeps resident (`keep_alive`) for fast follow-up calls. It is **not** a system
+/// memory purge — Indexa does not (and should not) touch the OS's reclaimable
+/// cache. Cloud providers hold no local model, so their `unload()` is a no-op.
+/// The memory watchdog already does this automatically under pressure; this is
+/// the manual lever for "give my RAM back now".
+pub(crate) async fn api_engine_release(State(s): State<AppState>) -> impl IntoResponse {
+    // Best-effort: unload never errors out of the trait; Ollama logs+ignores a
+    // failed evict. Models free asynchronously, so the streamed engine bar shows
+    // `used` falling / `budget` climbing a moment later.
+    s.llm.unload().await;
+    s.embedder.unload().await;
+    Json(serde_json::json!({ "released": true }))
+}
+
 /// `GET /api/telemetry` — the latest telemetry snapshot (poll-friendly fallback).
 pub(crate) async fn api_telemetry(State(s): State<AppState>) -> impl IntoResponse {
     let sample = s.telemetry.borrow().clone();
