@@ -3,24 +3,31 @@ async function loadStats() {
   try {
     const r = await fetch('/api/stats');
     const d = await r.json();
-    let text = d.entries.toLocaleString() + ' files \xb7 ' + d.chunks.toLocaleString() + ' chunks';
-    // Estimated token savings this week (≈4 bytes/token, same estimate as
-    // `indexa status`); hidden until retrieval calls produce real savings.
-    const u = d.usage_week;
+    const text = d.entries.toLocaleString() + ' files \xb7 ' + d.chunks.toLocaleString() + ' chunks';
     const statsEl = document.getElementById('stats');
-    if (u && u.counterfactual > u.served) {
-      const tokens = Math.round((u.counterfactual - u.served) / 4);
-      text += ' \xb7 ~' + tokens.toLocaleString() + ' tokens saved this week';
-      // The compact header drops the basis — restore it on hover (parity with
-      // the CLI/MCP savings line).
-      statsEl.title = 'Estimated: retrieval served ' + Math.round(u.served / 1024) +
-        ' KB where whole-file context would have been ' + Math.round(u.counterfactual / 1024) +
-        ' KB (≈4 bytes/token). See docs/methodology.md.';
-    } else {
-      statsEl.title = '';
-    }
-    statsEl.textContent = text;
+    if (statsEl) statsEl.textContent = text;
+    renderSavingsWidget(d.usage_week);
   } catch(e) { document.getElementById('stats').textContent = 'No context yet'; }
+}
+
+/* Promote the token-savings figure from a topbar suffix to a dedicated engine-bar
+   widget: "~N tokens saved/wk", with the honest estimate basis on hover. Hidden
+   until retrieval has actually served something (counterfactual > served). The
+   number is an estimate (≈4 bytes/token, same as `indexa status`/methodology). */
+function renderSavingsWidget(u) {
+  const wrap = document.getElementById('engine-savings');
+  const val = document.getElementById('engine-savings-val');
+  if (!wrap || !val) return;
+  if (u && u.counterfactual > u.served) {
+    const tokens = Math.round((u.counterfactual - u.served) / 4);
+    val.textContent = '~' + tokens.toLocaleString() + ' tok/wk';
+    wrap.title = 'Estimated tokens saved this week: retrieval served ' +
+      Math.round(u.served / 1024) + ' KB where whole-file context would have been ' +
+      Math.round(u.counterfactual / 1024) + ' KB (≈4 bytes/token, estimated — see docs/methodology.md).';
+    wrap.hidden = false;
+  } else {
+    wrap.hidden = true;
+  }
 }
 
 /* ── Tree ── */

@@ -2,7 +2,6 @@ use anyhow::{anyhow, Result};
 use indexa_core::config::Config;
 use indexa_core::decisions::templates::render_question;
 use indexa_core::decisions::{decide_and_apply, detectors, effects, DecisionType};
-use indexa_core::smart_classify::SemanticCategory;
 use indexa_core::store::{DecisionRecord, Store};
 use std::io::IsTerminal;
 
@@ -199,52 +198,10 @@ pub(crate) async fn cmd_review_answer(
     };
 
     // answer_decisions_under can't consult each row's options, so the value is
-    // validated per type up front (mirrors decide_and_apply's validate-first rule).
-    match t {
-        DecisionType::Classification => {
-            if choose != "ignore" && SemanticCategory::parse(choose).is_none() {
-                anyhow::bail!(
-                    "'{choose}' is not a category. Valid: work, personal, archive, media, \
-code, system, other — or ignore"
-                );
-            }
-        }
-        DecisionType::Duplicate => {
-            if choose != "keep_all" {
-                anyhow::bail!(
-                    "the only batch-safe duplicate answer is keep_all — a canonical pick is \
-per-cluster, so answer those individually (indexa review answer <id> <path>)"
-                );
-            }
-        }
-        // Archive menus are fixed (no per-row values), so both answers batch safely.
-        DecisionType::Archive => {
-            if choose != "archive" && choose != "keep_active" {
-                anyhow::bail!("archive questions accept: archive, keep_active");
-            }
-        }
-        // Drift menus are fixed too — both answers batch safely.
-        DecisionType::SummaryDrift => {
-            if choose != "keep_new" && choose != "restore_old" {
-                anyhow::bail!("summary_drift questions accept: keep_new, restore_old");
-            }
-        }
-        DecisionType::Language => {
-            if choose != "ignore" {
-                anyhow::bail!(
-                    "the only batch-safe language answer is ignore — the right language is \
-per-file, so answer those individually (indexa review answer <id> <language>)"
-                );
-            }
-        }
-        DecisionType::SymbolAmbiguity => {
-            if choose != "all" {
-                anyhow::bail!(
-                    "the only batch-safe symbol answer is all — an authoritative definition is \
-per-symbol, so answer those individually (indexa review answer <id> <path>)"
-                );
-            }
-        }
+    // validated per type up front (shared with the web batch endpoint so the
+    // batch-safety rules can't drift).
+    if let Some(msg) = indexa_core::decisions::batch_answer_refusal(t, choose) {
+        anyhow::bail!(msg);
     }
 
     let dir = shellexpand::tilde(under).into_owned();

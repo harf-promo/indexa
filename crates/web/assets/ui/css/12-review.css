@@ -50,3 +50,14 @@
   border-radius: 8px; padding: 0 5px; font-size: 9px; font-weight: 700;
   vertical-align: middle;
 }
+
+/* Batch-answer control above the review cards. */
+.review-batch { margin-bottom: 12px; font-size: 12px; }
+.review-batch > summary { cursor: pointer; color: var(--muted); padding: 4px 0; }
+.review-batch-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-top: 6px; }
+.review-batch-field { display: flex; flex-direction: column; gap: 2px; font-size: 10px; color: var(--muted); }
+.review-batch-field select, .review-batch-under {
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); padding: 3px 6px; font-size: 12px;
+}
+.review-batch-under { min-width: 150px; }

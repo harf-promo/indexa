@@ -50,7 +50,97 @@ function renderReviewList(questions) {
     renderReviewEmpty(list);
     return;
   }
+  var batch = buildBatchControl(questions);
+  if (batch) list.appendChild(batch);
   questions.forEach(function (q) { list.appendChild(buildReviewCard(q)); });
+}
+
+// Batch-safe answers per decision type — mirrors core::decisions::batch_answer_refusal
+// (per-row values like a canonical path or a specific language can't batch).
+var BATCH_CHOICES = {
+  classification: ['work', 'personal', 'archive', 'media', 'code', 'system', 'other', 'ignore'],
+  duplicate: ['keep_all'],
+  archive: ['archive', 'keep_active'],
+  summary_drift: ['keep_new', 'restore_old'],
+  language: ['ignore'],
+  symbol_ambiguity: ['all'],
+};
+var TYPE_LABELS = {
+  classification: 'classification', duplicate: 'duplicate', archive: 'archive',
+  summary_drift: 'summary drift', language: 'language', symbol_ambiguity: 'symbol',
+};
+
+/* "Batch answer…" control above the cards — answer all questions of a type
+   under a folder at once. Only types that have a batch-safe answer appear.
+   Built with createElement; the only user-typed value (folder) is sent in the
+   POST body, never interpolated as HTML. */
+function buildBatchControl(questions) {
+  var present = {};
+  questions.forEach(function (q) { if (BATCH_CHOICES[q.decision_type]) present[q.decision_type] = true; });
+  var typeList = Object.keys(present);
+  if (!typeList.length) return null;
+
+  var box = document.createElement('details');
+  box.className = 'review-batch';
+  var summary = document.createElement('summary');
+  summary.textContent = 'Batch answer…';
+  box.appendChild(summary);
+
+  var form = document.createElement('div');
+  form.className = 'review-batch-form';
+
+  var typeSel = document.createElement('select');
+  typeList.forEach(function (t) {
+    var o = document.createElement('option'); o.value = t; o.textContent = TYPE_LABELS[t] || t; typeSel.appendChild(o);
+  });
+  var under = document.createElement('input');
+  under.type = 'text'; under.placeholder = 'under folder (blank = all)'; under.className = 'review-batch-under';
+  var choiceSel = document.createElement('select');
+  function fillChoices() {
+    choiceSel.textContent = '';
+    (BATCH_CHOICES[typeSel.value] || []).forEach(function (c) {
+      var o = document.createElement('option'); o.value = c; o.textContent = c; choiceSel.appendChild(o);
+    });
+  }
+  fillChoices();
+  typeSel.addEventListener('change', fillChoices);
+
+  var go = document.createElement('button');
+  go.className = 'btn-sm'; go.textContent = 'Answer all';
+  go.onclick = function () { batchAnswer(typeSel.value, under.value.trim(), choiceSel.value); };
+
+  form.appendChild(batchField('Type', typeSel));
+  form.appendChild(batchField('Under', under));
+  form.appendChild(batchField('As', choiceSel));
+  form.appendChild(go);
+  box.appendChild(form);
+  return box;
+}
+
+function batchField(text, control) {
+  var w = document.createElement('label'); w.className = 'review-batch-field';
+  var s = document.createElement('span'); s.textContent = text;
+  w.appendChild(s); w.appendChild(control); return w;
+}
+
+function batchAnswer(type, under, chosen) {
+  var where = under ? ('under ' + under) : 'in all folders';
+  confirmModal('Answer all open ' + (TYPE_LABELS[type] || type) + ' questions ' + where +
+    ' as "' + chosen + '"? This applies immediately.', 'Answer all')
+    .then(function (ok) {
+      if (!ok) return null;
+      return fetch('/api/review/answer-batch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: type, under: under, chosen: chosen }),
+      }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (!res.ok) { toast(res.d.error || 'Batch answer failed', 'error'); return; }
+          toast('Answered ' + res.d.answered + ' question(s)' +
+            (res.d.applied < res.d.answered ? ' (' + res.d.applied + ' applied)' : ''), 'info');
+          loadReview(); loadReviewCount();
+        });
+    })
+    .catch(function (e) { toast('Batch answer error: ' + e.message, 'error'); });
 }
 
 function renderReviewEmpty(list) {

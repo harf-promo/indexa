@@ -64,8 +64,17 @@ function renderGraph(d) {
   }
 
   if (meta) {
+    // The bare-name caveat applies only to the bare remainder (v0.25 scoped
+    // resolution). When bare edges remain, name them. When none remain, say so
+    // honestly: in strict mode bare edges were *dropped*, not resolved, so we
+    // must not claim "all scope-resolved".
+    var bare = d.bare_edges || 0;
+    var resolvedNote = bare > 0
+      ? ' · ' + bare + ' bare-name (approximate)'
+      : (d.strict ? ' · strict (bare-name dropped)' : ' · all scope-resolved');
     meta.textContent = nodes.length + ' files · ' + edges.length + ' edges · node size = centrality'
-      + (d.truncated ? ' · ⚠ truncated (showing the heaviest)' : '');
+      + (d.truncated ? ' · ⚠ truncated (showing the heaviest)' : '')
+      + resolvedNote;
   }
 
   var rect = svg.getBoundingClientRect();
@@ -94,7 +103,7 @@ function renderGraph(d) {
     return o;
   });
   var links = edges.map(function (e) {
-    return { source: byId[e.from], target: byId[e.to], weight: e.weight };
+    return { source: byId[e.from], target: byId[e.to], weight: e.weight, tier: e.tier || 'bare' };
   }).filter(function (l) { return l.source && l.target; });
 
   // Adjacency for hover highlighting.
@@ -117,7 +126,9 @@ function renderGraph(d) {
     var ln = document.createElementNS(GRAPH_NS, 'line');
     ln.setAttribute('x1', l.source.x); ln.setAttribute('y1', l.source.y);
     ln.setAttribute('x2', l.target.x); ln.setAttribute('y2', l.target.y);
-    ln.setAttribute('class', 'graph-edge');
+    // Tier styling: scoped edges (same-file/import/same-dir) are solid; bare
+    // name-only matches render dashed + muted so "approximate" reads visually.
+    ln.setAttribute('class', 'graph-edge tier-' + l.tier);
     ln.setAttribute('stroke-width', Math.max(0.5, Math.min(4, l.weight * 0.6)));
     gEdges.appendChild(ln);
     return { el: ln, link: l };

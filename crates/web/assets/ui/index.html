@@ -573,7 +573,7 @@
     <span class="engine-spark" id="engine-cpu-spark" aria-hidden="true"></span>
     <span class="engine-val" id="engine-cpu-val">&#x2014;</span>
   </span>
-  <span class="engine-metric" title="RAM used / total &#x2014; the hatched band is the keep-free headroom">
+  <span class="engine-metric" id="engine-ram-metric" title="RAM used / total &#x2014; the hatched band is the keep-free headroom">
     <span class="engine-label">RAM</span>
     <span class="ram-meter" id="engine-ram-meter" aria-hidden="true">
       <span class="ram-meter-band" id="engine-ram-band"></span>
@@ -581,10 +581,11 @@
     </span>
     <span class="engine-val" id="engine-ram-val">&#x2014;</span>
   </span>
-  <span class="engine-metric" title="Memory pressure">
+  <span class="engine-metric" id="engine-pressure-metric" title="Memory pressure — Indexa's room for a new model above the keep-free headroom">
     <span class="pressure-pip" id="engine-pressure-pip" aria-hidden="true"></span>
     <span class="engine-val" id="engine-pressure-val">&#x2014;</span>
   </span>
+  <button class="engine-release" id="engine-release-btn" onclick="releaseModels()" title="Unload Indexa's loaded local models to free their RAM. Not a system purge — it only releases Indexa's own models." aria-label="Release Indexa's loaded models">&#x21BA; Free models</button>
   <!-- Live build progress — shown only while a job is running (fed from the job SSE the UI already opens) -->
   <span class="engine-job" id="engine-job" title="Current build" hidden>
     <span class="engine-job-sep" aria-hidden="true">&#x2502;</span>
@@ -595,6 +596,10 @@
     <span class="engine-job-model" id="engine-job-model"></span>
   </span>
   <span class="engine-spacer"></span>
+  <span class="engine-metric engine-savings" id="engine-savings" title="Estimated tokens saved this week by serving retrieved slices instead of whole files (≈4 bytes/token)" hidden>
+    <span class="engine-label">Saved</span>
+    <span class="engine-val" id="engine-savings-val"></span>
+  </span>
   <button class="engine-activity" id="engine-activity" onclick="switchTab('jobs')" title="Activity — jobs &amp; warnings" aria-label="Open activity">
     &#x25B8; Activity <span class="engine-activity-badge" id="engine-activity-badge" hidden></span>
   </button>

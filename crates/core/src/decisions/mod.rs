@@ -85,6 +85,47 @@ impl fmt::Display for DecisionType {
     }
 }
 
+/// For batch answering ("answer all `<type>` under `<dir>`"), only some choices
+/// are safe across many rows at once — a per-row value like a canonical
+/// duplicate path, a specific file language, or an authoritative symbol
+/// definition can't apply to a whole batch. Returns an explanatory refusal, or
+/// `None` when `chosen` is batch-safe for `ty`. Shared by the CLI
+/// `review answer --under` and the web batch endpoint so the rules can't drift.
+pub fn batch_answer_refusal(ty: DecisionType, chosen: &str) -> Option<String> {
+    use crate::smart_classify::SemanticCategory;
+    let ok = match ty {
+        DecisionType::Classification => {
+            chosen == "ignore" || SemanticCategory::parse(chosen).is_some()
+        }
+        DecisionType::Duplicate => chosen == "keep_all",
+        DecisionType::Archive => chosen == "archive" || chosen == "keep_active",
+        DecisionType::SummaryDrift => chosen == "keep_new" || chosen == "restore_old",
+        DecisionType::Language => chosen == "ignore",
+        DecisionType::SymbolAmbiguity => chosen == "all",
+    };
+    if ok {
+        return None;
+    }
+    Some(match ty {
+        DecisionType::Classification => "classification batch answer must be a category \
+            (work, personal, archive, media, code, system, other) or ignore"
+            .to_string(),
+        DecisionType::Duplicate => "the only batch-safe duplicate answer is keep_all — a \
+            canonical pick is per-cluster, so answer those individually"
+            .to_string(),
+        DecisionType::Archive => "archive questions accept: archive, keep_active".to_string(),
+        DecisionType::SummaryDrift => {
+            "summary_drift questions accept: keep_new, restore_old".to_string()
+        }
+        DecisionType::Language => "the only batch-safe language answer is ignore — the right \
+            language is per-file, so answer those individually"
+            .to_string(),
+        DecisionType::SymbolAmbiguity => "the only batch-safe symbol answer is all — an \
+            authoritative definition is per-symbol, so answer those individually"
+            .to_string(),
+    })
+}
+
 /// Answer an open question and project the answer onto the domain tables.
 /// The single entry point every surface (CLI/MCP/web) routes answers through.
 ///
@@ -371,6 +412,25 @@ mod tests {
             assert_eq!(DecisionType::parse(t.as_str()), Some(t));
         }
         assert_eq!(DecisionType::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn batch_answer_refusal_allows_only_batch_safe_choices() {
+        use DecisionType::*;
+        // Batch-safe answers are accepted (None = no refusal).
+        assert!(batch_answer_refusal(Classification, "work").is_none());
+        assert!(batch_answer_refusal(Classification, "ignore").is_none());
+        assert!(batch_answer_refusal(Duplicate, "keep_all").is_none());
+        assert!(batch_answer_refusal(Archive, "archive").is_none());
+        assert!(batch_answer_refusal(Archive, "keep_active").is_none());
+        assert!(batch_answer_refusal(SummaryDrift, "restore_old").is_none());
+        assert!(batch_answer_refusal(Language, "ignore").is_none());
+        assert!(batch_answer_refusal(SymbolAmbiguity, "all").is_none());
+        // Per-row values are refused (a path / language / bad category can't batch).
+        assert!(batch_answer_refusal(Classification, "banana").is_some());
+        assert!(batch_answer_refusal(Duplicate, "/some/canonical.rs").is_some());
+        assert!(batch_answer_refusal(Language, "rust").is_some());
+        assert!(batch_answer_refusal(SymbolAmbiguity, "/src/a.rs").is_some());
     }
 
     #[test]
