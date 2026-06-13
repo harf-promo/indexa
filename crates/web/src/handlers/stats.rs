@@ -20,6 +20,8 @@ pub(crate) async fn api_stats(State(state): State<AppState>) -> Response {
         (Ok(entries), Ok(chunks)) => Json(StatsResponse {
             entries,
             chunks,
+            // Best-effort: 0 over a read error just hides the "context not built" hint.
+            summaries: store.summary_count().unwrap_or(0),
             usage_week: UsageWeekDto {
                 served: usage.bytes_served,
                 counterfactual: usage.bytes_counterfactual,

@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] — 2026-06-13
+
+"Context that answers": make Ask actually answer about what you're looking at.
+
+Selecting `CLAUDE.md` and asking *"what is this file?"* used to return PNG **icon** files and
+*"the context only lists filenames and sizes"* — because Ask searched the whole index with no idea
+which file you had open, and content-free image placeholders out-ranked real text. Three fixes turn
+that around, all working on your existing index with no re-index.
+
+### Added
+
+- **File-aware Ask.** Selecting a file or folder now auto-scopes Ask to it, shown as a removable
+  **"Asking about: &lt;name&gt; ✕"** chip (clear it for a whole-index question). The Context summary
+  gains an **"💬 Ask about this file"** button that bridges straight into the scoped Ask — present
+  even before a file is summarized, since scoped answers work on its raw content. When a single-file
+  scope returns little, Ask offers to **broaden to the folder** rather than silently going global.
+  (`scope` rides the request the same way `indexa ask --scope` and MCP `ask {scope}` already do.)
+- **"Context not built yet" banner.** When an index is embedded but not yet summarized, a dismissible
+  banner explains answers are falling back to raw chunks and offers a one-click **Build context** —
+  instead of silently returning thin results. Auto-hides once summaries exist.
+
+### Changed
+
+- **Content-free image/binary stub chunks are excluded from retrieval.** Placeholders like
+  `File: logo.png` (emitted for images without captions) no longer surface as answer sources or crowd
+  out real content — filtered in the search SQL and guarded again at synthesis. Fixes existing indexes.
+- **The app opens on your Context, not a blank Ask box.** A returning user lands on the file tree +
+  summary (Ask is one click away), so there's always something to orient to.
+- **Image captioning defaults to gemma3** (the Google multimodal model already pulled for summaries)
+  instead of a separate ~8 GB vision model — captioning works out of the box when you enable it, with
+  no extra download and within the existing memory budget. Set `[parsers.image] model` to override.
+- **Plainer labels.** "Build deep context" → **"Index for search"**; the Context welcome now says
+  **"Select a file or folder to see what it is."** Sidebar row actions (scan / index / summarize /
+  remove) are revealed on hover, keyboard focus, **and** when a row is selected — no longer
+  hover-only — and are keyboard-reachable.
+
 ## [0.26.0] — 2026-06-13
 
 "Honest memory": tell the truth about RAM, and finish the loose ends.

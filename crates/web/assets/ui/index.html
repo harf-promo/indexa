@@ -69,6 +69,10 @@
       </div>
     </div>
 
+    <!-- "Context not built yet" banner: shown when the index is embedded but has no
+         summaries (Ask falls back to raw chunks). Dismissible; auto-hides once built. -->
+    <div class="context-notice" id="context-notice" hidden></div>
+
     <div class="workspace-views" id="workspace-views">
       <div class="tab-panel active" id="panel-tree" role="tabpanel" aria-labelledby="view-tree">
         <div class="summary-view" id="summary-view">
@@ -76,9 +80,9 @@
             <!-- Default welcome (populated index, nothing selected). JS hides this and
                  reveals #welcome-empty when /api/roots is empty (first run). -->
             <div id="welcome-default">
-              <h2>Your local context, on tap</h2>
-              <p>Click any folder in the sidebar to read its context summary, switch to the <strong>Map</strong>, or <strong>Ask</strong> a question below.<br><br>
-              Use the row actions to <strong>&#x21BB; scan</strong>, <strong>&#x26A1; build deep context</strong>, or <strong>&#x1F4DD; summarize</strong> a folder.</p>
+              <h2>Select a file or folder to read its summary</h2>
+              <p>Pick anything in the sidebar to read its summary — or <strong>Ask about it</strong> directly — then <strong>Export</strong> it to your AI tool. Switch to the <strong>Map</strong> for a coverage overview.<br><br>
+              Hover a folder for row actions: <strong>&#x21BB; scan</strong>, <strong>&#x26A1; index for search</strong>, or <strong>&#x1F4DD; summarize</strong>.</p>
             </div>
             <!-- First-run / empty-index guidance. Shown by onboarding.js when there are no
                  roots; self-dismisses once a folder is added (index becomes non-empty). -->
@@ -153,6 +157,8 @@
 
     <!-- Always-docked Ask bar: submitting switches the workspace to the Ask view. -->
     <div class="input-bar" id="ask-bar">
+      <!-- File-aware Ask: shows "Asking about: <selection>" when scoped; ✕ clears to whole-index. -->
+      <div class="ask-scope-chip" id="ask-scope-chip" hidden></div>
       <select id="saved-q" title="Saved searches (also: indexa saved)" aria-label="Saved searches" hidden></select>
       <input type="text" id="q" placeholder="Ask your local context&#x2026;" autocomplete="off" aria-label="Ask a question">
       <label class="toggle-label ask-agentic-toggle" title="Agentic: plan &rarr; search &rarr; refine across multiple hops. Better for compositional questions; a bit slower.">

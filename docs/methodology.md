@@ -146,6 +146,27 @@ empty, or unparseable output falls back to the original retrieval order, so re-r
 `ask` worse. A future ONNX/`fastembed` cross-encoder can slot in behind the same `CrossEncoder` trait
 via a Cargo feature.
 
+### Scoping a query (file-aware Ask)
+
+`ask` accepts a `scope` (CLI `--scope`, MCP `ask {scope}`, and — since v0.27 — the web UI, which
+auto-scopes to the file or folder you have selected and shows an "Asking about: …" chip). Scope is a
+**path-prefix filter** applied in both retrieval arms (`entry_path LIKE '<scope>%'`), not a hard
+directory boundary — so a folder scope `/src/auth` also matches a sibling `/src/authentication.rs`.
+For a single file it is effectively exact. Scoping narrows retrieval to that subtree, which is what
+makes "what is this file?" answer about *that* file rather than the whole index — but a single-file
+scope can return few hits, so the web UI offers to widen to the parent folder rather than silently
+falling back to a whole-index search.
+
+### Excluding content-free stub chunks
+
+Binary, image, and media files that yield no extractable text get a placeholder chunk
+(`File: <name>`, `Image: <name>`, `Media file: <name>`). These carry no semantic content but embed
+near generic phrasings like "what is this file?", so retrieval **excludes** them (a short-length +
+known-prefix filter in the search SQL, guarded again before synthesis) — they can never surface as an
+answer source. The honest consequence: **a binary or image file with no caption contributes nothing
+searchable** beyond its path and [classification](#decision-log) — enable [Vision
+captioning](#whats-opt-in-not-default) to make image *content* retrievable.
+
 ---
 
 ## Answer synthesis (RAG)

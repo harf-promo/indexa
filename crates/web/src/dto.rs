@@ -16,6 +16,10 @@ use uuid::Uuid;
 pub(crate) struct StatsResponse {
     pub(crate) entries: u64,
     pub(crate) chunks: u64,
+    /// Number of file/dir summaries built. 0 with `chunks > 0` ⇒ the index was
+    /// scanned + embedded but never summarized — the UI surfaces a "context not
+    /// built yet" hint so Ask answers aren't silently thin.
+    pub(crate) summaries: u64,
     /// Token-savings telemetry over the last week (zeros until retrieval calls
     /// are recorded). Bytes, not tokens — the ≈4 chars/token estimate is a UI
     /// concern. See `store::usage` for the counterfactual definition.
@@ -311,6 +315,11 @@ pub(crate) struct AskRequest {
     /// Agentic multi-hop retrieval. Omit ⇒ the server's `[retrieval] agentic` default.
     #[serde(default)]
     pub(crate) agentic: Option<bool>,
+    /// Restrict retrieval to chunks under this path prefix — the file or folder the
+    /// user has selected in the sidebar ("Asking about: <file>"). Omit / empty ⇒
+    /// whole-index ask. Mirrors `indexa ask --scope` and MCP `ask {scope}`.
+    #[serde(default)]
+    pub(crate) scope: Option<String>,
 }
 
 #[derive(Deserialize)]

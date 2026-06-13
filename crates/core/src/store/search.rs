@@ -43,6 +43,26 @@ pub(super) fn like_prefix(prefix: &str) -> String {
     format!("{escaped}%")
 }
 
+/// SQL `WHERE`-fragment (begins with ` AND `) that excludes content-free stub chunks from
+/// retrieval — the `File: <name>` / `Image: …` / `Media file: …` placeholders a binary,
+/// image, or media parser emits when it has nothing real to extract. They carry no semantic
+/// content but embed near generic "what is this file?" queries and crowd out real content.
+/// Kept in sync with [`is_stub_chunk`]: same prefixes + the same <80-char length cap (a real
+/// document that happens to start "File: …" runs far longer). Works on any table exposing a
+/// `text` column (`chunks`, `chunks_fts`).
+pub(super) const STUB_EXCLUDE_SQL: &str =
+    " AND NOT (length(text) < 80 AND (text LIKE 'File: %' OR text LIKE 'Image: %' OR text LIKE 'Media file: %'))";
+
+/// Whether `text` is a content-free parser stub (see [`STUB_EXCLUDE_SQL`]). The Rust-side
+/// guard for any stub that still reaches `retrieve()` — e.g. via the ANN dense arm, which
+/// returns ids from the HNSW index without running the SQL filter.
+pub fn is_stub_chunk(text: &str) -> bool {
+    text.len() < 80
+        && (text.starts_with("File: ")
+            || text.starts_with("Image: ")
+            || text.starts_with("Media file: "))
+}
+
 pub(super) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -141,20 +161,22 @@ impl Store {
                 let fts_query = fts5_quote(query_text);
                 let (sql, scope_param) = if let Some(s) = scope {
                     (
-                        "SELECT CAST(chunk_id AS INTEGER), entry_path, bm25(chunks_fts) AS score
-                         FROM chunks_fts
-                         WHERE chunks_fts MATCH ?1 AND entry_path LIKE ?2 ESCAPE '\\'
-                         ORDER BY score LIMIT 100"
-                            .to_string(),
+                        format!(
+                            "SELECT CAST(chunk_id AS INTEGER), entry_path, bm25(chunks_fts) AS score
+                             FROM chunks_fts
+                             WHERE chunks_fts MATCH ?1 AND entry_path LIKE ?2 ESCAPE '\\'{STUB_EXCLUDE_SQL}
+                             ORDER BY score LIMIT 100"
+                        ),
                         Some(like_prefix(s)),
                     )
                 } else {
                     (
-                        "SELECT CAST(chunk_id AS INTEGER), entry_path, bm25(chunks_fts) AS score
-                         FROM chunks_fts
-                         WHERE chunks_fts MATCH ?1
-                         ORDER BY score LIMIT 100"
-                            .to_string(),
+                        format!(
+                            "SELECT CAST(chunk_id AS INTEGER), entry_path, bm25(chunks_fts) AS score
+                             FROM chunks_fts
+                             WHERE chunks_fts MATCH ?1{STUB_EXCLUDE_SQL}
+                             ORDER BY score LIMIT 100"
+                        ),
                         None,
                     )
                 };
@@ -400,11 +422,11 @@ impl Store {
         scope: Option<&str>,
     ) -> Result<Vec<(i64, String)>> {
         let sql = if scope.is_some() {
-            "SELECT id, entry_path, embedding FROM chunks WHERE embedding IS NOT NULL AND entry_path LIKE ?1 ESCAPE '\\'"
+            format!("SELECT id, entry_path, embedding FROM chunks WHERE embedding IS NOT NULL AND entry_path LIKE ?1 ESCAPE '\\'{STUB_EXCLUDE_SQL}")
         } else {
-            "SELECT id, entry_path, embedding FROM chunks WHERE embedding IS NOT NULL"
+            format!("SELECT id, entry_path, embedding FROM chunks WHERE embedding IS NOT NULL{STUB_EXCLUDE_SQL}")
         };
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(&sql)?;
 
         let mut scored: Vec<(i64, String, f32)> = Vec::new();
         let scope_pattern = scope.map(like_prefix);

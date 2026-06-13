@@ -17,7 +17,11 @@ use crate::dto::{err_json, AskConfidence, AskRequest, AskResponse, AskSource};
 use crate::AppState;
 
 /// Build the Q&A config from the server's retrieval settings (shared by both ask handlers).
-fn qa_config(state: &AppState) -> QaConfig {
+/// `body.scope` restricts retrieval to a path prefix (the sidebar selection) — the same
+/// `QaConfig.scope` the CLI `--scope` and MCP `ask {scope}` already drive. An empty string
+/// means "whole index", so it's filtered out (an empty prefix would otherwise match nothing
+/// meaningful and only adds a no-op LIKE).
+fn qa_config(state: &AppState, body: &AskRequest) -> QaConfig {
     QaConfig {
         top_k: state.config.retrieval.top_k,
         mode: state.config.retrieval.hybrid.clone(),
@@ -28,7 +32,12 @@ fn qa_config(state: &AppState) -> QaConfig {
         rerank: state.config.retrieval.rerank,
         use_weights: state.config.retrieval.use_weights,
         max_steps: state.config.retrieval.agentic_max_steps,
-        ..QaConfig::default()
+        scope: body
+            .scope
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
     }
 }
 
@@ -119,7 +128,7 @@ pub(crate) async fn api_ask(
     State(state): State<AppState>,
     Json(body): Json<AskRequest>,
 ) -> Response {
-    let qa_cfg = qa_config(&state);
+    let qa_cfg = qa_config(&state, &body);
     let agentic = agentic_requested(&state, &body);
     let ann = ensure_ann(&state).await;
 
@@ -203,7 +212,7 @@ pub(crate) async fn api_ask_stream(
     State(state): State<AppState>,
     Json(body): Json<AskRequest>,
 ) -> impl IntoResponse {
-    let qa_cfg = qa_config(&state);
+    let qa_cfg = qa_config(&state, &body);
     let agentic = agentic_requested(&state, &body);
     let ann = ensure_ann(&state).await; // owned Arc moved into the task below
     let db_path = state.db_path.clone();
