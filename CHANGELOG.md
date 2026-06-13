@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] — 2026-06-13
+
+"Better in every sense": one broad polish release — discoverable desktop updates, a self-healing
+index, a token-savings dashboard, a responsive + keyboard-navigable web UI, and CLI/MCP ergonomics.
+
+### Added
+
+- **Token-savings "Impact" dashboard.** Settings → Impact shows the tokens Indexa saved your AI tools
+  this week and a per-tool breakdown (`ask` / `search` / `get_summary` / `read_file` / …), with the
+  honest ≈4 bytes/token caveat. New `GET /api/impact`; `indexa status --json` gains a per-tool
+  `by_tool` array.
+- **Discoverable desktop updates.** A native macOS **app menu** (Indexa → About · Check for Updates… ·
+  Quit ⌘Q; Edit copy/paste/select-all; Window) — "Check for Updates…" was previously reachable only
+  from the tray icon. Launch now *checks* for an update without silently downloading it, so reopening
+  the app no longer forces a surprise restart; clicking the Dock icon re-shows a hidden window.
+- **`indexa completion <bash|zsh|fish|powershell|elvish>`** — generated from the live CLI definition.
+- **`indexa mcp install` auto-detects** installed clients (claude-code / claude-desktop / cursor /
+  vscode) when run with no `--client`, and configures each one found.
+- **Three new MCP tools (39 → 42):** `query_config` (effective config, never secrets),
+  `list_files_by_category` (classification category → files), `get_chunk_context` (a file's indexed
+  chunks, or the neighbors of a search hit). Plus `offset` pagination on `list_open_decisions`.
+- **Persistent coverage legend** (● built · ◐ partial · ○ none · ✗ failed) under the sidebar header —
+  the glyphs were tooltip-only before.
+- First-run "next steps" after a build now offers **Export** alongside Ask and Browse.
+
+### Changed
+
+- **The index self-heals.** A rescan now auto-prunes the orphaned chunks/summaries left behind when
+  build artifacts are removed — no manual `indexa prune` needed — and the default skip rules guard
+  more build/cache directories (`build` / `dist` / `vendor` / `Pods` next to a manifest).
+- **Mobile / responsive web UI.** The CSS had essentially no breakpoints; now the sidebar collapses
+  into a slide-out drawer (hamburger + scrim) at ≤1024px, and the workspace stacks with 44px tap
+  targets at ≤768px.
+- **Keyboard navigation + accessibility.** Arrow-key navigation over the folder tree (WAI-ARIA tree
+  pattern, roving tabindex); the code-graph nodes are focusable with relationship `aria-label`s. The
+  long Settings drawer is now a collapsible accordion (first two sections open). A dark-theme contrast
+  audit confirmed every text-on-surface pair already clears WCAG AA — no token change needed.
+- **Richer `--help`** with examples on `ask` and `classify`; the MCP tool count in README / CLAUDE.md /
+  docs now reads **42** (a build-time guard keeps it honest).
+
+### Fixed
+
+- The desktop "Check for Updates…" command was effectively hidden (tray-menu only) and the on-launch
+  auto-download produced a "restart to update" prompt the next time the app opened — both addressed by
+  the native menu + check-then-ask flow above.
+
+### Internal
+
+- Web-handler tests (ask scope/agentic/empty, export, stats, review batch, the new `/api/impact`),
+  parser error-case tests (malformed PDF/EPUB/media → graceful stub, size cap), and a **macOS
+  desktop-build CI job** on PRs (the Tauri crate is excluded from `cargo --workspace`, so breakage
+  used to surface only at release).
+
 ## [0.27.0] — 2026-06-13
 
 "Context that answers": make Ask actually answer about what you're looking at.

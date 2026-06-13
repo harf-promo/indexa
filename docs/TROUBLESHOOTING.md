@@ -62,6 +62,41 @@ local model freeze the machine. It resumes when pressure clears. If it happens c
 - **A whole directory is missing** → check it isn't excluded by `.gitignore` (honored by default
   since v0.20; `[scan] respect_gitignore = false` to disable) or the `[scan] ignore` list.
 
+## Ask returns irrelevant results
+
+**Symptom:** an answer cites the wrong files, or pulls from across the disk when you meant one project.
+
+- **See *why* those sources were chosen** — re-run with the retrieval trace:
+
+  ```bash
+  indexa ask --explain "your question"   # prints the sparse, dense, and fused/reranked hits + scores
+  ```
+
+  If the right file isn't in the trace at all, it isn't indexed/embedded (run `indexa deep <path>`);
+  if it's there but ranked low, the query wording or a competing duplicate is the issue.
+- **Scope the question** to the area you mean: `indexa ask --scope ~/code/project "…"` (the web Ask bar
+  scopes automatically to the file/folder you have selected).
+- **A near-duplicate keeps winning** — `indexa insights duplicates` finds them; down-weight the copy you
+  don't want with `indexa weight set <path> 0.1`, or pick the canonical one from the review inbox.
+
+## MCP server: the agent can't see Indexa
+
+**Symptom:** Claude Code / Cursor / Claude Desktop doesn't list Indexa's tools, or calls fail.
+
+- Register the server (auto-detects installed clients when run with no `--client`):
+
+  ```bash
+  indexa mcp install                       # detect + configure every installed client
+  indexa mcp install --client claude-code  # or target one explicitly
+  ```
+
+- **Restart the client** after registering — MCP servers are read at client startup.
+- For Claude Code, verify directly: `claude mcp list` should show `indexa  - ✓ Connected`. If not,
+  `claude mcp get indexa` shows the exact command/args it will run.
+- The server speaks JSON-RPC over **stdio**, so all logging goes to stderr — a stray write to stdout
+  would corrupt the protocol. If a client reports a parse error, make sure nothing in your shell
+  profile prints on `indexa mcp` startup.
+
 ## Scanned PDFs / images produce empty results
 
 Image-only PDFs have no extractable text — they produce empty chunks (OCR is a planned opt-in, not
