@@ -49,6 +49,8 @@ pub(crate) async fn cmd_report(
         summary_depth_alpha: cfg.retrieval.summary_depth_alpha,
         rerank: cfg.retrieval.rerank,
         use_weights: cfg.retrieval.use_weights,
+        use_recency_weight: cfg.retrieval.recency_boost,
+        recency_days: cfg.retrieval.recency_days,
         max_steps: cfg.retrieval.agentic_max_steps,
     };
 

@@ -5,7 +5,7 @@ use indexa_core::{
 };
 use indexa_query::{build_tree, render_json, render_markdown, render_xml};
 
-use super::helpers::{build_embedder, require_index_db};
+use super::helpers::{build_embedder, finalize_export, require_index_db, ExportSink};
 
 /// Resolve and expand a path, canonicalizing `~` prefixes.
 fn expand(p: &str) -> String {
@@ -209,12 +209,19 @@ pub(crate) async fn cmd_pack_show(name: String) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn cmd_pack_export(
     name: String,
     format: String,
     output: Option<String>,
     depth: Option<usize>,
     include_weights: bool,
+    signatures: bool,
+    token_budget: Option<usize>,
+    strict_budget: bool,
+    clipboard: bool,
+    strip_comments: bool,
+    no_redact: bool,
 ) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
@@ -243,6 +250,22 @@ pub(crate) async fn cmd_pack_export(
 
     let mut exported = 0usize;
     for root_path in &paths {
+        if signatures {
+            // Code-skeleton view (reads chunks; works without summaries).
+            let chunks = store.code_chunks_under(root_path, 0)?;
+            if chunks.is_empty() {
+                eprintln!("  \u{26a0} No indexed code under {root_path} — run `indexa deep {root_path}` first.");
+                continue;
+            }
+            out_buf.push_str(&indexa_query::render_signatures(
+                &chunks,
+                &format,
+                !strip_comments,
+            ));
+            out_buf.push('\n');
+            exported += 1;
+            continue;
+        }
         let tree = build_tree(&store, root_path, depth)?;
         let Some(tree) = tree else {
             eprintln!(
@@ -274,31 +297,24 @@ pub(crate) async fn cmd_pack_export(
     }
 
     if exported == 0 {
-        bail!(
-            "No paths in pack \"{name}\" have summaries yet. \
-             Run `indexa summarize <path>` or `indexa index <path>` first."
-        );
+        let hint = if signatures {
+            "have indexed code yet. Run `indexa deep <path>` first."
+        } else {
+            "have summaries yet. Run `indexa summarize <path>` or `indexa index <path>` first."
+        };
+        bail!("No paths in pack \"{name}\" {hint}");
     }
 
-    if let Some(out_path) = output {
-        if let Some(parent) = std::path::Path::new(&out_path).parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                bail!(
-                    "cannot write to '{out_path}': directory '{}' does not exist.",
-                    parent.display()
-                );
-            }
-        }
-        std::fs::write(&out_path, &out_buf)?;
-        println!(
-            "Exported pack \"{name}\" ({exported}/{} paths) to {out_path}.",
-            paths.len()
-        );
-    } else {
-        print!("{out_buf}");
-    }
-
-    Ok(())
+    finalize_export(
+        out_buf,
+        ExportSink {
+            redact: !no_redact,
+            token_budget,
+            strict_budget,
+            clipboard,
+            output,
+        },
+    )
 }
 
 pub(crate) async fn cmd_pack_rename(name: String, new_name: String) -> Result<()> {

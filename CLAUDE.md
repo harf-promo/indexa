@@ -24,7 +24,7 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.30.0)
+## Current feature surface (v0.31.0)
 
 **CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize) · `scan` · `deep` ·
 `summarize` · `describe` · `map` · `worker` · `pack` (Context Packs) · `weight` (Importance
@@ -63,6 +63,19 @@ publish phases (downloading→installing→done/error); `download_cli_to` stream
 (no reqwest `stream` feature) + an injected `on_progress` callback — so `crates/update` stays
 web-agnostic (no circular dep). Channel stays `idle` under plain `indexa serve`, so the overlay never
 shows there.
+
+**Export invariants (v0.31, "exports that fit"):** export is summary-tree based (`crates/query/src/
+export.rs`); v0.31 adds (1) `--signatures` — a code-skeleton render (`render_signatures` + heuristic
+`extract_signature`; reads `Store::code_chunks_under`, language-tagged chunks, NOT summaries — works
+after `deep`); (2) `--token-budget N` (+ `--strict-budget` to fail) via `approx_tokens`; (3)
+**secret-scan-on-export** — `crates/query/src/redact.rs` `redact_secrets` runs on ALL export surfaces
+(CLI `export`/`pack export`, MCP `export_pack`, web `api_export`) before content leaves the machine,
+opt-out `--no-redact`; (4) `--clipboard` (native `pbcopy`/`clip`/`wl-copy`/`xclip`, NO arboard dep —
+keeps Linux CI X11-free) + `--strip-comments`. Shared `finalize_export`/`ExportSink` in
+`apps/indexa/src/commands/helpers.rs` (redact→budget→clipboard/file/stdout). **Recency boost (opt-in):**
+`[retrieval] recency_boost`/`recency_days` → `Store::boost_with_recency` in `qa.rs retrieve()` after
+`apply_archive_penalty` (positive twin; mtime-based, NOT git). Don't add a whole-repo "dump" mode — the
+retrieved-slice model is the moat (vs repomix/gitingest token bricks).
 
 **Major features by version:** Context Packs (v0.14) · Importance Weighting (v0.16, `importance_weights`
 table + `boost_with_weights` in QA) · Insights (v0.16, `find_*_duplicates`/`find_stale_entries`/

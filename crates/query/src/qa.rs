@@ -227,6 +227,11 @@ pub struct QaConfig {
     pub rerank: bool,
     /// Apply importance weights (v0.8) as a multiplicative boost after RRF fusion.
     pub use_weights: bool,
+    /// Apply a recency boost (v0.31) — multiplies up recently-modified files (the positive twin
+    /// of the archive penalty). Opt-in; off by default so it never silently re-ranks answers.
+    pub use_recency_weight: bool,
+    /// Recency window in days for `use_recency_weight` (files older than this stay neutral).
+    pub recency_days: i64,
     /// Max retrieval hops for the agentic ([`answer_agentic`]) path. Clamped to
     /// `1..=AGENTIC_MAX_STEPS_CAP`. Ignored by the one-shot [`answer`].
     pub max_steps: usize,
@@ -244,6 +249,8 @@ impl Default for QaConfig {
             summary_depth_alpha: 0.15,
             rerank: false,
             use_weights: true,
+            use_recency_weight: false,
+            recency_days: 90,
             max_steps: 3,
         }
     }
@@ -290,6 +297,11 @@ pub(crate) fn retrieve(
     // an answer about the current state. Multiplicative, not exclusion — such docs stay
     // findable when the query is explicitly scoped into the historical path.
     apply_archive_penalty(&mut hits, cfg.scope.as_deref());
+    // v0.31: optional recency boost — push recently-modified files up (the positive twin of the
+    // archive penalty). Opt-in so it never silently re-ranks; uses mtime, not git.
+    if cfg.use_recency_weight && !hits.is_empty() {
+        let _ = store.boost_with_recency(&mut hits, cfg.recency_days);
+    }
     // Re-sort after any score adjustment (idempotent when nothing changed — hybrid_search
     // already returns rrf-ordered hits).
     hits.sort_by(|a, b| {

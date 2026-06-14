@@ -105,7 +105,28 @@ async fn main() -> Result<()> {
                 output,
                 depth,
                 include_weights,
-            } => commands::cmd_pack_export(name, format, output, depth, include_weights).await,
+                signatures,
+                token_budget,
+                strict_budget,
+                clipboard,
+                strip_comments,
+                no_redact,
+            } => {
+                commands::cmd_pack_export(
+                    name,
+                    format,
+                    output,
+                    depth,
+                    include_weights,
+                    signatures,
+                    token_budget,
+                    strict_budget,
+                    clipboard,
+                    strip_comments,
+                    no_redact,
+                )
+                .await
+            }
             PackAction::Rename { name, new_name } => {
                 commands::cmd_pack_rename(name, new_name).await
             }
@@ -195,8 +216,28 @@ async fn main() -> Result<()> {
             output,
             include_weights,
             include_graph,
+            signatures,
+            token_budget,
+            strict_budget,
+            clipboard,
+            strip_comments,
+            no_redact,
         } => {
-            commands::cmd_export(paths, format, depth, output, include_weights, include_graph).await
+            commands::cmd_export(
+                paths,
+                format,
+                depth,
+                output,
+                include_weights,
+                include_graph,
+                signatures,
+                token_budget,
+                strict_budget,
+                clipboard,
+                strip_comments,
+                no_redact,
+            )
+            .await
         }
         Commands::Ask {
             question,

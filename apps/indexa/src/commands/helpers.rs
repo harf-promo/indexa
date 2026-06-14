@@ -1,8 +1,114 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use directories::BaseDirs;
 use indexa_core::config::{self, Config, SummaryMode};
 use indexa_core::resource;
 use std::path::PathBuf;
+
+/// Post-processing + destination for a rendered export. Shared by `export` and `pack export`
+/// so both get secret redaction, the token-budget guard, and `--clipboard` identically.
+pub(crate) struct ExportSink {
+    /// Scan + redact suspected secrets before the export leaves the machine (default on).
+    pub redact: bool,
+    /// Warn (or, with `strict_budget`, fail) when the export exceeds this many estimated tokens.
+    pub token_budget: Option<usize>,
+    /// Turn an over-budget export into a hard error (e.g. for CI), instead of a warning.
+    pub strict_budget: bool,
+    /// Copy to the OS clipboard instead of writing a file / stdout.
+    pub clipboard: bool,
+    /// Write to this file instead of stdout (ignored when `clipboard` is set).
+    pub output: Option<String>,
+}
+
+/// Apply redaction + the token-budget guard, then deliver the export (clipboard / file / stdout).
+pub(crate) fn finalize_export(mut out: String, sink: ExportSink) -> Result<()> {
+    // 1. Secret redaction (default on) — never let credentials leave the machine in an export.
+    if sink.redact {
+        let (clean, n) = indexa_query::redact::redact_secrets(&out);
+        if n > 0 {
+            eprintln!("⚠ Redacted {n} suspected secret(s) from the export.");
+        }
+        out = clean;
+    }
+    // 2. Token-budget guard (estimate ≈4 chars/token).
+    if let Some(budget) = sink.token_budget {
+        let toks = indexa_query::approx_tokens(&out);
+        if toks > budget {
+            let msg = format!("export is ~{toks} tokens, over the --token-budget of {budget}");
+            if sink.strict_budget {
+                anyhow::bail!("{msg}");
+            }
+            eprintln!("⚠ {msg}");
+        }
+    }
+    // 3. Deliver.
+    if sink.clipboard {
+        copy_to_clipboard(&out)?;
+        eprintln!("Copied {} bytes to the clipboard.", out.len());
+        return Ok(());
+    }
+    if let Some(path) = sink.output {
+        // Actionable hint when the parent dir is missing, vs a bare OS error.
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                anyhow::bail!(
+                    "cannot write to '{path}': the directory '{}' does not exist. \
+                     Create it first or choose an existing output path.",
+                    parent.display()
+                );
+            }
+        }
+        std::fs::write(&path, &out).with_context(|| format!("writing export to '{path}'"))?;
+        println!("Wrote {} bytes to {path}.", out.len());
+    } else {
+        print!("{out}");
+    }
+    Ok(())
+}
+
+/// Copy text to the OS clipboard via the platform's native command — no extra dependency (which
+/// keeps the Linux CI build free of X11 clipboard libs). Tries `pbcopy` (macOS), `clip` (Windows),
+/// or `wl-copy`/`xclip` (Linux); returns an actionable error if none is installed.
+fn copy_to_clipboard(text: &str) -> Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    #[cfg(target_os = "macos")]
+    let candidates: &[(&str, &[&str])] = &[("pbcopy", &[])];
+    #[cfg(target_os = "windows")]
+    let candidates: &[(&str, &[&str])] = &[("clip", &[])];
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let candidates: &[(&str, &[&str])] =
+        &[("wl-copy", &[]), ("xclip", &["-selection", "clipboard"])];
+
+    for (cmd, args) in candidates {
+        let mut child = match Command::new(cmd)
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => continue, // not installed → try the next
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(text.as_bytes())
+                .context("writing to the clipboard process")?;
+        }
+        if child
+            .wait()
+            .context("waiting on the clipboard process")?
+            .success()
+        {
+            return Ok(());
+        }
+    }
+    anyhow::bail!(
+        "no clipboard tool found — install one (macOS: pbcopy ships built-in; \
+         Linux: wl-copy or xclip) or use --output FILE / pipe stdout instead."
+    )
+}
 
 /// Return the index DB path if it exists, or `None` after printing the standard
 /// "no index found" hint. Call sites collapse to:

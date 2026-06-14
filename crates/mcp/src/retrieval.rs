@@ -327,6 +327,8 @@ impl IndexaMcp {
             summary_depth_alpha: self.config.retrieval.summary_depth_alpha,
             rerank: self.config.retrieval.rerank,
             use_weights: self.config.retrieval.use_weights,
+            use_recency_weight: self.config.retrieval.recency_boost,
+            recency_days: self.config.retrieval.recency_days,
             max_steps: self.config.retrieval.agentic_max_steps,
         };
 

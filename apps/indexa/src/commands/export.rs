@@ -1,10 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use indexa_core::store::Store;
 use indexa_query::{
-    build_tree, render_graph, render_json, render_markdown, render_weights, render_xml,
+    build_tree, render_graph, render_json, render_markdown, render_signatures, render_weights,
+    render_xml,
 };
 
-use super::helpers::require_index_db;
+use super::helpers::{finalize_export, require_index_db, ExportSink};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn cmd_export(
@@ -14,15 +15,25 @@ pub(crate) async fn cmd_export(
     output: Option<String>,
     include_weights: bool,
     include_graph: bool,
+    signatures: bool,
+    token_budget: Option<usize>,
+    strict_budget: bool,
+    clipboard: bool,
+    strip_comments: bool,
+    no_redact: bool,
 ) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };
     let store = Store::open(&db_path)?;
-    let count = store.summary_count()?;
-    if count == 0 {
-        println!("No summaries found. Run `indexa summarize <path>` first.");
-        return Ok(());
+    // The signatures (code-skeleton) view reads chunks, not summaries, so it works even on an
+    // index that has only been `deep`-scanned (no summaries yet).
+    if !signatures {
+        let count = store.summary_count()?;
+        if count == 0 {
+            println!("No summaries found. Run `indexa summarize <path>` first.");
+            return Ok(());
+        }
     }
 
     let roots: Vec<String> = if paths.is_empty() {
@@ -49,21 +60,37 @@ pub(crate) async fn cmd_export(
     };
 
     let mut out_buf = String::new();
-    for root_path in &roots {
-        let tree = build_tree(&store, root_path, depth)?;
-        let Some(tree) = tree else {
-            eprintln!(
-                "No summary found for {root_path} — run `indexa summarize {root_path}` first."
-            );
-            continue;
-        };
-        let rendered = match format.as_str() {
-            "md" | "markdown" => render_markdown(&tree),
-            "json" => render_json(&tree),
-            _ => render_xml(&tree, &now), // xml is the default
-        };
-        out_buf.push_str(&rendered);
-        out_buf.push('\n');
+    if signatures {
+        // Code-skeleton view: per code file, symbol signatures with bodies elided.
+        for root_path in &roots {
+            let chunks = store.code_chunks_under(root_path, 0)?;
+            if chunks.is_empty() {
+                eprintln!(
+                    "No indexed code under {root_path} — run `indexa deep {root_path}` first \
+                     (or drop --signatures for the summary export)."
+                );
+                continue;
+            }
+            out_buf.push_str(&render_signatures(&chunks, &format, !strip_comments));
+            out_buf.push('\n');
+        }
+    } else {
+        for root_path in &roots {
+            let tree = build_tree(&store, root_path, depth)?;
+            let Some(tree) = tree else {
+                eprintln!(
+                    "No summary found for {root_path} — run `indexa summarize {root_path}` first."
+                );
+                continue;
+            };
+            let rendered = match format.as_str() {
+                "md" | "markdown" => render_markdown(&tree),
+                "json" => render_json(&tree),
+                _ => render_xml(&tree, &now), // xml is the default
+            };
+            out_buf.push_str(&rendered);
+            out_buf.push('\n');
+        }
     }
 
     // Optional appended sections so the AI tool sees importance + relationships, not just
@@ -84,23 +111,14 @@ pub(crate) async fn cmd_export(
         }
     }
 
-    if let Some(path) = output {
-        // Give an actionable hint when the parent directory doesn't exist, rather
-        // than surfacing a bare OS "No such file or directory" error.
-        if let Some(parent) = std::path::Path::new(&path).parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                anyhow::bail!(
-                    "cannot write to '{path}': the directory '{}' does not exist. \
-                     Create it first or choose an existing output path.",
-                    parent.display()
-                );
-            }
-        }
-        std::fs::write(&path, &out_buf).with_context(|| format!("writing export to '{path}'"))?;
-        println!("Wrote {} bytes to {path}.", out_buf.len());
-    } else {
-        print!("{out_buf}");
-    }
-
-    Ok(())
+    finalize_export(
+        out_buf,
+        ExportSink {
+            redact: !no_redact,
+            token_budget,
+            strict_budget,
+            clipboard,
+            output,
+        },
+    )
 }
