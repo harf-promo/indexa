@@ -120,10 +120,15 @@ pub struct TreeNode {
 
 #[derive(Debug, Clone, Default)]
 pub struct QueueStats {
+    /// Pending rows backed by a live `entries` row — the real, processable backlog.
     pub pending: i64,
     pub in_flight: i64,
     pub done: i64,
     pub failed: i64,
+    /// Pending/in-flight rows whose path is NOT a live entry (build artifacts that were
+    /// later skipped, or deleted files). They can never summarize; the drain self-cleans
+    /// them and `indexa prune` removes them. Surfaced so "pending" isn't inflated by them.
+    pub stale: i64,
 }
 
 /// Whole-index coverage aggregates for the `status --deep` health report.

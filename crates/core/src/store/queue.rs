@@ -8,19 +8,39 @@ impl Store {
     // ── Summary queue ────────────────────────────────────────────────────────
 
     /// Enqueue (path, kind, depth) items; ignores duplicates.
+    ///
+    /// Paths that are not a live `entries` row are skipped (when the index has entries):
+    /// a queue row with no entry can never summarize and would only inflate the backlog —
+    /// the historical source of build-artifact rows stuck `pending` forever. The guard is
+    /// bypassed for an entry-less index (the legitimate `deep`/`summarize`-without-`scan`
+    /// workflow, where queue paths intentionally have no `entries` row).
     pub fn enqueue_summary_items(&mut self, items: &[(String, String, i64)]) -> Result<()> {
+        let has_entries = self.entry_count()? > 0;
         let tx = self.conn.transaction()?;
         {
+            let mut is_entry = tx.prepare_cached("SELECT 1 FROM entries WHERE path = ?1")?;
             let mut stmt = tx.prepare_cached(
                 "INSERT OR IGNORE INTO summary_queue (path, kind, depth, state)
                  VALUES (?1, ?2, ?3, 'pending')",
             )?;
             for (path, kind, depth) in items {
+                if has_entries && !is_entry.exists(params![path])? {
+                    continue; // not a live entry — don't queue un-processable work
+                }
                 stmt.execute(params![path, kind, depth])?;
             }
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Remove a queue row entirely. Used to self-clean an orphaned item whose path is no
+    /// longer a live entry (a build artifact that got skipped, or a deleted file) when the
+    /// drain claims it — see `process_queue_item_with_passes`. Returns rows removed.
+    pub fn delete_queue_item(&mut self, path: &str) -> Result<usize> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM summary_queue WHERE path = ?1", params![path])?)
     }
 
     /// Atomically claim one pending item — deepest first (files before their parent dirs).
@@ -145,6 +165,12 @@ impl Store {
     /// an edit landing mid-summary isn't re-queued by *that* edit — the next edit, or a
     /// later `deep`/`summarize`, picks it up.
     pub fn mark_for_resummary(&mut self, path: &str, kind: &str, depth: i64) -> Result<()> {
+        // Don't (re-)queue a path that isn't a live entry — e.g. a watch event for a file
+        // under a skipped build/VCS dir. Such a row could never summarize and would only
+        // inflate the queue. Bypassed for an entry-less index (entries are optional).
+        if !self.entry_exists(path)? && self.entry_count()? > 0 {
+            return Ok(());
+        }
         self.conn.execute(
             "INSERT INTO summary_queue (path, kind, depth, state, attempts, error)
              VALUES (?1, ?2, ?3, 'pending', 0, NULL)
@@ -194,24 +220,43 @@ impl Store {
     }
 
     /// Queue statistics for status display.
+    ///
+    /// `pending`/`in_flight` count only rows backed by a live `entries` row — the real,
+    /// processable backlog. Pending/in-flight rows whose path is NOT an entry (build
+    /// artifacts later skipped, deleted files) are reported separately as `stale` so the
+    /// headline backlog isn't inflated by un-processable rows (the drain self-cleans them
+    /// and `indexa prune` removes them). For an entry-less index (the legitimate
+    /// `deep`/`summarize`-without-`scan` workflow) every row counts as real work.
     pub fn queue_stats(&self) -> Result<QueueStats> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT state, COUNT(*) FROM summary_queue GROUP BY state")?;
-        let mut stats = QueueStats::default();
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let state: String = row.get(0)?;
-            let n: i64 = row.get(1)?;
-            match state.as_str() {
-                "pending" => stats.pending = n,
-                "in_flight" => stats.in_flight = n,
-                "done" => stats.done = n,
-                "failed" => stats.failed = n,
-                _ => {}
-            }
-        }
-        Ok(stats)
+        let has_entries: bool =
+            self.conn
+                .query_row("SELECT EXISTS(SELECT 1 FROM entries)", [], |r| r.get(0))?;
+        // `ie` = "is a live entry" (1/0). With no entries, treat every row as live so the
+        // entry-optional workflow is unaffected.
+        let ie_expr = if has_entries {
+            "(path IN (SELECT path FROM entries))"
+        } else {
+            "1"
+        };
+        let sql = format!(
+            "SELECT
+                COALESCE(SUM(CASE WHEN state='pending'   AND ie=1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN state='in_flight' AND ie=1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN state='done'      AND ie=1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN state='failed'    AND ie=1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN state IN ('pending','in_flight') AND ie=0 THEN 1 ELSE 0 END), 0)
+             FROM (SELECT state, {ie_expr} AS ie FROM summary_queue)"
+        );
+        let (pending, in_flight, done, failed, stale) = self.conn.query_row(&sql, [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?;
+        Ok(QueueStats {
+            pending,
+            in_flight,
+            done,
+            failed,
+            stale,
+        })
     }
 
     /// Return up to `limit` items in the `failed` state, with their error messages.

@@ -9,6 +9,14 @@ struct QueueJson {
     pending: i64,
     in_flight: i64,
     failed: i64,
+    /// Pending/in-flight rows with no live entry (build artifacts / deleted files) —
+    /// not real backlog; `indexa prune` removes them.
+    #[serde(skip_serializing_if = "is_zero")]
+    stale: i64,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 #[derive(Serialize)]
@@ -188,6 +196,7 @@ pub(crate) async fn cmd_status(
                 pending: queue.pending,
                 in_flight: queue.in_flight,
                 failed: queue.failed,
+                stale: queue.stale,
             },
             config_path,
             embedding_provider: cfg.embedding.provider.clone(),
@@ -231,8 +240,16 @@ pub(crate) async fn cmd_status(
     }
 
     println!(
-        "Summaries: {} (queue: {} pending / {} in-flight / {} failed)",
-        summary_count, queue.pending, queue.in_flight, queue.failed
+        "Summaries: {} (queue: {} pending / {} in-flight / {} failed{})",
+        summary_count,
+        queue.pending,
+        queue.in_flight,
+        queue.failed,
+        if queue.stale > 0 {
+            format!(" · {} stale → run `indexa prune`", queue.stale)
+        } else {
+            String::new()
+        }
     );
 
     // Measured token savings — same wording as MCP get_stats (one source of
@@ -324,8 +341,15 @@ pub(crate) async fn cmd_status(
                 }
             }
             println!(
-                "  Queue:      {} pending / {} in-flight / {} failed",
-                queue.pending, queue.in_flight, queue.failed
+                "  Queue:      {} pending / {} in-flight / {} failed{}",
+                queue.pending,
+                queue.in_flight,
+                queue.failed,
+                if queue.stale > 0 {
+                    format!(" · {} stale → run `indexa prune`", queue.stale)
+                } else {
+                    String::new()
+                }
             );
             if *open_questions > 0 {
                 println!("  Questions:  {open_questions} open — `indexa review list`");

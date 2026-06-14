@@ -11,30 +11,39 @@ use anyhow::Result;
 pub struct OrphanCounts {
     pub chunks: u64,
     pub summaries: u64,
+    /// Dead summary-queue rows (e.g. build-artifact paths that can never summarize).
+    pub queue: u64,
+    /// Orphaned classification rows.
+    pub classifications: u64,
 }
 
 impl OrphanCounts {
     pub fn is_empty(&self) -> bool {
-        self.chunks == 0 && self.summaries == 0
+        self.chunks == 0 && self.summaries == 0 && self.queue == 0 && self.classifications == 0
     }
 }
 
 impl Store {
-    /// Count chunks and summaries whose path has no matching `entries` row.
+    /// Count chunks, summaries, queue rows, and classifications whose path has no matching
+    /// `entries` row. (Mirrors exactly what [`prune_orphans`] deletes, so the report is honest.)
     pub fn count_orphans(&self) -> Result<OrphanCounts> {
-        let chunks: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM chunks WHERE entry_path NOT IN (SELECT path FROM entries)",
-            [],
-            |r| r.get(0),
-        )?;
-        let summaries: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM summaries WHERE path NOT IN (SELECT path FROM entries)",
-            [],
-            |r| r.get(0),
-        )?;
+        let count = |sql: &str| -> Result<u64> {
+            let n: i64 = self.conn.query_row(sql, [], |r| r.get(0))?;
+            Ok(n as u64)
+        };
         Ok(OrphanCounts {
-            chunks: chunks as u64,
-            summaries: summaries as u64,
+            chunks: count(
+                "SELECT COUNT(*) FROM chunks WHERE entry_path NOT IN (SELECT path FROM entries)",
+            )?,
+            summaries: count(
+                "SELECT COUNT(*) FROM summaries WHERE path NOT IN (SELECT path FROM entries)",
+            )?,
+            queue: count(
+                "SELECT COUNT(*) FROM summary_queue WHERE path NOT IN (SELECT path FROM entries)",
+            )?,
+            classifications: count(
+                "SELECT COUNT(*) FROM classifications WHERE path NOT IN (SELECT path FROM entries)",
+            )?,
         })
     }
 

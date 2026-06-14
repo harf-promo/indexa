@@ -337,6 +337,90 @@ fn delete_entry_clears_summary_and_queue() {
     assert_eq!(store.queue_stats().unwrap().pending, 0);
 }
 
+// ── v0.28.2: queue hygiene — honest counts, self-clean, prune report, enqueue guard ──
+
+#[test]
+fn queue_stats_excludes_orphan_pending_and_reports_stale() {
+    let mut store = Store::open_in_memory().unwrap();
+    // Queue an artifact path while the index is still entry-less (the guard is bypassed
+    // there) — this is how historical pollution got in.
+    store
+        .enqueue_summary_items(&[("/proj/.git/HEAD".to_owned(), "file".to_owned(), 5)])
+        .unwrap();
+    // Now the index has a real entry; the .git row is an orphan (no matching entry).
+    store
+        .upsert_entries(&[dummy_entry("/proj/real.rs", EntryKind::File, 10)])
+        .unwrap();
+    store
+        .enqueue_summary_items(&[("/proj/real.rs".to_owned(), "file".to_owned(), 1)])
+        .unwrap();
+
+    let s = store.queue_stats().unwrap();
+    assert_eq!(
+        s.pending, 1,
+        "only the entry-backed row is real pending work"
+    );
+    assert_eq!(
+        s.stale, 1,
+        "the orphan .git row is reported as stale, not pending"
+    );
+}
+
+#[test]
+fn enqueue_guard_skips_non_entry_paths_when_entries_exist() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[dummy_entry("/proj/real.rs", EntryKind::File, 10)])
+        .unwrap();
+    // Batch enqueue: only the entry-backed path is queued; the build-artifact path is dropped.
+    store
+        .enqueue_summary_items(&[
+            ("/proj/real.rs".to_owned(), "file".to_owned(), 1),
+            ("/proj/target/debug/x.rlib".to_owned(), "file".to_owned(), 3),
+        ])
+        .unwrap();
+    assert!(store.queue_state("/proj/real.rs").unwrap().is_some());
+    assert!(
+        store
+            .queue_state("/proj/target/debug/x.rlib")
+            .unwrap()
+            .is_none(),
+        "a non-entry build-artifact path must not be queued"
+    );
+    // Single-path resummary (the watch/web path) is guarded too.
+    store
+        .mark_for_resummary("/proj/.git/COMMIT_EDITMSG", "file", 4)
+        .unwrap();
+    assert!(store
+        .queue_state("/proj/.git/COMMIT_EDITMSG")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn prune_reports_and_removes_orphan_queue_rows() {
+    let mut store = Store::open_in_memory().unwrap();
+    // Orphan queue row (queued entry-less), then a real entry so it becomes an orphan.
+    store
+        .enqueue_summary_items(&[("/proj/.git/HEAD".to_owned(), "file".to_owned(), 5)])
+        .unwrap();
+    store
+        .upsert_entries(&[dummy_entry("/proj/real.rs", EntryKind::File, 10)])
+        .unwrap();
+
+    let counts = store.count_orphans().unwrap();
+    assert_eq!(
+        counts.queue, 1,
+        "count_orphans must include the dead queue row"
+    );
+    let removed = store.prune_orphans().unwrap();
+    assert_eq!(
+        removed.queue, 1,
+        "prune must report the queue row it deleted"
+    );
+    assert!(store.queue_state("/proj/.git/HEAD").unwrap().is_none());
+}
+
 #[test]
 fn unknown_extensions_uses_basename_extension() {
     let mut store = Store::open_in_memory().unwrap();

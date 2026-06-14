@@ -1137,7 +1137,11 @@ pub(crate) async fn run_summarize_phase(
             // CompletedUnchanged = the freshness gate skipped the LLM; for job
             // progress both are a completed item (the per-item event stream
             // already shows zero LLM fragments for skips).
-            Ok(QueueOutcome::Completed) | Ok(QueueOutcome::CompletedUnchanged) => {
+            // Orphaned = the row was self-cleaned (path no longer a live entry); terminal,
+            // same as a completed item for progress purposes.
+            Ok(QueueOutcome::Completed)
+            | Ok(QueueOutcome::CompletedUnchanged)
+            | Ok(QueueOutcome::Orphaned) => {
                 defers.remove(&item.path);
                 done += 1;
             }
