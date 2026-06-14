@@ -50,3 +50,4 @@ indexa-core    = { path = "../../crates/core" }
 indexa-embed   = { path = "../../crates/embed" }
 indexa-llm     = { path = "../../crates/llm" }
 indexa-web     = { path = "../../crates/web" }
+indexa-update  = { path = "../../crates/update" }

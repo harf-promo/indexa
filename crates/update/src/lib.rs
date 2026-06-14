@@ -307,6 +307,95 @@ pub async fn apply(tag: &str) -> anyhow::Result<String> {
     Ok(version_str)
 }
 
+/// Download the matching CLI binary for this platform from release `tag` into `dir`, writing it
+/// as `indexa` (`indexa.exe` on Windows), chmod 0755 + ad-hoc-codesign on macOS. Returns the
+/// installed path.
+///
+/// Unlike [`apply`], this writes to a *target directory* and never self-replaces — so the desktop
+/// app can install or refresh the user's standalone CLI (the desktop has no CLI of its own, and
+/// the self-replace guard intentionally blocks updating inside the `.app`). The download + integrity
+/// checks mirror `apply`.
+pub async fn download_cli_to(
+    dir: &std::path::Path,
+    tag: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    let tag_str = if tag.starts_with('v') {
+        tag.to_string()
+    } else {
+        format!("v{tag}")
+    };
+    let asset = asset_name()?;
+    let url = format!("https://github.com/{REPO}/releases/download/{tag_str}/{asset}");
+    tracing::info!(%url, "downloading CLI binary");
+
+    let client = build_client()?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .context("download request failed")?;
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "download failed (HTTP {}): tag={tag_str} asset={asset}",
+            resp.status()
+        );
+    }
+    let content_len = resp.content_length();
+    let bytes = resp.bytes().await.context("download stream interrupted")?;
+    if bytes.is_empty() {
+        anyhow::bail!("downloaded binary is empty — the release asset may be missing");
+    }
+    if let Some(expected) = content_len {
+        if bytes.len() as u64 != expected {
+            anyhow::bail!("download truncated — aborting");
+        }
+    }
+
+    let bin_name = if cfg!(windows) {
+        "indexa.exe"
+    } else {
+        "indexa"
+    };
+    let dir = dir.to_path_buf();
+    let dest = dir.join(bin_name);
+    let dest_for_task = dest.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        std::fs::create_dir_all(&dir).map_err(|e| permission_error(e, &dir))?;
+        // Write to a temp file in the target dir, then rename into place (atomic on the same fs).
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".indexa-cli-")
+            .tempfile_in(&dir)
+            .map_err(|e| permission_error(e, &dir))?;
+        tmp.write_all(&bytes).context("write to temp file failed")?;
+        tmp.flush().context("flush temp file failed")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tmp.as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o755))
+                .context("chmod on temp file failed")?;
+        }
+        let (_, tmp_path) = tmp
+            .keep()
+            .map_err(|e| anyhow::anyhow!("could not persist temp file: {e}"))?;
+        std::fs::rename(&tmp_path, &dest_for_task)
+            .map_err(|e| permission_error(e, &dest_for_task))?;
+        // macOS: ad-hoc sign so Gatekeeper lets the freshly-written binary run (best-effort).
+        #[cfg(target_os = "macos")]
+        if let Some(p) = dest_for_task.to_str() {
+            let _ = std::process::Command::new("codesign")
+                .args(["--force", "--sign", "-", p])
+                .output();
+        }
+        Ok(())
+    })
+    .await
+    .context("CLI install task panicked")??;
+
+    tracing::info!(path = %dest.display(), "CLI installed");
+    Ok(dest)
+}
+
 /// Build a human-readable, actionable error for a file-write permission failure.
 fn permission_error(source: impl std::fmt::Display, path: &std::path::Path) -> anyhow::Error {
     anyhow::anyhow!(

@@ -100,8 +100,15 @@ fn main() {
                 true,
                 None::<&str>,
             )?;
+            let install_cli = MenuItem::with_id(
+                app,
+                "install-cli",
+                "Install command-line tool",
+                true,
+                None::<&str>,
+            )?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &update, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &update, &install_cli, &quit])?;
 
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
@@ -114,6 +121,7 @@ fn main() {
                         }
                     }
                     "check-update" => run_update_check(app.clone(), true),
+                    "install-cli" => run_cli_install(app.clone()),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -130,6 +138,13 @@ fn main() {
                 true,
                 None::<&str>,
             )?;
+            let app_install_cli = MenuItem::with_id(
+                app,
+                "app-install-cli",
+                "Install command-line tool",
+                true,
+                None::<&str>,
+            )?;
             let about_meta = AboutMetadata {
                 version: Some(env!("CARGO_PKG_VERSION").to_owned()),
                 ..Default::default()
@@ -142,6 +157,7 @@ fn main() {
                     &PredefinedMenuItem::about(app, Some("Indexa"), Some(about_meta))?,
                     &PredefinedMenuItem::separator(app)?,
                     &app_check,
+                    &app_install_cli,
                     &PredefinedMenuItem::separator(app)?,
                     &PredefinedMenuItem::hide(app, None)?,
                     &PredefinedMenuItem::hide_others(app, None)?,
@@ -175,10 +191,10 @@ fn main() {
             )?;
             let menu_bar = Menu::with_items(app, &[&app_menu, &edit_menu, &window_menu])?;
             app.set_menu(menu_bar)?;
-            app.on_menu_event(|app, event| {
-                if event.id().as_ref() == "app-check-update" {
-                    run_update_check(app.clone(), true);
-                }
+            app.on_menu_event(|app, event| match event.id().as_ref() {
+                "app-check-update" => run_update_check(app.clone(), true),
+                "app-install-cli" => run_cli_install(app.clone()),
+                _ => {}
             });
 
             // Hide the window instead of closing when the user clicks ✕.
@@ -273,8 +289,29 @@ fn run_update_check(app: tauri::AppHandle, manual: bool) {
 /// Download, install, re-sign (macOS), and offer to restart into an available update.
 async fn install_update(app: tauri::AppHandle, update: tauri_plugin_updater::Update) {
     let version = update.version.clone();
-    eprintln!("[indexa-desktop] update {version} — downloading…");
 
+    // Show WHAT'S NEW before downloading (the owner's "it just says an update, I don't know
+    // what changed" complaint). `update.body` is the release notes from latest.json (the release
+    // workflow injects the CHANGELOG section). Confirm once, then download + restart — no second
+    // prompt, so it behaves like a normal app's updater.
+    let mut msg = format!("Indexa {version} is available.");
+    let notes = update.body.clone().unwrap_or_default();
+    let notes = notes.trim();
+    if !notes.is_empty() {
+        // Cap the dialog body so a long changelog stays readable.
+        let shown: String = notes.chars().take(1500).collect();
+        msg.push_str("\n\nWhat's new:\n");
+        msg.push_str(&shown);
+        if notes.chars().count() > 1500 {
+            msg.push('…');
+        }
+    }
+    msg.push_str("\n\nDownload and install now? Indexa will restart to apply it.");
+    if !show_confirm_dialog("Indexa Update", &msg, "Download & Restart") {
+        return;
+    }
+
+    eprintln!("[indexa-desktop] update {version} — downloading…");
     if let Err(e) = update
         .download_and_install(|_chunk, _total| {}, || {})
         .await
@@ -295,13 +332,124 @@ async fn install_update(app: tauri::AppHandle, update: tauri_plugin_updater::Upd
     #[cfg(target_os = "macos")]
     resign_app_bundle();
 
-    eprintln!("[indexa-desktop] update installed — prompting restart");
+    eprintln!("[indexa-desktop] update {version} installed — restarting");
+    // The user already agreed (download-and-restart) in the pre-download confirm, so restart
+    // straight into the new version — no surprise second prompt.
+    app.restart();
+}
 
-    // Ask the user before restarting so they aren't surprised.
-    let msg = format!("Indexa {version} has been installed.\n\nRestart now to apply the update?");
-    if show_confirm_dialog("Indexa Update Ready", &msg) {
-        app.restart();
+/// Download the matching `indexa` CLI binary from this release into a PATH directory, so the
+/// owner's terminal `indexa` command tracks the desktop app's version (their CLI was stuck at
+/// v0.19 while the app moved on). Runs off the UI thread; reports success/failure in a dialog.
+///
+/// Target directory (best-effort, in priority order):
+///   1. the dir of an existing `indexa` already on `$PATH` — overwrites the binary the user's
+///      shell actually resolves, so `indexa` updates in place;
+///   2. else `~/.cargo/bin` if it exists (common rustup/cargo install location);
+///   3. else `~/.local/bin` (created if missing; the standard user-bin dir).
+fn run_cli_install(app: tauri::AppHandle) {
+    let _ = &app; // reserved for future progress events; dialogs are the surface for now.
+    tauri::async_runtime::spawn(async move {
+        let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let (dir, on_path) = resolve_cli_dir();
+        eprintln!(
+            "[indexa-desktop] installing CLI {tag} → {} (on PATH: {on_path})",
+            dir.display()
+        );
+        match indexa_update::download_cli_to(&dir, &tag).await {
+            Ok(path) => {
+                let mut msg = format!(
+                    "The indexa command-line tool ({tag}) was installed to:\n{}",
+                    path.display()
+                );
+                if on_path {
+                    msg.push_str(
+                        "\n\nOpen a new terminal and run `indexa --version` to confirm \
+                         it matches this app.",
+                    );
+                } else {
+                    msg.push_str(&format!(
+                        "\n\nThis folder isn't on your PATH yet. Add it, e.g.:\n\
+                         echo 'export PATH=\"{}:$PATH\"' >> ~/.zshrc\n\
+                         then open a new terminal and run `indexa --version`.",
+                        dir.display()
+                    ));
+                }
+                eprintln!("[indexa-desktop] CLI installed to {}", path.display());
+                show_info_dialog("Indexa CLI installed", &msg);
+            }
+            Err(e) => {
+                eprintln!("[indexa-desktop] CLI install failed: {e:#}");
+                show_info_dialog(
+                    "Indexa CLI install failed",
+                    &format!("Couldn't install the command-line tool:\n{e}"),
+                );
+            }
+        }
+    });
+}
+
+/// Resolve where to install the `indexa` CLI. Returns `(dir, already_on_path)`.
+///
+/// Prefers overwriting an `indexa` already resolvable on `$PATH` (so the user's existing command
+/// updates in place); otherwise falls back to `~/.cargo/bin` (if present) or `~/.local/bin`.
+fn resolve_cli_dir() -> (std::path::PathBuf, bool) {
+    let bin_name = if cfg!(windows) {
+        "indexa.exe"
+    } else {
+        "indexa"
+    };
+
+    // 1) An existing `indexa` on PATH — overwrite it in place.
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            if dir.as_os_str().is_empty() {
+                continue;
+            }
+            if dir.join(bin_name).is_file() {
+                return (dir, true);
+            }
+        }
     }
+
+    // 2)/3) Fall back to a user-writable bin dir under HOME.
+    let home = home_dir();
+    if let Some(home) = home.as_ref() {
+        let cargo_bin = home.join(".cargo").join("bin");
+        if cargo_bin.is_dir() {
+            let on_path = dir_on_path(&cargo_bin);
+            return (cargo_bin, on_path);
+        }
+        let local_bin = home.join(".local").join("bin");
+        let on_path = dir_on_path(&local_bin);
+        return (local_bin, on_path);
+    }
+
+    // No HOME (unusual): use the current dir, reported as not-on-PATH.
+    (std::path::PathBuf::from("."), false)
+}
+
+/// Best-effort home directory without pulling in the `dirs` crate.
+fn home_dir() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE")
+            .map(std::path::PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+    }
+}
+
+/// Is `dir` one of the entries in `$PATH`?
+fn dir_on_path(dir: &std::path::Path) -> bool {
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d == dir))
+        .unwrap_or(false)
 }
 
 /// Re-sign the running `.app` bundle with an **ad-hoc** signature after an in-place update,
@@ -484,26 +632,27 @@ fn show_info_dialog(title: &str, message: &str) {
     }
 }
 
-/// Show a native OS confirmation dialog. Returns `true` if the user clicks the
-/// primary (OK/Yes) button. Falls back to `true` on unsupported platforms.
-fn show_confirm_dialog(title: &str, message: &str) -> bool {
+/// Show a native OS confirmation dialog with a custom primary-button label. Returns `true` if
+/// the user clicks the primary button (`ok_label`), `false` for "Later". Falls back to `false`
+/// off macOS (a no-op platform shouldn't silently trigger a download/restart).
+fn show_confirm_dialog(title: &str, message: &str, ok_label: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
         let output = std::process::Command::new("osascript")
             .arg("-e")
             .arg(format!(
                 "display alert {title:?} message {message:?} \
-                 buttons {{\"Later\", \"Restart Now\"}} default button \"Restart Now\""
+                 buttons {{\"Later\", {ok_label:?}}} default button {ok_label:?}"
             ))
             .output();
         match output {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).contains("Restart Now"),
-            Err(_) => true, // can't show dialog → restart anyway
+            Ok(o) => String::from_utf8_lossy(&o.stdout).contains(ok_label),
+            Err(_) => false, // can't show dialog → don't act without consent
         }
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (title, message);
-        true
+        let _ = (title, message, ok_label);
+        false
     }
 }
