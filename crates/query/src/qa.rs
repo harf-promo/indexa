@@ -284,14 +284,47 @@ pub(crate) fn retrieve(
     // v0.8: apply per-file/dir/category importance weight boosts (multiplicative).
     if cfg.use_weights && !hits.is_empty() {
         let _ = store.boost_with_weights(&mut hits);
-        // Re-sort after weight boost.
-        hits.sort_by(|a, b| {
-            b.rrf_score
-                .partial_cmp(&a.rrf_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
     }
+    // v0.29: deprioritize archived/historical content so a stale doc (e.g. an old
+    // known-issues file under docs/archive/ claiming an ancient version) can't dominate
+    // an answer about the current state. Multiplicative, not exclusion — such docs stay
+    // findable when the query is explicitly scoped into the historical path.
+    apply_archive_penalty(&mut hits, cfg.scope.as_deref());
+    // Re-sort after any score adjustment (idempotent when nothing changed — hybrid_search
+    // already returns rrf-ordered hits).
+    hits.sort_by(|a, b| {
+        b.rrf_score
+            .partial_cmp(&a.rrf_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(hits)
+}
+
+/// Full path segments that mark content as historical/superseded. Matched case-insensitively
+/// and segment-bounded (so `archive` matches `…/docs/archive/x` but not `archived_data.rs`).
+const HISTORICAL_SEGMENTS: [&str; 5] = ["archive", "archived", "historical", "deprecated", "old"];
+
+/// How hard to push historical hits down. 0.15 keeps them retrievable (and explicitly
+/// scopeable) but lets any current doc with a comparable raw score outrank them.
+const ARCHIVE_PENALTY: f64 = 0.15;
+
+/// True if any `/`-segment of `path` is a historical marker (see `HISTORICAL_SEGMENTS`).
+fn path_is_historical(path: &str) -> bool {
+    path.split('/')
+        .any(|seg| HISTORICAL_SEGMENTS.contains(&seg.to_ascii_lowercase().as_str()))
+}
+
+/// Multiply down the score of hits under a historical path — unless the query is explicitly
+/// scoped *into* such a path, in which case the user is asking for the history, so leave it.
+fn apply_archive_penalty(hits: &mut [SearchHit], scope: Option<&str>) {
+    if scope.map(path_is_historical).unwrap_or(false) {
+        return;
+    }
+    for h in hits.iter_mut() {
+        if path_is_historical(&h.entry_path) {
+            h.rrf_score *= ARCHIVE_PENALTY;
+        }
+    }
 }
 
 /// Human-readable name for a retrieval mode.
@@ -813,10 +846,31 @@ pub(crate) async fn synthesize_from_hits(
     let answer_text = llm.generate(&prompt).await?;
     Ok(Answer {
         question: question.to_owned(),
-        answer: answer_text.trim().to_owned(),
+        // Cut any hallucinated transcript continuation (see `trim_continuation`).
+        answer: trim_continuation(&answer_text),
         sources,
         confidence,
     })
+}
+
+/// Keep only the answer to the asked question. The `QUESTION:/ANSWER:` prompt frame can lead an
+/// instruct/base model to keep going with an invented next turn (observed live: it appended
+/// "QUESTION: what should you do when contributing? ANSWER: …"). Cut at the first such marker so
+/// the user never sees a fabricated extra Q&A. Defensive — the prompt also forbids it.
+fn trim_continuation(text: &str) -> String {
+    let mut end = text.len();
+    for marker in [
+        "\nQUESTION:",
+        "\nQuestion:",
+        "\nQ:",
+        "\nANSWER:",
+        "\n\nQUESTION",
+    ] {
+        if let Some(i) = text.find(marker) {
+            end = end.min(i);
+        }
+    }
+    text[..end].trim().to_owned()
 }
 
 fn pack_context(hits: &[SearchHit], budget: usize) -> (String, Vec<SourceCitation>) {
@@ -865,9 +919,13 @@ fn pack_context(hits: &[SearchHit], budget: usize) -> (String, Vec<SourceCitatio
 
 fn build_prompt(question: &str, context: &str) -> String {
     format!(
-        "You are a helpful assistant that answers questions about files on a computer.\n\
+        "You are a helpful assistant that answers questions about a user's files.\n\
          Use ONLY the provided context to answer. Cite sources by their [number].\n\
          If the answer isn't in the context, say so.\n\
+         Answer ONLY the question below. Do not invent or answer any other question, and do not \
+         continue with another \"QUESTION:\" line — stop when the answer is complete.\n\
+         Some context may be historical or archived (paths containing /archive/, or an old version \
+         marker like v0.2.2). Prefer current sources and never present an outdated fact as current.\n\
          \n\
          CONTEXT:\n\
          {context}\n\
@@ -906,6 +964,74 @@ mod tests {
         let prompt = build_prompt("what is 2+2?", "some context");
         assert!(prompt.contains("what is 2+2?"));
         assert!(prompt.contains("some context"));
+        // v0.29: the prompt must forbid the model from continuing with another question.
+        assert!(prompt.contains("Do not invent or answer any other question"));
+    }
+
+    fn hit(path: &str, score: f64) -> SearchHit {
+        SearchHit {
+            chunk_id: 1,
+            entry_path: path.to_owned(),
+            seq: 0,
+            heading: String::new(),
+            text: "x".to_owned(),
+            rrf_score: score,
+        }
+    }
+
+    #[test]
+    fn path_is_historical_is_segment_bounded() {
+        assert!(path_is_historical("/p/docs/archive/known-issues.md"));
+        assert!(path_is_historical("/p/historical/x.md"));
+        assert!(path_is_historical("/p/Deprecated/y.rs")); // case-insensitive
+                                                           // Not a full segment → not historical (must not over-match).
+        assert!(!path_is_historical("/p/src/archived_data.rs"));
+        assert!(!path_is_historical("/p/src/threshold.rs"));
+    }
+
+    #[test]
+    fn archive_penalty_demotes_historical_below_current() {
+        // Equal raw scores; after the penalty the current doc must rank above the archived one.
+        let mut hits = vec![
+            hit("/p/docs/archive/known-issues-v0.2.2.md", 1.0),
+            hit("/p/CHANGELOG.md", 0.9),
+        ];
+        apply_archive_penalty(&mut hits, None);
+        hits.sort_by(|a, b| b.rrf_score.partial_cmp(&a.rrf_score).unwrap());
+        assert_eq!(
+            hits[0].entry_path, "/p/CHANGELOG.md",
+            "current doc must win"
+        );
+        assert!(
+            hits[1].rrf_score < 0.2,
+            "archived hit pushed down (0.15×1.0)"
+        );
+    }
+
+    #[test]
+    fn archive_penalty_skipped_when_scoped_into_archive() {
+        // If the user explicitly asks within the archive, don't penalize it.
+        let mut hits = vec![hit("/p/docs/archive/old.md", 1.0)];
+        apply_archive_penalty(&mut hits, Some("/p/docs/archive"));
+        assert_eq!(
+            hits[0].rrf_score, 1.0,
+            "scoped-into-archive query keeps full score"
+        );
+    }
+
+    #[test]
+    fn trim_continuation_cuts_invented_turn() {
+        // The exact failure shape observed live: the model appended a fabricated next turn.
+        let raw = "The project documents known issues.\n\n\n\nQUESTION: what should you do when \
+                   contributing?\n\nANSWER: Fork the repo and open a PR.";
+        let cut = trim_continuation(raw);
+        assert_eq!(cut, "The project documents known issues.");
+        assert!(!cut.contains("QUESTION"));
+        // A clean single answer is unchanged (just trimmed).
+        assert_eq!(
+            trim_continuation("  Indexa is a context engine.  "),
+            "Indexa is a context engine."
+        );
     }
 
     // ── assess_confidence (retrieval-shape classifier) ─────────────────────────
