@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0] — 2026-06-14
+
+"Safe": the memory watchdog now sees the vision models too.
+
+### Added / Fixed
+
+- **Image/video captioning is counted by the memory watchdog.** Captioning runs a vision model
+  **alongside** the summary models, so its memory adds up. The watchdog now knows the footprint of
+  common vision models (`llama3.2-vision`, `moondream`) and, when you enable captioning, checks the
+  **combined** peak against your budget. If it won't fit, you get an honest warning with a lighter
+  model suggestion (e.g. `moondream`) — captioning is still saved (you own your machine), just no
+  longer a silent freeze risk. An unknown caption model is flagged as un-sizable rather than counted
+  as zero. (Audio transcription is excluded — it runs an external `whisper-cli` process, not an Ollama
+  model.) The old "Not yet counted by the memory watchdog" notes are gone.
+
 ## [0.37.0] — 2026-06-14
 
 "Durable": your view survives a reload, a bookmark, and a relaunch.

@@ -418,6 +418,9 @@ async function saveFeatures() {
       status.textContent = 'Saved' + (d.restart_required ? ' · restart indexa to apply' : '');
       setTimeout(function() { if (status) status.textContent = ''; }, 4000);
     }
+    // Honest multimodal memory guard (v0.38): captioning loads a vision model alongside
+    // the summarizers — warn (don't block) if the combined peak overflows the budget.
+    if (d.caption_warning && typeof toast === 'function') toast(d.caption_warning, 'warn');
   } catch(e) {
     if (status) { status.style.color = 'var(--red)'; status.textContent = 'Error: ' + e.message; }
   }

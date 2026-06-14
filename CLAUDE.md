@@ -24,7 +24,7 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.37.0)
+## Current feature surface (v0.38.0)
 
 **CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize) · `scan` · `deep` ·
 `summarize` · `describe` · `inspect` (per-path "what's indexed here") · `map` · `worker` · `pack`
@@ -53,6 +53,17 @@ hover-revealed row actions so folder names aren't clipped; the desktop "Check fo
 version + CHANGELOG notes (release.yml feeds `latest.json` `notes` via tauri-action `releaseBody`) then
 restarts, and a new app/tray "Install command-line tool" item runs `indexa_update::download_cli_to`
 (non-self-replace CLI download → a PATH dir).
+
+**Multimodal memory-safety (v0.38, "safe"):** the watchdog now counts vision/caption models. New
+vision footprints in `resource.rs` `MODEL_FOOTPRINTS` (`llama3.2-vision`, `:11b` alias, `moondream`;
+conservative Q4 estimates, NOT measured). `resident_peak_set` (N-model dedup peak) + `caption_fit_report`
+→ `CaptionFit {caption_model, caption_peak_bytes, trio_peak_bytes, budget_bytes, fits, caption_model_known,
+lighter_suggestion}` — the {file,dir,caption} co-resident trio vs `compute_budget`, suggests a lighter
+known vision model when it overflows. Surfaced via `POST /api/config/features` (`handlers/config.rs`
+`api_config_features_set` gained `State`; `caption_budget_warning` helper) → JSON `caption_warning`
+(honest, NON-blocking — local-first); `07-map.js saveFeatures` toasts it. `index.html` "Not yet counted"
+notes replaced. **Audio transcribe EXCLUDED** (external `whisper-cli`, not Ollama). Don't reintroduce the
+`compute_budget` `total−used` basis (v0.28.1 invariant). 4 `resource.rs` unit tests + live e2e.
 
 **Durable view: deep-linking + window-state (v0.37):** (A) **Deep-linkable URL state** — `26-url-state.js`
 mirrors the active tab + selected path + last Ask question into `location.hash` (`#tab=…&path=…&q=…&scope=file`;

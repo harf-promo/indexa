@@ -209,9 +209,61 @@ pub(crate) async fn api_config_features_get(
     })
 }
 
+/// Honest multimodal memory check (v0.38): when image/video captioning is enabled the
+/// vision model runs **co-resident** with the summarization models during `deep`, so the
+/// real peak is the {file, dir, caption} trio. Returns a calm warning — we don't block
+/// (local-first; the user owns the machine) — when the trio overflows the budget or the
+/// caption model's footprint is unknown. Audio transcription is excluded: it shells to an
+/// external whisper-cli process, not an Ollama model, so it's not in this budget.
+fn caption_budget_warning(
+    cfg: &config::Config,
+    spec: &indexa_core::resource::MachineSpec,
+) -> Option<String> {
+    let model = if cfg.parsers.image.caption {
+        cfg.parsers.image.caption_model().to_owned()
+    } else if cfg.parsers.video.caption {
+        cfg.parsers.video.caption_model().to_owned()
+    } else {
+        return None;
+    };
+    let sample = indexa_core::resource::sample_memory_once();
+    let cf = indexa_core::resource::caption_fit_report(
+        &cfg.describer.file_model,
+        &cfg.describer.dir_model,
+        &model,
+        cfg.describer.num_ctx,
+        spec,
+        &sample,
+        cfg.resource.effective_headroom_bytes(),
+    );
+    const GB: f64 = (1024 * 1024 * 1024) as f64;
+    if !cf.caption_model_known {
+        return Some(format!(
+            "Captioning with \u{201c}{model}\u{201d} is on, but its memory footprint is unknown — the watchdog can't size it. Enable only with headroom."
+        ));
+    }
+    if cf.fits {
+        return None;
+    }
+    let base = format!(
+        "Captioning with \u{201c}{model}\u{201d} needs ~{:.1} GB alongside the summary models, but only ~{:.1} GB is budgeted above the keep-free band.",
+        cf.trio_peak_bytes as f64 / GB,
+        cf.budget_bytes.max(0) as f64 / GB,
+    );
+    Some(match cf.lighter_suggestion {
+        Some(l) => format!(
+            "{base} Try a lighter model like \u{201c}{l}\u{201d}. It's saved — captioning may pause under memory pressure."
+        ),
+        None => format!("{base} It's saved — captioning may pause under memory pressure."),
+    })
+}
+
 /// Persist advanced feature toggles. Ungated — no secrets involved. Only supplied
 /// fields are written; every other config section is preserved by the round-trip.
-pub(crate) async fn api_config_features_set(Json(body): Json<FeaturesRequest>) -> Response {
+pub(crate) async fn api_config_features_set(
+    State(state): State<AppState>,
+    Json(body): Json<FeaturesRequest>,
+) -> Response {
     let cfg_path = config::default_config_path();
     let mut cfg = match config::load(&cfg_path) {
         Ok(c) => c,
@@ -260,7 +312,13 @@ pub(crate) async fn api_config_features_set(Json(body): Json<FeaturesRequest>) -
     }
     match config::save(&cfg, &cfg_path) {
         Ok(_) => {
-            Json(serde_json::json!({ "saved": true, "restart_required": true })).into_response()
+            let caption_warning = caption_budget_warning(&cfg, &state.machine_spec);
+            Json(serde_json::json!({
+                "saved": true,
+                "restart_required": true,
+                "caption_warning": caption_warning,
+            }))
+            .into_response()
         }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
