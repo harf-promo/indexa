@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.2] — 2026-06-14
+
+A hygiene patch: the summary queue no longer fills with dead rows, and `prune` tells the truth.
+
+### Fixed
+
+- **The queue no longer reports a backlog it can't work.** Build-artifact / deleted-file paths with
+  no `entries` row used to sit `pending` forever (one index showed "900 pending" where ~685 were dead
+  rows), and the worker could even waste a model call summarizing a `.git/` file. Now the drain
+  **deletes** a claimed row whose path is no longer a live entry instead of summarizing it, so the
+  queue self-cleans on the next run; `status` (and the engine bar) count only entry-backed `pending`
+  work and surface the rest as a `stale` hint ("N stale → run `indexa prune`").
+- **`indexa prune` now reports the queue and classification rows it removes** (it already deleted them;
+  it just under-reported — only chunks + summaries). On a real index this surfaced 685 dead queue rows
+  and 9,091 orphan chunks that prune had been silently clearing.
+
+### Changed
+
+- **The summarize-enqueue path skips non-entry paths** (a watch event under a skipped build dir, say),
+  so the queue can't re-accumulate un-processable rows. Bypassed for an entry-less
+  `deep`/`summarize`-without-`scan` index (entries remain optional by design).
+
 ## [0.28.1] — 2026-06-13
 
 A correctness patch: stop falsely reporting that there's no RAM to run a model.

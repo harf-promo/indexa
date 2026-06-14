@@ -29,8 +29,9 @@ pub(crate) async fn cmd_prune(dry_run: bool) -> Result<()> {
 
     if dry_run {
         println!(
-            "Would prune {} orphaned chunk(s) and {} orphaned summary(ies) (no matching entry).",
-            counts.chunks, counts.summaries
+            "Would prune {} orphaned chunk(s), {} stale queue row(s), {} summary(ies), and {} \
+classification(s) (no matching entry).",
+            counts.chunks, counts.queue, counts.summaries, counts.classifications
         );
         println!(
             "Would GC {gc_candidates} resolved review question(s) (dismissed/expired > 365 days)."
@@ -42,8 +43,9 @@ pub(crate) async fn cmd_prune(dry_run: bool) -> Result<()> {
     let removed = store.prune_orphans()?;
     let gcd = store.gc_decisions(DECISION_GC_SECS)?;
     println!(
-        "Pruned {} orphaned chunk(s) and {} orphaned summary(ies).",
-        removed.chunks, removed.summaries
+        "Pruned {} orphaned chunk(s), {} stale queue row(s), {} summary(ies), and {} \
+classification(s).",
+        removed.chunks, removed.queue, removed.summaries, removed.classifications
     );
     if gcd > 0 {
         println!(

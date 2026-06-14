@@ -438,6 +438,10 @@ pub enum QueueOutcome {
     /// claim (a deferred dir stays `pending`, so it is never lost). See
     /// `process_queue_item_with_passes` and the drain loops.
     Deferred,
+    /// The claimed path is no longer a live `entries` row (a build artifact that got
+    /// skipped, or a deleted file). The queue row was **deleted** rather than summarized —
+    /// it could never produce a meaningful summary. Self-cleans historical pollution.
+    Orphaned,
 }
 
 /// Process one item from the summary queue (called by the background worker).
@@ -485,6 +489,19 @@ pub async fn process_queue_item_with_passes(
     on_fragment: Option<&mut (dyn FnMut(String) + Send)>,
     force_rollup: bool,
 ) -> Result<QueueOutcome> {
+    // Self-clean an orphaned claim: a path that is no longer a live `entries` row (a build
+    // artifact later skipped, or a deleted file) can never summarize meaningfully and would
+    // otherwise sit `pending` forever or re-summarize junk. Delete the row and move on.
+    // Guarded by "the index has entries": an entry-less `deep`/`summarize`-without-`scan`
+    // index is legitimate, and there every queue path intentionally lacks an `entries` row.
+    // entry_exists errors degrade to `true` (don't drop on a read error).
+    if store.entry_count().map(|n| n > 0).unwrap_or(false)
+        && !store.entry_exists(&item.path).unwrap_or(true)
+    {
+        store.delete_queue_item(&item.path)?;
+        return Ok(QueueOutcome::Orphaned);
+    }
+
     // Defer a directory roll-up until its subtree's children are summarized, so a
     // concurrent worker can't roll up an incomplete (empty/stale) summary and mark it
     // `done` — the root cause of the dir-rollup race. The atomic claim is untouched; a
@@ -708,6 +725,11 @@ pub async fn summarize_subtree_sync(
                 done += 1;
             }
             Ok(QueueOutcome::CompletedUnchanged) => {
+                defers.remove(&item.path);
+                skipped += 1;
+            }
+            // Orphan row deleted (path no longer a live entry); count as skipped and move on.
+            Ok(QueueOutcome::Orphaned) => {
                 defers.remove(&item.path);
                 skipped += 1;
             }
@@ -965,6 +987,66 @@ mod scheduler_tests {
             kind: "dir".into(),
             depth: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn drain_deletes_an_orphan_queue_row_instead_of_summarizing() {
+        use indexa_core::walker::{Entry, EntryKind};
+        let mut store = Store::open_in_memory().unwrap();
+        // Queue a build-artifact path while entry-less (allowed), then add a real entry so
+        // the index "has entries" and the artifact row becomes an orphan.
+        store
+            .enqueue_summary_items(&[("/proj/.git/COMMIT_EDITMSG".into(), "file".into(), 5)])
+            .unwrap();
+        store
+            .upsert_entries(&[Entry {
+                path: std::path::PathBuf::from("/proj/real.rs"),
+                kind: EntryKind::File,
+                size: 10,
+                modified: None,
+                hint: None,
+            }])
+            .unwrap();
+
+        let item = QueueItem {
+            path: "/proj/.git/COMMIT_EDITMSG".into(),
+            kind: "file".into(),
+            depth: 5,
+        };
+        let dsc = CountingDescriber {
+            dir_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let out = process_queue_item_with_passes(
+            &mut store,
+            &dsc,
+            &StubEmbedder,
+            &item,
+            &DescriberConfig::default(),
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out,
+            QueueOutcome::Orphaned,
+            "an orphan claim is self-cleaned"
+        );
+        assert!(
+            store
+                .queue_state("/proj/.git/COMMIT_EDITMSG")
+                .unwrap()
+                .is_none(),
+            "the orphan queue row must be deleted, not summarized"
+        );
+        assert!(
+            store
+                .summary_by_path("/proj/.git/COMMIT_EDITMSG")
+                .unwrap()
+                .is_none(),
+            "no summary should be written for a build artifact"
+        );
     }
 
     #[tokio::test]

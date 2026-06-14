@@ -93,8 +93,9 @@ impl IndexaMcp {
         let mut store = self.store()?;
         let counts = store.prune_orphans().map_err(mcp_err)?;
         Ok(ok_text(format!(
-            "Pruned {} orphaned chunk(s) and {} orphaned summary row(s).",
-            counts.chunks, counts.summaries
+            "Pruned {} orphaned chunk(s), {} stale queue row(s), {} summary row(s), and {} \
+             classification(s).",
+            counts.chunks, counts.queue, counts.summaries, counts.classifications
         )))
     }
 
