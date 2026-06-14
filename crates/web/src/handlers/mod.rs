@@ -10,6 +10,7 @@ mod file_preview;
 mod fs;
 mod graph;
 mod insights_handler;
+mod inspect;
 mod jobs;
 mod keys;
 mod misc;
@@ -28,7 +29,7 @@ mod update;
 mod watch;
 mod weights;
 
-pub(crate) use ask::{api_ask, api_ask_stream};
+pub(crate) use ask::{api_ask, api_ask_explain, api_ask_stream};
 pub(crate) use classify::{
     api_classifications_confirm, api_classifications_ignore, api_classifications_list,
     api_classifications_reset,
@@ -44,6 +45,7 @@ pub(crate) use graph::api_graph;
 pub(crate) use insights_handler::{
     api_insights_diff, api_insights_duplicates, api_insights_stale, api_review_dismiss_evidence,
 };
+pub(crate) use inspect::api_inspect;
 pub(crate) use jobs::{
     api_job_deep, api_job_delete, api_job_estimate, api_job_get, api_job_index, api_job_scan,
     api_job_summarize, api_jobs_events, api_jobs_list,

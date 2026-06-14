@@ -58,6 +58,54 @@ function renderSources(sources) {
     }).join('') + '</div>';
 }
 
+// Fetch + render the retrieval trace for the "Why these sources?" expander.
+async function loadExplain(body, btn) {
+  var q = body.getAttribute('data-q') || '';
+  var scope = body.getAttribute('data-scope') || '';
+  btn.disabled = true;
+  btn.textContent = 'Loading…';
+  try {
+    var r = await fetch('/api/ask/explain', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q, scope: scope || null }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    body.innerHTML = renderExplainTrace(await r.json());
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Show retrieval breakdown';
+    body.insertAdjacentHTML('beforeend', '<div class="explain-err">Couldn’t load: ' + escapeHtml(e.message) + '</div>');
+  }
+}
+
+function renderExplainTrace(t) {
+  var head = '<div class="explain-meta">mode <b>' + escapeHtml(t.mode) + '</b>' +
+    ' · top_k ' + t.top_k + (t.rerank ? ' · reranked' : '') + (t.use_weights ? ' · weighted' : '') +
+    (t.scope ? ' · scoped to ' + escapeHtml(t.scope) : '') + '</div>';
+  var stages = (t.stages || []).map(function (st) {
+    var rows = (st.hits || []).map(function (h) {
+      var name = (h.path || '').split('/').pop() || h.path;
+      return '<li><span class="ex-rank">#' + h.rank + '</span> ' +
+        '<span class="ex-path" title="' + escapeAttr(h.path) + '">' + escapeHtml(name) +
+        (h.heading ? ' <span class="ex-head">' + escapeHtml(h.heading) + '</span>' : '') + '</span>' +
+        '<span class="ex-score">' + (typeof h.score === 'number' ? h.score.toFixed(3) : '') + '</span></li>';
+    }).join('');
+    return '<div class="explain-stage"><h5>' + escapeHtml(st.label) + '</h5><ol class="explain-hits">' +
+      (rows || '<li class="ex-none">(no hits)</li>') + '</ol></div>';
+  }).join('');
+  return head + stages;
+}
+
+// Delegated: the "Show retrieval breakdown" button is rendered inside chat bubbles (re-painted
+// during streaming), so bind once on the document rather than per-render.
+document.addEventListener('click', function (e) {
+  var btn = e.target && e.target.closest ? e.target.closest('.explain-load-btn') : null;
+  if (!btn) return;
+  var body = btn.closest('.explain-body');
+  if (body) loadExplain(body, btn);
+});
+
 async function doAsk() {
   const q = qInput.value.trim();
   if (!q) return;
@@ -112,9 +160,17 @@ async function doAsk() {
   };
   // Render the partial answer (leading whitespace from the model's first token trimmed so
   // it doesn't briefly indent) + sources, keeping the view pinned to the bottom.
+  // "Why these sources?" — a collapsible that, on demand, fetches the retrieval trace for this
+  // question (the web `ask --explain`) so the user can see how each source surfaced.
+  const renderExplain = function() {
+    if (!sources.length) return '';
+    return '<details class="explain-trace"><summary class="explain-summary">Why these sources?</summary>' +
+      '<div class="explain-body" data-q="' + escapeAttr(q) + '" data-scope="' + escapeAttr(scopeForAsk || '') + '">' +
+      '<button class="btn-sm explain-load-btn">Show retrieval breakdown</button></div></details>';
+  };
   const renderAnswer = function() {
     return renderSteps() + renderMarkdown(answerText.replace(/^\s+/, '')) +
-      renderSources(sources) + renderConfidence();
+      renderSources(sources) + renderConfidence() + renderExplain();
   };
   const repaint = function() {
     bubble.innerHTML = renderAnswer();

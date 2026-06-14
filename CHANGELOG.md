@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] — 2026-06-14
+
+"Legible retrieval": see *why* an answer cited what it did, and what's indexed for any path.
+
+### Added
+
+- **"Why these sources?" on every answer.** Each Ask answer now has an expander that shows the
+  retrieval trace — the sparse (keyword), dense (semantic), and fused (RRF) stages with each hit's
+  rank and score — so you can see how a source surfaced, not just that it did. (The web equivalent
+  of `indexa ask --explain`; computed on demand via `POST /api/ask/explain`.)
+- **"Indexed facts" under every summary.** A collapsible panel showing exactly what Indexa stored
+  for the selected path: kind, size, last-modified, chunk count + language, whether a summary exists
+  (and which model), classification, importance weight, and code-graph edge counts — with a note
+  that it's a derived cache, re-derivable by re-indexing, and your files are never modified. (The web
+  equivalent of `indexa inspect`; `GET /api/inspect`.)
+
 ## [0.34.0] — 2026-06-14
 
 A real update window, and a file preview beside every summary.

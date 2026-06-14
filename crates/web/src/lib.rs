@@ -113,6 +113,7 @@ pub(crate) const UI_CSS: &str = concat!(
     include_str!("../assets/ui/css/14-update-overlay.css"),
     include_str!("../assets/ui/css/15-file-preview.css"),
     include_str!("../assets/ui/css/16-update-changelog.css"),
+    include_str!("../assets/ui/css/17-legible.css"),
 );
 pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/01-state-theme-tabs.js"),
@@ -297,8 +298,10 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/api/search", get(api_search))
         .route("/api/fs/ls", get(api_fs_ls))
         .route("/api/file", get(api_file_preview))
+        .route("/api/inspect", get(api_inspect))
         .route("/api/ask", post(api_ask))
         .route("/api/ask/stream", post(api_ask_stream))
+        .route("/api/ask/explain", post(api_ask_explain))
         .route("/api/tree", get(api_tree))
         .route("/api/summary", get(api_summary))
         .route("/api/summarize", post(api_summarize_enqueue))
@@ -1074,6 +1077,43 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[tokio::test]
+    async fn api_inspect_reports_facts_or_404() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[entry("/r/a.rs", EntryKind::File)])
+            .unwrap();
+        store
+            .upsert_chunks(&[chunk("/r/a.rs", 0, "fn main() {}")])
+            .unwrap();
+        let app = build_router(state_with(store), 7620);
+
+        let (status, json) = get_json(app.clone(), "/api/inspect?path=/r/a.rs").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["kind"], "file");
+        assert_eq!(json["chunk_count"], 1);
+        assert_eq!(json["has_summary"], false);
+
+        let (status_missing, _json) = get_json(app, "/api/inspect?path=/r/nope.rs").await;
+        assert_eq!(status_missing, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn api_ask_explain_returns_stage_shaped_json() {
+        // Smoke: the explain endpoint is wired and returns the trace shape. (The handler opens its
+        // own db from db_path = ":memory:" → empty, so stages have no hits, but the shape is fixed.)
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let (status, json) = post_json(
+            app,
+            "/api/ask/explain",
+            serde_json::json!({ "question": "where is auth?" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["stages"].is_array(), "stages array present");
+        assert!(json["mode"].is_string(), "mode present");
     }
 
     #[tokio::test]
