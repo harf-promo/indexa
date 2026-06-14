@@ -1,6 +1,10 @@
 # Rust
 /target/
 Cargo.lock
+# …but commit the desktop binary's lock: it's a workspace-EXCLUDED app whose Tauri
+# dependency graph floats into broken upstream releases (brotli 8.0.3, pcre2) on a
+# fresh CI/release resolve. A committed lock makes the desktop build reproducible.
+!apps/indexa-desktop/Cargo.lock
 
 # IDE
 .idea/
