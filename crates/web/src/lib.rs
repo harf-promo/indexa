@@ -142,6 +142,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/23-sidebar-resize.js"),
     include_str!("../assets/ui/js/24-file-preview.js"),
     include_str!("../assets/ui/js/25-graph-explore.js"),
+    include_str!("../assets/ui/js/26-url-state.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────

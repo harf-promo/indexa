@@ -24,7 +24,7 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.36.0)
+## Current feature surface (v0.37.0)
 
 **CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize) · `scan` · `deep` ·
 `summarize` · `describe` · `inspect` (per-path "what's indexed here") · `map` · `worker` · `pack`
@@ -53,6 +53,19 @@ hover-revealed row actions so folder names aren't clipped; the desktop "Check fo
 version + CHANGELOG notes (release.yml feeds `latest.json` `notes` via tauri-action `releaseBody`) then
 restarts, and a new app/tray "Install command-line tool" item runs `indexa_update::download_cli_to`
 (non-self-replace CLI download → a PATH dir).
+
+**Durable view: deep-linking + window-state (v0.37):** (A) **Deep-linkable URL state** — `26-url-state.js`
+mirrors the active tab + selected path + last Ask question into `location.hash` (`#tab=…&path=…&q=…&scope=file`;
+`tree` omitted as default) via `writeHash` (`history.replaceState`, guarded by `__suppressHashWrite`) and
+restores on load via the hoisted `restoreFromHash` (⚠️ call the BARE hoisted name from `08`'s boot, NOT
+`window.__indexaRestoreHash` — the window assignment runs later, in `26`). Hooks: `switchTab` (01),
+`showSummary` (05, also sets `selectedPath`), `doAsk` (06), boot (08, replaces unconditional
+`switchTab('tree')` + sets `window.__indexaHashRestored`), onboarding guard (11). Restore fires ONE
+`/api/summary`, ZERO `/api/ask` (question is display-only, never auto-run); `hashchange` re-restores on
+Back/Forward. (B) **Desktop window-state** — `tauri-plugin-window-state` v2 (`.plugin(...Builder::default().build())`
+in `main.rs`, dep in desktop `Cargo.toml`; MIT/Apache, cargo-deny clean) remembers size/position;
+tauri.conf width/height are first-launch defaults, minWidth/minHeight clamp. **v0.38 "safe" (multimodal
+memory budget) is split out** per the blueprint (touches the `compute_budget` honesty invariant).
 
 **Navigable knowledge graph (v0.36, "see the graph"):** the Map's force-directed call graph
 (`19-graph.js`, `#map-panel-graph`) is now interactive — extended in place, NOT a new sub-view.

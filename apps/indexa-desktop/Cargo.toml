@@ -1,6 +1,6 @@
 [package]
 name = "indexa-desktop"
-version = "0.36.0"
+version = "0.37.0"
 edition = "2021"
 authors = ["Harf Promo <ahmed541991@gmail.com>"]
 license = "Apache-2.0"
@@ -28,6 +28,10 @@ tauri-build = { version = "2", features = [] }
 tauri              = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell   = { version = "2" }
 tauri-plugin-updater = { version = "2" }
+# Persist window size/position across launches (v0.37). First-party Tauri plugin,
+# MIT/Apache-2.0 — clears cargo-deny without an exception. Auto-saves on move/resize/
+# close and restores before show; minWidth/minHeight in tauri.conf.json clamp it.
+tauri-plugin-window-state = { version = "2" }
 # Pin Tauri's transitive `brotli` to the last-good 8.0.3-avoiding version: brotli 8.0.3
 # ships an internal compile error (`StandardAlloc: alloc::Allocator<…>` in
 # enc/combined_alloc.rs). The matching brotli-decompressor must be 5.0.1 (5.0.0 and 5.0.2

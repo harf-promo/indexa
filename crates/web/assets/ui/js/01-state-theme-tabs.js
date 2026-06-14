@@ -53,6 +53,8 @@ function switchTab(tab) {
   const sv = document.getElementById('summary-view');
   if (sv) sv.style.display = (tab === 'tree' && selectedPath !== null) ? 'block' : '';
   if (tab === 'map') loadMap();
+  // Mirror the active tab into the URL (deep-linking, v0.37). Drawers returned above.
+  if (typeof writeHash === 'function') writeHash();
 }
 
 /* The element focus returns to when the last open drawer closes (the gear/activity
