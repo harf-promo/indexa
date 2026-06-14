@@ -23,6 +23,9 @@ directories = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 shellexpand = "3"
+sha2 = { workspace = true }
+htmd = { workspace = true }
+indexa-http-util = { path = "../../crates/http-util" }
 indexa-cli = { path = "../../crates/cli" }
 indexa-core = { path = "../../crates/core" }
 indexa-parsers = { path = "../../crates/parsers" }

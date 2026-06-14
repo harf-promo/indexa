@@ -24,7 +24,7 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.31.0)
+## Current feature surface (v0.32.0)
 
 **CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize) · `scan` · `deep` ·
 `summarize` · `describe` · `map` · `worker` · `pack` (Context Packs) · `weight` (Importance
@@ -76,6 +76,14 @@ keeps Linux CI X11-free) + `--strip-comments`. Shared `finalize_export`/`ExportS
 `[retrieval] recency_boost`/`recency_days` → `Store::boost_with_recency` in `qa.rs retrieve()` after
 `apply_archive_penalty` (positive twin; mtime-based, NOT git). Don't add a whole-repo "dump" mode — the
 retrieved-slice model is the moat (vs repomix/gitingest token bricks).
+
+**Remote sources (v0.32, "reach"):** `indexa pack add-url <pack> <url>` fetches a GitHub issue/PR (public
+API → Markdown) or web page (HTML→Markdown via `html2md`, `<script>`/`<style>` stripped) → caches a local
+file under `<data_dir>/sources/<slug>-<sha8>.md` → `add_pack_paths` (cache-as-file: NO schema change, NO
+virtual entries — flows through the normal pipeline). Code in `apps/indexa/src/commands/sources.rs` (uses
+`indexa_http_util`). **Gated** by `[sources] enabled` (`SourcesConfig`) OR `INDEXA_REMOTE_FETCH_ALLOW=1` —
+fetching is opt-in (network). arXiv/YouTube/site scrapers stay OUT of core (rot → plugins). Pack "recipes"
+deferred.
 
 **Major features by version:** Context Packs (v0.14) · Importance Weighting (v0.16, `importance_weights`
 table + `boost_with_weights` in QA) · Insights (v0.16, `find_*_duplicates`/`find_stale_entries`/
