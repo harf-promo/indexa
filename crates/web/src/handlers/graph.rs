@@ -24,6 +24,59 @@ pub(crate) struct GraphQuery {
     /// the broader bare-name match, which is what PageRank / Map node sizing expect).
     #[serde(default)]
     strict: bool,
+    /// Center the graph on this file path and return only its N-hop neighborhood
+    /// (the "expand a node's neighbors" interaction). Filters the already-scoped
+    /// graph server-side so a hub's real neighbors aren't lost to client-side
+    /// truncation. Empty/unset = whole scope.
+    focus: Option<String>,
+    /// Hops from `focus` to include, clamped to `[1, 2]`. Ignored without `focus`.
+    /// Default 1 (direct callers + callees only).
+    #[serde(default)]
+    depth: Option<usize>,
+}
+
+/// Keep only `focus` plus the nodes within `depth` undirected hops of it, dropping
+/// the rest and the edges that no longer connect two kept nodes. Pure in-memory
+/// filtering of an already-fetched scoped graph — no DB access, no schema change.
+/// `edge_tiers` is parallel to `edges` and is filtered in lockstep.
+fn apply_focus(sg: &mut indexa_core::store::ScopedCodeGraph, focus: &str, depth: usize) {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    // Build undirected adjacency, then BFS the kept set. `adj` borrows the edges
+    // immutably; it's dropped before we mutate the graph below.
+    let mut keep: HashSet<String> = HashSet::new();
+    {
+        let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+        for e in &sg.graph.edges {
+            adj.entry(e.from.as_str()).or_default().push(e.to.as_str());
+            adj.entry(e.to.as_str()).or_default().push(e.from.as_str());
+        }
+        keep.insert(focus.to_owned());
+        let mut frontier: VecDeque<(String, usize)> = VecDeque::new();
+        frontier.push_back((focus.to_owned(), 0));
+        while let Some((cur, dist)) = frontier.pop_front() {
+            if dist >= depth {
+                continue;
+            }
+            if let Some(ns) = adj.get(cur.as_str()) {
+                for &n in ns {
+                    if keep.insert(n.to_owned()) {
+                        frontier.push_back((n.to_owned(), dist + 1));
+                    }
+                }
+            }
+        }
+    }
+
+    sg.graph.nodes.retain(|n| keep.contains(&n.path));
+    let edges = std::mem::take(&mut sg.graph.edges);
+    let tiers = std::mem::take(&mut sg.edge_tiers);
+    for (e, t) in edges.into_iter().zip(tiers) {
+        if keep.contains(&e.from) && keep.contains(&e.to) {
+            sg.graph.edges.push(e);
+            sg.edge_tiers.push(t);
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -91,7 +144,12 @@ pub(crate) async fn api_graph(
     .unwrap_or_else(|e| Err(anyhow::anyhow!("graph task panicked: {e}")));
 
     match scoped {
-        Ok(sg) => {
+        Ok(mut sg) => {
+            // Optional focus: keep only the focus node's N-hop neighborhood.
+            if let Some(focus) = q.focus.filter(|s| !s.is_empty()) {
+                let depth = q.depth.unwrap_or(1).clamp(1, 2);
+                apply_focus(&mut sg, &focus, depth);
+            }
             let g = sg.graph;
             let nodes: Vec<NodeDto> = g
                 .nodes
@@ -133,5 +191,101 @@ pub(crate) async fn api_graph(
             .into_response()
         }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use indexa_core::store::{
+        CodeGraph, CodeGraphEdge, CodeGraphNode, ResolutionTier, ScopedCodeGraph,
+    };
+
+    fn node(p: &str) -> CodeGraphNode {
+        CodeGraphNode {
+            path: p.into(),
+            out_degree: 0,
+            in_degree: 0,
+            pagerank: 0.1,
+        }
+    }
+    fn edge(f: &str, t: &str) -> CodeGraphEdge {
+        CodeGraphEdge {
+            from: f.into(),
+            to: t.into(),
+            weight: 1,
+        }
+    }
+    // a→b→c→d  and  a→e  (undirected adjacency for focus BFS)
+    fn sample() -> ScopedCodeGraph {
+        ScopedCodeGraph {
+            graph: CodeGraph {
+                nodes: vec![node("a"), node("b"), node("c"), node("d"), node("e")],
+                edges: vec![
+                    edge("a", "b"),
+                    edge("b", "c"),
+                    edge("c", "d"),
+                    edge("a", "e"),
+                ],
+                truncated: false,
+            },
+            edge_tiers: vec![
+                ResolutionTier::Import,
+                ResolutionTier::Bare,
+                ResolutionTier::SameDir,
+                ResolutionTier::Import,
+            ],
+        }
+    }
+    fn paths(sg: &ScopedCodeGraph) -> Vec<String> {
+        let mut v: Vec<String> = sg.graph.nodes.iter().map(|n| n.path.clone()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn focus_depth_1_keeps_direct_neighbors_only() {
+        let mut sg = sample();
+        apply_focus(&mut sg, "a", 1);
+        assert_eq!(paths(&sg), vec!["a", "b", "e"]);
+        // Only edges with both endpoints kept survive — a→b and a→e.
+        assert_eq!(sg.graph.edges.len(), 2);
+        assert!(sg.graph.edges.iter().all(|e| e.from == "a"));
+        // edge_tiers stays parallel to edges (same length, lockstep filter).
+        assert_eq!(sg.edge_tiers.len(), sg.graph.edges.len());
+    }
+
+    #[test]
+    fn focus_depth_2_widens_one_more_hop() {
+        let mut sg = sample();
+        apply_focus(&mut sg, "a", 2);
+        assert_eq!(paths(&sg), vec!["a", "b", "c", "e"]);
+        // a→b, b→c, a→e kept; c→d dropped (d is 3 hops away).
+        assert_eq!(sg.graph.edges.len(), 3);
+        assert_eq!(sg.edge_tiers.len(), 3);
+    }
+
+    #[test]
+    fn focus_isolated_node_returns_just_it() {
+        let mut sg = ScopedCodeGraph {
+            graph: CodeGraph {
+                nodes: vec![node("solo"), node("other")],
+                edges: vec![],
+                truncated: false,
+            },
+            edge_tiers: vec![],
+        };
+        apply_focus(&mut sg, "solo", 2);
+        assert_eq!(paths(&sg), vec!["solo"]);
+        assert!(sg.graph.edges.is_empty());
+    }
+
+    #[test]
+    fn focus_unknown_path_drops_everything_without_panic() {
+        let mut sg = sample();
+        apply_focus(&mut sg, "not-a-node", 2);
+        assert!(sg.graph.nodes.is_empty());
+        assert!(sg.graph.edges.is_empty());
+        assert!(sg.edge_tiers.is_empty());
     }
 }

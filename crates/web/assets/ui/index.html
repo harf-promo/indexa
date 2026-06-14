@@ -183,10 +183,29 @@
             <div class="graph-toolbar">
               <label for="graph-scope" class="graph-scope-label">Scope</label>
               <select id="graph-scope" class="graph-scope" aria-label="Graph scope root" onchange="loadGraph(this.value)"></select>
+              <button id="graph-help-btn" class="btn-sm graph-help-btn" onclick="toggleGraphHelp()" aria-expanded="false" aria-controls="graph-help" title="What is this?">&#x24D8; What is this?</button>
               <span class="graph-meta" id="graph-meta"></span>
             </div>
-            <svg id="graph-svg" class="graph-svg" role="group" aria-label="Code call graph — files as nodes, calls as edges. Hover a node to highlight its callers and callees."></svg>
+            <!-- Plain-language explainer for the graph (mirrors #map-help). -->
+            <div id="graph-help" class="graph-help" hidden>
+              <p>This is a map of how your files connect. Each <strong>dot is a file</strong>, and a <strong>line between two files</strong> means one of them uses code from the other.</p>
+              <ul>
+                <li><strong>Bigger dots are more important</strong> — lots of other files rely on them, so they're the hubs of your project. Small dots are used by fewer files.</li>
+                <li><strong>Solid lines</strong> are confident connections (the files clearly reference each other, or live together). <strong>Dotted lines</strong> are best-guess connections matched only by a shared name — treat them as approximate.</li>
+              </ul>
+              <p><strong>Try it:</strong> click a dot to focus on it and dim everything else, then <strong>Expand neighbors</strong> to see just its direct connections. Use <strong>Scope</strong> above to zoom into one folder, and <strong>Show all in scope</strong> to go back.</p>
+              <p class="graph-help-terms">Nothing here changes your files or your answers — it's a read-only view of what's already indexed.</p>
+            </div>
+            <!-- Focus breadcrumb + actions (shown only when a node is focused). -->
+            <div id="graph-focus-bar" class="graph-focus-bar" hidden>
+              <span id="graph-focus-label" class="graph-focus-label"></span>
+              <button class="btn-sm" onclick="expandFocusNeighbors()">Expand neighbors</button>
+              <button class="btn-sm" onclick="resetGraphView()">Show all in scope</button>
+            </div>
+            <svg id="graph-svg" class="graph-svg" role="group" aria-label="Code knowledge graph — files as nodes sized by how central they are, calls as edges. Hover or focus a node to highlight its callers and callees; click or press Enter to focus it, then expand its neighbors."></svg>
             <div class="graph-tooltip" id="graph-tooltip" role="tooltip" hidden></div>
+            <!-- Legend, built by renderGraphLegend() so labels match the live palette. -->
+            <div id="graph-legend" class="graph-legend" role="group" aria-label="Graph legend"></div>
             <p class="graph-note">Call edges link a file to any in-scope file that <em>defines</em> a function it calls — matched by bare name (case-sensitive). Languages: Rust, Python, JS, TS, Go, Java.</p>
           </div>
         </div>

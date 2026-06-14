@@ -24,7 +24,7 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.35.0)
+## Current feature surface (v0.36.0)
 
 **CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize) · `scan` · `deep` ·
 `summarize` · `describe` · `inspect` (per-path "what's indexed here") · `map` · `worker` · `pack`
@@ -53,6 +53,20 @@ hover-revealed row actions so folder names aren't clipped; the desktop "Check fo
 version + CHANGELOG notes (release.yml feeds `latest.json` `notes` via tauri-action `releaseBody`) then
 restarts, and a new app/tray "Install command-line tool" item runs `indexa_update::download_cli_to`
 (non-self-replace CLI download → a PATH dir).
+
+**Navigable knowledge graph (v0.36, "see the graph"):** the Map's force-directed call graph
+(`19-graph.js`, `#map-panel-graph`) is now interactive — extended in place, NOT a new sub-view.
+Click/Enter a node → `focusNode` locks a persistent highlight (`graphState.setHighlight`/`lockedId`,
+published from `renderGraph`'s closure) + shows `#graph-focus-bar`; **Expand neighbors**
+(`expandFocusNeighbors`) re-fetches `GET /api/graph?focus=<path>&depth=1|2` — a new read-only
+neighborhood filter (`apply_focus` in `handlers/graph.rs`, pure in-memory BFS over the already-scoped
+graph, `edge_tiers` filtered in lockstep, NO schema/Store change); **Show all in scope**
+(`resetGraphView`) clears it. Nodes sized by PageRank (unchanged `r` formula), edges styled by tier
+(`tier-import` accent / `tier-bare` dashed-muted). New `25-graph-explore.js` (legend + plain-language
+"What is this?" help + focus/expand/reset; reuses `escG`/`graphState`/`fetchGraph`/`currentGraphScope`
+from `19-graph.js`, concatenated before it) + `css/18-graph-explore.css` (re-asserts `.graph-edge.hl/.dim`
+LAST so dimming wins over per-tier opacity). Legend swatches are text-labelled (aria, not color-only);
+bare-name caveat shown only when `bare_edges>0`/`strict`. Both files wired into the `lib.rs` concat.
 
 **Legible retrieval (v0.35):** two read-only web surfaces of existing CLI capability. `POST
 /api/ask/explain` (`handlers/ask.rs` `api_ask_explain`) calls `indexa_query::explain_retrieval` → JSON

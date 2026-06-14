@@ -8,6 +8,25 @@ var graphScopeLoaded = false;
 var graphData = null;
 var graphLayout = null; // [{id, x, y, r, node}]
 
+// Interaction state for the navigable knowledge-graph view (v0.36). Click a node to
+// lock a persistent focus highlight; "Expand neighbors" re-fetches only that node's
+// N-hop neighborhood (server-side via ?focus=&depth=). renderGraph publishes its
+// highlight closures here so 25-graph-explore.js can drive focus from outside the
+// render closure.
+var graphState = {
+  focusId: null,   // currently locked (clicked) node id, or null
+  lockedId: null,  // same as focusId while a render is live (closure-visible marker)
+  depth: 0,        // depth of the current focused fetch (0 = whole-scope, not focused)
+  setHighlight: null, // fn(id): persistently dim non-neighbors of id
+  clearHighlight: null, // fn(): remove all highlight classes
+};
+
+// Current scope = the scope <select> value (the user's "home" scope, a root).
+function currentGraphScope() {
+  var sel = document.getElementById('graph-scope');
+  return sel ? sel.value : '';
+}
+
 // Populate the scope <select> from /api/roots once, then load the graph.
 function loadGraph(scope) {  // eslint-disable-line no-unused-vars
   var sel = document.getElementById('graph-scope');
@@ -27,12 +46,22 @@ function loadGraph(scope) {  // eslint-disable-line no-unused-vars
   fetchGraph(scope || (sel ? sel.value : ''));
 }
 
-function fetchGraph(scope) {
+function fetchGraph(scope, focus, depth) {
   var svg = document.getElementById('graph-svg');
   var meta = document.getElementById('graph-meta');
   if (svg) clearSvg(svg);
   if (meta) meta.textContent = 'Loading…';
+  // A plain (non-focused) scope load clears any locked focus + its breadcrumb;
+  // a focused load (Expand neighbors) keeps the focus marker so it re-locks on render.
+  graphState.depth = focus ? (depth || 1) : 0;
+  if (!focus) {
+    graphState.focusId = null;
+    graphState.lockedId = null;
+    var bar = document.getElementById('graph-focus-bar');
+    if (bar) bar.hidden = true;
+  }
   var url = '/api/graph?limit=300' + (scope ? '&scope=' + encodeURIComponent(scope) : '');
+  if (focus) url += '&focus=' + encodeURIComponent(focus) + '&depth=' + (depth || 1);
   fetch(url)
     .then(function (r) { return r.json(); })
     .then(function (d) {
@@ -161,7 +190,8 @@ function renderGraph(d) {
     g.setAttribute('tabindex', '0');
     g.setAttribute('role', 'button');
     g.setAttribute('aria-label',
-      o.label + ' — calls ' + o.node.out_degree + ' file(s), called by ' + o.node.in_degree);
+      o.label + ' — calls ' + o.node.out_degree + ' file(s), called by ' + o.node.in_degree
+      + '. Press Enter to focus and expand its connections.');
     g.addEventListener('mouseenter', function (ev) { onNodeHover(o, true, ev); });
     g.addEventListener('mouseleave', function () { onNodeHover(o, false); });
     g.addEventListener('focus', function () {
@@ -170,23 +200,47 @@ function renderGraph(d) {
       onNodeHover(o, true, { clientX: r.left + r.width / 2, clientY: r.top });
     });
     g.addEventListener('blur', function () { onNodeHover(o, false); });
+    // Click / Enter / Space locks a persistent focus on this node (v0.36).
+    // focusNode + the focus-bar live in 25-graph-explore.js (concatenated after).
+    g.addEventListener('click', function () {
+      if (typeof focusNode === 'function') focusNode(o.id);
+    });
+    g.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        if (typeof focusNode === 'function') focusNode(o.id);
+      }
+    });
     return { el: g, label: lbl, obj: o };
   });
 
+  // Highlight a node's neighborhood by id — shared by transient hover and the
+  // persistent click focus. byId/neighbors are closure-local to this render.
+  function setHighlight(id) {
+    if (!neighbors[id]) return;
+    nodeEls.forEach(function (ne) {
+      var related = ne.obj.id === id || neighbors[id][ne.obj.id];
+      ne.el.classList.toggle('dim', !related);
+      ne.el.classList.toggle('focus', ne.obj.id === id);
+      if (related && ne.obj.id !== id) ne.label.style.display = '';
+    });
+    lineEls.forEach(function (le) {
+      var on2 = le.link.source.id === id || le.link.target.id === id;
+      le.el.classList.toggle('hl', on2);
+      le.el.classList.toggle('dim', !on2);
+    });
+  }
+  function clearHighlight() {
+    nodeEls.forEach(function (ne) {
+      ne.el.classList.remove('dim', 'focus');
+      if ((ne.obj.node.in_degree + ne.obj.node.out_degree) < 4) ne.label.style.display = 'none';
+    });
+    lineEls.forEach(function (le) { le.el.classList.remove('hl', 'dim'); });
+  }
   function onNodeHover(o, on, ev) {
     var tip = document.getElementById('graph-tooltip');
     if (on) {
-      nodeEls.forEach(function (ne) {
-        var related = ne.obj.id === o.id || neighbors[o.id][ne.obj.id];
-        ne.el.classList.toggle('dim', !related);
-        ne.el.classList.toggle('focus', ne.obj.id === o.id);
-        if (related && ne.obj.id !== o.id) ne.label.style.display = '';
-      });
-      lineEls.forEach(function (le) {
-        var on2 = le.link.source.id === o.id || le.link.target.id === o.id;
-        le.el.classList.toggle('hl', on2);
-        le.el.classList.toggle('dim', !on2);
-      });
+      setHighlight(o.id);
       if (tip) {
         tip.hidden = false;
         tip.innerHTML = '<strong>' + escG(o.label) + '</strong><br>'
@@ -196,14 +250,27 @@ function renderGraph(d) {
         if (ev) { tip.style.left = (ev.clientX + 12) + 'px'; tip.style.top = (ev.clientY + 12) + 'px'; }
       }
     } else {
-      nodeEls.forEach(function (ne) {
-        ne.el.classList.remove('dim', 'focus');
-        if ((ne.obj.node.in_degree + ne.obj.node.out_degree) < 4) ne.label.style.display = 'none';
-      });
-      lineEls.forEach(function (le) { le.el.classList.remove('hl', 'dim'); });
       if (tip) tip.hidden = true;
+      // Leaving a transient hover: restore the locked focus if one is set, else clear.
+      if (graphState.lockedId && neighbors[graphState.lockedId]) setHighlight(graphState.lockedId);
+      else clearHighlight();
     }
   }
+
+  // Publish highlight controls so the focus-bar handlers (25-graph-explore.js) can
+  // lock/clear a focus from outside this render closure.
+  graphState.setHighlight = setHighlight;
+  graphState.clearHighlight = clearHighlight;
+
+  // Re-apply a locked focus after a re-render — an "Expand neighbors" fetch
+  // re-centers on the focused node, which is still present in the neighborhood.
+  if (graphState.focusId && byId[graphState.focusId]) {
+    graphState.lockedId = graphState.focusId;
+    setHighlight(graphState.focusId);
+  }
+
+  // Legend + conditional bare-name caveat (built from live data in 25-graph-explore.js).
+  if (typeof renderGraphLegend === 'function') renderGraphLegend(d);
 }
 
 // Compact Fruchterman-Reingold style force layout (~250 cooling ticks).
