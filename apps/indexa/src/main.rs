@@ -96,6 +96,9 @@ async fn main() -> Result<()> {
                 limit,
             } => commands::cmd_pack_create(name, description, auto, yes, limit, &cfg).await,
             PackAction::Add { name, paths } => commands::cmd_pack_add(name, paths).await,
+            PackAction::AddUrl { name, url, label } => {
+                commands::cmd_pack_add_url(name, url, label, &cfg).await
+            }
             PackAction::Remove { name, paths } => commands::cmd_pack_remove(name, paths).await,
             PackAction::List => commands::cmd_pack_list().await,
             PackAction::Show { name } => commands::cmd_pack_show(name).await,

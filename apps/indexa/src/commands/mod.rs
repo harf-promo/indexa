@@ -25,6 +25,7 @@ mod scan;
 mod search;
 mod serve;
 mod snapshot;
+mod sources;
 mod status;
 mod summarize;
 mod update;
@@ -51,8 +52,8 @@ pub(crate) use map::cmd_map;
 pub(crate) use mcp::cmd_mcp;
 pub(crate) use mcp_install::cmd_mcp_install;
 pub(crate) use pack::{
-    cmd_pack_add, cmd_pack_create, cmd_pack_delete, cmd_pack_export, cmd_pack_list,
-    cmd_pack_remove, cmd_pack_rename, cmd_pack_show,
+    cmd_pack_add, cmd_pack_add_url, cmd_pack_create, cmd_pack_delete, cmd_pack_export,
+    cmd_pack_list, cmd_pack_remove, cmd_pack_rename, cmd_pack_show,
 };
 pub(crate) use prune::cmd_prune;
 pub(crate) use related::cmd_related;

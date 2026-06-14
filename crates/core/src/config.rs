@@ -37,6 +37,33 @@ pub struct Config {
     /// Decision-Ledger review settings (v0.22): when uncertainty becomes a question.
     #[serde(default)]
     pub review: ReviewConfig,
+    /// Opt-in remote-source ingestion (v0.32): pull a web page / GitHub issue|PR into a pack.
+    #[serde(default)]
+    pub sources: SourcesConfig,
+}
+
+/// Settings for opt-in remote-source ingestion (`indexa pack add-url`). Off by default — fetching
+/// a URL reaches the network, so it must be explicitly enabled here or via `INDEXA_REMOTE_FETCH_ALLOW=1`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SourcesConfig {
+    /// Allow `pack add-url` to fetch remote content. Also unlockable per-run with the
+    /// `INDEXA_REMOTE_FETCH_ALLOW=1` environment variable.
+    pub enabled: bool,
+    /// HTTP timeout (seconds) for a remote fetch.
+    pub timeout_secs: u64,
+    /// Retry attempts on transient HTTP failures (429/5xx/timeouts).
+    pub max_retries: u32,
+}
+
+impl Default for SourcesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timeout_secs: 30,
+            max_retries: 2,
+        }
+    }
 }
 
 // ── Review (Decision Ledger) ──────────────────────────────────────────────────

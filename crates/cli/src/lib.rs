@@ -738,6 +738,23 @@ pub enum PackAction {
         #[arg(num_args = 1..)]
         paths: Vec<String>,
     },
+    /// Fetch a remote source (GitHub issue/PR or web page) into a pack as a cached Markdown file.
+    /// Opt-in: set `[sources] enabled = true` or `INDEXA_REMOTE_FETCH_ALLOW=1` (reaches the network).
+    #[command(
+        name = "add-url",
+        after_help = "Examples:
+  INDEXA_REMOTE_FETCH_ALLOW=1 indexa pack add-url \"Bug 219\" https://github.com/harf-promo/indexa/issues/219
+  indexa pack add-url \"Docs\" https://docs.example.com/guide --label guide"
+    )]
+    AddUrl {
+        /// Pack name.
+        name: String,
+        /// URL to fetch (a GitHub issue/PR, or any web page).
+        url: String,
+        /// Optional label for the cached file name (defaults to a slug of the URL).
+        #[arg(long)]
+        label: Option<String>,
+    },
     /// Remove one or more paths from a pack.
     Remove {
         /// Pack name.

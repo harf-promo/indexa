@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0] — 2026-06-14
+
+"Reach": pull a few remote sources into a Context Pack — opt-in and local-first.
+
+### Added
+
+- **`indexa pack add-url <pack> <url>`** — fetch a **GitHub issue/PR** (via the public API, already
+  Markdown — title, state, body, and comments) or **any web page** (HTML → Markdown), and cache it
+  as a local file the pack can index, search, and export like any other. Re-fetching the same URL
+  overwrites in place. Optional `--label` names the cached file.
+- **Opt-in + local-first.** Fetching reaches the network, so it's **off by default** — enable it
+  with `[sources] enabled = true` in config.toml, or `INDEXA_REMOTE_FETCH_ALLOW=1` for one run.
+  Honors `GITHUB_TOKEN` for higher GitHub rate limits. The fetched content lands as a plain local
+  file (under the data dir); nothing is sent anywhere. `<script>`/`<style>` blocks are stripped
+  before conversion so a page's CSS/JS doesn't pollute the context.
+
+### Notes
+
+Scope is deliberately narrow (GitHub + generic web). arXiv/YouTube and other site-specific scrapers
+belong in optional plugins, not core — they break often. Saved pack "recipes" are deferred to a
+later release.
+
 ## [0.31.0] — 2026-06-14
 
 "Exports that fit": smarter, safer context exports — and answers can prefer fresh files.

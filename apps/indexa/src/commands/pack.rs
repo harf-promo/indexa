@@ -149,6 +149,47 @@ pub(crate) async fn cmd_pack_add(name: String, paths: Vec<String>) -> Result<()>
     Ok(())
 }
 
+/// Fetch a remote source (GitHub issue/PR or web page), cache it as a local Markdown file, and add
+/// that file to the pack. Network access is gated by `[sources] enabled` / `INDEXA_REMOTE_FETCH_ALLOW`.
+pub(crate) async fn cmd_pack_add_url(
+    name: String,
+    url: String,
+    label: Option<String>,
+    cfg: &Config,
+) -> Result<()> {
+    use super::sources;
+
+    if !sources::remote_fetch_allowed(&cfg.sources) {
+        bail!(
+            "Remote fetching is off. Enable it with `[sources]\\nenabled = true` in config.toml, \
+             or set INDEXA_REMOTE_FETCH_ALLOW=1 for this run. (Fetching reaches the network, so \
+             it's opt-in.)"
+        );
+    }
+    let Some(db_path) = require_index_db()? else {
+        return Ok(());
+    };
+    let mut store = Store::open(&db_path)?;
+    let pack = store.pack_by_name(&name)?.ok_or_else(|| {
+        anyhow::anyhow!("no pack named \"{name}\" — create it first with `indexa pack create`")
+    })?;
+
+    println!("Fetching {url} …");
+    let md = sources::fetch_source_markdown(&url, &cfg.sources).await?;
+    let data_dir = indexa_core::config::default_data_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot determine data directory"))?;
+    let path = sources::cache_source(&data_dir, &url, label.as_deref(), &md)?;
+    let path_str = path.to_string_lossy().into_owned();
+    store.add_pack_paths(&pack.id, std::slice::from_ref(&path_str))?;
+
+    println!("Cached {} bytes → {path_str}", md.len());
+    println!(
+        "Added to pack \"{name}\". Run `indexa index \"{path_str}\"` to make it searchable, \
+         then `indexa pack export \"{name}\"`."
+    );
+    Ok(())
+}
+
 pub(crate) async fn cmd_pack_remove(name: String, paths: Vec<String>) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
