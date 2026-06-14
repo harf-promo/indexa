@@ -61,10 +61,19 @@ document.addEventListener('DOMContentLoaded', function () {
           // the menu bar — both the app menu and the tray icon expose it.
           status.textContent = d.update_available
             ? '⬆ Update v' + d.latest + ' is ready. In the menu bar, choose ' +
-              '“Indexa → Check for Updates…” to install it.'
+              '“Indexa → Check for Updates…” to see what’s new and install it.'
             : '✓ You’re on the latest (v' + d.current + '). To check anytime, choose ' +
               '“Indexa → Check for Updates…” in the menu bar (or the Indexa tray icon).';
           status.style.color = d.update_available ? 'var(--accent)' : 'var(--muted)';
+        }
+        // Point the user at the menu item that installs/updates the standalone `indexa`
+        // command-line tool so their terminal version matches the app (the in-page button
+        // can't drive native installs from the remote webview).
+        var cliHint = document.getElementById('update-cli-hint');
+        if (cliHint) {
+          cliHint.textContent =
+            'Use the terminal? Choose “Indexa → Install command-line tool” in the menu bar to ' +
+            'put a matching ‘indexa’ command on your PATH.';
         }
       }
     })

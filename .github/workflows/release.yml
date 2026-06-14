@@ -133,6 +133,32 @@ jobs:
       - name: Install Tauri CLI
         run: npm install -g @tauri-apps/cli@^2
 
+      - name: Extract CHANGELOG notes for the in-app updater
+        # tauri-action writes latest.json's `notes` field from the `releaseBody` input
+        # (src/index.ts: body → uploadVersionJSON). The desktop updater surfaces that as
+        # `Update.body`, which the "Check for Updates" dialog shows as "What's new". Pull the
+        # curated "## [X.Y.Z]" section out of CHANGELOG.md so users see real release notes
+        # instead of a bare "an update is available".
+        id: notes
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES=$(awk -v ver="$VERSION" '
+            $0 ~ ("^## \\[" ver "\\]") { capture=1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md)
+          # Strip leading blank lines so the dialog opens on real content.
+          NOTES=$(printf '%s\n' "$NOTES" | sed -e '/./,$!d')
+          if [ -z "$NOTES" ]; then
+            echo "::warning::no CHANGELOG section for $VERSION — updater notes will be empty"
+          fi
+          {
+            echo "body<<__INDEXA_NOTES_EOF__"
+            printf '%s\n' "$NOTES"
+            echo "__INDEXA_NOTES_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Materialize App Store Connect API key (.p8)
         # APPLE_API_KEY_PATH must be a real file on the runner — the .p8 is stored
         # base64-encoded in APPLE_API_KEY_FILE and decoded here. No-ops when the
@@ -177,6 +203,9 @@ jobs:
           projectPath: apps/indexa-desktop
           tauriScript: npx tauri
           tagName: ${{ github.ref_name }}
+          # Curated CHANGELOG section → latest.json `notes` → the updater's "What's new"
+          # dialog. Also (re)sets the GitHub release body to the same section.
+          releaseBody: ${{ steps.notes.outputs.body }}
           # Universal binary: one .dmg/.app.tar.gz that runs on Intel and Apple
           # Silicon. Published under the darwin-universal updater key (see main.rs).
           args: --target universal-apple-darwin
