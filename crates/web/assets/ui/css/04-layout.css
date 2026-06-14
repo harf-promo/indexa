@@ -4,7 +4,27 @@
   grid-template-columns: var(--sidebar-width) 1fr;
   flex: 1;
   overflow: hidden;
+  position: relative; /* anchor for the sidebar resize handle */
 }
+
+/* Drag handle to resize the sidebar (23-sidebar-resize.js drives --sidebar-width). Sits on the
+   sidebar's right edge; invisible until hover/drag. Hidden on small viewports where the sidebar
+   is a slide-out drawer (13-responsive.css). */
+#sidebar-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--sidebar-width);
+  width: 7px;
+  margin-left: -3px;
+  cursor: col-resize;
+  z-index: 25;
+  background: transparent;
+  transition: background 120ms;
+}
+#sidebar-resizer:hover,
+#sidebar-resizer.dragging { background: var(--accent); }
+@media (max-width: 1024px) { #sidebar-resizer { display: none; } }
 
 /* ── Sidebar ── */
 .app-sidebar {
@@ -66,6 +86,8 @@
   border-radius: var(--radius-sm);
   margin: 0 4px;
   transition: background 100ms;
+  /* Anchor for the absolutely-positioned row actions (see below). */
+  position: relative;
 }
 .tree-node-row:hover { background: rgba(88,166,255,0.07); }
 [data-theme="light"] .tree-node-row:hover { background: rgba(9,105,218,0.06); }
@@ -101,13 +123,25 @@
   margin-left: 4px;
 }
 .tree-children { padding-left: 14px; }
-/* Row actions stay laid out (no reflow) but are revealed on hover, keyboard focus, AND
-   when the row is selected — so clicking a file surfaces what you can do with it, and Tab
-   reaches the buttons (they were previously display:none = hover-only, undiscoverable). */
-.tree-row-actions { display: flex; gap: 1px; margin-left: auto; flex-shrink: 0; opacity: 0; transition: opacity 100ms; }
+/* Row actions are ABSOLUTELY positioned + hidden at rest, so they reserve NO width — the full
+   folder name is visible (previously `opacity:0` still laid the 4 buttons out, permanently
+   shrinking the label and clipping the name). They overlay the row's right edge — over a small
+   fade so the buttons stay legible — only on hover, keyboard focus, or selection. */
+.tree-row-actions {
+  display: none;
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  align-items: center;
+  gap: 1px;
+  padding-left: 20px;
+  background: linear-gradient(to right, transparent, var(--surface-2) 18px);
+  border-radius: var(--radius-sm);
+}
 .tree-node-row:hover .tree-row-actions,
 .tree-node-row:focus-within .tree-row-actions,
-.tree-node-row.selected .tree-row-actions { opacity: 1; }
+.tree-node-row.selected .tree-row-actions { display: flex; }
 .tree-row-actions button {
   background: none; border: none; color: var(--muted); cursor: pointer;
   font-size: 11px; padding: 1px 4px; border-radius: var(--radius-sm); line-height: 1.5;

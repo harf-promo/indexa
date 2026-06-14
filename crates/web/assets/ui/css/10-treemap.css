@@ -7,6 +7,25 @@
   flex-wrap: wrap;
 }
 
+/* "What is this?" explainer toggle + panel (plain-language map/jargon help). */
+.map-help-btn { align-self: center; }
+.map-help {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin: 4px 0 12px;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.6;
+  max-width: 720px;
+}
+.map-help ul { margin: 8px 0; padding-left: 4px; list-style: none; }
+.map-help li { margin: 4px 0; }
+.map-help .cov-glyph { font-size: 12px; margin-right: 4px; }
+.map-help-terms { color: var(--muted); margin-top: 10px; font-size: 12px; }
+.map-help-terms em { color: var(--text); font-style: normal; font-weight: 500; }
+
 .map-sub-toggle {
   display: flex;
   gap: 2px;

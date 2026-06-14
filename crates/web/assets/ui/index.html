@@ -19,7 +19,7 @@
   <span class="app-version" id="app-version"></span>
   <span class="app-tagline">the local context engine for AI</span>
   <div class="app-topbar-actions">
-    <span class="app-stats" id="stats">Loading&#x2026;</span>
+    <span class="app-stats" id="stats" title="Files indexed and chunks — a chunk is a small searchable piece a file is split into, so AI can find the exact relevant part instead of re-reading the whole file.">Loading&#x2026;</span>
     <button class="icon-btn" id="cmd-palette-btn" onclick="openCmdPalette()" title="Command palette (&#x2318;K)" aria-label="Open command palette">&#x2318;K</button>
     <button class="icon-btn" id="review-btn" onclick="switchTab('review')" title="Review &#x2014; questions needing your judgment" aria-label="Open review inbox">&#x2709; Review <span class="review-badge" id="review-badge" hidden></span></button>
     <button class="icon-btn" id="settings-gear" onclick="switchTab('settings')" title="Settings" aria-label="Settings">&#x2699;</button>
@@ -55,6 +55,8 @@
   </aside>
   <!-- Scrim behind the sidebar drawer on small viewports (≤1024px); click to close. -->
   <div id="sidebar-scrim" onclick="closeSidebar()" aria-hidden="true"></div>
+  <!-- Drag handle to resize the sidebar (desktop only; hidden ≤1024px). -->
+  <div id="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize sidebar"></div>
 
   <!-- Context workspace — one panel with a Context | Map | Ask view toggle and an
        always-docked Ask bar. Settings + Activity(Jobs) live in drawers (below). -->
@@ -127,11 +129,23 @@
         <div class="map-view" id="map-view">
           <div class="map-toolbar">
             <h2 class="panel-heading">Context map</h2>
+            <button id="map-help-btn" class="btn-sm map-help-btn" onclick="toggleMapHelp()" aria-expanded="false" aria-controls="map-help" title="What is this?">&#x24D8; What is this?</button>
             <div class="map-sub-toggle" role="tablist" aria-label="Map view">
               <button id="map-tab-treemap" class="map-sub-tab active" role="tab" aria-selected="true" onclick="switchMapView('treemap')">Treemap</button>
               <button id="map-tab-table"   class="map-sub-tab"        role="tab" aria-selected="false" onclick="switchMapView('table')">Table</button>
               <button id="map-tab-graph"   class="map-sub-tab"        role="tab" aria-selected="false" onclick="switchMapView('graph')">Graph</button>
             </div>
+          </div>
+          <!-- Plain-language explainer (WS3/WS4): what the map is + the jargon, for a general audience. -->
+          <div id="map-help" class="map-help" hidden>
+            <p>This map shows how ready your files are for AI to use. Each box is a folder, <strong>sized by how much content it holds</strong>, and <strong>colored by readiness</strong>:</p>
+            <ul>
+              <li><span class="cov-glyph cov-full">&#x25CF;</span> <strong>Built</strong> — summarized and searchable. Ask about it and you'll get good answers.</li>
+              <li><span class="cov-glyph cov-partial">&#x25D0;</span> <strong>In progress</strong> — being indexed right now; refreshes to green when done.</li>
+              <li><span class="cov-glyph cov-none">&#x25CB;</span> <strong>Not built</strong> — not indexed yet. Hover the folder in the sidebar and click <strong>&#x26A1; Index for search</strong> to build it.</li>
+              <li><span class="cov-glyph cov-failed">&#x2717;</span> <strong>Failed</strong> — something went wrong; click the &#x2717; in the sidebar to retry.</li>
+            </ul>
+            <p class="map-help-terms"><strong>The words:</strong> a <em>chunk</em> is a small searchable piece a file is split into (so AI can find the exact relevant bit, not re-read the whole file); a <em>summary</em> is a short AI-written description of a file or folder; <em>coverage</em> is the share of your folders that have summaries built. The <strong>Graph</strong> tab shows which files call into which.</p>
           </div>
           <!-- Treemap sub-view (default) -->
           <div id="map-panel-treemap">
