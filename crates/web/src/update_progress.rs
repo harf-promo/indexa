@@ -17,7 +17,7 @@ use tokio::sync::watch;
 /// A snapshot of an in-progress desktop self-update or CLI-tool install, streamed to the webview.
 #[derive(Clone, Debug, Serialize)]
 pub struct UpdateProgress {
-    /// `idle` | `downloading` | `installing` | `done` | `error`.
+    /// `idle` | `available` | `downloading` | `installing` | `done` | `error`.
     pub phase: String,
     /// Human label for what's updating, e.g. `"Indexa 0.30.0"` or `"Command-line tool"`.
     pub title: String,
@@ -27,6 +27,10 @@ pub struct UpdateProgress {
     pub total: Option<u64>,
     /// Error message, set only when `phase == "error"`.
     pub error: Option<String>,
+    /// Full release notes (changelog), set only on phase `available` — shown in the changelog modal.
+    pub notes: Option<String>,
+    /// Version string for the changelog modal header, set only on phase `available`.
+    pub version: Option<String>,
 }
 
 impl UpdateProgress {
@@ -38,6 +42,23 @@ impl UpdateProgress {
             downloaded: 0,
             total: None,
             error: None,
+            notes: None,
+            version: None,
+        }
+    }
+
+    /// An update is available (desktop self-update only): show the in-app changelog modal with the
+    /// full release notes + Install/Later. The webview replies via `POST /api/update/control`.
+    pub fn available(version: impl Into<String>, notes: Option<String>) -> Self {
+        let version = version.into();
+        Self {
+            phase: "available".to_owned(),
+            title: format!("Indexa {version}"),
+            downloaded: 0,
+            total: None,
+            error: None,
+            notes,
+            version: Some(version),
         }
     }
 
@@ -49,6 +70,8 @@ impl UpdateProgress {
             downloaded,
             total,
             error: None,
+            notes: None,
+            version: None,
         }
     }
 
@@ -60,6 +83,8 @@ impl UpdateProgress {
             downloaded: 0,
             total: None,
             error: None,
+            notes: None,
+            version: None,
         }
     }
 
@@ -71,6 +96,8 @@ impl UpdateProgress {
             downloaded: 0,
             total: None,
             error: None,
+            notes: None,
+            version: None,
         }
     }
 
@@ -82,6 +109,8 @@ impl UpdateProgress {
             downloaded: 0,
             total: None,
             error: Some(message.into()),
+            notes: None,
+            version: None,
         }
     }
 }

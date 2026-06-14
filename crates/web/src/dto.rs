@@ -350,6 +350,29 @@ pub(crate) struct UpdateRequest {
     pub(crate) pin: Option<String>,
 }
 
+/// Body of `POST /api/update/control` — the desktop in-app changelog modal's button choice.
+#[derive(Deserialize)]
+pub(crate) struct UpdateControlRequest {
+    /// `"start"` (download + install) or `"dismiss"` (do nothing).
+    pub(crate) action: String,
+}
+
+/// Response for `GET /api/file` — a file's raw text (capped) for the in-app preview pane.
+#[derive(Serialize)]
+pub(crate) struct FilePreviewResponse {
+    pub(crate) path: String,
+    /// Coarse language tag for the client highlighter (`rust`, `python`, …); `None` → plain text.
+    pub(crate) language: Option<String>,
+    /// Raw file text (capped); `None` when `binary` is true.
+    pub(crate) content: Option<String>,
+    /// True when the file exceeds the preview cap (only the first ~40 KB is returned).
+    pub(crate) truncated: bool,
+    /// Full on-disk size in bytes.
+    pub(crate) bytes_total: u64,
+    /// True when the file looks binary (a NUL byte was found) — no `content` is returned.
+    pub(crate) binary: bool,
+}
+
 #[derive(Serialize)]
 pub(crate) struct AskResponse {
     pub(crate) answer: String,

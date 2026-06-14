@@ -1,7 +1,7 @@
 // Hide the console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use indexa_web::{report_update_progress, UpdateProgress};
+use indexa_web::{report_update_progress, wait_for_update_command, UpdateCommand, UpdateProgress};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::Manager;
@@ -287,41 +287,50 @@ fn run_update_check(app: tauri::AppHandle, manual: bool) {
     });
 }
 
-/// Download, install, re-sign (macOS), and offer to restart into an available update.
+/// Show the in-app changelog window, wait for the user's choice, then (on Install) download,
+/// re-sign (macOS), and restart. Replaces the old blocking osascript confirm — the whole flow is
+/// now in-app (changelog modal → progress bar → restart), bridged over the embedded server's SSE.
 async fn install_update(app: tauri::AppHandle, update: tauri_plugin_updater::Update) {
-    let version = update.version.clone();
-
-    // Show WHAT'S NEW before downloading (the owner's "it just says an update, I don't know
-    // what changed" complaint). `update.body` is the release notes from latest.json (the release
-    // workflow injects the CHANGELOG section). Confirm once, then download + restart — no second
-    // prompt, so it behaves like a normal app's updater.
-    let mut msg = format!("Indexa {version} is available.");
-    let notes = update.body.clone().unwrap_or_default();
-    let notes = notes.trim();
-    if !notes.is_empty() {
-        // Cap the dialog body so a long changelog stays readable.
-        let shown: String = notes.chars().take(1500).collect();
-        msg.push_str("\n\nWhat's new:\n");
-        msg.push_str(&shown);
-        if notes.chars().count() > 1500 {
-            msg.push('…');
-        }
-    }
-    msg.push_str("\n\nDownload and install now? Indexa will restart to apply it.");
-    if !show_confirm_dialog("Indexa Update", &msg, "Download & Restart") {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // The tray item and the macOS app-menu item both route to run_update_check → install_update;
+    // guard so a double-trigger can't open two flows or download twice.
+    static INSTALL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+    if INSTALL_IN_PROGRESS.swap(true, Ordering::SeqCst) {
         return;
     }
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            INSTALL_IN_PROGRESS.store(false, Ordering::SeqCst);
+        }
+    }
+    let _guard = Guard;
 
-    // Bring the window forward so the in-app progress overlay is on screen. The webview is
-    // already subscribed to /api/update/progress/stream; it reveals the overlay when the phase
-    // below flips to "downloading". (The webview can't receive Tauri events directly — it loads a
-    // remote URL with no IPC — so progress is bridged through the embedded server's SSE instead.)
+    let version = update.version.clone();
+    let title = format!("Indexa {version}");
+
+    // Publish the FULL changelog to the webview, which renders an in-app "update available" modal
+    // (white card, scrollable notes, Install & Relaunch / Later) — no native dialog. Bring the
+    // window forward so it's visible. The webview replies via POST /api/update/control, waking
+    // `wait_for_update_command` below. (The webview loads a remote URL with no Tauri IPC, so both
+    // directions are bridged through the embedded server.)
+    report_update_progress(UpdateProgress::available(version.clone(), update.body.clone()));
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
         let _ = win.set_focus();
     }
 
-    let title = format!("Indexa {version}");
+    // Wait for the user's choice with a generous timeout, so a walked-away user never triggers a
+    // surprise download. Dismiss or timeout → reset to idle and stop.
+    match tokio::time::timeout(Duration::from_secs(600), wait_for_update_command()).await {
+        Ok(UpdateCommand::Start) => { /* fall through to download */ }
+        Ok(UpdateCommand::Dismiss) | Err(_) => {
+            report_update_progress(UpdateProgress::idle());
+            eprintln!("[indexa-desktop] update {version} dismissed (or timed out)");
+            return;
+        }
+    }
+
     report_update_progress(UpdateProgress::downloading(title.clone(), 0, None));
 
     eprintln!("[indexa-desktop] update {version} — downloading…");
@@ -361,8 +370,8 @@ async fn install_update(app: tauri::AppHandle, update: tauri_plugin_updater::Upd
 
     report_update_progress(UpdateProgress::done(title));
     eprintln!("[indexa-desktop] update {version} installed — restarting");
-    // The user already agreed (download-and-restart) in the pre-download confirm, so restart
-    // straight into the new version — no surprise second prompt.
+    // The user clicked "Install & Relaunch" in the in-app modal, so restart straight into the new
+    // version.
     app.restart();
 }
 
@@ -678,27 +687,3 @@ fn show_info_dialog(title: &str, message: &str) {
     }
 }
 
-/// Show a native OS confirmation dialog with a custom primary-button label. Returns `true` if
-/// the user clicks the primary button (`ok_label`), `false` for "Later". Falls back to `false`
-/// off macOS (a no-op platform shouldn't silently trigger a download/restart).
-fn show_confirm_dialog(title: &str, message: &str, ok_label: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        let output = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(format!(
-                "display alert {title:?} message {message:?} \
-                 buttons {{\"Later\", {ok_label:?}}} default button {ok_label:?}"
-            ))
-            .output();
-        match output {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).contains(ok_label),
-            Err(_) => false, // can't show dialog → don't act without consent
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (title, message, ok_label);
-        false
-    }
-}
