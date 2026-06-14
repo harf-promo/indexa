@@ -76,6 +76,8 @@ async function showSummary(path) {
       if (d.kind === 'file') showFilePreview(path);
       else if (typeof clearPreview === 'function') clearPreview();
     }
+    // Append a collapsible "Indexed facts" panel (the web `indexa inspect`) below the summary.
+    if (typeof appendInspectFacts === 'function') appendInspectFacts(view, path);
   } catch(e) {
     view.innerHTML = '<div class="summary-pending" style="color:var(--red)">Error: ' + escapeHtml(e.message) + '</div>';
     if (typeof clearPreview === 'function') clearPreview();
@@ -91,6 +93,48 @@ function renderNoPendingSummary(path) {
     '<button class="btn-sm summary-ask-btn" id="ask-cta-btn" title="Ask a question answered only from this file">&#x1F4AC; Ask about this file</button>' +
     '<button class="enqueue-btn" id="enqueue-btn">Generate summary</button>' +
     '</div></div>';
+}
+
+/* "Indexed facts" — the web `indexa inspect`. Appends a collapsible panel below the summary so the
+   index is legible (what's stored for this path), not a black box. */
+async function appendInspectFacts(view, path) {  // eslint-disable-line no-unused-vars
+  if (!view) return;
+  var details = document.createElement('details');
+  details.className = 'inspect-facts';
+  details.innerHTML = '<summary>Indexed facts</summary><div class="inspect-body">Loading…</div>';
+  view.appendChild(details);
+  var bodyEl = details.querySelector('.inspect-body');
+  try {
+    var r = await fetch('/api/inspect?path=' + encodeURIComponent(path));
+    if (!r.ok) { bodyEl.textContent = 'unavailable'; return; }
+    bodyEl.innerHTML = renderInspectFacts(await r.json());
+  } catch (_) { bodyEl.textContent = 'unavailable'; }
+}
+
+function renderInspectFacts(d) {
+  var rows = [];
+  var row = function (k, v) {
+    if (v !== null && v !== undefined && v !== '') {
+      rows.push('<div class="if-row"><span class="if-k">' + k + '</span><span class="if-v">' + v + '</span></div>');
+    }
+  };
+  if (d.kind) row('Kind', escapeHtml(d.kind));
+  if (typeof d.size === 'number') {
+    var kb = d.size / 1024;
+    row('Size', kb < 1024 ? kb.toFixed(1) + ' KB' : (kb / 1024).toFixed(1) + ' MB');
+  }
+  if (d.modified_s) row('Modified', fmtRelTime(d.modified_s));
+  row('Chunks', d.chunk_count + (d.language ? ' (' + escapeHtml(d.language) + ')' : ''));
+  row('Summary', d.has_summary ? ('yes — ' + escapeHtml(d.summary_model || '')) : 'none');
+  if (d.category) {
+    row('Category', escapeHtml(d.category) + (typeof d.confidence === 'number' ? ' (' + Math.round(d.confidence * 100) + '%)' : ''));
+  }
+  if (typeof d.weight === 'number' && Math.abs(d.weight - 1) > 0.001) row('Weight', d.weight.toFixed(2));
+  if (d.imports || d.defines || d.calls) {
+    row('Graph', d.imports + ' imports · ' + d.defines + ' defines · ' + d.calls + ' calls');
+  }
+  return '<div class="inspect-rows">' + rows.join('') + '</div>' +
+    '<div class="if-note">Derived from your files — re-derivable by re-indexing; sources are never modified.</div>';
 }
 
 /* Format a unix timestamp as a relative human string: "just now", "3 min ago",

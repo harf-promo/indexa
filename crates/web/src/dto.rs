@@ -357,6 +357,57 @@ pub(crate) struct UpdateControlRequest {
     pub(crate) action: String,
 }
 
+/// Response for `POST /api/ask/explain` — the retrieval trace (why these sources), mirroring the
+/// CLI `ask --explain`: each pipeline stage's ranked hits so the UI can show how a source surfaced.
+#[derive(Serialize)]
+pub(crate) struct ExplainResponse {
+    pub(crate) question: String,
+    pub(crate) mode: String,
+    pub(crate) top_k: usize,
+    pub(crate) rrf_k: f32,
+    pub(crate) rerank: bool,
+    pub(crate) use_weights: bool,
+    pub(crate) scope: Option<String>,
+    pub(crate) stages: Vec<ExplainStage>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ExplainStage {
+    pub(crate) label: String,
+    pub(crate) hits: Vec<ExplainHit>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ExplainHit {
+    /// 1-based rank within the stage.
+    pub(crate) rank: usize,
+    pub(crate) path: String,
+    pub(crate) heading: String,
+    /// The fusion/relevance score (RRF for the fused stage; per-retriever otherwise).
+    pub(crate) score: f64,
+}
+
+/// Response for `GET /api/inspect` — "what's indexed here" for a path (the web `indexa inspect`).
+#[derive(Serialize)]
+pub(crate) struct InspectResponse {
+    pub(crate) path: String,
+    pub(crate) kind: Option<String>,
+    pub(crate) size: Option<u64>,
+    pub(crate) modified_s: Option<i64>,
+    pub(crate) chunk_count: usize,
+    pub(crate) chunk_headings: Vec<String>,
+    pub(crate) language: Option<String>,
+    pub(crate) has_summary: bool,
+    pub(crate) abstract_: Option<String>,
+    pub(crate) summary_model: Option<String>,
+    pub(crate) category: Option<String>,
+    pub(crate) confidence: Option<f32>,
+    pub(crate) weight: f32,
+    pub(crate) imports: usize,
+    pub(crate) defines: usize,
+    pub(crate) calls: usize,
+}
+
 /// Response for `GET /api/file` — a file's raw text (capped) for the in-app preview pane.
 #[derive(Serialize)]
 pub(crate) struct FilePreviewResponse {

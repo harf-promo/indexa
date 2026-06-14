@@ -13,7 +13,10 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::dto::{err_json, AskConfidence, AskRequest, AskResponse, AskSource};
+use crate::dto::{
+    err_json, AskConfidence, AskRequest, AskResponse, AskSource, ExplainHit, ExplainResponse,
+    ExplainStage,
+};
 use crate::AppState;
 
 /// Build the Q&A config from the server's retrieval settings (shared by both ask handlers).
@@ -292,6 +295,57 @@ fn into_ask_source(s: indexa_query::SourceCitation) -> AskSource {
         path: s.path,
         heading: s.heading,
         snippet: s.snippet,
+    }
+}
+
+/// `POST /api/ask/explain` — the retrieval trace for a question ("why these sources"): per-stage
+/// ranked hits (sparse / dense / fused) with scores. Mirrors the CLI `ask --explain`. Read-only and
+/// answer-free; runs the same scoped retrieve the answer path uses, on demand from the UI.
+pub(crate) async fn api_ask_explain(
+    State(state): State<AppState>,
+    Json(body): Json<AskRequest>,
+) -> Response {
+    let qa_cfg = qa_config(&state, &body);
+    let ann = ensure_ann(&state).await;
+    match indexa_query::explain_retrieval(
+        &state.db_path,
+        state.embedder.as_ref(),
+        state.llm.as_ref(),
+        &body.question,
+        &qa_cfg,
+        ann.as_deref(),
+    )
+    .await
+    {
+        Ok(trace) => Json(ExplainResponse {
+            question: trace.question,
+            mode: trace.mode,
+            top_k: trace.top_k,
+            rrf_k: trace.rrf_k,
+            rerank: trace.rerank,
+            use_weights: trace.use_weights,
+            scope: trace.scope,
+            stages: trace
+                .stages
+                .into_iter()
+                .map(|st| ExplainStage {
+                    label: st.label,
+                    hits: st
+                        .hits
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, h)| ExplainHit {
+                            rank: i + 1,
+                            path: h.entry_path,
+                            heading: h.heading,
+                            score: h.rrf_score,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
+        .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
 }
 

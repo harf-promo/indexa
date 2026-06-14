@@ -24,7 +24,7 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.34.0)
+## Current feature surface (v0.35.0)
 
 **CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize) · `scan` · `deep` ·
 `summarize` · `describe` · `inspect` (per-path "what's indexed here") · `map` · `worker` · `pack`
@@ -53,6 +53,15 @@ hover-revealed row actions so folder names aren't clipped; the desktop "Check fo
 version + CHANGELOG notes (release.yml feeds `latest.json` `notes` via tauri-action `releaseBody`) then
 restarts, and a new app/tray "Install command-line tool" item runs `indexa_update::download_cli_to`
 (non-self-replace CLI download → a PATH dir).
+
+**Legible retrieval (v0.35):** two read-only web surfaces of existing CLI capability. `POST
+/api/ask/explain` (`handlers/ask.rs` `api_ask_explain`) calls `indexa_query::explain_retrieval` → JSON
+`{mode,top_k,…,stages:[{label,hits:[{rank,path,heading,score}]}]}` (the `ask --explain` trace); the Ask
+answer gets a "Why these sources?" `<details>` (`06-chat-settings.js` `renderExplainTrace`/`loadExplain`,
+delegated click). `GET /api/inspect?path=` (`handlers/inspect.rs`, reuses `Store::entry_by_path`/
+`chunks_for_path`/`classification_for`/`weight_for`/`edges_from`) → an "Indexed facts" `<details>` under
+the summary (`05-summary.js` `appendInspectFacts`). Styles in `css/17-legible.css`. No answer-pipeline
+change (SourceCitation untouched) — explain is a separate on-demand pass.
 
 **Updater window + file preview (v0.34):** the desktop "Check for Updates" is now a fully **in-app**
 flow — no osascript dialog. `install_update` (`apps/indexa-desktop/src/main.rs`) publishes
