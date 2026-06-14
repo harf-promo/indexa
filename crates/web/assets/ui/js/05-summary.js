@@ -4,6 +4,9 @@ async function showSummary(path) {
   // Auto-scope Ask to whatever the user is now looking at (file-aware Ask). The
   // "Asking about: <name> ✕" chip lets them clear it for a whole-index question.
   if (typeof setAskScope === 'function') setAskScope(path);
+  // Keep tree selection + deep-link URL in sync with what's being viewed (v0.37).
+  selectedPath = path;
+  if (typeof writeHash === 'function') writeHash();
   var view = document.getElementById('summary-view');
   view.style.display = 'block';
   view.innerHTML = '<div class="summary-pending">Loading summary…</div>';

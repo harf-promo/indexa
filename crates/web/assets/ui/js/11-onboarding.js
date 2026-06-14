@@ -34,7 +34,8 @@ async function detectEmptyAndOnboard() {
   }
   if (isEmpty) {
     applyEmptyState(true);
-    switchTab('tree');
+    // Don't steal the tab from a valid deep link (v0.37); show the empty banner regardless.
+    if (!window.__indexaHashRestored) switchTab('tree');
   }
 }
 

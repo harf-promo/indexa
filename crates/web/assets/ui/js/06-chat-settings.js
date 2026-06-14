@@ -111,6 +111,9 @@ async function doAsk() {
   if (!q) return;
   lastAskQuestion = q; // for the "broaden to folder" retry on thin scoped results
   const scopeForAsk = askScope; // snapshot: the chip may change before the stream returns
+  // Reflect the asked question in the URL (deep-linking, v0.37). currentView is 'chat'
+  // here (the Ask bar switched to it); writeHash reads lastAskQuestion + askScope.
+  if (typeof writeHash === 'function') writeHash();
 
   // Pre-flight: if no embeddings exist yet, guide the user instead of returning
   // an unhelpful empty/error answer.

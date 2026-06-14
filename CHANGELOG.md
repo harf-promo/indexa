@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0] — 2026-06-14
+
+"Durable": your view survives a reload, a bookmark, and a relaunch.
+
+### Added
+
+- **Deep-linkable URL state (web).** The active tab, the selected file, and your last Ask question are
+  now encoded in the page URL (`#tab=…&path=…&q=…`), so a view is **bookmarkable and shareable** and is
+  **restored on reload** — instead of always booting to a blank Context view. Restoring a question types
+  it back into the box but never auto-runs it; restoring a path fetches exactly one summary (no request
+  storms). Back/Forward navigation works. Local file paths in the URL only resolve on your own machine.
+- **Desktop window state persists across launches.** The app now remembers its **size and position**
+  when you quit and relaunch (via the first-party `tauri-plugin-window-state`); the configured
+  width/height become first-launch defaults, and the minimum-size clamp keeps a restored window
+  on-screen.
+
 ## [0.36.0] — 2026-06-14
 
 "See the graph": the call graph becomes a navigable knowledge map you can explore.
