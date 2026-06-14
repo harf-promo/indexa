@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] — 2026-06-14
+
+"Trustworthy & legible": answers you can trust, a Map that keeps up, a sidebar you can read, and
+updates that work like a normal app.
+
+### Fixed
+
+- **Answers stop citing archived, out-of-date docs.** Asking about the repo could surface content
+  from an `archive/` folder and confidently state a version that hasn't shipped in years. Retrieval
+  now **automatically down-weights** files under historical path segments (`archive`, `archived`,
+  `historical`, `deprecated`, `old`) so current sources win — while the archived files stay
+  **findable** if you explicitly scope a question into them. Nothing is deleted from your index.
+- **Answers no longer drift into invented follow-up questions.** The model sometimes continued the
+  context as a fake transcript ("QUESTION: … ANSWER: …") instead of answering what you asked. The
+  prompt now instructs it to answer only your question and prefer current over archived sources, and
+  any invented `QUESTION:`/`ANSWER:` continuation is trimmed defensively.
+- **The Map turns green the moment indexing finishes.** After a successful re-index the Map (and its
+  graph + tables) could stay stuck on the old orange "in progress" view until you reloaded. Finishing
+  a job now refreshes the Map automatically.
+
+### Added
+
+- **Plain-language help throughout.** A "What is this?" explainer on the Map and tooltips across the
+  UI define the jargon in everyday terms — *chunks* ("the small searchable pieces your files are split
+  into"), *summaries*, *coverage*, and what green / orange / grey mean — because the audience is
+  everyone, not just engineers.
+- **A resizable, readable sidebar.** Drag the divider to widen the file tree (your width is
+  remembered), and the row-action buttons now tuck away until you hover a row, so long folder names
+  are no longer hidden behind them.
+- **Updates that explain themselves.** "Check for Updates…" now shows the new version **and what
+  changed** (the release notes), asks once, then downloads and restarts into the new version — like a
+  normal app, instead of a bare "an update is available." Release notes are sourced from the
+  changelog automatically.
+- **One-click command-line tool install.** A new **"Install command-line tool"** item in the app and
+  tray menus downloads the matching `indexa` CLI for this release and puts it on your `PATH`, so your
+  terminal `indexa` stays in sync with the desktop app.
+
 ## [0.28.2] — 2026-06-14
 
 A hygiene patch: the summary queue no longer fills with dead rows, and `prune` tells the truth.
