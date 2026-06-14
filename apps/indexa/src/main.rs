@@ -83,6 +83,7 @@ async fn main() -> Result<()> {
             passes,
         } => commands::cmd_summarize(paths, mode, passes, &cfg).await,
         Commands::Describe { path } => commands::cmd_describe(path).await,
+        Commands::Inspect { path } => commands::cmd_inspect(path).await,
         Commands::Worker {
             concurrency,
             auto_reindex,

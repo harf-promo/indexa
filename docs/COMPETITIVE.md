@@ -41,8 +41,13 @@ Most tools nail one or two. The combination is the moat.
 ## Closest threats — and the difference
 
 - **Repomix / gitingest / code2prompt** — popular repo→LLM packers; some have MCP. But they're one-shot:
-  no persistent index, no retrieval, no relevance slice, no whole-disk. *Indexa adds persistence,
-  retrieval, and a ranked slice instead of dumping the whole repo.*
+  no persistent index, no retrieval, no relevance slice, no whole-disk. The model is fundamental: a real
+  repo packs to **tens of millions of tokens** (one benchmark: ~56M; even filtered + signature-compressed
+  ≈1.8M — still past any window), and Repomix's own most-requested issues are "output only related files"
+  and "entity-level packing to cut tokens." *That's the wedge: **retrieve the slice, don't pack the repo.**
+  Indexa serves the ~2–4K tokens that answer the question from a persistent index. And when you do want a
+  file, Indexa's `export --signatures` (code-skeleton) + `--token-budget` + on-export secret-scan make the
+  packed slice smaller and safer than a raw dump.*
 - **AnythingLLM / Khoj / Onyx** — local "second brain" / doc-chat. But ingest is **manual** (drop folders
   in), they're heavier (Postgres/Docker), and they have no code intelligence. *Indexa points at any folder,
   is a single binary, and treats code as a first-class citizen.*

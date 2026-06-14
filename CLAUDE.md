@@ -24,10 +24,11 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.32.0)
+## Current feature surface (v0.33.0)
 
 **CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize) · `scan` · `deep` ·
-`summarize` · `describe` · `map` · `worker` · `pack` (Context Packs) · `weight` (Importance
+`summarize` · `describe` · `inspect` (per-path "what's indexed here") · `map` · `worker` · `pack`
+(Context Packs; `pack add-url` = remote sources) · `weight` (Importance
 weighting) · `insights` (duplicates/stale/diff) · `graph` (file-to-file call graph) · `export` ·
 `ask` · `watch` · `serve` (`--host 0.0.0.0` for LAN) · `mcp` (+ `mcp install [--client]`, auto-detects)
 · `completion <shell>` · `status` (`--json` incl. per-tool savings) · `rm` · `prune` (orphan-row GC) ·
