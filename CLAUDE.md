@@ -24,7 +24,7 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.28.1)
+## Current feature surface (v0.29.0)
 
 **CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize) · `scan` · `deep` ·
 `summarize` · `describe` · `map` · `worker` · `pack` (Context Packs) · `weight` (Importance
@@ -38,6 +38,20 @@ weighting) · `insights` (duplicates/stale/diff) · `graph` (file-to-file call g
 sysinfo 0.39's `used_memory()` includes the macOS **compressor**, so `total−used` falsely refuses
 models. Don't reintroduce the `total−used` basis. The web Impact dashboard (`/api/impact`),
 responsive layout (≤1024px drawer / ≤768px stack), and arrow-key tree a11y also shipped in v0.28.
+
+**Answer-quality invariant (v0.29):** retrieval auto-**down-weights** historical paths — `retrieve()`
+in `crates/query/src/qa.rs` calls `apply_archive_penalty` (×`ARCHIVE_PENALTY` 0.15) on hits whose path
+has a segment in `HISTORICAL_SEGMENTS` (`archive`/`archived`/`historical`/`deprecated`/`old`), skipped
+when the question is explicitly scoped *into* such a path, then re-sorts. `build_prompt` instructs
+"answer only the question, prefer current over archived"; `synthesize_from_hits` runs `trim_continuation`
+to cut any hallucinated `QUESTION:`/`ANSWER:` second turn. Don't remove these — they fix answers citing
+`docs/archive/` + claiming unshipped versions. v0.29 web/desktop: Map self-refreshes on job-done
+(`refreshMap` in `07-map.js`, fired from the SSE `done` handler) + a "What is this?" plain-language
+explainer; drag-resizable sidebar (`23-sidebar-resize.js`, persists `--sidebar-width`) with
+hover-revealed row actions so folder names aren't clipped; the desktop "Check for Updates" shows
+version + CHANGELOG notes (release.yml feeds `latest.json` `notes` via tauri-action `releaseBody`) then
+restarts, and a new app/tray "Install command-line tool" item runs `indexa_update::download_cli_to`
+(non-self-replace CLI download → a PATH dir).
 
 **Major features by version:** Context Packs (v0.14) · Importance Weighting (v0.16, `importance_weights`
 table + `boost_with_weights` in QA) · Insights (v0.16, `find_*_duplicates`/`find_stale_entries`/
