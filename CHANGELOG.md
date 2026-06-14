@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] — 2026-06-14
+
+A small, focused release: you can now watch updates download.
+
+### Added
+
+- **A live download progress bar for updates.** "Check for Updates…" still shows the new version and
+  what changed, but once you confirm, an in-app bar now fills as the new version downloads, switches
+  to "Installing…", and then the app restarts — so you can see it working instead of waiting on a
+  silent dialog. The **"Install command-line tool"** action shows the same live bar.
+
+### Changed
+
+- **Clearer command-line-tool install message.** A desktop app can't see your terminal's `PATH`, so
+  instead of wrongly claiming a folder "isn't on your PATH," it now says to add the folder *if*
+  `indexa` isn't found in a new terminal.
+
 ## [0.29.0] — 2026-06-14
 
 "Trustworthy & legible": answers you can trust, a Map that keeps up, a sidebar you can read, and

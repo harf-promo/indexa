@@ -67,7 +67,7 @@ pub(crate) use summary::{api_summarize_enqueue, api_summary};
 pub(crate) use telemetry::{api_engine_release, api_telemetry, api_telemetry_stream};
 pub(crate) use tree::api_tree;
 pub(crate) use ui::{serve_ui, serve_ui_css, serve_ui_js};
-pub(crate) use update::{api_update_apply, api_update_check};
+pub(crate) use update::{api_update_apply, api_update_check, api_update_progress_stream};
 pub(crate) use watch::{api_watch_start, api_watch_status, api_watch_stop};
 pub(crate) use weights::{
     api_weights_delete, api_weights_list, api_weights_set, api_weights_suggest,

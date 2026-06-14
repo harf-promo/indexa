@@ -1,8 +1,13 @@
 use axum::{
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     Json,
 };
+use std::convert::Infallible;
+use tokio_stream::{wrappers::WatchStream, StreamExt};
 
 use crate::dto::{err_json, UpdateRequest};
 
@@ -100,4 +105,17 @@ pub(crate) async fn api_update_apply(Json(body): Json<UpdateRequest>) -> Respons
         }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
+}
+
+/// `GET /api/update/progress/stream` — SSE that emits the current update-progress snapshot
+/// immediately, then on every change. Written only by the desktop app (Tauri updater / CLI
+/// downloader); under plain `indexa serve` the value stays `idle` and the web overlay never shows.
+/// Mirrors `api_telemetry_stream` — `WatchStream` yields the latest value to each new subscriber,
+/// so a reconnecting client has no startup gap and needs no replay/dedup machinery.
+pub(crate) async fn api_update_progress_stream() -> impl IntoResponse {
+    let stream = WatchStream::new(crate::update_progress::subscribe()).map(|p| {
+        let data = serde_json::to_string(&p).unwrap_or_default();
+        Ok::<Event, Infallible>(Event::default().data(data))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::new())
 }

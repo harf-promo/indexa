@@ -1,0 +1,68 @@
+/* ── Desktop update / CLI-install progress overlay ──────────────────────────────
+   A centered modal shown while the desktop app downloads an update or the command-line
+   tool. Driven entirely by the /api/update/progress/stream SSE (15-update.js); under plain
+   `indexa serve` nothing writes progress, so it never appears. Reuses the engine bar's
+   .engine-job-bar / .engine-job-fill for the determinate track + fill. */
+.update-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+.update-overlay[hidden] {
+  display: none;
+}
+.update-overlay-card {
+  width: min(420px, calc(100vw - 48px));
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 22px;
+  box-shadow: var(--shadow-lg);
+}
+.update-overlay-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 14px;
+}
+/* Override the engine bar's tiny fixed width — fill the card. */
+.update-overlay-bar {
+  width: 100%;
+  height: 8px;
+  border-radius: 4px;
+}
+.update-overlay-pct {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 8px;
+}
+.update-overlay-phase {
+  font-size: 13px;
+  color: var(--text);
+  margin-top: 6px;
+}
+.update-overlay-error {
+  color: var(--red);
+}
+.update-overlay-dismiss {
+  margin-top: 14px;
+}
+
+/* Indeterminate (no Content-Length): slide a partial fill back and forth instead of a %. */
+.engine-job-fill.indeterminate {
+  width: 35%;
+  animation: indexa-indeterminate 1.2s ease-in-out infinite;
+}
+@keyframes indexa-indeterminate {
+  0% {
+    left: -35%;
+  }
+  100% {
+    left: 100%;
+  }
+}

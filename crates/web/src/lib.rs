@@ -14,6 +14,9 @@ mod dto;
 mod handlers;
 mod jobs;
 mod jobs_exec;
+mod update_progress;
+
+pub use update_progress::{report_update_progress, UpdateProgress};
 
 use anyhow::Result;
 use axum::{
@@ -105,6 +108,7 @@ pub(crate) const UI_CSS: &str = concat!(
     include_str!("../assets/ui/css/11-graph.css"),
     include_str!("../assets/ui/css/12-review.css"),
     include_str!("../assets/ui/css/13-responsive.css"),
+    include_str!("../assets/ui/css/14-update-overlay.css"),
 );
 pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/01-state-theme-tabs.js"),
@@ -330,6 +334,10 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/api/version", get(api_version))
         .route("/api/update/check", get(api_update_check))
         .route("/api/update/apply", post(api_update_apply))
+        .route(
+            "/api/update/progress/stream",
+            get(api_update_progress_stream),
+        )
         .route("/api/logs/tail", get(api_logs_tail))
         .route("/api/watch/status", get(api_watch_status))
         .route("/api/watch/start", post(api_watch_start))
@@ -990,5 +998,56 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn update_progress_serializes_phase_title_and_bytes() {
+        let p = UpdateProgress::downloading("Indexa 9.9.9", 12, Some(34));
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["phase"], "downloading");
+        assert_eq!(v["title"], "Indexa 9.9.9");
+        assert_eq!(v["downloaded"], 12);
+        assert_eq!(v["total"], 34);
+
+        let e = UpdateProgress::error("X", "boom");
+        let ev = serde_json::to_value(&e).unwrap();
+        assert_eq!(ev["phase"], "error");
+        assert_eq!(ev["error"], "boom");
+    }
+
+    #[tokio::test]
+    async fn update_progress_stream_emits_reported_value() {
+        use futures_util::StreamExt;
+
+        // Publish BEFORE subscribing — WatchStream yields the latest value to a new subscriber,
+        // so the first SSE frame carries it (no startup gap).
+        report_update_progress(UpdateProgress::downloading("Indexa test", 50, Some(100)));
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/update/progress/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        assert!(ct.starts_with("text/event-stream"), "content-type was {ct}");
+
+        let mut stream = resp.into_body().into_data_stream();
+        let first = stream.next().await.expect("an SSE frame").unwrap();
+        let text = String::from_utf8_lossy(&first);
+        assert!(text.contains("\"phase\":\"downloading\""), "frame: {text}");
+        assert!(text.contains("\"downloaded\":50"), "frame: {text}");
+
+        // Reset the process-global channel so it doesn't leak a stale value to other tests.
+        report_update_progress(UpdateProgress::idle());
     }
 }

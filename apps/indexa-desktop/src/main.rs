@@ -1,6 +1,7 @@
 // Hide the console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use indexa_web::{report_update_progress, UpdateProgress};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::Manager;
@@ -311,12 +312,38 @@ async fn install_update(app: tauri::AppHandle, update: tauri_plugin_updater::Upd
         return;
     }
 
+    // Bring the window forward so the in-app progress overlay is on screen. The webview is
+    // already subscribed to /api/update/progress/stream; it reveals the overlay when the phase
+    // below flips to "downloading". (The webview can't receive Tauri events directly — it loads a
+    // remote URL with no IPC — so progress is bridged through the embedded server's SSE instead.)
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+
+    let title = format!("Indexa {version}");
+    report_update_progress(UpdateProgress::downloading(title.clone(), 0, None));
+
     eprintln!("[indexa-desktop] update {version} — downloading…");
+    // `download_and_install`'s on_chunk closure is `Fn` (not `FnMut`), so accumulate the running
+    // byte count through an atomic. chunk_len is per-chunk; total is the Content-Length if present.
+    let downloaded = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let dl = downloaded.clone();
+    let title_chunk = title.clone();
+    let title_finish = title.clone();
     if let Err(e) = update
-        .download_and_install(|_chunk, _total| {}, || {})
+        .download_and_install(
+            move |chunk_len, total| {
+                let n = dl.fetch_add(chunk_len as u64, std::sync::atomic::Ordering::Relaxed)
+                    + chunk_len as u64;
+                report_update_progress(UpdateProgress::downloading(title_chunk.clone(), n, total));
+            },
+            move || report_update_progress(UpdateProgress::installing(title_finish.clone())),
+        )
         .await
     {
         eprintln!("[indexa-desktop] update install failed: {e:#}");
+        report_update_progress(UpdateProgress::error(title.clone(), format!("{e}")));
         show_info_dialog(
             "Indexa Update",
             &format!("The update failed to install: {e}"),
@@ -332,6 +359,7 @@ async fn install_update(app: tauri::AppHandle, update: tauri_plugin_updater::Upd
     #[cfg(target_os = "macos")]
     resign_app_bundle();
 
+    report_update_progress(UpdateProgress::done(title));
     eprintln!("[indexa-desktop] update {version} installed — restarting");
     // The user already agreed (download-and-restart) in the pre-download confirm, so restart
     // straight into the new version — no surprise second prompt.
@@ -348,16 +376,29 @@ async fn install_update(app: tauri::AppHandle, update: tauri_plugin_updater::Upd
 ///   2. else `~/.cargo/bin` if it exists (common rustup/cargo install location);
 ///   3. else `~/.local/bin` (created if missing; the standard user-bin dir).
 fn run_cli_install(app: tauri::AppHandle) {
-    let _ = &app; // reserved for future progress events; dialogs are the surface for now.
     tauri::async_runtime::spawn(async move {
+        // Surface the in-app progress overlay (same SSE-driven bar as the app self-update).
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+
         let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
         let (dir, on_path) = resolve_cli_dir();
         eprintln!(
             "[indexa-desktop] installing CLI {tag} → {} (on PATH: {on_path})",
             dir.display()
         );
-        match indexa_update::download_cli_to(&dir, &tag).await {
+
+        let cli_title = "Command-line tool";
+        report_update_progress(UpdateProgress::downloading(cli_title, 0, None));
+        // download_cli_to passes (cumulative downloaded, total) per chunk; bridge it to the bar.
+        let on_progress = move |downloaded: u64, total: Option<u64>| {
+            report_update_progress(UpdateProgress::downloading(cli_title, downloaded, total));
+        };
+        match indexa_update::download_cli_to(&dir, &tag, Some(&on_progress)).await {
             Ok(path) => {
+                report_update_progress(UpdateProgress::done(cli_title));
                 let mut msg = format!(
                     "The indexa command-line tool ({tag}) was installed to:\n{}",
                     path.display()
@@ -368,8 +409,12 @@ fn run_cli_install(app: tauri::AppHandle) {
                          it matches this app.",
                     );
                 } else {
+                    // The GUI app's $PATH is the minimal launchd one, not your shell's, so we
+                    // can't reliably tell whether this folder is on your *terminal* PATH — phrase
+                    // it as a conditional rather than asserting it isn't.
                     msg.push_str(&format!(
-                        "\n\nThis folder isn't on your PATH yet. Add it, e.g.:\n\
+                        "\n\nIf `indexa` isn't found in a new terminal, add this folder to your \
+                         PATH, e.g.:\n\
                          echo 'export PATH=\"{}:$PATH\"' >> ~/.zshrc\n\
                          then open a new terminal and run `indexa --version`.",
                         dir.display()
@@ -380,6 +425,7 @@ fn run_cli_install(app: tauri::AppHandle) {
             }
             Err(e) => {
                 eprintln!("[indexa-desktop] CLI install failed: {e:#}");
+                report_update_progress(UpdateProgress::error(cli_title, format!("{e}")));
                 show_info_dialog(
                     "Indexa CLI install failed",
                     &format!("Couldn't install the command-line tool:\n{e}"),
