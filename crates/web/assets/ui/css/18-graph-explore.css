@@ -1,0 +1,90 @@
+/* ── Knowledge-graph navigation: help, focus bar, legend (v0.36) ───────────── */
+
+/* "What is this?" graph explainer — mirrors .map-help so it inherits theming. */
+.graph-help-btn { align-self: center; }
+.graph-help {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin: 4px 0 12px;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.6;
+  max-width: 720px;
+}
+.graph-help ul { margin: 8px 0; padding-left: 18px; }
+.graph-help li { margin: 4px 0; }
+.graph-help-terms { color: var(--muted); margin-top: 10px; font-size: 12px; }
+
+/* Focus breadcrumb — shown only when a node is locked (clicked / Entered). */
+.graph-focus-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+}
+.graph-focus-label { color: var(--text); }
+.graph-focus-label strong { color: var(--accent); }
+.graph-focus-path {
+  color: var(--muted);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+/* Legend: relation + size key. Swatches are decorative (aria-hidden); the text
+   label carries the meaning, so the legend is never color/dash-only. */
+.graph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  align-items: center;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.glegend-item { display: inline-flex; align-items: center; gap: 6px; }
+.glegend-dot {
+  display: inline-block;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.glegend-dot-lg { width: 14px; height: 14px; }
+.glegend-dot-sm { width: 7px; height: 7px; }
+.glegend-edge {
+  display: inline-block;
+  width: 22px;
+  height: 0;
+  border-top-width: 2px;
+  border-top-style: solid;
+}
+.glegend-edge-import { border-top-color: var(--accent); }
+.glegend-edge-scope  { border-top-color: var(--border); }
+.glegend-edge-bare   { border-top-style: dashed; border-top-color: var(--muted); }
+.glegend-caveat {
+  flex-basis: 100%;
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* Re-assert the edge interaction states LAST so they always win over the per-tier
+   opacity rules in 11-graph.css (equal specificity → later declaration wins). This
+   makes dimming work for import/bare edges during a focus, not just neutral ones. */
+.graph-edge.hl { stroke: var(--accent); opacity: 1; }
+.graph-edge.dim { opacity: 0.08; }
+
+/* Responsive: tighten the legend/focus bar on narrow screens (existing breakpoints
+   ≤1024px drawer / ≤768px stack). The SVG already uses width:100% + viewport height. */
+@media (max-width: 768px) {
+  .graph-legend { gap: 4px 12px; }
+  .graph-focus-bar { font-size: 11px; }
+}

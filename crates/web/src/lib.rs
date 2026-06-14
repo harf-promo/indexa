@@ -114,6 +114,7 @@ pub(crate) const UI_CSS: &str = concat!(
     include_str!("../assets/ui/css/15-file-preview.css"),
     include_str!("../assets/ui/css/16-update-changelog.css"),
     include_str!("../assets/ui/css/17-legible.css"),
+    include_str!("../assets/ui/css/18-graph-explore.css"),
 );
 pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/01-state-theme-tabs.js"),
@@ -140,6 +141,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/22-responsive.js"),
     include_str!("../assets/ui/js/23-sidebar-resize.js"),
     include_str!("../assets/ui/js/24-file-preview.js"),
+    include_str!("../assets/ui/js/25-graph-explore.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────

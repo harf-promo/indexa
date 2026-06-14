@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0] — 2026-06-14
+
+"See the graph": the call graph becomes a navigable knowledge map you can explore.
+
+### Added
+
+- **Navigable knowledge graph in the Map tab.** The Graph view is now interactive:
+  - **Click any file (or press Enter)** to focus it — its callers and callees light up,
+    everything else dims, and a breadcrumb appears.
+  - **Expand neighbors** re-fetches just that file's connections (1 hop, then 2), so a
+    hub's real neighbors are never lost to display limits — and **Show all in scope**
+    returns to the full view.
+  - **Nodes are sized by how central a file is** (weighted PageRank) and **edges are
+    styled by relation** — solid for clear references, dotted for approximate name-only
+    matches.
+  - A **legend** and a plain-language **"What is this?"** explainer make it readable for a
+    general audience, and the approximate (name-only) caveat is surfaced honestly whenever
+    such links are shown.
+- `GET /api/graph` gained optional read-only `focus`/`depth` query parameters that return a
+  file's N-hop neighborhood (server-side filtering of the already-scoped graph; no schema
+  change, no new dependency).
+
 ## [0.35.0] — 2026-06-14
 
 "Legible retrieval": see *why* an answer cited what it did, and what's indexed for any path.
