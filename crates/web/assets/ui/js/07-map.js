@@ -1,5 +1,34 @@
 /* ── Map coverage table view ── */
 let mapLoaded = false;
+
+/* Invalidate the Map's cached coverage/treemap/graph so a just-finished job's new state shows.
+   The views cache their first load (mapLoaded / treemapLoaded), so without this the Map stayed
+   "all orange / in progress" after a re-index actually completed. Called from the job-done
+   handler: if the Map is on screen, re-render the active sub-view now; otherwise just clear the
+   caches so the next visit re-fetches. eslint-disable-line no-unused-vars */
+function refreshMap() {
+  mapLoaded = false;
+  if (typeof treemapLoaded !== 'undefined') treemapLoaded = false;
+  var panel = document.getElementById('panel-map');
+  if (panel && panel.classList.contains('active')) {
+    if (typeof switchMapView === 'function') {
+      switchMapView(typeof mapSubView !== 'undefined' && mapSubView ? mapSubView : 'treemap');
+    } else {
+      loadMap();
+    }
+  }
+}
+
+/* Toggle the plain-language "What is this?" explainer above the map. eslint-disable-line no-unused-vars */
+function toggleMapHelp() {
+  var el = document.getElementById('map-help');
+  var btn = document.getElementById('map-help-btn');
+  if (!el) return;
+  var show = el.hidden;
+  el.hidden = !show;
+  if (btn) btn.setAttribute('aria-expanded', show ? 'true' : 'false');
+}
+
 async function loadMap() {
   if (mapLoaded) return;
   mapLoaded = true;

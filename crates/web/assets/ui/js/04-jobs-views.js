@@ -68,8 +68,14 @@ function subscribeJob(jobId, path, kind) {
         _removeActiveJob(jobId);
         playPing('ok');
         _markDirty(jobId);
-        // Refresh tree (preserving expand/scroll state) and stats in background.
-        setTimeout(function() { refreshTree(); loadStats(); }, 500);
+        // Refresh tree (preserving expand/scroll state), stats, and the Map in background.
+        // refreshMap() clears the Map's cached coverage so a finished job shows green instead of
+        // the stale "in progress" orange (and re-renders in place if the Map is on screen).
+        setTimeout(function() {
+          refreshTree();
+          loadStats();
+          if (typeof refreshMap === 'function') refreshMap();
+        }, 500);
         // Post-completion guidance for deep/index jobs: toast + welcome-panel update.
         if (j.kind === 'deep' || j.kind === 'index') {
           var folderName = (j.path || '').split('/').pop() || j.path || 'folder';
