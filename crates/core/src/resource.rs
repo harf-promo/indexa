@@ -318,6 +318,39 @@ pub static MODEL_FOOTPRINTS: &[ModelFootprint] = &[
         gen_tok_s_apple_m3: 25.0,
         gen_tok_s_generic: 7.0,
     },
+    // ── Vision / caption models (v0.38) ──────────────────────────────────────
+    // Weight estimates are Q4_K_M, rounded UP (conservative) from Ollama's model
+    // cards (params × ~0.65 GB/B). These are ESTIMATES pending live `ollama ps`
+    // measurement — not measured peaks — and err high (the safe direction). The
+    // watchdog now counts a caption model co-resident with the summarizers; see
+    // `caption_fit_report`.
+    ModelFootprint {
+        name: "llama3.2-vision", // 11B vision (the default caption placeholder)
+        weights_bytes: 8 * 1024 * 1024 * 1024, // ~8 GB Q4 weights + image encoder
+        kv_bytes_per_ctx_token: 4096,
+        default_num_ctx: 4096,
+        prompt_eval_tok_s_apple_m3: 300.0,
+        gen_tok_s_apple_m3: 28.0,
+        gen_tok_s_generic: 7.0,
+    },
+    ModelFootprint {
+        name: "llama3.2-vision:11b", // explicit-tag alias of the above
+        weights_bytes: 8 * 1024 * 1024 * 1024,
+        kv_bytes_per_ctx_token: 4096,
+        default_num_ctx: 4096,
+        prompt_eval_tok_s_apple_m3: 300.0,
+        gen_tok_s_apple_m3: 28.0,
+        gen_tok_s_generic: 7.0,
+    },
+    ModelFootprint {
+        name: "moondream",                 // ~1.8B — the light caption option
+        weights_bytes: 1843 * 1024 * 1024, // ~1.8 GB
+        kv_bytes_per_ctx_token: 1024,
+        default_num_ctx: 2048,
+        prompt_eval_tok_s_apple_m3: 700.0,
+        gen_tok_s_apple_m3: 50.0,
+        gen_tok_s_generic: 14.0,
+    },
 ];
 
 /// Look up a model by name, returning its footprint if known.
@@ -555,6 +588,87 @@ pub struct FitReport {
     pub recommended: Option<ModelFit>,
     /// Calm UI/CLI text describing the substitution, when one is offered.
     pub reason: Option<String>,
+}
+
+/// Lightest-first vision/caption models we have footprints for — used to suggest a
+/// smaller caption model when the configured one + the summarizers don't co-fit.
+const LIGHT_CAPTION_MODELS: &[&str] = &["moondream", "llama3.2-vision"];
+
+/// Combined resident peak of a set of DISTINCT models co-resident at once (Ollama keeps
+/// each warm under `keep_alive`). Generalizes [`resident_peak`] to N models — used for the
+/// {file, dir, caption} trio when captioning runs during `deep`. Identical names count once.
+fn resident_peak_set(models: &[&str], num_ctx: u32) -> u64 {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut total = 0u64;
+    for &m in models {
+        if !seen.contains(&m) {
+            seen.push(m);
+            total += model_peak(m, num_ctx);
+        }
+    }
+    total
+}
+
+/// Whether enabling image/video captioning is memory-safe: the caption (vision) model
+/// runs **co-resident** with the summarization models during a captioning `deep`, so the
+/// real peak is {file, dir, caption} together. Closes the v0.38 gap where the watchdog
+/// budgeted only the summarizers. Pure (no I/O) — unit-testable; the web estimate and the
+/// enable-toggle guard agree by construction. Audio transcription is NOT covered: it shells
+/// out to an external `whisper-cli` process (not an Ollama model), so it is not in this budget.
+#[derive(Debug, Clone)]
+pub struct CaptionFit {
+    pub caption_model: String,
+    /// The caption model's own peak (weights + KV at `num_ctx`); 0 if its footprint is unknown.
+    pub caption_peak_bytes: u64,
+    /// {file, dir, caption} co-resident peak (distinct model names summed once each).
+    pub trio_peak_bytes: u64,
+    pub budget_bytes: i64,
+    pub fits: bool,
+    /// False when the caption model has no known footprint — the watchdog is then blind to
+    /// it, so the UI must warn "footprint unknown, proceed at your own risk".
+    pub caption_model_known: bool,
+    /// A lighter known caption model that WOULD co-fit with the summarizers, offered when
+    /// the configured one doesn't. `None` when it fits or nothing lighter helps.
+    pub lighter_suggestion: Option<String>,
+}
+
+/// Compute the [`CaptionFit`] for a caption model co-resident with the summarizers. Reuses
+/// `compute_budget` + `resident_peak_set` — no new memory math.
+pub fn caption_fit_report(
+    file_model: &str,
+    dir_model: &str,
+    caption_model: &str,
+    num_ctx: u32,
+    spec: &MachineSpec,
+    sample: &MemSample,
+    headroom: u64,
+) -> CaptionFit {
+    let budget = compute_budget(spec, sample, headroom);
+    let caption_peak = model_peak(caption_model, num_ctx);
+    let trio = resident_peak_set(&[file_model, dir_model, caption_model], num_ctx);
+    let fits = trio as i64 <= budget;
+    let known = lookup_footprint(caption_model).is_some();
+    let lighter = if fits {
+        None
+    } else {
+        LIGHT_CAPTION_MODELS
+            .iter()
+            .copied()
+            .find(|&m| {
+                m != caption_model
+                    && resident_peak_set(&[file_model, dir_model, m], num_ctx) as i64 <= budget
+            })
+            .map(|m| m.to_owned())
+    };
+    CaptionFit {
+        caption_model: caption_model.to_owned(),
+        caption_peak_bytes: caption_peak,
+        trio_peak_bytes: trio,
+        budget_bytes: budget,
+        fits,
+        caption_model_known: known,
+        lighter_suggestion: lighter,
+    }
 }
 
 fn model_peak(name: &str, num_ctx: u32) -> u64 {
@@ -979,6 +1093,87 @@ mod tests {
             swap_used_bytes: swap_used_mb * 1024 * 1024,
             swap_total_bytes: swap_total_mb * 1024 * 1024,
         }
+    }
+
+    // ── Multimodal caption-fit (v0.38) ──────────────────────────────────────
+    #[test]
+    fn caption_fits_on_roomy_machine() {
+        let spec = fake_spec(64, true); // gpu limit 48 GB
+        let sample = fake_sample(40, 0, 0); // available 40 GB
+        let cf = caption_fit_report(
+            "gemma3:4b",
+            "gemma3:4b",
+            "llama3.2-vision",
+            4096,
+            &spec,
+            &sample,
+            0,
+        );
+        assert!(
+            cf.fits,
+            "trio {} should fit budget {}",
+            cf.trio_peak_bytes, cf.budget_bytes
+        );
+        assert!(cf.caption_model_known);
+        assert!(cf.lighter_suggestion.is_none());
+        // The vision model is co-resident → trio peak exceeds the caption model alone.
+        assert!(cf.trio_peak_bytes > cf.caption_peak_bytes);
+    }
+
+    #[test]
+    fn caption_does_not_fit_suggests_lighter_model() {
+        let spec = fake_spec(16, true); // gpu limit 12 GB
+        let sample = fake_sample(11, 0, 0); // budget ~11 GB
+        let cf = caption_fit_report(
+            "gemma3:4b",
+            "gemma3:4b",
+            "llama3.2-vision",
+            4096,
+            &spec,
+            &sample,
+            0,
+        );
+        assert!(
+            !cf.fits,
+            "trio {} should exceed budget {}",
+            cf.trio_peak_bytes, cf.budget_bytes
+        );
+        assert_eq!(cf.lighter_suggestion.as_deref(), Some("moondream"));
+    }
+
+    #[test]
+    fn caption_model_reused_as_summarizer_counts_once() {
+        let spec = fake_spec(64, true);
+        let sample = fake_sample(40, 0, 0);
+        // All three the same model → the distinct set is just {gemma3:4b}, so the trio
+        // peak equals that single model's peak (no double-counting).
+        let cf = caption_fit_report(
+            "gemma3:4b",
+            "gemma3:4b",
+            "gemma3:4b",
+            4096,
+            &spec,
+            &sample,
+            0,
+        );
+        assert_eq!(cf.trio_peak_bytes, cf.caption_peak_bytes);
+    }
+
+    #[test]
+    fn unknown_caption_model_flagged_not_counted_no_panic() {
+        let spec = fake_spec(64, true);
+        let sample = fake_sample(40, 0, 0);
+        let cf = caption_fit_report(
+            "gemma3:4b",
+            "gemma3:4b",
+            "some-untested-vision",
+            4096,
+            &spec,
+            &sample,
+            0,
+        );
+        assert!(!cf.caption_model_known);
+        assert_eq!(cf.caption_peak_bytes, 0); // unknown → 0, watchdog is blind (UI must warn)
     }
 
     #[test]

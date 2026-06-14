@@ -376,7 +376,7 @@
             <span class="key-label">Vision model</span>
             <input type="text" class="key-input" id="feat-image-model" placeholder="llama3.2-vision (default)" autocomplete="off" aria-label="Vision model name">
           </div>
-          <p class="settings-note" style="margin-top:0">⚠ Requires ~7–8 GB RAM. Not yet counted by the memory watchdog — enable only with headroom. Applies on the next <code>indexa deep</code> run.</p>
+          <p class="settings-note" style="margin-top:0">Runs a vision model alongside the summary models during indexing. The memory watchdog now counts it and warns here if the combination won't fit your budget. Applies on the next <code>indexa deep</code> run.</p>
           <!-- Audio transcription -->
           <div class="key-row" style="margin-top:8px">
             <span class="key-label">Audio transcription</span>
@@ -402,7 +402,7 @@
             <span class="key-label">Vision model</span>
             <input type="text" class="key-input" id="feat-video-model" placeholder="llama3.2-vision (default)" autocomplete="off" aria-label="Video vision model name">
           </div>
-          <p class="settings-note" style="margin-top:0">Requires <code>ffmpeg</code> (frame extraction) + an Ollama vision model. Samples 1 frame/2s, max 8 frames per video. Not yet counted by memory watchdog — enable only with headroom.</p>
+          <p class="settings-note" style="margin-top:0">Requires <code>ffmpeg</code> (frame extraction) + an Ollama vision model. Samples 1 frame/2s, max 8 frames per video — frames are captioned one at a time, so the memory peak is a single frame's model (not 8×). The memory watchdog now counts that vision model and warns here if it won't fit.</p>
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
           <button class="btn-sm" onclick="saveFeatures()">Save features</button>
