@@ -268,4 +268,30 @@ impl Store {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+
+    /// Code chunks (those carrying a `language` tag) under `prefix` — the file itself, or any
+    /// descendant when `prefix` is a directory — ordered by path then seq. Powers the v0.31
+    /// signatures (code-skeleton) export. `limit == 0` means no limit.
+    pub fn code_chunks_under(&self, prefix: &str, limit: usize) -> Result<Vec<ChunkRecord>> {
+        let lim: i64 = if limit == 0 { -1 } else { limit as i64 };
+        let like = super::search::like_prefix(&format!("{}/", prefix.trim_end_matches('/')));
+        let mut stmt = self.conn.prepare(
+            "SELECT entry_path, seq, heading, text, language FROM chunks
+              WHERE (entry_path = ?1 OR entry_path LIKE ?2 ESCAPE '\\')
+                AND language IS NOT NULL
+              ORDER BY entry_path, seq LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![prefix, like, lim], |r| {
+            Ok(ChunkRecord {
+                entry_path: r.get::<_, String>(0)?,
+                seq: r.get::<_, i64>(1)? as usize,
+                heading: r.get::<_, String>(2)?,
+                text: r.get::<_, String>(3)?,
+                language: r.get::<_, Option<String>>(4)?,
+                embedding: None,
+                embed_model: None,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
 }

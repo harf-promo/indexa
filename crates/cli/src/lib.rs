@@ -371,6 +371,32 @@ pub enum Commands {
         /// Append the file-to-file call graph for the exported scope (heaviest edges).
         #[arg(long)]
         include_graph: bool,
+
+        /// Emit a code-skeleton view (symbol signatures, bodies elided) instead of prose
+        /// summaries — feeds code structure to an AI tool at a fraction of the tokens. Reads
+        /// indexed chunks, so it works after `deep` even without summaries.
+        #[arg(long)]
+        signatures: bool,
+
+        /// Warn when the export exceeds this many estimated tokens (≈4 chars/token).
+        #[arg(long)]
+        token_budget: Option<usize>,
+
+        /// With --token-budget, fail (non-zero exit) instead of warning when over budget — for CI.
+        #[arg(long)]
+        strict_budget: bool,
+
+        /// Copy the export to the OS clipboard instead of writing a file / stdout.
+        #[arg(long)]
+        clipboard: bool,
+
+        /// In --signatures mode, drop leading doc-comments from each signature.
+        #[arg(long)]
+        strip_comments: bool,
+
+        /// Do NOT scan the export for secrets before output (redaction is on by default).
+        #[arg(long)]
+        no_redact: bool,
     },
 
     /// Query your local context with a natural-language question.
@@ -747,6 +773,24 @@ pub enum PackAction {
         /// Append an importance-weights section (which files you've marked as important).
         #[arg(long)]
         include_weights: bool,
+        /// Emit a code-skeleton view (symbol signatures, bodies elided) instead of summaries.
+        #[arg(long)]
+        signatures: bool,
+        /// Warn when the export exceeds this many estimated tokens (≈4 chars/token).
+        #[arg(long)]
+        token_budget: Option<usize>,
+        /// With --token-budget, fail instead of warning when over budget — for CI.
+        #[arg(long)]
+        strict_budget: bool,
+        /// Copy the export to the OS clipboard instead of a file / stdout.
+        #[arg(long)]
+        clipboard: bool,
+        /// In --signatures mode, drop leading doc-comments from each signature.
+        #[arg(long)]
+        strip_comments: bool,
+        /// Do NOT scan the export for secrets before output (redaction is on by default).
+        #[arg(long)]
+        no_redact: bool,
     },
     /// Rename a pack.
     Rename {

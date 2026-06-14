@@ -19,7 +19,7 @@ members = [
 exclude = ["apps/indexa-desktop"]
 
 [workspace.package]
-version = "0.30.0"
+version = "0.31.0"
 edition = "2021"
 authors = ["Harf Promo <ahmed541991@gmail.com>"]
 license = "Apache-2.0"
@@ -73,6 +73,9 @@ shellexpand = "3"
 
 # Config file parsing
 toml = "1.1"
+
+# Regex (secret-scan/redaction on export; already in the tree transitively)
+regex = "1"
 
 # System resource detection
 sysinfo = { version = "0.39" }

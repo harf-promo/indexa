@@ -5,7 +5,9 @@
 //! (<https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/use-xml-tags>)
 
 use anyhow::{Context, Result};
-use indexa_core::store::{abstract_from, CodeGraph, Store, SummaryRecord, WeightRecord};
+use indexa_core::store::{
+    abstract_from, ChunkRecord, CodeGraph, Store, SummaryRecord, WeightRecord,
+};
 use std::path::Path;
 
 /// Rough token estimate for a rendered string: ~4 chars per token (the common heuristic
@@ -330,6 +332,131 @@ pub fn render_graph(graph: &CodeGraph, format: &str) -> String {
     }
 }
 
+// ── Signatures (code-skeleton) export ───────────────────────────────────────────
+
+/// Extract a compact signature from a code chunk's full body: leading doc/comment lines plus the
+/// declaration up to the first `{` (C-family) or trailing `:` (Python), with the body elided.
+/// Capped at a few lines so a brace-less chunk can't dump everything. Heuristic and line-based
+/// (not a parser) — label it as such in any UI. `keep_docs=false` drops the leading comment lines.
+fn extract_signature(text: &str, keep_docs: bool) -> String {
+    const MAX_LINES: usize = 8;
+    let is_doc = |t: &str| {
+        t.starts_with("///")
+            || t.starts_with("//!")
+            || t.starts_with("//")
+            || t.starts_with('#') // Rust attrs (#[...]) + Python/shell comments
+            || t.starts_with("/*")
+            || t.starts_with('*')
+            || t.starts_with("\"\"\"")
+            || t.starts_with("'''")
+    };
+    let mut out: Vec<&str> = Vec::new();
+    let mut in_decl = false;
+    for line in text.lines() {
+        let t = line.trim_start();
+        if !in_decl && is_doc(t) {
+            if keep_docs && !t.is_empty() {
+                out.push(line);
+                if out.len() >= MAX_LINES {
+                    break;
+                }
+            }
+            continue;
+        }
+        in_decl = true;
+        out.push(line);
+        if line.contains('{') || line.trim_end().ends_with(':') || out.len() >= MAX_LINES {
+            break;
+        }
+    }
+    let joined = out.join("\n");
+    let trimmed = joined.trim_end();
+    // If the declaration opened a brace, elide the body with a marker.
+    if let Some(idx) = trimmed.rfind('{') {
+        format!("{} … }}", &trimmed[..=idx])
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// Render a code-skeleton ("signatures") view: per code file, each indexed symbol's signature +
+/// leading docstring, bodies elided. A heuristic, line-based compression of indexed code that
+/// *complements* the prose-summary export — feed code structure to an AI tool at a fraction of the
+/// tokens. `chunks` must be language-tagged code chunks, pre-sorted by `(entry_path, seq)`.
+/// `keep_docs=false` strips leading comments (the `--strip-comments` flag).
+pub fn render_signatures(chunks: &[ChunkRecord], format: &str, keep_docs: bool) -> String {
+    // Group consecutive chunks by file (input is already path-ordered).
+    let mut files: Vec<(&str, Vec<&ChunkRecord>)> = Vec::new();
+    for c in chunks {
+        match files.last_mut() {
+            Some((p, v)) if *p == c.entry_path.as_str() => v.push(c),
+            _ => files.push((c.entry_path.as_str(), vec![c])),
+        }
+    }
+
+    match format {
+        "md" | "markdown" => {
+            let mut out = String::from("\n## Code signatures\n\n");
+            out.push_str("_Heuristic skeleton — symbol signatures with bodies elided._\n\n");
+            for (path, syms) in &files {
+                let lang = syms
+                    .first()
+                    .and_then(|c| c.language.clone())
+                    .unwrap_or_default();
+                out.push_str(&format!("### `{path}`\n\n```{lang}\n"));
+                for c in syms {
+                    out.push_str(&extract_signature(&c.text, keep_docs));
+                    out.push_str("\n\n");
+                }
+                out.push_str("```\n\n");
+            }
+            out
+        }
+        "json" => {
+            let files_json: Vec<String> = files
+                .iter()
+                .map(|(path, syms)| {
+                    let symbols: Vec<String> = syms
+                        .iter()
+                        .map(|c| {
+                            format!(
+                                "{{\"name\": {}, \"signature\": {}}}",
+                                json_str(&c.heading),
+                                json_str(&extract_signature(&c.text, keep_docs))
+                            )
+                        })
+                        .collect();
+                    format!(
+                        "{{\"path\": {}, \"symbols\": [{}]}}",
+                        json_str(path),
+                        symbols.join(", ")
+                    )
+                })
+                .collect();
+            format!("{{\"signatures\": [{}]}}\n", files_json.join(", "))
+        }
+        _ => {
+            let mut body = String::new();
+            for (path, syms) in &files {
+                body.push_str(&format!("  <file path=\"{}\">\n", xml_attr(path)));
+                for c in syms {
+                    body.push_str(&format!(
+                        "    <symbol name=\"{}\">{}</symbol>\n",
+                        xml_attr(&c.heading),
+                        xml_text(&extract_signature(&c.text, keep_docs))
+                    ));
+                }
+                body.push_str("  </file>\n");
+            }
+            format!(
+                "<signatures files=\"{}\" approx_tokens=\"{}\">\n{body}</signatures>\n",
+                files.len(),
+                approx_tokens(&body),
+            )
+        }
+    }
+}
+
 // ── XML helpers ───────────────────────────────────────────────────────────────
 
 fn xml_attr(s: &str) -> String {
@@ -507,5 +634,64 @@ mod tests {
         let tree = build_tree(&store, "/r", Some(1)).unwrap().unwrap();
         assert_eq!(tree.children.len(), 1); // /r/a included
         assert!(tree.children[0].children.is_empty()); // /r/a/b excluded
+    }
+
+    fn code_chunk(path: &str, heading: &str, text: &str, lang: &str) -> ChunkRecord {
+        ChunkRecord {
+            entry_path: path.to_owned(),
+            seq: 0,
+            heading: heading.to_owned(),
+            text: text.to_owned(),
+            language: Some(lang.to_owned()),
+            embedding: None,
+            embed_model: None,
+        }
+    }
+
+    #[test]
+    fn signatures_keep_declaration_drop_body() {
+        let chunks = vec![
+            code_chunk(
+                "/r/lib.rs",
+                "compute",
+                "/// Adds two numbers.\npub fn compute(a: u32, b: u32) -> u32 {\n    let s = a + b;\n    s\n}",
+                "rust",
+            ),
+            code_chunk(
+                "/r/app.py",
+                "greet",
+                "def greet(name):\n    return f\"hi {name}\"",
+                "python",
+            ),
+        ];
+
+        let md = render_signatures(&chunks, "md", true);
+        assert!(
+            md.contains("pub fn compute(a: u32, b: u32) -> u32 {"),
+            "decl kept: {md}"
+        );
+        assert!(md.contains("… }"), "body elided");
+        assert!(!md.contains("let s = a + b"), "rust body leaked: {md}");
+        assert!(md.contains("Adds two numbers"), "docstring kept");
+        assert!(md.contains("def greet(name):"));
+        assert!(!md.contains("return f"), "python body leaked: {md}");
+
+        // --strip-comments drops the docstring.
+        let md_nodoc = render_signatures(&chunks, "md", false);
+        assert!(
+            !md_nodoc.contains("Adds two numbers"),
+            "docstring should be stripped: {md_nodoc}"
+        );
+
+        // XML carries a token estimate + symbol names per file.
+        let xml = render_signatures(&chunks, "xml", true);
+        assert!(xml.contains("<signatures files=\"2\""));
+        assert!(xml.contains("name=\"compute\""));
+        assert!(xml.contains("approx_tokens=\""));
+
+        // JSON groups symbols by file.
+        let json = render_signatures(&chunks, "json", true);
+        assert!(json.contains("\"signatures\""));
+        assert!(json.contains("\"path\": \"/r/lib.rs\""));
     }
 }

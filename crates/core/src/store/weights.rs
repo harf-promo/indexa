@@ -263,4 +263,64 @@ impl Store {
         }
         Ok(())
     }
+
+    /// Boost recently-modified files (multiplicative on `rrf_score`) — the positive twin of the
+    /// archive penalty: fresh work outranks stale work at comparable relevance. Uses filesystem
+    /// mtime (`entries.modified_s`), not git, and the same 7d→2.0 / 30d→1.5 / 90d→1.2 tiers as
+    /// [`Self::suggest_weights_by_recency`]. Files older than `threshold_days` (and files with no
+    /// recorded mtime) stay neutral (×1.0). Opt-in via `QaConfig.use_recency_weight`.
+    pub fn boost_with_recency(
+        &self,
+        hits: &mut [super::SearchHit],
+        threshold_days: i64,
+    ) -> Result<()> {
+        use std::collections::HashMap;
+        if hits.is_empty() {
+            return Ok(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let cutoff_secs = threshold_days.max(0) * 86_400;
+        // Cache mtime per path within the call (hits often repeat a path across chunks).
+        let mut mtime_cache: HashMap<String, Option<i64>> = HashMap::new();
+        for hit in hits.iter_mut() {
+            let mtime = if let Some(m) = mtime_cache.get(&hit.entry_path) {
+                *m
+            } else {
+                let m: Option<i64> = self
+                    .conn
+                    .query_row(
+                        "SELECT modified_s FROM entries WHERE path=?1",
+                        params![&hit.entry_path],
+                        |r| r.get::<_, Option<i64>>(0),
+                    )
+                    .optional()?
+                    .flatten();
+                mtime_cache.insert(hit.entry_path.clone(), m);
+                m
+            };
+            if let Some(mtime) = mtime {
+                let age = (now - mtime).max(0);
+                if cutoff_secs > 0 && age > cutoff_secs {
+                    continue; // outside the recency window → neutral
+                }
+                let age_days = age / 86_400;
+                let w: f64 = if age_days <= 7 {
+                    2.0
+                } else if age_days <= 30 {
+                    1.5
+                } else if age_days <= 90 {
+                    1.2
+                } else {
+                    1.0
+                };
+                if (w - 1.0).abs() > f64::EPSILON {
+                    hit.rrf_score *= w;
+                }
+            }
+        }
+        Ok(())
+    }
 }

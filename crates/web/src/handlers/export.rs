@@ -23,6 +23,8 @@ pub(crate) struct ExportQuery {
     format: Option<String>,
     /// Maximum tree depth (0 = root summary only; omit for full depth).
     depth: Option<usize>,
+    /// Emit a code-skeleton view (symbol signatures, bodies elided) instead of prose summaries.
+    signatures: Option<bool>,
 }
 
 pub(crate) async fn api_export(
@@ -58,9 +60,26 @@ pub(crate) async fn api_export(
         .unwrap_or_else(|_| "0".to_owned());
 
     let fmt = params.format.as_deref().unwrap_or("xml");
+    let signatures = params.signatures.unwrap_or(false);
 
     let mut out_buf = String::new();
     for root_path in &roots {
+        if signatures {
+            match store.code_chunks_under(root_path, 0) {
+                Ok(chunks) if !chunks.is_empty() => {
+                    out_buf.push_str(&indexa_query::render_signatures(&chunks, fmt, true));
+                    out_buf.push('\n');
+                }
+                Ok(_) => { /* no indexed code under this path — skip */ }
+                Err(e) => {
+                    return err_json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Export failed for {root_path}: {e:#}"),
+                    )
+                }
+            }
+            continue;
+        }
         match indexa_query::build_tree(&store, root_path, params.depth) {
             Ok(Some(tree)) => {
                 let rendered = match fmt {
@@ -90,6 +109,9 @@ pub(crate) async fn api_export(
              Run `indexa summarize <path>` first.",
         );
     }
+
+    // Scan exported content for secrets before it leaves the machine over HTTP.
+    let (out_buf, _redacted) = indexa_query::redact::redact_secrets(&out_buf);
 
     let (content_type, ext) = match fmt {
         "md" | "markdown" => ("text/markdown; charset=utf-8", "md"),

@@ -3342,3 +3342,54 @@ fn symbol_pin_narrows_who_calls_and_blast_radius() {
         }
     }
 }
+
+#[test]
+fn boost_with_recency_ranks_fresh_above_stale() {
+    use std::time::{Duration, SystemTime};
+    let mut store = Store::open_in_memory().unwrap();
+    let now = SystemTime::now();
+    let fresh = Entry {
+        path: PathBuf::from("/proj/fresh.rs"),
+        kind: EntryKind::File,
+        size: 10,
+        modified: Some(now),
+        hint: None,
+    };
+    let stale = Entry {
+        path: PathBuf::from("/proj/stale.rs"),
+        kind: EntryKind::File,
+        size: 10,
+        modified: Some(now - Duration::from_secs(200 * 86_400)),
+        hint: None,
+    };
+    store.upsert_entries(&[fresh, stale]).unwrap();
+
+    let mk = |path: &str| SearchHit {
+        chunk_id: 0,
+        entry_path: path.to_owned(),
+        seq: 0,
+        heading: String::new(),
+        text: "x".to_owned(),
+        rrf_score: 1.0,
+    };
+    let mut hits = vec![mk("/proj/stale.rs"), mk("/proj/fresh.rs")];
+    store.boost_with_recency(&mut hits, 90).unwrap();
+
+    let fresh_score = hits
+        .iter()
+        .find(|h| h.entry_path.ends_with("fresh.rs"))
+        .unwrap()
+        .rrf_score;
+    let stale_score = hits
+        .iter()
+        .find(|h| h.entry_path.ends_with("stale.rs"))
+        .unwrap()
+        .rrf_score;
+    // today → ×2.0; 200 days → outside the 90-day window → ×1.0 (neutral).
+    assert!(
+        fresh_score > stale_score,
+        "fresh {fresh_score} should outrank stale {stale_score}"
+    );
+    assert!((fresh_score - 2.0).abs() < 1e-9, "fresh got {fresh_score}");
+    assert!((stale_score - 1.0).abs() < 1e-9, "stale got {stale_score}");
+}

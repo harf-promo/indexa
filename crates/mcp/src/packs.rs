@@ -26,6 +26,10 @@ pub struct ExportPackParams {
     /// Maximum tree depth per path (0 = top summary only). Omit for full depth.
     #[serde(default)]
     pub depth: Option<usize>,
+    /// Emit a code-skeleton view (symbol signatures, bodies elided) instead of prose summaries —
+    /// far fewer tokens for handing code structure to a model. Reads indexed chunks.
+    #[serde(default)]
+    pub signatures: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -136,14 +140,19 @@ impl IndexaMcp {
         &self,
         params: Parameters<ExportPackParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        use indexa_query::{build_tree, render_json, render_markdown, render_xml};
+        use indexa_query::{
+            build_tree, redact::redact_secrets, render_json, render_markdown, render_signatures,
+            render_xml,
+        };
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let ExportPackParams {
             name,
             format,
             depth,
+            signatures,
         } = params.0;
+        let signatures = signatures.unwrap_or(false);
         let format = format.as_deref().unwrap_or("xml");
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -175,6 +184,16 @@ impl IndexaMcp {
 
         let mut exported = 0usize;
         for root_path in &paths {
+            if signatures {
+                let chunks = store.code_chunks_under(root_path, 0).map_err(mcp_err)?;
+                if chunks.is_empty() {
+                    continue;
+                }
+                buf.push_str(&render_signatures(&chunks, format, true));
+                buf.push('\n');
+                exported += 1;
+                continue;
+            }
             let tree = build_tree(&store, root_path, depth).map_err(mcp_err)?;
             let Some(tree) = tree else { continue };
             let rendered = match format {
@@ -191,12 +210,16 @@ impl IndexaMcp {
         }
 
         if exported == 0 {
-            return Err(mcp_err(format!(
-                "no paths in pack \"{name}\" have summaries yet \
-                 — run `indexa summarize <path>` or `indexa index <path>` first"
-            )));
+            let hint = if signatures {
+                "have indexed code yet — run `indexa deep <path>` first"
+            } else {
+                "have summaries yet — run `indexa summarize <path>` or `indexa index <path>` first"
+            };
+            return Err(mcp_err(format!("no paths in pack \"{name}\" {hint}")));
         }
 
+        // Never hand a model a secret that slipped into the indexed content.
+        let (buf, _redacted) = redact_secrets(&buf);
         Ok(ok_text(buf))
     }
 

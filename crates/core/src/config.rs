@@ -250,6 +250,12 @@ pub struct RetrievalConfig {
     pub agentic: bool,
     /// Max retrieval hops when agentic `ask` is used (clamped to 1..=5).
     pub agentic_max_steps: usize,
+    /// Boost recently-modified files in retrieval (v0.31) — the positive twin of the archive
+    /// penalty (fresh work outranks stale at comparable relevance). Off by default so it never
+    /// silently re-ranks; uses filesystem mtime, not git.
+    pub recency_boost: bool,
+    /// Recency window in days for `recency_boost` (files older than this stay neutral).
+    pub recency_days: i64,
 }
 
 impl Default for RetrievalConfig {
@@ -267,6 +273,8 @@ impl Default for RetrievalConfig {
             use_weights: true,
             agentic: false,
             agentic_max_steps: 3,
+            recency_boost: false,
+            recency_days: 90,
         }
     }
 }

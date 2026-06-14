@@ -31,6 +31,8 @@ fn qa_config(state: &AppState, body: &AskRequest) -> QaConfig {
         summary_depth_alpha: state.config.retrieval.summary_depth_alpha,
         rerank: state.config.retrieval.rerank,
         use_weights: state.config.retrieval.use_weights,
+        use_recency_weight: state.config.retrieval.recency_boost,
+        recency_days: state.config.retrieval.recency_days,
         max_steps: state.config.retrieval.agentic_max_steps,
         scope: body
             .scope

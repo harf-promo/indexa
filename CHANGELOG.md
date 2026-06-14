@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] — 2026-06-14
+
+"Exports that fit": smarter, safer context exports — and answers can prefer fresh files.
+
+### Added
+
+- **Code-skeleton exports.** `indexa export --signatures` (and `pack export --signatures`, MCP
+  `export_pack signatures=true`, web `?signatures=1`) emit each symbol's signature + leading
+  docstring with bodies elided — hand an AI tool your code's *structure* at a fraction of the
+  tokens, instead of either full files or prose summaries. Heuristic and line-based; works after
+  `deep`, even without summaries.
+- **Token-budget guard.** `export --token-budget N` warns when an export exceeds ~N tokens
+  (≈4 chars/token); add `--strict-budget` to fail with a non-zero exit (handy in CI/agent loops).
+- **Secret scanning on export.** Every export (CLI, MCP, web) is now scanned for obvious
+  credentials — AWS keys, GitHub/Slack/Google/OpenAI tokens, private-key blocks, `key = "…"`
+  assignments — and they're redacted before the content leaves your machine. Opt out per-run with
+  `--no-redact`. A safety net, not a guarantee.
+- **Clipboard + hygiene flags.** `export --clipboard` copies the result straight to the OS
+  clipboard (via the platform's native tool — no extra dependency); `--strip-comments` drops leading
+  doc-comments from a `--signatures` export.
+- **Recency-aware retrieval (opt-in).** Set `[retrieval] recency_boost = true` to bias answers
+  toward recently-modified files — the positive twin of the archive down-weighting from v0.29. Uses
+  file modification time (not git); window configurable via `recency_days` (default 90).
+
+### Why
+
+Tools that pack a whole repo into one file routinely blow past context limits (tens of millions of
+tokens). Indexa already serves a *retrieved slice*; these changes make the exported slices smaller
+(signatures), safer (secret-scan), and easier to keep within a model's window (token budget).
+
 ## [0.30.0] — 2026-06-14
 
 A small, focused release: you can now watch updates download.
