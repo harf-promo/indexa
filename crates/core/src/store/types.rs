@@ -20,6 +20,14 @@ pub struct EdgeRecord {
     pub to_ref: String,
 }
 
+/// Display facts for one indexed entry row, used by `indexa inspect`.
+#[derive(Debug, Clone)]
+pub struct EntryInfo {
+    pub kind: String,
+    pub size: u64,
+    pub modified_s: Option<i64>,
+}
+
 /// A file related to a query file through the call graph, with the relation strength
 /// (count of shared call→define symbols across both directions).
 #[derive(Debug, Clone)]

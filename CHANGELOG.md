@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] — 2026-06-14
+
+"Trust & position": see exactly what's indexed, and a clearer story about why retrieval beats packing.
+
+### Added
+
+- **`indexa inspect <path>`** — a plain-text "what's indexed here" view for any path: the scan entry
+  (kind/size/modified), the indexed chunks (count + first symbols/headings), whether a summary
+  exists, the classification, the resolved importance weight, and the code-graph relationships
+  (imports/defines/calls). It ends by noting that **the index is a derived cache over your real
+  files — every field is re-derivable by re-indexing, and your source files are never modified**, so
+  the index is legible rather than a black box.
+
+### Changed
+
+- **Sharper positioning** (`docs/COMPETITIVE.md`): the wedge vs whole-repo packers (Repomix / gitingest
+  / code2prompt) is now stated with the concrete token reality — a real repo packs to tens of millions
+  of tokens — and points at v0.31's `--signatures` / `--token-budget` / on-export secret-scan as the
+  "if you must pack, pack smart" answer. **Retrieve the slice; don't pack the repo.**
+
 ## [0.32.0] — 2026-06-14
 
 "Reach": pull a few remote sources into a Context Pack — opt-in and local-first.

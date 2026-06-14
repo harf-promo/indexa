@@ -1,11 +1,11 @@
 //! Surface-scan entry writes, counts, and subtree reconciliation/deletion.
 
 use super::search::like_prefix;
-use super::types::HealthStats;
+use super::types::{EntryInfo, HealthStats};
 use super::Store;
 use crate::walker::{Entry, EntryKind};
 use anyhow::Result;
-use rusqlite::{params, Transaction};
+use rusqlite::{params, OptionalExtension, Transaction};
 
 /// Row type for [`Store::all_coverage_entries`]:
 /// `(path, parent_path, is_dir, own_chunk_count, queue_state)`.
@@ -133,6 +133,25 @@ impl Store {
             .conn
             .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))?;
         Ok(n as u64)
+    }
+
+    /// Look up a single entry's display facts (kind/size/mtime) by exact path. Powers
+    /// `indexa inspect`. Returns `None` when the path isn't indexed.
+    pub fn entry_by_path(&self, path: &str) -> Result<Option<EntryInfo>> {
+        self.conn
+            .query_row(
+                "SELECT kind, size, modified_s FROM entries WHERE path = ?1",
+                params![path],
+                |r| {
+                    Ok(EntryInfo {
+                        kind: r.get::<_, String>(0)?,
+                        size: r.get::<_, i64>(1)? as u64,
+                        modified_s: r.get::<_, Option<i64>>(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     /// Remove a single entry (and its chunks, summary, and any queued summary work)

@@ -11,6 +11,7 @@ mod graph;
 mod helpers;
 mod index;
 mod insights;
+mod inspect;
 mod map;
 mod mcp;
 mod mcp_install;
@@ -48,6 +49,7 @@ pub(crate) use insights::{
     cmd_insights_diff, cmd_insights_duplicates, cmd_insights_languages, cmd_insights_largest,
     cmd_insights_stale,
 };
+pub(crate) use inspect::cmd_inspect;
 pub(crate) use map::cmd_map;
 pub(crate) use mcp::cmd_mcp;
 pub(crate) use mcp_install::cmd_mcp_install;

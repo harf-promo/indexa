@@ -147,6 +147,16 @@ pub enum Commands {
         path: String,
     },
 
+    /// Show exactly what's indexed for a path: entry, chunks, summary, classification, weight, graph.
+    #[command(after_help = "Examples:
+  indexa inspect ~/code/myrepo/src/main.rs
+  indexa inspect ~/Documents/taxes")]
+    #[command(display_order = 36)]
+    Inspect {
+        /// Path to inspect.
+        path: String,
+    },
+
     /// Run the background summarization worker (drains the summary queue).
     #[command(after_help = "Examples:
   indexa worker

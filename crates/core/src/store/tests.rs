@@ -3344,6 +3344,18 @@ fn symbol_pin_narrows_who_calls_and_blast_radius() {
 }
 
 #[test]
+fn entry_by_path_returns_facts_or_none() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[dummy_entry("/r/a.rs", EntryKind::File, 42)])
+        .unwrap();
+    let e = store.entry_by_path("/r/a.rs").unwrap().unwrap();
+    assert_eq!(e.kind, "file");
+    assert_eq!(e.size, 42);
+    assert!(store.entry_by_path("/r/missing.rs").unwrap().is_none());
+}
+
+#[test]
 fn boost_with_recency_ranks_fresh_above_stale() {
     use std::time::{Duration, SystemTime};
     let mut store = Store::open_in_memory().unwrap();

@@ -58,8 +58,8 @@ pub use saved::SavedQuery;
 pub use search::is_stub_chunk;
 pub use types::{
     ChunkRecord, ClassificationRecord, CodeGraph, CodeGraphEdge, CodeGraphNode, DecisionRecord,
-    EdgeRecord, FailedQueueItem, HealthStats, NewDecision, PackRecord, QueueItem, QueueStats,
-    RegionSummary, RelatedFile, SearchHit, SummaryRecord, TreeNode, WeightRecord,
+    EdgeRecord, EntryInfo, FailedQueueItem, HealthStats, NewDecision, PackRecord, QueueItem,
+    QueueStats, RegionSummary, RelatedFile, SearchHit, SummaryRecord, TreeNode, WeightRecord,
 };
 pub use usage::{UsageSummary, USAGE_WEEK_SECS};
 
