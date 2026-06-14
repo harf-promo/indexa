@@ -150,8 +150,13 @@ function fmtUpdateBytes(bytes) {
 
 // Exposed for the overlay's Dismiss button (error state) and for tests.
 function renderUpdateProgress(p) {  // eslint-disable-line no-unused-vars
+  if (!p) return;
+  // Phase "available" (desktop self-update) → show the in-app changelog window, not the progress
+  // overlay. The user picks Install/Later there; the progress overlay takes over afterward.
+  if (p.phase === 'available') { showUpdateChangelog(p); return; }
+
   var ov = document.getElementById('update-overlay');
-  if (!ov || !p) return;
+  if (!ov) return;
   var fill = document.getElementById('update-overlay-fill');
   var titleEl = document.getElementById('update-overlay-title');
   var pctEl = document.getElementById('update-overlay-pct');
@@ -161,6 +166,7 @@ function renderUpdateProgress(p) {  // eslint-disable-line no-unused-vars
 
   if (phase === 'downloading' || phase === 'installing') {
     updateOverlayActive = true;
+    hideUpdateChangelog(); // the changelog window is done; the progress bar takes over
     ov.hidden = false;
     if (dismiss) dismiss.hidden = true;
     if (phaseEl) phaseEl.classList.remove('update-overlay-error');
@@ -201,4 +207,56 @@ function dismissUpdateOverlay() {  // eslint-disable-line no-unused-vars
   var ov = document.getElementById('update-overlay');
   if (ov) ov.hidden = true;
   updateOverlayActive = false;
+}
+
+// ── In-app "update available" changelog window (desktop only) ────────────────
+// Shown on SSE phase "available" with the full release notes. Replaces the old native dialog —
+// a white card with a scrollable changelog + Install & Relaunch / Later. The buttons POST to
+// /api/update/control, which wakes the desktop's install task (the webview has no Tauri IPC).
+
+function showUpdateChangelog(p) {
+  var modal = document.getElementById('update-changelog-modal');
+  if (!modal) return;
+  var verEl = document.getElementById('ucl-version');
+  var notesEl = document.getElementById('ucl-notes');
+  var installBtn = document.getElementById('ucl-install');
+  if (verEl) verEl.textContent = p.version || (p.title || '').replace(/^Indexa\s*/, '');
+  if (notesEl) {
+    notesEl.textContent = p.notes && p.notes.trim() ? p.notes.trim() : 'No release notes available.';
+    notesEl.scrollTop = 0;
+  }
+  if (installBtn) { installBtn.disabled = false; installBtn.textContent = 'Install & Relaunch'; }
+  modal.hidden = false;
+}
+
+function hideUpdateChangelog() {
+  var modal = document.getElementById('update-changelog-modal');
+  if (modal) modal.hidden = true;
+}
+
+function sendUpdateControl(action) {
+  return fetch('/api/update/control', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: action }),
+  });
+}
+
+function dismissUpdateChangelog() {  // eslint-disable-line no-unused-vars
+  hideUpdateChangelog();
+  sendUpdateControl('dismiss').catch(function () { /* best-effort */ });
+}
+
+function installUpdateFromChangelog() {  // eslint-disable-line no-unused-vars
+  var btn = document.getElementById('ucl-install');
+  if (btn) { btn.disabled = true; btn.textContent = 'Downloading…'; }
+  sendUpdateControl('start')
+    .then(function () {
+      // The progress overlay takes over when the next SSE event ("downloading") arrives;
+      // renderUpdateProgress hides this modal then too.
+      hideUpdateChangelog();
+    })
+    .catch(function () {
+      if (btn) { btn.disabled = false; btn.textContent = 'Install & Relaunch'; }
+    });
 }

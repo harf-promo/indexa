@@ -26,10 +26,14 @@ async function showSummary(path) {
       if (nsAsk && typeof askAboutSelection === 'function') {
         nsAsk.addEventListener('click', function() { askAboutSelection(path); });
       }
+      // A file can be previewed even with no summary (raw content is always available); the
+      // endpoint returns a placeholder for directories, so this is safe regardless of kind.
+      if (typeof showFilePreview === 'function') showFilePreview(path);
       return;
     }
     if (d.error) {
       view.innerHTML = '<div class="summary-pending" style="color:var(--red)">' + escapeHtml(d.error) + '</div>';
+      if (typeof clearPreview === 'function') clearPreview();
       return;
     }
 
@@ -67,8 +71,14 @@ async function showSummary(path) {
     });
     // Load smart label (classification) asynchronously after the summary renders
     if (typeof loadClassificationForPath === 'function') loadClassificationForPath(path);
+    // Show the raw file beside the summary (files only; directories have no content to preview).
+    if (typeof showFilePreview === 'function') {
+      if (d.kind === 'file') showFilePreview(path);
+      else if (typeof clearPreview === 'function') clearPreview();
+    }
   } catch(e) {
     view.innerHTML = '<div class="summary-pending" style="color:var(--red)">Error: ' + escapeHtml(e.message) + '</div>';
+    if (typeof clearPreview === 'function') clearPreview();
   }
 }
 

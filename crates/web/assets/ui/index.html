@@ -79,6 +79,8 @@
           <button onclick="doExport(selectedPath||'','json')">JSON</button>
         </div>
       </div>
+      <button class="btn-sm preview-toggle" id="preview-toggle-btn" onclick="togglePreview()"
+        title="Show / hide the file preview pane" aria-label="Toggle file preview" aria-pressed="true">Preview</button>
     </div>
 
     <!-- "Context not built yet" banner: shown when the index is embedded but has no
@@ -87,6 +89,7 @@
 
     <div class="workspace-views" id="workspace-views">
       <div class="tab-panel active" id="panel-tree" role="tabpanel" aria-labelledby="view-tree">
+        <div class="context-split" id="context-split">
         <div class="summary-view" id="summary-view">
           <div class="welcome" id="browse-welcome">
             <!-- Default welcome (populated index, nothing selected). JS hides this and
@@ -112,6 +115,17 @@
               </div>
             </div>
           </div>
+        </div>
+        <div class="file-preview-pane" id="file-preview-pane" hidden>
+          <div class="preview-header">
+            <span class="preview-lang-badge" id="preview-lang"></span>
+            <span class="preview-spacer"></span>
+            <span class="preview-trunc" id="preview-trunc" hidden></span>
+          </div>
+          <div class="preview-body" id="preview-body">
+            <div class="preview-placeholder">Select a file to preview it.</div>
+          </div>
+        </div>
         </div>
       </div>
       <div class="tab-panel" id="panel-chat" role="tabpanel" aria-labelledby="view-chat">
@@ -688,6 +702,19 @@
     <div class="update-overlay-pct" id="update-overlay-pct"></div>
     <div class="update-overlay-phase" id="update-overlay-phase"></div>
     <button class="btn-sm update-overlay-dismiss" id="update-overlay-dismiss" hidden onclick="dismissUpdateOverlay()">Dismiss</button>
+  </div>
+</div>
+
+<!-- Desktop "update available" window: shown by 15-update.js on SSE phase "available" (desktop only).
+     A white card with the full, scrollable changelog + Install/Later. Never shows under plain serve. -->
+<div id="update-changelog-modal" class="update-changelog-overlay" role="dialog" aria-modal="true" aria-labelledby="ucl-title" hidden>
+  <div class="update-changelog-card">
+    <h2 class="ucl-title" id="ucl-title">Indexa <span id="ucl-version"></span> is available</h2>
+    <div class="ucl-notes" id="ucl-notes" role="region" aria-label="What&#x2019;s new"></div>
+    <div class="ucl-actions">
+      <button class="ucl-later" id="ucl-later" onclick="dismissUpdateChangelog()">Later</button>
+      <button class="ucl-install" id="ucl-install" onclick="installUpdateFromChangelog()">Install &amp; Relaunch</button>
+    </div>
   </div>
 </div>
 

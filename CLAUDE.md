@@ -24,7 +24,7 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.33.0)
+## Current feature surface (v0.34.0)
 
 **CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize) · `scan` · `deep` ·
 `summarize` · `describe` · `inspect` (per-path "what's indexed here") · `map` · `worker` · `pack`
@@ -53,6 +53,21 @@ hover-revealed row actions so folder names aren't clipped; the desktop "Check fo
 version + CHANGELOG notes (release.yml feeds `latest.json` `notes` via tauri-action `releaseBody`) then
 restarts, and a new app/tray "Install command-line tool" item runs `indexa_update::download_cli_to`
 (non-self-replace CLI download → a PATH dir).
+
+**Updater window + file preview (v0.34):** the desktop "Check for Updates" is now a fully **in-app**
+flow — no osascript dialog. `install_update` (`apps/indexa-desktop/src/main.rs`) publishes
+`UpdateProgress::available(version, body)` (full changelog) → the webview shows `#update-changelog-modal`
+(white scrollable card, Install/Later; `15-update.js` + `css/16-update-changelog.css`) → the user's
+choice flows web→Rust via `POST /api/update/control` → a process-global `watch<Option<UpdateCommand>>`
+in `crates/web/src/update_control.rs` (`wait_for_command`, ⚠️ copy the value out before `send(None)` or
+it self-deadlocks) → existing download/progress overlay → restart. `AtomicBool INSTALL_IN_PROGRESS`
+guards tray+menu double-fire; control endpoint is `INDEXA_DESKTOP`-gated (403 under plain serve).
+**File preview:** `GET /api/file?path=` (`handlers/file_preview.rs`; path-within-roots like MCP
+read_file, 40 KB cap, NUL→binary) → `#file-preview-pane` split beside `#summary-view` in `.context-split`
+(`24-file-preview.js` + `css/15-file-preview.css`), driven from `05-summary.js` on file select.
+**Highlighting is a self-written client tokenizer** (keyword/string/comment/number → `.hl-*` tokens) —
+NOT tree-sitter-highlight, which can't pair with the tree-sitter 0.26 the parsers use (no 0.26-compatible
+release). Keep it client-side + dependency-free.
 
 **Update-progress invariant (v0.30):** the desktop self-update + CLI install show a **live progress
 bar** bridged Rust→web **without Tauri IPC** (the webview loads a remote URL — no `withGlobalTauri`).

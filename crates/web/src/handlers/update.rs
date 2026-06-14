@@ -9,7 +9,8 @@ use axum::{
 use std::convert::Infallible;
 use tokio_stream::{wrappers::WatchStream, StreamExt};
 
-use crate::dto::{err_json, UpdateRequest};
+use crate::dto::{err_json, UpdateControlRequest, UpdateRequest};
+use crate::update_control::{send_command, UpdateCommand};
 
 /// `GET /api/update/check` — returns the current and latest version without
 /// modifying anything. Network errors are swallowed so a transient GitHub
@@ -105,6 +106,31 @@ pub(crate) async fn api_update_apply(Json(body): Json<UpdateRequest>) -> Respons
         }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
+}
+
+/// `POST /api/update/control` — the desktop in-app changelog modal's button choice (`start` |
+/// `dismiss`). Wakes the desktop's `install_update` task waiting on `update_control::wait_for_command`.
+/// Gated to the desktop app (`INDEXA_DESKTOP=1`): under plain `indexa serve` there's no updater task
+/// listening, so it returns 403 rather than silently no-op.
+pub(crate) async fn api_update_control(Json(body): Json<UpdateControlRequest>) -> Response {
+    if std::env::var("INDEXA_DESKTOP").as_deref() != Ok("1") {
+        return err_json(
+            StatusCode::FORBIDDEN,
+            "update control is only available inside the desktop app",
+        );
+    }
+    let cmd = match body.action.as_str() {
+        "start" => UpdateCommand::Start,
+        "dismiss" => UpdateCommand::Dismiss,
+        other => {
+            return err_json(
+                StatusCode::BAD_REQUEST,
+                format!("unknown update action '{other}' (expected 'start' or 'dismiss')"),
+            )
+        }
+    };
+    send_command(cmd);
+    Json(serde_json::json!({ "ok": true })).into_response()
 }
 
 /// `GET /api/update/progress/stream` — SSE that emits the current update-progress snapshot

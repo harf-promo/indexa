@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] — 2026-06-14
+
+A real update window, and a file preview beside every summary.
+
+### Added
+
+- **An in-app update window.** "Check for Updates…" no longer pops a cramped system dialog. When an
+  update is found, Indexa shows a proper window — a white card with the **full, scrollable
+  changelog** and **Install & Relaunch** / **Later** — then the live progress bar, then restart.
+  The whole flow is in-app now, like a normal app's updater.
+- **File preview beside the summary.** Selecting a file in the Context tab now shows its **actual
+  contents** in a pane next to the summary, with lightweight syntax highlighting (a built-in
+  tokenizer — no third-party library), line numbers, and a binary/large-file notice. Toggle it with
+  the **Preview** button (your choice is remembered). Reads are confined to your indexed folders and
+  capped at 40 KB.
+
+### Changed
+
+- The desktop updater is fully in-app: the macOS confirmation dialog was removed in favor of the new
+  window, and a double-trigger (tray + menu) can no longer start two downloads.
+
 ## [0.33.0] — 2026-06-14
 
 "Trust & position": see exactly what's indexed, and a clearer story about why retrieval beats packing.

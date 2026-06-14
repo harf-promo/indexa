@@ -14,8 +14,10 @@ mod dto;
 mod handlers;
 mod jobs;
 mod jobs_exec;
+mod update_control;
 mod update_progress;
 
+pub use update_control::{wait_for_command as wait_for_update_command, UpdateCommand};
 pub use update_progress::{report_update_progress, UpdateProgress};
 
 use anyhow::Result;
@@ -109,6 +111,8 @@ pub(crate) const UI_CSS: &str = concat!(
     include_str!("../assets/ui/css/12-review.css"),
     include_str!("../assets/ui/css/13-responsive.css"),
     include_str!("../assets/ui/css/14-update-overlay.css"),
+    include_str!("../assets/ui/css/15-file-preview.css"),
+    include_str!("../assets/ui/css/16-update-changelog.css"),
 );
 pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/01-state-theme-tabs.js"),
@@ -134,6 +138,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/21-impact.js"),
     include_str!("../assets/ui/js/22-responsive.js"),
     include_str!("../assets/ui/js/23-sidebar-resize.js"),
+    include_str!("../assets/ui/js/24-file-preview.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -291,6 +296,7 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/api/roots", get(api_roots))
         .route("/api/search", get(api_search))
         .route("/api/fs/ls", get(api_fs_ls))
+        .route("/api/file", get(api_file_preview))
         .route("/api/ask", post(api_ask))
         .route("/api/ask/stream", post(api_ask_stream))
         .route("/api/tree", get(api_tree))
@@ -334,6 +340,7 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/api/version", get(api_version))
         .route("/api/update/check", get(api_update_check))
         .route("/api/update/apply", post(api_update_apply))
+        .route("/api/update/control", post(api_update_control))
         .route(
             "/api/update/progress/stream",
             get(api_update_progress_stream),
@@ -1008,11 +1015,79 @@ mod tests {
         assert_eq!(v["title"], "Indexa 9.9.9");
         assert_eq!(v["downloaded"], 12);
         assert_eq!(v["total"], 34);
+        // The v0.34 changelog fields are null except on the `available` phase.
+        assert_eq!(v["notes"], serde_json::Value::Null);
+        assert_eq!(v["version"], serde_json::Value::Null);
 
         let e = UpdateProgress::error("X", "boom");
         let ev = serde_json::to_value(&e).unwrap();
         assert_eq!(ev["phase"], "error");
         assert_eq!(ev["error"], "boom");
+
+        // `available` carries the full changelog + version for the in-app modal.
+        let a = UpdateProgress::available("0.34.0", Some("- New update window".to_owned()));
+        let av = serde_json::to_value(&a).unwrap();
+        assert_eq!(av["phase"], "available");
+        assert_eq!(av["version"], "0.34.0");
+        assert_eq!(av["notes"], "- New update window");
+        assert_eq!(av["title"], "Indexa 0.34.0");
+    }
+
+    #[tokio::test]
+    async fn api_file_serves_text_within_roots_and_blocks_outside() {
+        // A real temp file inside an indexed root must be previewable; a real file outside any
+        // indexed root must be refused (path-confinement, mirroring MCP read_file).
+        let base = std::env::temp_dir().canonicalize().unwrap();
+        let pid = std::process::id();
+        let root = base.join(format!("indexa_fp_root_{pid}"));
+        let outside = base.join(format!("indexa_fp_out_{pid}"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let infile = root.join("a.rs");
+        std::fs::write(&infile, "fn main() { let x = 1; }\n").unwrap();
+        let outfile = outside.join("b.rs");
+        std::fs::write(&outfile, "secret\n").unwrap();
+
+        let mut store = Store::open_in_memory().unwrap();
+        // Entry under `root` (which is itself not an entry) → root_paths() yields `root`.
+        store
+            .upsert_entries(&[entry(infile.to_str().unwrap(), EntryKind::File)])
+            .unwrap();
+        let state = state_with(store);
+
+        let (status, json) = get_json(
+            build_router(state.clone(), 7620),
+            &format!("/api/file?path={}", infile.display()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["language"], "rust");
+        assert_eq!(json["binary"], false);
+        assert!(json["content"].as_str().unwrap().contains("fn main"));
+
+        let (status_out, _json) = get_json(
+            build_router(state, 7620),
+            &format!("/api/file?path={}", outfile.display()),
+        )
+        .await;
+        assert_eq!(status_out, StatusCode::FORBIDDEN);
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[tokio::test]
+    async fn update_control_is_desktop_gated() {
+        // Outside the desktop app (INDEXA_DESKTOP unset — the test default), the control endpoint
+        // refuses with 403: there's no updater task listening under plain `indexa serve`.
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let (status, _json) = post_json(
+            app,
+            "/api/update/control",
+            serde_json::json!({ "action": "start" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
