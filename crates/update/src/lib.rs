@@ -313,11 +313,17 @@ pub async fn apply(tag: &str) -> anyhow::Result<String> {
 ///
 /// Unlike [`apply`], this writes to a *target directory* and never self-replaces — so the desktop
 /// app can install or refresh the user's standalone CLI (the desktop has no CLI of its own, and
-/// the self-replace guard intentionally blocks updating inside the `.app`). The download + integrity
-/// checks mirror `apply`.
+/// the self-replace guard intentionally blocks updating inside the `.app`). The integrity checks
+/// mirror `apply`.
+///
+/// `on_progress(downloaded_bytes, total_bytes)` is called after each received chunk so a caller
+/// (the desktop app) can render a live progress bar; `total_bytes` is `None` when the server omits
+/// `Content-Length`. The body is read chunk-by-chunk via `Response::chunk` (no `reqwest` `stream`
+/// feature needed) rather than `.bytes()` all-at-once, so progress is real.
 pub async fn download_cli_to(
     dir: &std::path::Path,
     tag: &str,
+    on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
 ) -> anyhow::Result<std::path::PathBuf> {
     let tag_str = if tag.starts_with('v') {
         tag.to_string()
@@ -329,7 +335,7 @@ pub async fn download_cli_to(
     tracing::info!(%url, "downloading CLI binary");
 
     let client = build_client()?;
-    let resp = client
+    let mut resp = client
         .get(&url)
         .send()
         .await
@@ -341,7 +347,15 @@ pub async fn download_cli_to(
         );
     }
     let content_len = resp.content_length();
-    let bytes = resp.bytes().await.context("download stream interrupted")?;
+    // Stream the body so we can report progress per chunk. `chunk()` is available without the
+    // `stream` cargo feature, unlike `bytes_stream()`.
+    let mut bytes: Vec<u8> = Vec::with_capacity(content_len.unwrap_or(0) as usize);
+    while let Some(chunk) = resp.chunk().await.context("download stream interrupted")? {
+        bytes.extend_from_slice(&chunk);
+        if let Some(cb) = on_progress {
+            cb(bytes.len() as u64, content_len);
+        }
+    }
     if bytes.is_empty() {
         anyhow::bail!("downloaded binary is empty — the release asset may be missing");
     }

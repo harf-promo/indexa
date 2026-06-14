@@ -679,6 +679,18 @@
   </div>
 </dialog>
 
+<!-- Desktop self-update / CLI-install progress (driven by /api/update/progress/stream; 15-update.js).
+     Hidden until the stream reports a "downloading"/"installing" phase — never shows under plain serve. -->
+<div id="update-overlay" class="update-overlay" role="dialog" aria-modal="true" aria-labelledby="update-overlay-title" hidden>
+  <div class="update-overlay-card">
+    <div class="update-overlay-title" id="update-overlay-title">Updating Indexa&#x2026;</div>
+    <div class="engine-job-bar update-overlay-bar"><span class="engine-job-fill" id="update-overlay-fill"></span></div>
+    <div class="update-overlay-pct" id="update-overlay-pct"></div>
+    <div class="update-overlay-phase" id="update-overlay-phase"></div>
+    <button class="btn-sm update-overlay-dismiss" id="update-overlay-dismiss" hidden onclick="dismissUpdateOverlay()">Dismiss</button>
+  </div>
+</div>
+
 <script src="/assets/app.js" defer></script>
 </body>
 </html>

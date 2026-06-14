@@ -24,7 +24,7 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.29.0)
+## Current feature surface (v0.30.0)
 
 **CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize) · `scan` · `deep` ·
 `summarize` · `describe` · `map` · `worker` · `pack` (Context Packs) · `weight` (Importance
@@ -52,6 +52,17 @@ hover-revealed row actions so folder names aren't clipped; the desktop "Check fo
 version + CHANGELOG notes (release.yml feeds `latest.json` `notes` via tauri-action `releaseBody`) then
 restarts, and a new app/tray "Install command-line tool" item runs `indexa_update::download_cli_to`
 (non-self-replace CLI download → a PATH dir).
+
+**Update-progress invariant (v0.30):** the desktop self-update + CLI install show a **live progress
+bar** bridged Rust→web **without Tauri IPC** (the webview loads a remote URL — no `withGlobalTauri`).
+A process-global `watch` channel in `crates/web/src/update_progress.rs` (`report_update_progress` /
+`UpdateProgress`) is streamed over `GET /api/update/progress/stream` (SSE, mirrors
+`handlers/telemetry.rs`); `15-update.js` renders `#update-overlay` (reusing `.engine-job-bar`/
+`.engine-job-fill`). The desktop's `install_update`/`run_cli_install` (`apps/indexa-desktop/src/main.rs`)
+publish phases (downloading→installing→done/error); `download_cli_to` streams via `Response::chunk`
+(no reqwest `stream` feature) + an injected `on_progress` callback — so `crates/update` stays
+web-agnostic (no circular dep). Channel stays `idle` under plain `indexa serve`, so the overlay never
+shows there.
 
 **Major features by version:** Context Packs (v0.14) · Importance Weighting (v0.16, `importance_weights`
 table + `boost_with_weights` in QA) · Insights (v0.16, `find_*_duplicates`/`find_stale_entries`/
