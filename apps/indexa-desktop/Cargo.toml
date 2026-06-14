@@ -28,6 +28,15 @@ tauri-build = { version = "2", features = [] }
 tauri              = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell   = { version = "2" }
 tauri-plugin-updater = { version = "2" }
+# Pin Tauri's transitive `brotli` to the last-good 8.0.3-avoiding version: brotli 8.0.3
+# ships an internal compile error (`StandardAlloc: alloc::Allocator<…>` in
+# enc/combined_alloc.rs). The matching brotli-decompressor must be 5.0.1 (5.0.0 and 5.0.2
+# are likewise broken) — that's pinned via the COMMITTED apps/indexa-desktop/Cargo.lock,
+# not here: declaring brotli-decompressor directly drops the `std` feature brotli enables
+# on it and breaks the build. The committed lock is what keeps the whole graph
+# reproducible (no more floating into broken upstream releases). Drop this pin + re-float
+# once brotli ships a fixed release.
+brotli = "=8.0.2"
 
 # Indexa core — same crates as `apps/indexa` but linked directly so the
 # desktop app embeds the web server instead of shelling out.

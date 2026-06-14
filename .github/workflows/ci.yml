@@ -109,4 +109,6 @@ jobs:
           workspaces: apps/indexa-desktop -> target
 
       - name: Build desktop app
-        run: cargo build --manifest-path apps/indexa-desktop/Cargo.toml
+        # --locked: build from the committed apps/indexa-desktop/Cargo.lock and fail if it's
+        # stale, so the desktop dep graph can't silently float into a broken upstream release.
+        run: cargo build --locked --manifest-path apps/indexa-desktop/Cargo.toml
