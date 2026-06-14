@@ -120,9 +120,9 @@ async fn fetch_web(url: &str, timeout: u64, retries: u32) -> Result<String> {
         anyhow::bail!("HTTP {} fetching {url}", resp.status());
     }
     let html = resp.text().await.context("reading response body")?;
-    // Drop <script>/<style> blocks first — html2md would otherwise dump their JS/CSS as text.
+    // Drop <script>/<style> blocks first so their JS/CSS can't leak into the Markdown.
     let cleaned = strip_blocks(&strip_blocks(&html, "script"), "style");
-    let md = html2md::parse_html(&cleaned);
+    let md = htmd::convert(&cleaned).context("converting HTML to Markdown")?;
     if md.trim().is_empty() {
         anyhow::bail!("converted page was empty — not HTML, or no extractable text");
     }

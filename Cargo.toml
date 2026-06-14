@@ -77,8 +77,8 @@ toml = "1.1"
 # Regex (secret-scan/redaction on export; already in the tree transitively)
 regex = "1"
 
-# HTML → Markdown for opt-in remote web-page ingestion (reuses in-tree html5ever)
-html2md = "0.2"
+# HTML → Markdown for opt-in remote web-page ingestion (Apache-2.0; reuses in-tree html5ever)
+htmd = "0.5"
 
 # System resource detection
 sysinfo = { version = "0.39" }
