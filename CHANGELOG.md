@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0] — 2026-06-15
+
+"Readable & quiet": the in-app update window now renders the changelog as formatted text, and
+the review inbox stops asking about files that merely share a topic.
+
+### Fixed
+
+- **The "What's new" window no longer shows raw markdown.** Headings, **bold** text, bullet
+  lists, and `inline code` now render properly instead of showing `**`, `###`, and `-` as
+  literal characters. The formatter handles the hard-wrapped CHANGELOG style so bullet
+  continuations flow as a single item, not a broken list.
+- **The Review inbox no longer flags unrelated files as duplicates.** Near-duplicate detection
+  (similarity ≥ 95%) now requires all cluster members to share the same filename — so two
+  different files that happen to cover similar topics (e.g. `summarize.rs` and `jobs_exec.rs`)
+  no longer produce a "which is canonical?" question that has no useful answer. Exact-content
+  duplicates (byte-identical regardless of name) still always ask. Existing false-positive
+  questions are cleared automatically on the next `indexa prune`.
+
 ## [0.39.0] — 2026-06-15
 
 "Trustworthy & current": a quieter review inbox, code answers for code questions, and an

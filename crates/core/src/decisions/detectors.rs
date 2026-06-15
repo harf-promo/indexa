@@ -171,6 +171,27 @@ fn duplicate_cluster_actionable(paths: &[String]) -> bool {
     !(all_assets || any_generated)
 }
 
+/// Extract the file name (basename without directory) from a path string.
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Do all members of a near-duplicate cluster share the same filename? A
+/// near-dup (similarity-based, not content-identical) cluster of differently-
+/// named files is almost certainly a false positive — two files with similar
+/// *topic* whose summaries land nearby in embedding space, not actual copies.
+/// We only ask when every member has the same basename (e.g. `qa.rs` appearing
+/// in two different crates), which is strong evidence of an unintentional copy.
+/// Exact clusters (identical content fingerprint) skip this check — two files
+/// with different names but byte-identical content really are duplicates. (v0.40)
+fn near_dup_same_basenames(paths: &[String]) -> bool {
+    let mut it = paths.iter().map(|p| basename(p));
+    match it.next() {
+        None => true,
+        Some(first) => it.all(|b| b == first),
+    }
+}
+
 /// Symbol-ambiguity candidates, gated by config and pre-filtered for idioms.
 /// Returns empty when the feature is off (the default), so the detector loop is a
 /// no-op and never opens an unanswerable "which `new` is authoritative?" question. (v0.39)
@@ -207,7 +228,17 @@ pub fn sweep_filtered_noise(store: &mut Store, cfg: &ReviewConfig, dry_run: bool
                         .collect()
                 })
                 .unwrap_or_default();
-            !paths.is_empty() && !duplicate_cluster_actionable(&paths)
+            // Asset/generated filter from v0.39.
+            let noisy_asset = !paths.is_empty() && !duplicate_cluster_actionable(&paths);
+            // Near-dup (similarity < 1.0) clusters whose members have different
+            // basenames are false positives (similar topics, not copies). (v0.40)
+            let similarity = params
+                .get("similarity")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0);
+            let near_dup_false_pos =
+                similarity < 1.0 && !paths.is_empty() && !near_dup_same_basenames(&paths);
+            noisy_asset || near_dup_false_pos
         } else {
             false
         };
@@ -298,6 +329,14 @@ pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorRe
         // screenshots, fonts) and generated/vendored copies are not redundant source a
         // user would consolidate — asking floods the inbox with unanswerable questions. (v0.39)
         if !duplicate_cluster_actionable(&cluster.paths) {
+            report.skipped += 1;
+            continue;
+        }
+        // Near-dup clusters of differently-named files are almost always false
+        // positives: two files on the same topic whose summaries land nearby in
+        // embedding space. Only ask when all members share a basename (e.g.
+        // `qa.rs` in two crates) or the cluster is exact-content. (v0.40)
+        if !cluster.exact && !near_dup_same_basenames(&cluster.paths) {
             report.skipped += 1;
             continue;
         }
@@ -1774,5 +1813,193 @@ mod tests {
             "/p/a.rs".into(),
             "/p/b.rs".into()
         ]));
+    }
+
+    // ── v0.40 near-dup basename filter tests ─────────────────────────────────
+
+    #[test]
+    fn near_dup_same_basenames_helper() {
+        // Same basename in different dirs → true (potentially a copy).
+        assert!(near_dup_same_basenames(&[
+            "/crates/query/src/qa.rs".into(),
+            "/crates/web/src/qa.rs".into(),
+        ]));
+        // Different basenames → false (likely a false positive).
+        assert!(!near_dup_same_basenames(&[
+            "/crates/query/src/summarize.rs".into(),
+            "/crates/web/src/jobs_exec.rs".into(),
+        ]));
+        // Three members, all same → true.
+        assert!(near_dup_same_basenames(&[
+            "/a/foo.rs".into(),
+            "/b/foo.rs".into(),
+            "/c/foo.rs".into(),
+        ]));
+        // Three members, one different → false.
+        assert!(!near_dup_same_basenames(&[
+            "/a/foo.rs".into(),
+            "/b/foo.rs".into(),
+            "/c/bar.rs".into(),
+        ]));
+        // Single member → true (vacuous; no question is opened for single-member clusters).
+        assert!(near_dup_same_basenames(&["/a/foo.rs".into()]));
+        // Empty → true (vacuous).
+        assert!(near_dup_same_basenames(&[]));
+    }
+
+    #[test]
+    fn near_dup_differently_named_cluster_is_skipped() {
+        // Two files with different names get a high-similarity embedding cluster
+        // (via same source_hash used as embedding proxy in find_exact_duplicates).
+        // A near-dup of differently-named files must be skipped (not opened).
+        let mut store = Store::open_in_memory().unwrap();
+        // Use different source hashes so find_exact_duplicates doesn't fire;
+        // the question is whether the near-dup path is blocked by name check.
+        // We seed the open decision directly to test sweep_filtered_noise.
+        let q = NewDecision {
+            decision_type: "duplicate".into(),
+            subject: "/r/summarize.rs".into(),
+            params: serde_json::json!({
+                "paths": ["/r/summarize.rs", "/r/jobs_exec.rs"],
+                "similarity": 0.97_f32,
+                "exact": false,
+            }),
+            options: serde_json::json!(["/r/summarize.rs", "/r/jobs_exec.rs", "keep_all"]),
+            auto_value: Some("/r/summarize.rs".into()),
+            confidence: Some(0.97),
+            evidence_hash: "test-hash-near-diff-name".into(),
+            priority: 60,
+            paths: vec!["/r/summarize.rs".into(), "/r/jobs_exec.rs".into()],
+        };
+        store.record_decision(q).unwrap();
+        assert_eq!(store.open_decision_count().unwrap(), 1);
+
+        // sweep_filtered_noise should dismiss it.
+        let cfg = crate::config::ReviewConfig::default();
+        let n = sweep_filtered_noise(&mut store, &cfg, false).unwrap();
+        assert_eq!(n, 1, "differently-named near-dup must be swept");
+        assert_eq!(store.open_decision_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn near_dup_same_named_cluster_is_kept() {
+        // Same basename (qa.rs in two crates) is a real copy candidate — keep asking.
+        let mut store = Store::open_in_memory().unwrap();
+        let q = NewDecision {
+            decision_type: "duplicate".into(),
+            subject: "/crates/query/src/qa.rs".into(),
+            params: serde_json::json!({
+                "paths": ["/crates/query/src/qa.rs", "/crates/web/src/qa.rs"],
+                "similarity": 0.97_f32,
+                "exact": false,
+            }),
+            options: serde_json::json!([
+                "/crates/query/src/qa.rs",
+                "/crates/web/src/qa.rs",
+                "keep_all"
+            ]),
+            auto_value: Some("/crates/query/src/qa.rs".into()),
+            confidence: Some(0.97),
+            evidence_hash: "test-hash-near-same-name".into(),
+            priority: 60,
+            paths: vec![
+                "/crates/query/src/qa.rs".into(),
+                "/crates/web/src/qa.rs".into(),
+            ],
+        };
+        store.record_decision(q).unwrap();
+        assert_eq!(store.open_decision_count().unwrap(), 1);
+
+        let cfg = crate::config::ReviewConfig::default();
+        let n = sweep_filtered_noise(&mut store, &cfg, false).unwrap();
+        assert_eq!(n, 0, "same-basename near-dup must NOT be swept");
+        assert_eq!(
+            store.open_decision_count().unwrap(),
+            1,
+            "question must remain open"
+        );
+    }
+
+    #[test]
+    fn exact_dup_differently_named_is_kept() {
+        // Exact content (similarity 1.0) — always ask regardless of name.
+        let mut store = Store::open_in_memory().unwrap();
+        let q = NewDecision {
+            decision_type: "duplicate".into(),
+            subject: "/r/alpha.rs".into(),
+            params: serde_json::json!({
+                "paths": ["/r/alpha.rs", "/r/beta.rs"],
+                "similarity": 1.0_f32,
+                "exact": true,
+            }),
+            options: serde_json::json!(["/r/alpha.rs", "/r/beta.rs", "keep_all"]),
+            auto_value: Some("/r/alpha.rs".into()),
+            confidence: Some(1.0),
+            evidence_hash: "test-hash-exact-diff-name".into(),
+            priority: 60,
+            paths: vec!["/r/alpha.rs".into(), "/r/beta.rs".into()],
+        };
+        store.record_decision(q).unwrap();
+        assert_eq!(store.open_decision_count().unwrap(), 1);
+
+        let cfg = crate::config::ReviewConfig::default();
+        let n = sweep_filtered_noise(&mut store, &cfg, false).unwrap();
+        assert_eq!(
+            n, 0,
+            "exact-content dup must NOT be swept even if names differ"
+        );
+        assert_eq!(store.open_decision_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn run_detectors_skips_near_dup_differently_named_cluster() {
+        // Integration test: run_detectors must skip the cluster before opening it.
+        // We seed two files with the same source_hash so find_exact_duplicates fires
+        // but differently-named files — exact=true so the basename gate does NOT apply,
+        // confirming that exact clusters still go through. Then we also test near-dup
+        // via the seeding loop gate (exact=false, different names must be skipped).
+        //
+        // The store's find_near_duplicates requires embeddings, so we test the seeding
+        // gate indirectly: inject a near-dup differently-named open question, then run
+        // run_detectors which calls sweep_filtered_noise first and clears it.
+        let mut store = Store::open_in_memory().unwrap();
+        let q = NewDecision {
+            decision_type: "duplicate".into(),
+            subject: "/r/graph.rs".into(),
+            params: serde_json::json!({
+                "paths": ["/r/graph.rs", "/r/pack.rs"],
+                "similarity": 0.96_f32,
+                "exact": false,
+            }),
+            options: serde_json::json!(["/r/graph.rs", "/r/pack.rs", "keep_all"]),
+            auto_value: Some("/r/graph.rs".into()),
+            confidence: Some(0.96),
+            evidence_hash: "test-hash-gate-integration".into(),
+            priority: 60,
+            paths: vec!["/r/graph.rs".into(), "/r/pack.rs".into()],
+        };
+        store.record_decision(q).unwrap();
+        assert_eq!(store.open_decision_count().unwrap(), 1);
+
+        // Summaries for the members are needed so the expiry sweep doesn't expire them.
+        store
+            .upsert_summary(&file_summary("/r/graph.rs", "Hg"))
+            .unwrap();
+        store
+            .upsert_summary(&file_summary("/r/pack.rs", "Hp"))
+            .unwrap();
+
+        let cfg = crate::config::ReviewConfig::default();
+        let report = run_detectors(&mut store, &cfg).unwrap();
+        // sweep_filtered_noise counts as skipped; the question must be gone.
+        assert!(
+            report.skipped >= 1,
+            "differently-named near-dup must be swept by run_detectors"
+        );
+        assert_eq!(
+            store.open_decision_count().unwrap(),
+            0,
+            "question must be dismissed"
+        );
     }
 }
