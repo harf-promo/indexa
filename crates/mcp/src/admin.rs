@@ -21,9 +21,33 @@ impl IndexaMcp {
         let store = self.store()?;
         let entries = store.entry_count().map_err(mcp_err)?;
         let chunks = store.chunk_count().map_err(mcp_err)?;
-        let mut out = format!("{entries} indexed entries, {chunks} chunks.");
+        // Lead with the server version so an agent can tell when it's talking to a
+        // stale binary (the v0.39 honesty fix: a 9-version-behind MCP served wrong
+        // answers silently).
+        let mut out = format!(
+            "Indexa MCP v{}.  {entries} indexed entries, {chunks} chunks.",
+            env!("CARGO_PKG_VERSION")
+        );
+        // Index freshness: warn when the newest indexed chunk is old, so the agent
+        // knows the answers may predate recent code/file changes and can re-index.
+        if let Ok(Some(ts)) = store.last_indexed_at() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(ts);
+            let days = ((now - ts) / 86_400).max(0);
+            if days >= 7 {
+                out.push_str(&format!(
+                    "\n\u{26A0} Index last updated {days} days ago — it may miss recent changes. \
+                     Run `indexa index <root>` (or enable watch) to refresh before relying on answers."
+                ));
+            } else {
+                out.push_str(&format!("\nIndex last updated {days}d ago."));
+            }
+        }
         // Measured token savings (approximate by definition — see store::usage);
-        // best-effort, so a telemetry read failure can't fail the stats call.
+        // best-effort, so a telemetry read failure can't fail the stats call. Only
+        // meaningful when the index is fresh (see the freshness note above).
         if let Some(line) = store
             .usage_summary(indexa_core::store::USAGE_WEEK_SECS)
             .ok()

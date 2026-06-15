@@ -53,6 +53,174 @@ const LANGUAGE_SCAN_LIMIT: usize = 200;
 /// hottest ambiguities first; the rest wait for a later scan.
 const SYMBOL_AMBIGUITY_TOP_K: usize = 10;
 
+/// Above this many definers a symbol is an idiom (every type defines its own
+/// `new`/`default`), not a resolvable ambiguity — asking is pure noise. (v0.39)
+const SYMBOL_AMBIGUITY_MAX_DEFINERS: usize = 6;
+
+/// Extensions whose "duplicates" are not actionable: a user never picks a
+/// canonical copy among near-identical images/fonts/binaries — they're assets,
+/// not redundant source. (v0.39 duplicate-noise filter.)
+const DUP_SKIP_EXTS: &[&str] = &[
+    "png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "tif", "ico", "icns", "svg", "heic", "pdf",
+    "mp4", "mov", "avi", "mkv", "webm", "mp3", "wav", "flac", "woff", "woff2", "ttf", "otf", "eot",
+    "zip", "gz", "tar", "bin", "wasm", "class", "o", "a", "dylib", "so", "lock",
+];
+
+/// Path fragments marking generated / vendored / asset trees: members here are
+/// regenerated on build (icon sets) or are intentional collections — "dedupe
+/// these" is never the right ask. (v0.39 duplicate-noise filter.)
+const DUP_SKIP_DIR_FRAGMENTS: &[&str] = &[
+    ".xcassets/",
+    "/icons/",
+    "/assets/",
+    "/dist/",
+    "/build/",
+    "/node_modules/",
+    "/vendor/",
+    "/.next/",
+    "/target/",
+    "/competitors/",
+];
+
+/// Universal trait/idiom method names: legitimately defined independently by many
+/// types, so "which is authoritative?" has no answer. (v0.39 symbol-noise filter.)
+const IDIOM_SYMBOLS: &[&str] = &[
+    "new",
+    "default",
+    "parse",
+    "build",
+    "from",
+    "into",
+    "from_str",
+    "as_str",
+    "as_ref",
+    "as_mut",
+    "clone",
+    "to_string",
+    "to_owned",
+    "drop",
+    "deref",
+    "deref_mut",
+    "fmt",
+    "eq",
+    "ne",
+    "hash",
+    "cmp",
+    "partial_cmp",
+    "next",
+    "len",
+    "is_empty",
+    "iter",
+    "into_iter",
+    "default_config_path",
+    "main",
+    "run",
+    "init",
+    "setup",
+    "render",
+    "update",
+    "handle",
+    "call",
+    "apply",
+    "load",
+    "save",
+    "open",
+    "close",
+    "read",
+    "write",
+    "flush",
+    "poll",
+    "start",
+    "stop",
+    "name",
+    "kind",
+    "value",
+];
+
+/// A symbol so ubiquitous that disambiguating it is busywork: a known idiom, or a
+/// common accessor/builder prefix (`with_`/`set_`/`get_`/`is_`/`to_`/`from_`/`on_`).
+fn is_idiom_symbol(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    IDIOM_SYMBOLS.contains(&n.as_str())
+        || [
+            "with_", "set_", "get_", "is_", "to_", "from_", "on_", "try_",
+        ]
+        .iter()
+        .any(|p| n.starts_with(p))
+}
+
+fn dup_ext_is_asset(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| DUP_SKIP_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+fn dup_in_generated_dir(path: &str) -> bool {
+    DUP_SKIP_DIR_FRAGMENTS.iter().any(|f| path.contains(f))
+}
+
+/// Is a duplicate cluster worth a human's attention? Not when every member is an
+/// asset/binary (you won't "pick a canonical" screenshot) or any member lives in a
+/// generated/vendored tree (icon sets regenerate; vendored copies aren't yours).
+/// Only redundant source/text that a user could actually consolidate qualifies.
+fn duplicate_cluster_actionable(paths: &[String]) -> bool {
+    let all_assets = !paths.is_empty() && paths.iter().all(|p| dup_ext_is_asset(p));
+    let any_generated = paths.iter().any(|p| dup_in_generated_dir(p));
+    !(all_assets || any_generated)
+}
+
+/// Symbol-ambiguity candidates, gated by config and pre-filtered for idioms.
+/// Returns empty when the feature is off (the default), so the detector loop is a
+/// no-op and never opens an unanswerable "which `new` is authoritative?" question. (v0.39)
+fn symbol_ambiguity_candidates(store: &Store, cfg: &ReviewConfig) -> Result<Vec<(String, i64)>> {
+    if !cfg.symbol_ambiguity {
+        return Ok(Vec::new());
+    }
+    Ok(store
+        .ambiguous_called_symbols(SYMBOL_AMBIGUITY_TOP_K)?
+        .into_iter()
+        .filter(|(sym, _)| !is_idiom_symbol(sym))
+        .collect())
+}
+
+/// Retroactively dismiss already-open questions the v0.39 noise filters would now
+/// reject — so existing inboxes get quiet without a re-index. Run from both
+/// `run_detectors` (so a re-index cleans up) and `indexa prune` (cheap, no Ollama).
+/// Dismisses: every `symbol_ambiguity` row when the feature is off, plus idiom/over-
+/// definer ones when on; and `duplicate` rows whose cluster isn't actionable. With
+/// `dry_run`, counts without dismissing (for `prune --dry-run`). (v0.39)
+pub fn sweep_filtered_noise(store: &mut Store, cfg: &ReviewConfig, dry_run: bool) -> Result<usize> {
+    let mut hits = 0usize;
+    for d in store.open_decisions(None, 10_000)? {
+        let drop = if d.decision_type == DecisionType::SymbolAmbiguity.as_str() {
+            !cfg.symbol_ambiguity || is_idiom_symbol(&d.subject)
+        } else if d.decision_type == DecisionType::Duplicate.as_str() {
+            let params: serde_json::Value = serde_json::from_str(&d.params).unwrap_or_default();
+            let paths: Vec<String> = params
+                .get("paths")
+                .and_then(|p| p.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            !paths.is_empty() && !duplicate_cluster_actionable(&paths)
+        } else {
+            false
+        };
+        if drop {
+            hits += 1;
+            if !dry_run {
+                store.dismiss_decision(d.id)?;
+            }
+        }
+    }
+    Ok(hits)
+}
+
 /// What a detector pass did. Totals are across detector types; a per-type
 /// split waits until a surface actually needs it.
 #[derive(Debug, Default, Clone, Copy)]
@@ -78,6 +246,11 @@ pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorRe
         repaired: super::repair_unapplied(store)?,
         ..DetectorReport::default()
     };
+
+    // v0.39: retroactively dismiss already-open questions the noise filters now reject
+    // (idiom / disabled symbol_ambiguity, asset/generated duplicate clusters) so an
+    // existing inbox gets quiet on the next index without a manual sweep.
+    report.skipped += sweep_filtered_noise(store, cfg, false)?;
 
     // Expiry sweep: an open question whose evidence left the index would
     // otherwise linger forever and permanently consume the open budget —
@@ -119,6 +292,13 @@ pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorRe
     let mut open_budget = (cfg.max_open as i64 - store.open_decision_count()?).max(0) as usize;
     for cluster in clusters {
         if cluster.paths.len() < 2 {
+            continue;
+        }
+        // Skip non-actionable clusters: near-identical assets (icon sets, competitor
+        // screenshots, fonts) and generated/vendored copies are not redundant source a
+        // user would consolidate — asking floods the inbox with unanswerable questions. (v0.39)
+        if !duplicate_cluster_actionable(&cluster.paths) {
+            report.skipped += 1;
             continue;
         }
         if report.opened >= cfg.max_new_per_scan || open_budget == 0 {
@@ -268,13 +448,15 @@ pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorRe
     // apart. Top-K hottest by caller count per scan; the answer is stored as
     // the question's effects only (no projection table — graph surfaces
     // consult the ledger's answer separately).
-    for (symbol, callers) in store.ambiguous_called_symbols(SYMBOL_AMBIGUITY_TOP_K)? {
+    for (symbol, callers) in symbol_ambiguity_candidates(store, cfg)? {
         if report.opened >= cfg.max_new_per_scan || open_budget == 0 {
             break;
         }
         let definers = store.edges_to("defines", &symbol)?;
-        if definers.len() < 2 {
-            continue; // racing re-deep shrank the set since the GROUP BY
+        // < 2: racing re-deep shrank the set. > MAX: an idiom every type defines
+        // (`new`, `default`) — not a resolvable ambiguity, so don't ask. (v0.39)
+        if definers.len() < 2 || definers.len() > SYMBOL_AMBIGUITY_MAX_DEFINERS {
+            continue;
         }
         let fingerprint = symbol_fingerprint(&definers);
         let mut reask_parent: Option<i64> = None;
@@ -1299,7 +1481,11 @@ mod tests {
             ])
             .unwrap();
 
-        let cfg = crate::config::ReviewConfig::default();
+        // symbol_ambiguity is opt-in as of v0.39 — enable it for this detector's tests.
+        let cfg = crate::config::ReviewConfig {
+            symbol_ambiguity: true,
+            ..crate::config::ReviewConfig::default()
+        };
         let report = run_detectors(&mut store, &cfg).unwrap();
         assert_eq!(report.opened, 1);
         let open = store.open_decisions(Some("symbol_ambiguity"), 10).unwrap();
@@ -1333,7 +1519,10 @@ mod tests {
     fn symbol_detector_reasks_chained_when_the_definer_set_changes() {
         let mut store = Store::open_in_memory().unwrap();
         seed_ambiguous_foo(&mut store);
-        let cfg = crate::config::ReviewConfig::default();
+        let cfg = crate::config::ReviewConfig {
+            symbol_ambiguity: true,
+            ..crate::config::ReviewConfig::default()
+        };
         assert_eq!(run_detectors(&mut store, &cfg).unwrap().opened, 1);
         let id = store.open_decisions(Some("symbol_ambiguity"), 1).unwrap()[0].id;
         super::super::decide_and_apply(&mut store, id, "all", "user").unwrap();
@@ -1389,13 +1578,17 @@ mod tests {
         // max_new_per_scan below top-K: the scan cap wins.
         let cfg = crate::config::ReviewConfig {
             max_new_per_scan: 4,
+            symbol_ambiguity: true,
             ..crate::config::ReviewConfig::default()
         };
         assert_eq!(run_detectors(&mut store, &cfg).unwrap().opened, 4);
 
         // With a generous cap the per-scan top-K (10) bounds the rest:
         // 6 remaining of the K=10 hottest open on the second pass.
-        let cfg = crate::config::ReviewConfig::default();
+        let cfg = crate::config::ReviewConfig {
+            symbol_ambiguity: true,
+            ..crate::config::ReviewConfig::default()
+        };
         let report = run_detectors(&mut store, &cfg).unwrap();
         assert_eq!(
             report.opened + 4,
@@ -1422,5 +1615,164 @@ mod tests {
         let report = run_detectors(&mut store, &cfg).unwrap();
         assert_eq!(report.opened, 2);
         assert_eq!(store.open_decision_count().unwrap(), 2);
+    }
+
+    // ── v0.39 noise filters ─────────────────────────────────────────────────────
+    #[test]
+    fn duplicate_detector_skips_asset_clusters_keeps_source() {
+        let mut store = Store::open_in_memory().unwrap();
+        // Identical-content images (exact dup) — assets, NOT actionable.
+        store
+            .upsert_summary(&file_summary("/r/x.png", "H1"))
+            .unwrap();
+        store
+            .upsert_summary(&file_summary("/r/y.png", "H1"))
+            .unwrap();
+        // Identical-content source — a real, actionable duplicate.
+        store
+            .upsert_summary(&file_summary("/r/a.rs", "H2"))
+            .unwrap();
+        store
+            .upsert_summary(&file_summary("/r/b.rs", "H2"))
+            .unwrap();
+
+        let cfg = crate::config::ReviewConfig::default();
+        let report = run_detectors(&mut store, &cfg).unwrap();
+        assert_eq!(
+            report.opened, 1,
+            "only the source cluster opens; the image cluster is filtered"
+        );
+        let open = store.open_decisions(Some("duplicate"), 10).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].subject, "/r/a.rs");
+    }
+
+    #[test]
+    fn duplicate_detector_skips_generated_dir_clusters() {
+        let mut store = Store::open_in_memory().unwrap();
+        // Source files (not asset-extension) but under a generated icon tree — not actionable.
+        store
+            .upsert_summary(&file_summary("/r/icons/ios/Icon-1.txt", "H1"))
+            .unwrap();
+        store
+            .upsert_summary(&file_summary("/r/icons/ios/Icon-2.txt", "H1"))
+            .unwrap();
+        let cfg = crate::config::ReviewConfig::default();
+        let report = run_detectors(&mut store, &cfg).unwrap();
+        assert_eq!(
+            report.opened, 0,
+            "a generated/asset tree is never a dedupe target"
+        );
+    }
+
+    #[test]
+    fn symbol_ambiguity_is_off_by_default() {
+        let mut store = Store::open_in_memory().unwrap();
+        seed_ambiguous_foo(&mut store);
+        let cfg = crate::config::ReviewConfig::default(); // symbol_ambiguity = false
+        run_detectors(&mut store, &cfg).unwrap();
+        assert_eq!(
+            store
+                .open_decisions(Some("symbol_ambiguity"), 10)
+                .unwrap()
+                .len(),
+            0,
+            "the unanswerable-question detector must stay quiet unless opted in"
+        );
+    }
+
+    #[test]
+    fn symbol_ambiguity_skips_idioms_even_when_enabled() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                fresh_entry("/a.rs", EntryKind::File),
+                fresh_entry("/b.rs", EntryKind::File),
+                fresh_entry("/c.rs", EntryKind::File),
+            ])
+            .unwrap();
+        // `new` is a universal idiom: defined in two files, called once. Even with the
+        // feature ON, asking "which `new` is authoritative?" is noise — must not fire.
+        store
+            .upsert_edges(&[
+                edge("/a.rs", "defines", "new"),
+                edge("/b.rs", "defines", "new"),
+                edge("/c.rs", "calls", "new"),
+            ])
+            .unwrap();
+        let cfg = crate::config::ReviewConfig {
+            symbol_ambiguity: true,
+            ..crate::config::ReviewConfig::default()
+        };
+        run_detectors(&mut store, &cfg).unwrap();
+        assert_eq!(
+            store
+                .open_decisions(Some("symbol_ambiguity"), 10)
+                .unwrap()
+                .len(),
+            0,
+            "idiom `new` must not surface even with the feature on"
+        );
+    }
+
+    #[test]
+    fn sweep_dismisses_disabled_symbol_ambiguity_rows() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                fresh_entry("/a.rs", EntryKind::File),
+                fresh_entry("/b.rs", EntryKind::File),
+            ])
+            .unwrap();
+        // Pre-existing ambiguity row (e.g. created before v0.39). record_decision does
+        // not filter — the detector/sweep do.
+        store
+            .record_decision(symbol_ambiguity_question(
+                "resolve_base_url",
+                &["/a.rs".to_owned(), "/b.rs".to_owned()],
+                2,
+            ))
+            .unwrap();
+        assert_eq!(store.open_decision_count().unwrap(), 1);
+
+        let cfg = crate::config::ReviewConfig::default(); // feature off
+        assert_eq!(
+            sweep_filtered_noise(&mut store, &cfg, true).unwrap(),
+            1,
+            "dry-run counts it"
+        );
+        assert_eq!(
+            store.open_decision_count().unwrap(),
+            1,
+            "dry-run dismisses nothing"
+        );
+        assert_eq!(sweep_filtered_noise(&mut store, &cfg, false).unwrap(), 1);
+        assert_eq!(
+            store.open_decision_count().unwrap(),
+            0,
+            "sweep dismissed the disabled-feature row"
+        );
+    }
+
+    #[test]
+    fn idiom_and_actionable_helpers() {
+        assert!(is_idiom_symbol("new"));
+        assert!(is_idiom_symbol("Default")); // case-insensitive
+        assert!(is_idiom_symbol("with_timeout"));
+        assert!(is_idiom_symbol("set_scope"));
+        assert!(!is_idiom_symbol("resolve_base_url"));
+        assert!(!is_idiom_symbol("compute_budget"));
+        assert!(!duplicate_cluster_actionable(&[
+            "/a/x.webp".into(),
+            "/a/y.webp".into()
+        ]));
+        assert!(!duplicate_cluster_actionable(&[
+            "/p/icons/a.rs".into(),
+            "/p/b.rs".into()
+        ]));
+        assert!(duplicate_cluster_actionable(&[
+            "/p/a.rs".into(),
+            "/p/b.rs".into()
+        ]));
     }
 }

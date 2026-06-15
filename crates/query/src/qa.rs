@@ -297,6 +297,12 @@ pub(crate) fn retrieve(
     // an answer about the current state. Multiplicative, not exclusion — such docs stay
     // findable when the query is explicitly scoped into the historical path.
     apply_archive_penalty(&mut hits, cfg.scope.as_deref());
+    // v0.39: when the question is about *implementation* ("which function implements…",
+    // "the code that…", or it names a snake_case/CamelCase identifier), boost code-file
+    // hits so the implementation outranks prose docs. Fixes the doc-bias where "how does X
+    // work? which function?" returned only README/CHANGELOG and couldn't name the code.
+    // Always-on like the archive penalty; inert on non-code questions and doc-only indexes.
+    apply_code_intent_boost(&mut hits, question);
     // v0.31: optional recency boost — push recently-modified files up (the positive twin of the
     // archive penalty). Opt-in so it never silently re-ranks; uses mtime, not git.
     if cfg.use_recency_weight && !hits.is_empty() {
@@ -319,6 +325,64 @@ const HISTORICAL_SEGMENTS: [&str; 5] = ["archive", "archived", "historical", "de
 /// How hard to push historical hits down. 0.15 keeps them retrievable (and explicitly
 /// scopeable) but lets any current doc with a comparable raw score outrank them.
 const ARCHIVE_PENALTY: f64 = 0.15;
+
+/// Phrases that signal a question is about implementation/code, not prose. (v0.39)
+const CODE_INTENT_TERMS: [&str; 12] = [
+    "function",
+    "implement",
+    "method",
+    "struct",
+    "trait",
+    "fn ",
+    "class ",
+    "def ",
+    "which file",
+    "in the code",
+    "code that",
+    "where is",
+];
+
+/// How hard to lift a code-file hit when the question is code-intent. Modest and
+/// multiplicative — enough to put the implementing file above prose docs of similar
+/// raw score, not enough to drag in an unrelated code file.
+const CODE_INTENT_BOOST: f64 = 1.6;
+
+/// Code file extensions: a hit here is "the implementation" for a code question.
+const CODE_EXTS: [&str; 22] = [
+    "rs", "py", "js", "mjs", "cjs", "ts", "tsx", "jsx", "go", "java", "c", "h", "cpp", "cc", "rb",
+    "php", "swift", "kt", "scala", "cs", "sh", "lua",
+];
+
+/// Does the question ask about implementation/code? True on explicit code phrasing or a
+/// snake_case identifier (≥4 chars with an underscore) — a strong "they mean a symbol" tell.
+fn is_code_intent(question: &str) -> bool {
+    let q = question.to_ascii_lowercase();
+    CODE_INTENT_TERMS.iter().any(|t| q.contains(t))
+        || question
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|w| w.len() >= 4 && w.contains('_'))
+}
+
+fn is_code_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| CODE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Multiplicatively lift code-file hits for code-intent questions, then the caller's
+/// re-sort orders them. No-op when the question isn't code-intent or no hit is code.
+fn apply_code_intent_boost(hits: &mut [SearchHit], question: &str) {
+    if !is_code_intent(question) {
+        return;
+    }
+    for h in hits.iter_mut() {
+        if is_code_path(&h.entry_path) {
+            h.rrf_score *= CODE_INTENT_BOOST;
+        }
+    }
+}
 
 /// True if any `/`-segment of `path` is a historical marker (see `HISTORICAL_SEGMENTS`).
 fn path_is_historical(path: &str) -> bool {
@@ -989,6 +1053,40 @@ mod tests {
             text: "x".to_owned(),
             rrf_score: score,
         }
+    }
+
+    #[test]
+    fn code_intent_boost_lifts_implementation_over_docs() {
+        // Docs outrank code by raw score; a code-intent question must flip that so the
+        // implementing file (not the README) answers "which function…".
+        let mut hits = vec![
+            hit("/docs/readme.md", 1.0),
+            hit("/crates/query/src/qa.rs", 0.8),
+        ];
+        apply_code_intent_boost(
+            &mut hits,
+            "which function implements archive down-weighting?",
+        );
+        hits.sort_by(|a, b| b.rrf_score.partial_cmp(&a.rrf_score).unwrap());
+        assert_eq!(hits[0].entry_path, "/crates/query/src/qa.rs");
+
+        // A prose question gets no boost — the doc stays on top.
+        let mut prose = vec![
+            hit("/docs/readme.md", 1.0),
+            hit("/crates/query/src/qa.rs", 0.8),
+        ];
+        apply_code_intent_boost(&mut prose, "what is this project about?");
+        prose.sort_by(|a, b| b.rrf_score.partial_cmp(&a.rrf_score).unwrap());
+        assert_eq!(prose[0].entry_path, "/docs/readme.md");
+    }
+
+    #[test]
+    fn is_code_intent_detects_code_questions_only() {
+        assert!(is_code_intent("which function does this?"));
+        assert!(is_code_intent("how does apply_archive_penalty work")); // snake_case symbol
+        assert!(is_code_intent("where is the retrieve method"));
+        assert!(!is_code_intent("what is the marketing strategy?"));
+        assert!(!is_code_intent("summarize the quarterly results"));
     }
 
     #[test]

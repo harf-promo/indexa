@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0] — 2026-06-15
+
+"Trustworthy & current": a quieter review inbox, code answers for code questions, and an
+end to silently-stale context.
+
+### Fixed / Changed
+
+- **The Review inbox no longer floods you with unanswerable questions.** Duplicate detection now
+  skips near-identical **assets** (icon sets, screenshots, fonts) and generated/vendored trees — it
+  only asks about redundant **source/text** you could actually consolidate. The "which definition is
+  authoritative?" (symbol-ambiguity) detector is now **off by default**, and when enabled it skips
+  universal idioms (`new`, `default`, `parse`, `build`, …) and symbols defined in many files — cases
+  that have no answer on an idiomatic codebase. Existing low-value questions are cleared automatically
+  on the next index or `indexa prune`.
+- **Code questions get code answers.** Retrieval now lifts the implementing source file above prose
+  docs when you ask an implementation question ("which function does X", or you name a `snake_case`
+  symbol) — so "how does X work?" stops returning only the README/CHANGELOG.
+- **Your CLI tracks the app.** When the desktop app self-updates it now refreshes the matching `indexa`
+  CLI in place — fixing the silent version skew where the app moved ahead while your terminal `indexa`
+  (and the MCP server that runs it) stayed versions behind and served stale answers.
+
+### Added
+
+- **Staleness and version are now visible.** `GET /api/health` plus a web banner warn when the index is
+  stale (newest content older than a week); the MCP `get_stats` tool now reports the running server
+  version and index age, so an AI agent can tell when it's talking to a stale binary or index instead of
+  trusting it blindly.
+
+### Notes
+
+- Background auto-watch (live re-indexing of changed files) and a `doctor` version-skew section are the
+  next step; for now the staleness banner + `get_stats` make a stale index visible so you can re-index
+  or start Watch.
+
 ## [0.38.0] — 2026-06-14
 
 "Safe": the memory watchdog now sees the vision models too.

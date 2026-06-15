@@ -143,6 +143,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/24-file-preview.js"),
     include_str!("../assets/ui/js/25-graph-explore.js"),
     include_str!("../assets/ui/js/26-url-state.js"),
+    include_str!("../assets/ui/js/27-health.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -302,6 +303,7 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/api/fs/ls", get(api_fs_ls))
         .route("/api/file", get(api_file_preview))
         .route("/api/inspect", get(api_inspect))
+        .route("/api/health", get(api_health))
         .route("/api/ask", post(api_ask))
         .route("/api/ask/stream", post(api_ask_stream))
         .route("/api/ask/explain", post(api_ask_explain))
