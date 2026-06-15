@@ -43,7 +43,8 @@ pub enum Commands {
     #[command(after_help = "Examples:
   indexa index ~/code/my-repo
   indexa index ~/Documents --passes 2
-  indexa index ~/Projects --embed-model nomic-embed-text:v1.5")]
+  indexa index ~/Projects --embed-model nomic-embed-text:v1.5
+  indexa index ~/Projects --contextual   # Anthropic Contextual Retrieval (slower, better recall)")]
     #[command(display_order = 10)]
     Index {
         /// Path(s) to index. Omit to index all existing roots.
@@ -61,6 +62,13 @@ pub enum Commands {
         /// Refinement passes per summary. Default: 2 for new context, 1 for refresh.
         #[arg(long)]
         passes: Option<u32>,
+
+        /// Enable Anthropic Contextual Retrieval: generate a 1–2 sentence situating blurb
+        /// per chunk before embedding. Reduces retrieval failures by ~35% at the cost of
+        /// one extra LLM call per chunk (slower on local hardware). Default: off.
+        /// Also enabled by `[describer] contextual_retrieval = true` in config.
+        #[arg(long)]
+        contextual: bool,
     },
 
     /// Build the surface context map of a path (fast — no AI calls).
@@ -97,7 +105,8 @@ pub enum Commands {
     #[command(after_help = "Examples:
   indexa deep ~/Documents
   indexa deep ~/Projects --embed-model nomic-embed-text:v1.5
-  indexa deep --dry-run ~/Documents")]
+  indexa deep --dry-run ~/Documents
+  indexa deep ~/Projects --contextual   # Anthropic Contextual Retrieval (slower, better recall)")]
     #[command(display_order = 41)]
     Deep {
         /// Path to deep-scan. Omit to deep-scan the entire existing index.
@@ -115,6 +124,13 @@ pub enum Commands {
         /// Summary storage mode: augment (default), compress, summaries-only.
         #[arg(long, default_value = "augment")]
         mode: String,
+
+        /// Enable Anthropic Contextual Retrieval: generate a 1–2 sentence situating blurb
+        /// per chunk before embedding. Reduces retrieval failures by ~35% at the cost of
+        /// one extra LLM call per chunk (slower on local hardware). Default: off.
+        /// Also enabled by `[describer] contextual_retrieval = true` in config.
+        #[arg(long)]
+        contextual: bool,
     },
 
     /// Generate hierarchical context summaries for indexed files and directories.
@@ -1180,6 +1196,24 @@ mod tests {
         let cli = Cli::try_parse_from(["indexa", "deep", "~/Documents", "--dry-run"]).unwrap();
         match cli.command {
             Commands::Deep { dry_run, .. } => assert!(dry_run),
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_deep_contextual_flag() {
+        let cli = Cli::try_parse_from(["indexa", "deep", "~/Projects", "--contextual"]).unwrap();
+        match cli.command {
+            Commands::Deep { contextual, .. } => assert!(contextual),
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_index_contextual_flag() {
+        let cli = Cli::try_parse_from(["indexa", "index", "~/Projects", "--contextual"]).unwrap();
+        match cli.command {
+            Commands::Index { contextual, .. } => assert!(contextual),
             _ => panic!("wrong command"),
         }
     }

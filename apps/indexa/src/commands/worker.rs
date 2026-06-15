@@ -65,7 +65,16 @@ async fn run_auto_reindex(db_path: &std::path::Path, cfg: &Config) -> Result<()>
         // Reuse the one-shot pipeline; it's incremental (deep skips unchanged files,
         // summarize refreshes stale summaries). A failure on one root must not abort
         // the others or the worker.
-        if let Err(e) = cmd_index(vec![root.clone()], None, "augment".to_owned(), None, cfg).await {
+        if let Err(e) = cmd_index(
+            vec![root.clone()],
+            None,
+            "augment".to_owned(),
+            None,
+            false,
+            cfg,
+        )
+        .await
+        {
             eprintln!("auto-reindex: failed to refresh {root}: {e:#}");
         }
     }

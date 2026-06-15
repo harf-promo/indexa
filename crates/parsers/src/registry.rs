@@ -35,6 +35,7 @@ use crate::media::MediaParser;
 use crate::office::OfficeParser;
 use crate::org::OrgParser;
 use crate::pdf::PdfParser;
+use crate::presentation::PresentationParser;
 use crate::text::{MarkdownParser, TextParser};
 use crate::types::{Extracted, Parser};
 use anyhow::{bail, Result};
@@ -70,6 +71,7 @@ impl Registry {
                 Box::new(OrgParser::default()),
                 Box::new(ImageParser),
                 Box::new(MediaParser),
+                Box::new(PresentationParser), // must precede OfficeParser (pptx vs. ppt)
                 Box::new(OfficeParser),
                 Box::new(MarkdownParser::default()),
                 Box::new(TextParser::default()),
@@ -125,6 +127,7 @@ pub fn parse(path: &Path) -> Result<Extracted> {
         Box::new(OrgParser::default()),
         Box::new(ImageParser),
         Box::new(MediaParser),
+        Box::new(PresentationParser), // must precede OfficeParser (pptx vs. ppt)
         Box::new(OfficeParser),
         Box::new(MarkdownParser::default()),
         Box::new(TextParser::default()),

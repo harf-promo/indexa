@@ -15,6 +15,7 @@ pub(crate) async fn cmd_index(
     embed_model: Option<String>,
     mode: String,
     passes: Option<u32>,
+    contextual: bool,
     cfg: &Config,
 ) -> Result<()> {
     // ── Phase 1: scan ─────────────────────────────────────────────────────────
@@ -23,7 +24,15 @@ pub(crate) async fn cmd_index(
 
     // ── Phase 2: deep embed + code graph ──────────────────────────────────────
     println!("\n── Phase 2 / 3 · Deep context ──────────────────────────────");
-    cmd_deep(paths.clone(), embed_model, false, mode.clone(), cfg).await?;
+    cmd_deep(
+        paths.clone(),
+        embed_model,
+        false,
+        mode.clone(),
+        contextual,
+        cfg,
+    )
+    .await?;
 
     // ── Phase 3: hierarchical summaries ───────────────────────────────────────
     println!("\n── Phase 3 / 3 · Summaries ─────────────────────────────────");

@@ -7,6 +7,7 @@ pub mod media;
 pub mod office;
 pub mod org;
 pub mod pdf;
+pub mod presentation;
 pub mod registry;
 pub mod text;
 pub mod types;
