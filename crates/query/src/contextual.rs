@@ -159,7 +159,7 @@ mod tests {
             // Simulate streaming two fragments.
             on_frag("half1 ".to_owned());
             on_frag("half2".to_owned());
-            Ok(format!("half1 half2"))
+            Ok("half1 half2".to_string())
         }
     }
 
@@ -196,7 +196,7 @@ mod tests {
     fn build_doc_context_caps_at_4000_chars() {
         // Feed 10 chunks of 1000 chars each — should be capped at 4000.
         let long = "x".repeat(1000);
-        let texts: Vec<&str> = std::iter::repeat(long.as_str()).take(10).collect();
+        let texts: Vec<&str> = std::iter::repeat_n(long.as_str(), 10).collect();
         let ctx = build_doc_context(&texts);
         assert!(
             ctx.chars().count() <= 4000,
