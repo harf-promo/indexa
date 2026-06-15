@@ -1,4 +1,6 @@
 use anyhow::Result;
+use indexa_core::config;
+use indexa_core::decisions::detectors;
 use indexa_core::store::Store;
 
 use super::helpers::require_index_db;
@@ -22,7 +24,12 @@ pub(crate) async fn cmd_prune(dry_run: bool) -> Result<()> {
     let counts = store.count_orphans()?;
     // gc_decisions has no dry-run mode; the count-only twin keeps --dry-run honest.
     let gc_candidates = store.gc_decisions_count(DECISION_GC_SECS)?;
-    if counts.is_empty() && gc_candidates == 0 {
+    // v0.39: low-value review questions the new noise filters reject (idiom / disabled
+    // symbol-ambiguity, asset/generated duplicate clusters). Respects the user's actual
+    // config so an opted-in symbol_ambiguity isn't wrongly dismissed.
+    let review_cfg = config::load_default().map(|c| c.review).unwrap_or_default();
+    let noise_candidates = detectors::sweep_filtered_noise(&mut store, &review_cfg, true)?;
+    if counts.is_empty() && gc_candidates == 0 && noise_candidates == 0 {
         println!("Index is clean — no orphaned rows or stale review questions to prune.");
         return Ok(());
     }
@@ -36,17 +43,27 @@ classification(s) (no matching entry).",
         println!(
             "Would GC {gc_candidates} resolved review question(s) (dismissed/expired > 365 days)."
         );
+        if noise_candidates > 0 {
+            println!(
+                "Would dismiss {noise_candidates} low-value review question(s) (idiom / disabled \
+symbol-ambiguity, asset/generated duplicates)."
+            );
+        }
         println!("Run `indexa prune` (without --dry-run) to remove them.");
         return Ok(());
     }
 
     let removed = store.prune_orphans()?;
     let gcd = store.gc_decisions(DECISION_GC_SECS)?;
+    let dismissed = detectors::sweep_filtered_noise(&mut store, &review_cfg, false)?;
     println!(
         "Pruned {} orphaned chunk(s), {} stale queue row(s), {} summary(ies), and {} \
 classification(s).",
         removed.chunks, removed.queue, removed.summaries, removed.classifications
     );
+    if dismissed > 0 {
+        println!("Dismissed {dismissed} low-value review question(s) (idiom/asset noise).");
+    }
     if gcd > 0 {
         println!(
             "Review questions GC'd: {gcd} (forgotten dismissals may be asked again if their \

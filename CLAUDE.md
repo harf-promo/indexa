@@ -24,7 +24,7 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.38.0)
+## Current feature surface (v0.39.0)
 
 **CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize) · `scan` · `deep` ·
 `summarize` · `describe` · `inspect` (per-path "what's indexed here") · `map` · `worker` · `pack`
@@ -53,6 +53,22 @@ hover-revealed row actions so folder names aren't clipped; the desktop "Check fo
 version + CHANGELOG notes (release.yml feeds `latest.json` `notes` via tauri-action `releaseBody`) then
 restarts, and a new app/tray "Install command-line tool" item runs `indexa_update::download_cli_to`
 (non-self-replace CLI download → a PATH dir).
+
+**Trustworthy & current (v0.39):** fixes the owner's "stale binary / noisy review / wrong answers" audit.
+**(A) Review noise** — `crates/core/src/decisions/detectors.rs`: duplicate decisions skip non-actionable
+clusters (`duplicate_cluster_actionable`: all-asset extensions `DUP_SKIP_EXTS` or any member in
+`DUP_SKIP_DIR_FRAGMENTS` generated/vendored trees); `symbol_ambiguity` is OFF by default
+(`ReviewConfig.symbol_ambiguity`, `[review] symbol_ambiguity`) + an idiom denylist (`is_idiom_symbol`:
+`new`/`default`/`parse`/… + `with_`/`set_`/`get_` prefixes) + `SYMBOL_AMBIGUITY_MAX_DEFINERS` ceiling;
+`sweep_filtered_noise` retroactively dismisses existing noise (run from `run_detectors` + `indexa prune`,
+respects the config flag). **(B) Code answers** — `qa.rs apply_code_intent_boost` (×1.6 code-file hits on
+code-intent questions: `is_code_intent` terms / snake_case; always-on like `apply_archive_penalty`, inert
+on prose/non-code) fixes the doc-bias where "which function…" returned only docs. **(C) Visibility** —
+`get_stats` (MCP) shows server version + index-age staleness; `GET /api/health` (`handlers/health.rs`,
+`STALE_AFTER_DAYS=7`) + `27-health.js` banner; desktop `install_update` refreshes the CLI in place via
+`download_cli_to` (the version-skew root-cause fix). ⚠️ The 3 "bugs" an adversarial agent flagged
+(`trim_continuation` slice, `delete_subtree` prefix, redact count) were VERIFIED false positives — don't
+"fix" them. Desktop background auto-watch wiring + `doctor` skew are deferred to v0.40 (device-only verify).
 
 **Multimodal memory-safety (v0.38, "safe"):** the watchdog now counts vision/caption models. New
 vision footprints in `resource.rs` `MODEL_FOOTPRINTS` (`llama3.2-vision`, `:11b` alias, `moondream`;

@@ -373,6 +373,23 @@ async fn install_update(app: tauri::AppHandle, update: tauri_plugin_updater::Upd
     #[cfg(target_os = "macos")]
     resign_app_bundle();
 
+    // v0.39: refresh the matching CLI in place, so the user's terminal `indexa` — and the
+    // MCP server that runs `indexa mcp` — tracks the app instead of rotting versions behind
+    // (the root cause of a desktop-0.38 / CLI-0.29 / MCP-0.29 skew that silently served stale,
+    // sometimes-wrong context). Best-effort and non-fatal: a failed CLI refresh never blocks
+    // the app restart.
+    {
+        let (dir, on_path) = resolve_cli_dir();
+        let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+        match indexa_update::download_cli_to(&dir, &tag, None).await {
+            Ok(p) => eprintln!(
+                "[indexa-desktop] CLI refreshed to {tag} at {} (on PATH: {on_path})",
+                p.display()
+            ),
+            Err(e) => eprintln!("[indexa-desktop] CLI refresh after update failed (non-fatal): {e:#}"),
+        }
+    }
+
     report_update_progress(UpdateProgress::done(title));
     eprintln!("[indexa-desktop] update {version} installed — restarting");
     // The user clicked "Install & Relaunch" in the in-app modal, so restart straight into the new

@@ -151,7 +151,7 @@ mod tests {
                 .iter()
                 .map(|(id, v)| (*id, cosine(query, v)))
                 .collect();
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            scored.sort_by(|a, b| b.1.total_cmp(&a.1)); // NaN-safe (no unwrap panic)
             let bf: std::collections::HashSet<i64> =
                 scored.iter().take(k).map(|(id, _)| *id).collect();
             let ann: std::collections::HashSet<i64> = idx.search(query, k).into_iter().collect();

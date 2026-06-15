@@ -82,6 +82,11 @@ pub struct ReviewConfig {
     pub max_open: usize,
     /// Max questions a single scan/classify pass may open.
     pub max_new_per_scan: usize,
+    /// Surface "which definition is authoritative?" questions for bare-name symbols
+    /// defined in multiple files. OFF by default: on idiomatic codebases (Rust `new`,
+    /// `default`, `parse`, `build`, …) these are near-unanswerable and flood the inbox.
+    /// Opt in only with a real polyglot symbol-resolution need. (v0.39)
+    pub symbol_ambiguity: bool,
 }
 
 impl Default for ReviewConfig {
@@ -90,6 +95,7 @@ impl Default for ReviewConfig {
             auto_record_below: 0.8,
             max_open: 50,
             max_new_per_scan: 20,
+            symbol_ambiguity: false,
         }
     }
 }
