@@ -214,6 +214,32 @@ function dismissUpdateOverlay() {  // eslint-disable-line no-unused-vars
 // a white card with a scrollable changelog + Install & Relaunch / Later. The buttons POST to
 // /api/update/control, which wakes the desktop's install task (the webview has no Tauri IPC).
 
+// Reflow hard-wrapped CHANGELOG text into logical paragraphs before passing to
+// renderMarkdown. Our CHANGELOG is hard-wrapped at ~100 cols with 2-space
+// continuation indents; renderMarkdown is line-based, so a wrapped bullet's
+// second line would close the <ul> prematurely. This pre-pass merges a
+// non-blank continuation line into the previous logical line unless it starts
+// a new block (heading, list item, fenced code, blank line).
+function reflowChangelog(text) {
+  if (!text) return text;
+  var lines = text.split('\n');
+  var out = [];
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    var isBlock = !line.trim() ||           // blank
+      /^#{1,6}\s/.test(line) ||             // heading
+      /^\s*[-*]\s/.test(line) ||            // list item
+      /^```/.test(line);                    // fenced code
+    if (!isBlock && out.length > 0) {
+      // Continuation: append to previous line with a space.
+      out[out.length - 1] = out[out.length - 1] + ' ' + line.trim();
+    } else {
+      out.push(line);
+    }
+  }
+  return out.join('\n');
+}
+
 function showUpdateChangelog(p) {
   var modal = document.getElementById('update-changelog-modal');
   if (!modal) return;
@@ -222,7 +248,15 @@ function showUpdateChangelog(p) {
   var installBtn = document.getElementById('ucl-install');
   if (verEl) verEl.textContent = p.version || (p.title || '').replace(/^Indexa\s*/, '');
   if (notesEl) {
-    notesEl.textContent = p.notes && p.notes.trim() ? p.notes.trim() : 'No release notes available.';
+    var raw = p.notes && p.notes.trim() ? p.notes.trim() : 'No release notes available.';
+    // Render as markdown (headings, bold, lists) instead of raw pre-wrap text.
+    // reflowChangelog merges hard-wrapped continuation lines first so the
+    // line-based renderer doesn't close list items prematurely.
+    if (typeof renderMarkdown === 'function') {
+      notesEl.innerHTML = renderMarkdown(reflowChangelog(raw));
+    } else {
+      notesEl.textContent = raw; // fallback if renderer not loaded (should not happen)
+    }
     notesEl.scrollTop = 0;
   }
   if (installBtn) { installBtn.disabled = false; installBtn.textContent = 'Install & Relaunch'; }
