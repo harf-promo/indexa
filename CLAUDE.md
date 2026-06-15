@@ -24,9 +24,9 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.39.0)
+## Current feature surface (v0.41.0)
 
-**CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize) · `scan` · `deep` ·
+**CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize; `--contextual` flag) · `scan` · `deep` (`--contextual` flag) ·
 `summarize` · `describe` · `inspect` (per-path "what's indexed here") · `map` · `worker` · `pack`
 (Context Packs; `pack add-url` = remote sources) · `weight` (Importance
 weighting) · `insights` (duplicates/stale/diff) · `graph` (file-to-file call graph) · `export` ·
@@ -53,6 +53,19 @@ hover-revealed row actions so folder names aren't clipped; the desktop "Check fo
 version + CHANGELOG notes (release.yml feeds `latest.json` `notes` via tauri-action `releaseBody`) then
 restarts, and a new app/tray "Install command-line tool" item runs `indexa_update::download_cli_to`
 (non-self-replace CLI download → a PATH dir).
+
+**Understand the whole project (v0.41):** (A) **Presentation parsing** — `crates/parsers/src/presentation.rs` (`PresentationParser`); slides extracted from OOXML zip (`ppt/slides/slideN.xml`), numerically sorted, speaker notes from `ppt/notesSlides/notesSlideN.xml`, one chunk per slide. `.ppt` (OLE binary) quiet stub in `office.rs`. Richer `.docx` reads headers/footers/footnotes/endnotes. (B) **Whole-project synthesis** — `is_broad_intent(q)` detector + `build_project_overview(store, hits, scope, budget)` in `qa.rs`; broad questions inject a PROJECT OVERVIEW block (root roll-up + child one-liners) into `pack_context` before chunk citations; `retrieve_and_rerank` + `agentic_retrieve` both return `(hits, overview)`. Budget: broad → `context_budget*35%`, specific → 300 chars. `synthesize_from_hits` + `build_prompt` updated with overview guidance. (C) **Contextual Retrieval** — `crates/query/src/contextual.rs` shared helper (`build_doc_context`, `contextual_embed_texts`, `build_blurb_prompt`); `--contextual` flag on `deep`/`index`; wired in `deep.rs` using the helper; `jobs_exec.rs` refactored to call `build_doc_context`/`build_blurb_prompt` from the shared helper (kills prompt drift). 549 tests. ⚠️ Known gaps: scanned-PDF OCR, Apple iWork, chart/SmartArt text — documented in `docs/methodology.md`.
+
+**Readable & quiet (v0.40):** (A) **Changelog markdown rendering** — the in-app update window (`showUpdateChangelog`
+in `15-update.js`) now calls `renderMarkdown(reflowChangelog(notes))` instead of `notesEl.textContent = raw`.
+`reflowChangelog` merges hard-wrapped CHANGELOG continuation lines so `renderMarkdown`'s line-based parser
+doesn't close list items prematurely. Light-theme CSS overrides in `16-update-changelog.css` (white card
+background → dark headings, gray code chips). (B) **Near-dup basename filter** — `near_dup_same_basenames`
+(new helper in `detectors.rs`) gates the seeding loop and `sweep_filtered_noise`: a near-dup cluster
+(similarity-based, not byte-identical) now only opens a "which is canonical?" question when all members share
+the same filename. Differently-named files that happen to be topically similar no longer flood the inbox.
+Exact-content clusters always ask regardless of name. 5 new tests; 520 total. ⚠️ The MCP server must be
+restarted after each CLI update so it spawns the new binary — MCP version skew remains device-only/user-triggered.
 
 **Trustworthy & current (v0.39):** fixes the owner's "stale binary / noisy review / wrong answers" audit.
 **(A) Review noise** — `crates/core/src/decisions/detectors.rs`: duplicate decisions skip non-actionable

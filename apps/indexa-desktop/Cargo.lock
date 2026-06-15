@@ -45,9 +45,9 @@ checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
 
 [[package]]
 name = "alloc-stdlib"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "982052a20ce6eccdc3ee95f1fd77f10bf6b7ff5b02c3c4cc5a3fb50ce506a108"
+checksum = "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195"
 dependencies = [
  "alloc-no-stdlib",
 ]
@@ -361,9 +361,9 @@ dependencies = [
 
 [[package]]
 name = "brotli-decompressor"
-version = "5.0.1"
+version = "5.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5962523e1b92ce1b5e793d9169b9943eece10d39f62550bc04bb605d75b94924"
+checksum = "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-core"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2170,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-desktop"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "anyhow",
  "brotli",
@@ -2192,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-embed"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2207,7 +2207,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-http-util"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "reqwest 0.12.28",
  "tokio",
@@ -2215,7 +2215,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-llm"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2232,7 +2232,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-parsers"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "anyhow",
  "calamine",
@@ -2257,7 +2257,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-query"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2273,7 +2273,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-update"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -2288,7 +2288,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-web"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "anyhow",
  "axum",

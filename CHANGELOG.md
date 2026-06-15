@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.0] — 2026-06-16
+
+"Understand the whole project": Indexa now makes sense of a real work directory — presentations,
+documents, spreadsheets, and code — and can answer "what is this project about?" from the project's
+own structure rather than from scattered file excerpts.
+
+### Added
+
+- **Presentation parsing (`.pptx`/`.ppsx`).** PowerPoint files are fully indexed for the first
+  time — slide text and speaker notes extracted per slide, sorted numerically (slide 10 after slide
+  9), with one searchable chunk per slide. `.ppt` (legacy binary) now stores a quiet fallback stub
+  instead of counting as a parse error.
+- **Richer Word document parsing.** `.docx` extraction now includes headers, footers, footnotes,
+  and endnotes in addition to the main body — so a document's full text is indexed, not just
+  its paragraphs.
+- **Whole-project synthesis.** Broad questions — "what is this project about?", "main themes",
+  "high-level overview", "summarize the project" — now draw on Indexa's directory roll-up
+  summaries (always generated, never surfaced in answers before). The answer opens with a
+  PROJECT OVERVIEW block: the root directory's summary plus top child-directory one-liners.
+  Specific questions keep the existing chunk-citation behaviour unchanged.
+- **Contextual Retrieval (`--contextual`).** Anthropic's Contextual Retrieval technique is now
+  available on the CLI path. Pass `--contextual` to `indexa deep` or `indexa index` to generate
+  a 1–2 sentence situating blurb per chunk before embedding — reduces retrieval failures by ~35%
+  at the cost of one extra LLM call per chunk (default: off; or set
+  `[describer] contextual_retrieval = true`). The web path already supported this; CLI and web
+  paths now share a single prompt (no drift).
+
+### Changed
+
+- **549 tests** (up from 520). New tests cover PPTX slide ordering, speaker notes, fallback on
+  corrupt zips, broad-intent detection, project-overview budget, contextual blurb generation,
+  cancellation, and all CLI flag parsing additions.
+
 ## [0.40.0] — 2026-06-15
 
 "Readable & quiet": the in-app update window now renders the changelog as formatted text, and

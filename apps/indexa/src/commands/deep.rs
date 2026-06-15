@@ -6,7 +6,7 @@ use indexa_core::{
     walker::{walk, WalkConfig},
 };
 use indexa_llm::OllamaLlm;
-use indexa_query::enqueue_subtree;
+use indexa_query::{contextual::ContextualEvent, enqueue_subtree};
 use std::io::{IsTerminal, Write};
 
 use super::helpers::{build_embedder, parse_summary_mode, require_index_db, resolve_roots};
@@ -16,6 +16,7 @@ pub(crate) async fn cmd_deep(
     embed_model_flag: Option<String>,
     dry_run: bool,
     mode: String,
+    contextual: bool,
     cfg: &Config,
 ) -> Result<()> {
     let summary_mode = parse_summary_mode(&mode)?;
@@ -96,6 +97,23 @@ pub(crate) async fn cmd_deep(
 
     let mut store = Store::open(&db_path)?;
     let embedder = build_embedder(cfg, Some(&embed_model))?;
+
+    // Effective contextual-retrieval flag: CLI --contextual OR config [describer] contextual_retrieval.
+    let use_contextual = contextual || cfg.describer.contextual_retrieval;
+    // Build the contextual LLM once (re-used per file) when the feature is enabled.
+    // Uses the same file-describer model and base URL — no extra model pull needed.
+    let ctx_llm: Option<OllamaLlm> = if use_contextual {
+        let base = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
+        Some(OllamaLlm::new(&base, &cfg.describer.file_model).with_num_ctx(cfg.describer.num_ctx))
+    } else {
+        None
+    };
+    if use_contextual {
+        eprintln!(
+            "  contextual retrieval enabled (model: {})",
+            cfg.describer.file_model
+        );
+    }
 
     // Optional image captioning (opt-in): a vision model adds a caption chunk per image.
     // Built once, gated on [parsers.image] caption; shares the describer's Ollama endpoint.
@@ -250,10 +268,38 @@ pub(crate) async fn cmd_deep(
 
             // Embed all of a file's chunks in batched round-trips (≫ faster than one HTTP
             // call per chunk), preserving order; per-chunk-resilient on a batch failure.
-            let texts: Vec<&str> = extracted.chunks.iter().map(|c| c.text.as_str()).collect();
-            let mut embeddings =
-                indexa_embed::embed_all(embedder.as_ref(), &texts, indexa_embed::EMBED_BATCH_SIZE)
-                    .await;
+            // With contextual retrieval enabled, each chunk is first enriched with a
+            // 1–2 sentence situating blurb from the file LLM; the ORIGINAL text is stored,
+            // but the ENRICHED text (blurb + chunk) is what gets embedded. This is the
+            // Anthropic Contextual Retrieval technique (−35% retrieval failures).
+            let raw_texts: Vec<&str> = extracted.chunks.iter().map(|c| c.text.as_str()).collect();
+            let embed_texts: Vec<String> = if let Some(ref llm) = ctx_llm {
+                let doc_context = indexa_query::contextual::build_doc_context(&raw_texts);
+                let path_str_clone = path_str.clone();
+                indexa_query::contextual::contextual_embed_texts(
+                    llm,
+                    &doc_context,
+                    &raw_texts,
+                    None,
+                    &path_str,
+                    move |event| match event {
+                        ContextualEvent::BlurbFragment { .. } => {} // silent — no streaming to stderr
+                        ContextualEvent::BlurbFailed { error, .. } => {
+                            eprintln!("  ⚠  {path_str_clone}: context blurb failed: {error}");
+                        }
+                    },
+                )
+                .await
+            } else {
+                raw_texts.iter().map(|s| s.to_string()).collect()
+            };
+            let embed_text_refs: Vec<&str> = embed_texts.iter().map(|s| s.as_str()).collect();
+            let mut embeddings = indexa_embed::embed_all(
+                embedder.as_ref(),
+                &embed_text_refs,
+                indexa_embed::EMBED_BATCH_SIZE,
+            )
+            .await;
             // Drop embeddings whose dim ≠ the configured `[embedding] dim` (model/config
             // mismatch) — they'd corrupt dense search; the chunk stays BM25-searchable.
             let (dim_mismatch, sample_dim) =

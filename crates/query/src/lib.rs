@@ -1,5 +1,6 @@
 //! Hybrid search (FTS5 + vector) and RAG-based Q&A pipeline.
 
+pub mod contextual;
 pub mod eval;
 pub mod export;
 pub mod qa;

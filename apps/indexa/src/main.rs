@@ -68,14 +68,16 @@ async fn main() -> Result<()> {
             embed_model,
             mode,
             passes,
-        } => commands::cmd_index(paths, embed_model, mode, passes, &cfg).await,
+            contextual,
+        } => commands::cmd_index(paths, embed_model, mode, passes, contextual, &cfg).await,
         Commands::Scan { paths, all } => commands::cmd_scan(paths, all, &cfg).await,
         Commands::Deep {
             paths,
             embed_model,
             dry_run,
             mode,
-        } => commands::cmd_deep(paths, embed_model, dry_run, mode, &cfg).await,
+            contextual,
+        } => commands::cmd_deep(paths, embed_model, dry_run, mode, contextual, &cfg).await,
         Commands::Map { depth } => commands::cmd_map(depth).await,
         Commands::Summarize {
             paths,

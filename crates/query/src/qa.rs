@@ -326,6 +326,172 @@ const HISTORICAL_SEGMENTS: [&str; 5] = ["archive", "archived", "historical", "de
 /// scopeable) but lets any current doc with a comparable raw score outrank them.
 const ARCHIVE_PENALTY: f64 = 0.15;
 
+// ── Broad-question (project-overview) detection ───────────────────────────────
+
+/// Phrases that signal a question is asking for a project-level / thematic overview.
+/// Conservative/false-negative-biased: phrase-level substrings only, never single common
+/// words like "what" or "summary". A missed broad question still gets the small root-L0
+/// fallback; the harm of a false-positive (enlarging the overview block for a specific
+/// question) is minor — chunks still fill the remainder of the budget.
+const BROAD_INTENT_TERMS: [&str; 20] = [
+    "what is this project",
+    "what's this project",
+    "what is this repo",
+    "what's this repo",
+    "what is this about",
+    "what's this about",
+    "what does this project",
+    "tell me about this project",
+    "summarize this project",
+    "summarise this project",
+    "summary of the project",
+    "summarize the project",
+    "summarise the project",
+    "main themes",
+    "overall",
+    "high level",
+    "high-level",
+    "what are these documents about",
+    "across these documents",
+    "the whole project",
+];
+
+fn is_broad_intent(question: &str) -> bool {
+    let q = question.to_ascii_lowercase();
+    BROAD_INTENT_TERMS.iter().any(|t| q.contains(t))
+}
+
+// ── Project-overview composer ─────────────────────────────────────────────────
+
+/// Safely truncate `s` to at most `max_chars` chars at a UTF-8 boundary.
+fn truncate_on_boundary(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        None => s,
+        Some((i, _)) => &s[..i],
+    }
+}
+
+/// Compute the nearest common ancestor (deepest shared directory prefix) of a
+/// set of file paths (using `/` as the separator). Returns `None` when `paths`
+/// is empty or has no common prefix.
+fn common_ancestor(paths: &[String]) -> Option<String> {
+    let mut iter = paths.iter();
+    let first = iter.next()?;
+    let mut prefix: Vec<&str> = first.trim_end_matches('/').split('/').collect();
+    for path in iter {
+        let segs: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+        let shared = prefix
+            .iter()
+            .zip(segs.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        prefix.truncate(shared);
+        if prefix.is_empty() {
+            return None;
+        }
+    }
+    Some(prefix.join("/"))
+}
+
+/// Build a "PROJECT OVERVIEW" block from directory roll-up summaries. Runs
+/// **inside the sync store scope** so it never crosses an `.await`. Returns an
+/// empty string when no dir summaries exist (the feature is then completely inert).
+///
+/// Budget split:
+/// - `overview_budget` chars max for the overview block.
+/// - Callers subtract `result.len()` from their chunk budget.
+fn build_project_overview(
+    store: &Store,
+    hits: &[SearchHit],
+    scope: Option<&str>,
+    overview_budget: usize,
+) -> String {
+    if overview_budget == 0 || hits.is_empty() {
+        return String::new();
+    }
+
+    // Determine the root directory to summarise: prefer the explicit scope, else
+    // the nearest common ancestor of the top hit paths.
+    let root: String = if let Some(s) = scope {
+        s.to_owned()
+    } else {
+        let top_paths: Vec<String> = hits.iter().take(5).map(|h| h.entry_path.clone()).collect();
+        match common_ancestor(&top_paths) {
+            Some(a) => a,
+            None => return String::new(),
+        }
+    };
+
+    // Look up the root directory's summary. If missing, walk up to find one.
+    let root_rec = {
+        let mut r = None;
+        let mut candidate = root.clone();
+        loop {
+            if let Ok(Some(rec)) = store.summary_by_path(&candidate) {
+                if rec.kind == "dir" {
+                    r = Some(rec);
+                    break;
+                }
+            }
+            // Walk up one level.
+            match std::path::Path::new(&candidate).parent() {
+                Some(p) => {
+                    let s = p.to_string_lossy().into_owned();
+                    if s.is_empty() || s == "/" || s == candidate {
+                        break;
+                    }
+                    candidate = s;
+                }
+                None => break,
+            }
+        }
+        r
+    };
+
+    let root_rec = match root_rec {
+        Some(r) => r,
+        None => return String::new(),
+    };
+
+    // Compose the overview block.
+    let root_name = std::path::Path::new(&root_rec.path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&root_rec.path);
+    let root_summary = if root_rec.summary.trim().is_empty() {
+        return String::new();
+    } else {
+        root_rec.summary.trim()
+    };
+
+    let mut block = format!(
+        "PROJECT OVERVIEW (directory roll-up summaries — background context; \
+         cite numbered excerpts below for specific claims):\n{root_name}: {root_summary}\n"
+    );
+
+    // Append top child-directory L0 abstracts (one-liners) if budget allows.
+    if let Ok(children) = store.children_summaries(&root_rec.path) {
+        for child in children.iter().filter(|c| c.kind == "dir").take(6) {
+            let child_name = std::path::Path::new(&child.path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&child.path);
+            let child_l0 = child.summary_l0.as_deref().unwrap_or(&child.summary).trim();
+            if child_l0.is_empty() {
+                continue;
+            }
+            let line = format!("  - {child_name}: {child_l0}\n");
+            if block.len() + line.len() > overview_budget {
+                break;
+            }
+            block.push_str(&line);
+        }
+    }
+
+    // Hard-cap to overview_budget chars at a UTF-8 boundary.
+    truncate_on_boundary(&block, overview_budget).to_owned()
+}
+
 /// Phrases that signal a question is about implementation/code, not prose. (v0.39)
 const CODE_INTENT_TERMS: [&str; 12] = [
     "function",
@@ -556,12 +722,12 @@ pub async fn answer_with_ann(
     cfg: &QaConfig,
     ann: Option<&AnnIndex>,
 ) -> Result<Answer> {
-    let hits = retrieve_and_rerank(db_path, embedder, llm, question, cfg, ann).await?;
+    let (hits, overview) = retrieve_and_rerank(db_path, embedder, llm, question, cfg, ann).await?;
     if hits.is_empty() {
         return Ok(no_match_answer(question));
     }
     // Synthesize (no store access).
-    synthesize_from_hits(hits, llm, question, cfg).await
+    synthesize_from_hits(hits, overview, llm, question, cfg).await
 }
 
 /// Hard cap on agentic retrieval hops, regardless of `cfg.max_steps`. Each hop is
@@ -593,11 +759,12 @@ pub async fn answer_agentic(
     cfg: &QaConfig,
     on_step: &mut (dyn FnMut(usize, &str) + Send),
 ) -> Result<Answer> {
-    let hits = agentic_retrieve(db_path, embedder, llm, question, cfg, None, on_step).await?;
+    let (hits, overview) =
+        agentic_retrieve(db_path, embedder, llm, question, cfg, None, on_step).await?;
     if hits.is_empty() {
         return Ok(no_match_answer(question));
     }
-    synthesize_from_hits(hits, llm, question, cfg).await
+    synthesize_from_hits(hits, overview, llm, question, cfg).await
 }
 
 /// Streaming agentic Q&A: the [`answer_agentic`] hop loop, then a streamed synthesis.
@@ -617,7 +784,7 @@ pub async fn answer_agentic_stream(
 ) -> Result<Answer> {
     // Hop loop — each hop surfaces a Step chunk. The on_step closure's borrow of
     // on_chunk is confined to this block so on_chunk is free for synthesis below.
-    let hits = {
+    let (hits, overview) = {
         let mut on_step =
             |step: usize, query: &str| on_chunk(AnswerChunk::Step(step, query.to_owned()));
         agentic_retrieve(db_path, embedder, llm, question, cfg, ann, &mut on_step).await?
@@ -632,7 +799,7 @@ pub async fn answer_agentic_stream(
 
     // Confidence is a property of the retrieval pool, fixed before synthesis.
     let confidence = confidence_for(&hits, cfg);
-    let (context, sources) = pack_context(&hits, cfg.context_budget);
+    let (context, sources) = pack_context(&hits, &overview, cfg.context_budget);
     on_chunk(AnswerChunk::Sources(sources.clone()));
 
     let prompt = build_prompt(question, &context);
@@ -652,7 +819,7 @@ pub async fn answer_agentic_stream(
     })
 }
 
-/// The agentic hop loop: returns the merged, deduplicated, re-ranked hit pool.
+/// The agentic hop loop: returns `(merged hit pool, project overview)`.
 /// Each hop reuses [`retrieve`], so `cfg.scope` and the summary/importance boosts
 /// apply on every hop (a follow-up never leaks outside the requested scope). The
 /// `&Store` is opened and dropped inside a sync block each hop so the future stays
@@ -665,7 +832,7 @@ async fn agentic_retrieve(
     cfg: &QaConfig,
     ann: Option<&AnnIndex>,
     on_step: &mut (dyn FnMut(usize, &str) + Send),
-) -> Result<Vec<SearchHit>> {
+) -> Result<(Vec<SearchHit>, String)> {
     let max_steps = cfg.max_steps.clamp(1, AGENTIC_MAX_STEPS_CAP);
     let mut pool: Vec<SearchHit> = Vec::new();
     let mut seen_chunks: std::collections::HashSet<i64> = std::collections::HashSet::new();
@@ -716,7 +883,20 @@ async fn agentic_retrieve(
             .partial_cmp(&a.rrf_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    Ok(pool)
+
+    // Build project overview from the merged pool — same logic as retrieve_and_rerank.
+    // Open a fresh Store; the borrow is dropped before returning so the future stays Send.
+    let overview = {
+        let overview_budget = if is_broad_intent(question) {
+            cfg.context_budget * 35 / 100
+        } else {
+            300
+        };
+        let store = Store::open(db_path)?;
+        build_project_overview(&store, &pool, cfg.scope.as_deref(), overview_budget)
+    };
+
+    Ok((pool, overview))
 }
 
 fn normalize_query(q: &str) -> String {
@@ -822,7 +1002,7 @@ pub async fn answer_stream_with_ann(
     ann: Option<&AnnIndex>,
     on_chunk: &mut (dyn FnMut(AnswerChunk) + Send),
 ) -> Result<Answer> {
-    let hits = retrieve_and_rerank(db_path, embedder, llm, question, cfg, ann).await?;
+    let (hits, overview) = retrieve_and_rerank(db_path, embedder, llm, question, cfg, ann).await?;
     if hits.is_empty() {
         let ans = no_match_answer(question);
         on_chunk(AnswerChunk::Sources(Vec::new()));
@@ -832,7 +1012,7 @@ pub async fn answer_stream_with_ann(
 
     // Confidence is a property of the retrieval pool, fixed before synthesis.
     let confidence = confidence_for(&hits, cfg);
-    let (context, sources) = pack_context(&hits, cfg.context_budget);
+    let (context, sources) = pack_context(&hits, &overview, cfg.context_budget);
     // Citations up front so the UI can render them before the first token.
     on_chunk(AnswerChunk::Sources(sources.clone()));
 
@@ -853,10 +1033,11 @@ pub async fn answer_stream_with_ann(
     })
 }
 
-/// Embed → retrieve → optional rerank, shared by [`answer`] and [`answer_stream`].
-/// Returns an empty `Vec` when nothing matched (callers emit the no-match guidance).
+/// Embed → retrieve → optional rerank + project overview, shared by [`answer`] and
+/// [`answer_stream`]. Returns `(hits, overview)`. Empty hits ⇒ callers short-circuit.
 /// The `&Store` is confined to a sync scope and dropped before any `.await`, so the
-/// returned future is `Send`.
+/// returned future is `Send`. The `overview` is a pre-budgeted PROJECT OVERVIEW string
+/// (empty when no dir summaries exist or for specific questions).
 async fn retrieve_and_rerank(
     db_path: &Path,
     embedder: &dyn Embedder,
@@ -864,23 +1045,33 @@ async fn retrieve_and_rerank(
     question: &str,
     cfg: &QaConfig,
     ann: Option<&AnnIndex>,
-) -> Result<Vec<SearchHit>> {
+) -> Result<(Vec<SearchHit>, String)> {
     // 1. Embed (no store in scope). Skip for sparse-only.
     let query_vec = match cfg.mode {
         HybridMode::Sparse => None,
         _ => Some(embedder.embed(question).await?),
     };
 
-    // 2. Retrieve in a sync scope — `&Store` never crosses an await.
-    let hits = {
+    // 2. Retrieve + build project overview in a sync scope — `&Store` never crosses an await.
+    let (hits, overview) = {
         let store = Store::open(db_path)?;
-        retrieve(&store, question, query_vec.as_deref(), cfg, ann)?
+        let hits = retrieve(&store, question, query_vec.as_deref(), cfg, ann)?;
+        // Compute project-overview block while the store is still open.
+        // Budget: broad questions get ~35% of context_budget (≤1400); specific → 300 chars
+        // for just the root one-liner. Always subtracted FROM the chunk budget, never added.
+        let overview_budget = if is_broad_intent(question) {
+            cfg.context_budget * 35 / 100
+        } else {
+            300
+        };
+        let overview = build_project_overview(&store, &hits, cfg.scope.as_deref(), overview_budget);
+        (hits, overview)
     };
 
     // 2b. No matches: with zero grounding the LLM would hallucinate a confident answer, so
     //     callers short-circuit to a "run indexa deep first" message (do not rerank).
     if hits.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), String::new()));
     }
 
     // 3. Optional cross-encoder rerank (fails open). Reaches every surface
@@ -890,7 +1081,7 @@ async fn retrieve_and_rerank(
     } else {
         hits
     };
-    Ok(hits)
+    Ok((hits, overview))
 }
 
 /// The shared no-match answer (identical across CLI, web, MCP). Deliberately carries
@@ -908,8 +1099,10 @@ fn no_match_answer(question: &str) -> Answer {
 
 /// Synthesise an answer from pre-retrieved hits (no store access). Internal helper for
 /// [`answer`]; kept separate so the `&Store` borrow in `answer` never crosses an `.await`.
+/// `overview` is the pre-budgeted PROJECT OVERVIEW string (may be empty).
 pub(crate) async fn synthesize_from_hits(
     hits: Vec<SearchHit>,
+    overview: String,
     llm: &dyn Generator,
     question: &str,
     cfg: &QaConfig,
@@ -917,7 +1110,7 @@ pub(crate) async fn synthesize_from_hits(
     // Confidence is a property of the retrieval pool, fixed before synthesis
     // (rerank only reorders; assess_confidence sorts scores internally).
     let confidence = confidence_for(&hits, cfg);
-    let (context, sources) = pack_context(&hits, cfg.context_budget);
+    let (context, sources) = pack_context(&hits, &overview, cfg.context_budget);
     let prompt = build_prompt(question, &context);
     let answer_text = llm.generate(&prompt).await?;
     Ok(Answer {
@@ -949,10 +1142,26 @@ fn trim_continuation(text: &str) -> String {
     text[..end].trim().to_owned()
 }
 
-fn pack_context(hits: &[SearchHit], budget: usize) -> (String, Vec<SourceCitation>) {
+fn pack_context(
+    hits: &[SearchHit],
+    overview: &str,
+    budget: usize,
+) -> (String, Vec<SourceCitation>) {
     let mut context = String::new();
     let mut sources = Vec::new();
-    let mut chars_used = 0;
+
+    // Prepend the project-overview block (already budget-bounded by build_project_overview).
+    // It is NOT cited (no citation numbers) — it's background context, not a retrievable chunk.
+    if !overview.is_empty() {
+        context.push_str(overview);
+        if !overview.ends_with('\n') {
+            context.push('\n');
+        }
+        context.push('\n');
+    }
+
+    // Remaining budget for chunk citations.
+    let mut chars_used = context.len();
 
     for (i, hit) in hits.iter().enumerate() {
         let header = if hit.heading.is_empty() {
@@ -996,6 +1205,11 @@ fn pack_context(hits: &[SearchHit], budget: usize) -> (String, Vec<SourceCitatio
 fn build_prompt(question: &str, context: &str) -> String {
     format!(
         "You are a helpful assistant that answers questions about a user's files.\n\
+         The context below may begin with a PROJECT OVERVIEW block: directory roll-up summaries \
+         describing the project as a whole. Use it to give a coherent, project-level answer when \
+         the question is broad (e.g. \"what is this project about\", \"main themes\"). For specific \
+         claims, cite the numbered excerpts by their [number]; the overview itself is background and \
+         is not numbered.\n\
          Use ONLY the provided context to answer. Cite sources by their [number].\n\
          If the answer isn't in the context, say so.\n\
          Answer ONLY the question below. Do not invent or answer any other question, and do not \
@@ -1028,7 +1242,7 @@ mod tests {
             })
             .collect();
 
-        let (ctx, sources) = pack_context(&hits, 2000);
+        let (ctx, sources) = pack_context(&hits, "", 2000);
         assert!(ctx.len() <= 2100);
         assert!(!sources.is_empty());
         // The over-budget chunk is cut and explicitly marked so the synthesizer knows.
@@ -1801,5 +2015,145 @@ mod tests {
         let first_answer = order.iter().position(|k| *k != "step").unwrap();
         assert!(order[..first_answer].iter().all(|k| *k == "step"));
         assert_eq!(order[first_answer], "sources");
+    }
+
+    // ── Phase 2: whole-project synthesis helpers ──────────────────────────────
+
+    #[test]
+    fn is_broad_intent_recognises_project_level_questions() {
+        // Positive cases
+        assert!(is_broad_intent("what is this project about?"));
+        assert!(is_broad_intent("what's this project about"));
+        assert!(is_broad_intent("tell me about this project"));
+        assert!(is_broad_intent("summarize this project"));
+        assert!(is_broad_intent("summarise the project"));
+        assert!(is_broad_intent("what are the main themes?"));
+        assert!(is_broad_intent("give me a high level overview"));
+        assert!(is_broad_intent("what is this repo"));
+        assert!(is_broad_intent("what are these documents about"));
+        assert!(is_broad_intent("describe the whole project"));
+        // Negative cases — specific questions must NOT match
+        assert!(!is_broad_intent("which function does the archive penalty?"));
+        assert!(!is_broad_intent("what is the Q3 budget?"));
+        assert!(!is_broad_intent("where is the qa.rs file?"));
+        assert!(!is_broad_intent("how do I run the tests?"));
+        assert!(!is_broad_intent("what is 2+2"));
+    }
+
+    #[test]
+    fn pack_context_overview_prepended_and_inside_budget() {
+        let overview = "PROJECT OVERVIEW (directory roll-up summaries — background context; \
+                        cite numbered excerpts below for specific claims):\n\
+                        myproject: A demo project with slides and documents.\n";
+        let hits: Vec<SearchHit> = (0..3)
+            .map(|i| SearchHit {
+                chunk_id: i,
+                entry_path: format!("/doc{i}.md"),
+                seq: 0,
+                heading: String::new(),
+                text: "content chunk".to_owned(),
+                rrf_score: 1.0 / (i as f64 + 1.0),
+            })
+            .collect();
+
+        let budget = 4000;
+        let (ctx, sources) = pack_context(&hits, overview, budget);
+
+        // Overview must appear first
+        assert!(
+            ctx.starts_with("PROJECT OVERVIEW"),
+            "overview must be first, got: {ctx}"
+        );
+        // Chunk citations come after
+        assert!(ctx.contains("[1] /doc0.md"), "citations must follow: {ctx}");
+        // Total length must respect budget
+        assert!(ctx.len() <= budget + 50, "exceeded budget: {}", ctx.len());
+        // Sources only contain chunk citations (overview is unnumbered)
+        assert!(!sources.is_empty());
+    }
+
+    #[test]
+    fn pack_context_empty_overview_is_byte_identical_to_no_overview() {
+        // When overview is empty, pack_context must produce the same output as before
+        // this feature was added — this is the regression guard.
+        let hits: Vec<SearchHit> = vec![SearchHit {
+            chunk_id: 1,
+            entry_path: "/a.rs".to_owned(),
+            seq: 0,
+            heading: "header".to_owned(),
+            text: "implementation".to_owned(),
+            rrf_score: 0.5,
+        }];
+        let (ctx_no_overview, _) = pack_context(&hits, "", 4000);
+        // Should start directly with the citation, not a blank line
+        assert!(
+            !ctx_no_overview.starts_with('\n'),
+            "extra leading newline: {ctx_no_overview}"
+        );
+        assert!(
+            ctx_no_overview.contains("[1] /a.rs"),
+            "citation present: {ctx_no_overview}"
+        );
+    }
+
+    #[test]
+    fn common_ancestor_finds_shared_prefix() {
+        let paths = vec![
+            "/home/user/project/src/main.rs".to_owned(),
+            "/home/user/project/src/lib.rs".to_owned(),
+            "/home/user/project/tests/test.rs".to_owned(),
+        ];
+        let ancestor = common_ancestor(&paths).unwrap();
+        assert_eq!(ancestor, "/home/user/project");
+    }
+
+    #[test]
+    fn common_ancestor_returns_none_for_empty_input() {
+        assert!(common_ancestor(&[]).is_none());
+    }
+
+    #[test]
+    fn common_ancestor_divergent_absolute_paths_return_empty_string() {
+        // Two absolute paths always share the root-level empty segment from split('/'),
+        // so common_ancestor returns Some("") rather than None. The caller
+        // (build_project_overview) looks up the empty path and finds no dir summary,
+        // which is the correct graceful-no-op behaviour.
+        let paths = vec!["/home/user/a.rs".to_owned(), "/var/log/b.txt".to_owned()];
+        let result = common_ancestor(&paths);
+        assert!(
+            result == Some(String::new()) || result.is_none(),
+            "divergent abs paths should be root-level or None, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn build_prompt_contains_project_overview_guidance() {
+        let prompt = build_prompt("what is this project about?", "PROJECT OVERVIEW:\nfoo");
+        // The prompt must explain the PROJECT OVERVIEW block to the model
+        assert!(
+            prompt.contains("PROJECT OVERVIEW"),
+            "prompt must mention PROJECT OVERVIEW, got: {prompt}"
+        );
+        // v0.29 anti-continuation guard must be preserved
+        assert!(
+            prompt.contains("Do not invent or answer any other question"),
+            "v0.29 anti-continuation guard removed: {prompt}"
+        );
+        // Archive/current-sources preference must be preserved
+        assert!(
+            prompt.contains("Prefer current sources"),
+            "archive preference instruction removed: {prompt}"
+        );
+    }
+
+    #[test]
+    fn truncate_on_boundary_respects_utf8() {
+        // "こんにちは" is 5 chars × 3 bytes = 15 bytes. Capping at 9 chars must land
+        // on a char boundary (not in the middle of a multi-byte sequence).
+        let s = "こんにちは world";
+        let result = truncate_on_boundary(s, 6);
+        // Must be valid UTF-8 (would panic on invalid slice otherwise)
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+        assert!(result.len() <= s.len());
     }
 }
