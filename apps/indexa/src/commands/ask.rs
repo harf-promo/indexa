@@ -183,6 +183,7 @@ pub(crate) async fn cmd_ask(
         summary_weight: cfg.retrieval.summary_weight,
         summary_depth_alpha: cfg.retrieval.summary_depth_alpha,
         rerank: cfg.retrieval.rerank,
+        rerank_backend: cfg.retrieval.rerank_backend.clone(),
         use_weights: cfg.retrieval.use_weights,
         use_recency_weight: cfg.retrieval.recency_boost,
         recency_days: cfg.retrieval.recency_days,

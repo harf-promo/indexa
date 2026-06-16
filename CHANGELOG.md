@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.0] — 2026-06-16
+
+"Sharper retrieval": a local DeBERTa-v2 cross-encoder reranker joins the LLM reranker, and agents
+can now explicitly opt into reranking per query via the MCP `ask` tool.
+
+### Added
+
+- **Candle cross-encoder reranker.** Set `[retrieval] rerank_backend = "cross-encoder"` to use
+  `mixedbread-ai/mxbai-rerank-xsmall-v1` (Apache-2.0, ~85 MB, DeBERTa-v2 xsmall) for pointwise
+  (query, doc) scoring instead of the LLM listwise reranker. Pure-Rust candle inference — no
+  onnxruntime, no native dylib, safe for macOS notarized builds. Model downloaded from HuggingFace
+  on first use and cached in `~/.cache/huggingface/hub/`. The model initialises once per process
+  (mmap-backed; OS page-cache keeps it warm). Falls back to the LLM reranker on any load error.
+- **`rerank` + `rerank_backend` on MCP `ask` tool.** Agents can now explicitly enable reranking
+  (`rerank: true`) and choose the backend (`rerank_backend: "llm" | "cross-encoder"`) per call,
+  rather than inheriting the server default. Both params default to the server config when omitted.
+- **`rerank_backend` config key.** `[retrieval] rerank_backend = "llm"` (default, listwise LLM)
+  or `"cross-encoder"` (candle DeBERTa-v2). Works with all surfaces: CLI `ask`, web, MCP.
+
 ## [0.42.0] — 2026-06-16
 
 "Fast, legible & visible": re-indexing is dramatically faster (skips unchanged chunks), retrieval

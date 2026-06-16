@@ -19,7 +19,7 @@ members = [
 exclude = ["apps/indexa-desktop"]
 
 [workspace.package]
-version = "0.42.0"
+version = "0.43.0"
 edition = "2021"
 authors = ["Harf Promo <ahmed541991@gmail.com>"]
 license = "Apache-2.0"
@@ -94,3 +94,16 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 semver = "1"
 self-replace = "1"
 tempfile = "3"
+
+# Pure-Rust ML inference (Apache-2.0/MIT) — used for the candle cross-encoder reranker.
+# All deps are 100% Rust; no native dylibs, safe for macOS hardened-runtime notarization.
+candle-core = "0.9"
+candle-nn = "0.9"
+candle-transformers = "0.9"
+# HuggingFace model hub — model file cache (Apache-2.0).
+# Uses ureq+native-tls for model downloads only (not subject to the reqwest/rustls
+# security invariant, which covers server-facing API calls).
+hf-hub = { version = "0.3", default-features = false, features = ["online"] }
+# HF tokenizer (Apache-2.0). onig = Oniguruma, compiled from bundled C source and
+# statically linked — same pattern as rusqlite's bundled SQLite, safe for notarization.
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }

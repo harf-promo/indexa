@@ -84,6 +84,14 @@ pub struct AskParams {
     /// few extra model calls. Defaults to the server's `[retrieval] agentic`.
     #[serde(default)]
     pub agentic: Option<bool>,
+    /// Enable cross-encoder reranking after retrieval (adds latency; improves ranking quality).
+    /// Defaults to the server's `[retrieval] rerank`. Use with `rerank_backend` to choose
+    /// between `"llm"` (listwise, default) or `"cross-encoder"` (candle DeBERTa-v2).
+    #[serde(default)]
+    pub rerank: Option<bool>,
+    /// Reranker backend when `rerank` is true: `"llm"` (default) or `"cross-encoder"`.
+    #[serde(default)]
+    pub rerank_backend: Option<String>,
 }
 
 #[tool_router(router = router_retrieval, vis = "pub(crate)")]
@@ -312,6 +320,8 @@ impl IndexaMcp {
             scope,
             mode,
             agentic,
+            rerank,
+            rerank_backend,
         } = params.0;
         let agentic = agentic.unwrap_or(self.config.retrieval.agentic);
         let cfg = QaConfig {
@@ -325,7 +335,9 @@ impl IndexaMcp {
             rrf_k: self.config.retrieval.rrf_k as f32,
             summary_weight: self.config.retrieval.summary_weight,
             summary_depth_alpha: self.config.retrieval.summary_depth_alpha,
-            rerank: self.config.retrieval.rerank,
+            rerank: rerank.unwrap_or(self.config.retrieval.rerank),
+            rerank_backend: rerank_backend
+                .unwrap_or_else(|| self.config.retrieval.rerank_backend.clone()),
             use_weights: self.config.retrieval.use_weights,
             use_recency_weight: self.config.retrieval.recency_boost,
             recency_days: self.config.retrieval.recency_days,
