@@ -305,6 +305,16 @@ pub struct RetrievalConfig {
     ///
     /// TOML: `[retrieval] mmr_lambda = 0.3`
     pub mmr_lambda: f32,
+    /// Backend used for cross-encoder reranking when `rerank = true` (v0.43).
+    ///
+    /// - `"llm"` (default): listwise rerank via the local generation model (no extra dep).
+    /// - `"cross-encoder"`: pointwise rerank via a local DeBERTa-v2 model downloaded from
+    ///   HuggingFace on first use and cached in `~/.cache/huggingface/hub/`. Model:
+    ///   `mixedbread-ai/mxbai-rerank-xsmall-v1` (~85 MB, Apache-2.0, CPU-only).
+    ///   Falls back to `"llm"` if the model can't be loaded.
+    ///
+    /// TOML: `[retrieval] rerank_backend = "cross-encoder"`
+    pub rerank_backend: String,
 }
 
 impl Default for RetrievalConfig {
@@ -325,6 +335,7 @@ impl Default for RetrievalConfig {
             recency_boost: false,
             recency_days: 90,
             mmr_lambda: 0.5,
+            rerank_backend: "llm".to_string(),
         }
     }
 }

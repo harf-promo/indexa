@@ -7,7 +7,7 @@ use indexa_core::store::{AnnIndex, SearchHit, Store};
 use indexa_embed::Embedder;
 use indexa_llm::Generator;
 
-use crate::rerank::{apply_rerank, LlmReranker};
+use crate::rerank::{apply_rerank, CandleReranker, LlmReranker};
 
 /// Result of a Q&A query.
 #[derive(Debug)]
@@ -223,9 +223,11 @@ pub struct QaConfig {
     pub summary_weight: f32,
     /// Depth-boost coefficient α for summary cosine search.
     pub summary_depth_alpha: f32,
-    /// Apply a cross-encoder rerank pass after retrieval (default off). Currently
-    /// a local LLM-listwise reranker; fails open (never errors `ask`).
+    /// Apply a cross-encoder rerank pass after retrieval (default off). Fails open.
     pub rerank: bool,
+    /// Which reranker backend to use when `rerank = true`.
+    /// `"llm"` = listwise LLM call (default). `"cross-encoder"` = candle DeBERTa-v2.
+    pub rerank_backend: String,
     /// Apply importance weights (v0.8) as a multiplicative boost after RRF fusion.
     pub use_weights: bool,
     /// Apply a recency boost (v0.31) — multiplies up recently-modified files (the positive twin
@@ -253,6 +255,7 @@ impl Default for QaConfig {
             summary_weight: 0.0,
             summary_depth_alpha: 0.15,
             rerank: false,
+            rerank_backend: "llm".to_string(),
             use_weights: true,
             use_recency_weight: false,
             recency_days: 90,
@@ -798,7 +801,11 @@ pub async fn explain_retrieval(
     // Optional rerank (async, fails open) — mirrors `retrieve_and_rerank`.
     let final_hits = if cfg.rerank && !fused.is_empty() {
         final_label.push_str(" + rerank");
-        apply_rerank(&LlmReranker::new(llm), question, fused).await
+        if cfg.rerank_backend == "cross-encoder" {
+            apply_rerank(&CandleReranker::new(), question, fused).await
+        } else {
+            apply_rerank(&LlmReranker::new(llm), question, fused).await
+        }
     } else {
         fused
     };
@@ -1203,7 +1210,11 @@ async fn retrieve_and_rerank(
     // 3. Optional cross-encoder rerank (fails open). Reaches every surface
     //    because they all call this helper.
     let hits = if cfg.rerank {
-        apply_rerank(&LlmReranker::new(llm), question, hits).await
+        if cfg.rerank_backend == "cross-encoder" {
+            apply_rerank(&CandleReranker::new(), question, hits).await
+        } else {
+            apply_rerank(&LlmReranker::new(llm), question, hits).await
+        }
     } else {
         hits
     };

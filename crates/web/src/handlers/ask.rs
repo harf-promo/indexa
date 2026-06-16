@@ -33,6 +33,7 @@ fn qa_config(state: &AppState, body: &AskRequest) -> QaConfig {
         summary_weight: state.config.retrieval.summary_weight,
         summary_depth_alpha: state.config.retrieval.summary_depth_alpha,
         rerank: state.config.retrieval.rerank,
+        rerank_backend: state.config.retrieval.rerank_backend.clone(),
         use_weights: state.config.retrieval.use_weights,
         use_recency_weight: state.config.retrieval.recency_boost,
         recency_days: state.config.retrieval.recency_days,

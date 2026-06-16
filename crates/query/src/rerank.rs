@@ -1,19 +1,33 @@
 //! Cross-encoder reranking of retrieved hits.
 //!
 //! After hybrid retrieval + summary boosting, an optional reranking pass reorders
-//! the candidates by relevance to the question. The default implementation
-//! ([`LlmReranker`]) does a single listwise LLM call — no new native dependency,
-//! works on the local Ollama model, and is gated behind `QaConfig.rerank`
-//! (default off). A future `fastembed`/ONNX cross-encoder can implement the same
-//! [`CrossEncoder`] trait behind a Cargo feature.
+//! the candidates by relevance to the question. Two implementations:
 //!
-//! **Reranking fails open**: it is a pure enhancement. Any parse problem, LLM
-//! error, or timeout falls back to the original hit order — reranking must never
-//! make `ask` worse or error it.
+//! - [`LlmReranker`] — listwise rerank via the local Ollama generation model. No extra
+//!   dependencies; works out-of-the-box with any model in the stack. Selected with
+//!   `[retrieval] rerank_backend = "llm"` (default).
+//!
+//! - [`CandleReranker`] — pointwise rerank via a local DeBERTa-v2 sequence-classification
+//!   model (`mixedbread-ai/mxbai-rerank-xsmall-v1`, ~85 MB, Apache-2.0). Downloaded from
+//!   HuggingFace on first use and cached in `~/.cache/huggingface/hub/`. Uses pure-Rust
+//!   candle for inference — no onnxruntime, no native dylib, safe for macOS notarization.
+//!   Selected with `[retrieval] rerank_backend = "cross-encoder"`.
+//!
+//! **Reranking fails open**: it is a pure enhancement. Any parse problem, LLM error, model
+//! load failure, or timeout falls back to the original hit order — reranking must never make
+//! `ask` worse or produce an error.
+
+use std::sync::OnceLock;
 
 use anyhow::Result;
+use candle_core::{DType, Device, Tensor};
+use candle_nn::VarBuilder;
+use candle_transformers::models::debertav2::{
+    Config as DeBertaConfig, DebertaV2SeqClassificationModel,
+};
 use indexa_core::store::SearchHit;
 use indexa_llm::Generator;
+use tokenizers::Tokenizer;
 
 /// Reorders candidate documents by relevance to a query.
 ///
@@ -65,6 +79,157 @@ impl CrossEncoder for LlmReranker<'_> {
         Ok(parse_ranking(&response, docs.len()))
     }
 }
+
+// ── Candle cross-encoder ─────────────────────────────────────────────────────
+
+const MXBAI_MODEL_ID: &str = "mixedbread-ai/mxbai-rerank-xsmall-v1";
+/// Max tokens to feed per (query, doc) pair — model max is 512.
+const MAX_SEQ_LEN: usize = 512;
+
+struct CandleInner {
+    model: DebertaV2SeqClassificationModel,
+    tokenizer: Tokenizer,
+    device: Device,
+    /// Index of the "relevant" output logit.  1 when num_labels==2, 0 when ==1.
+    score_idx: usize,
+}
+
+impl CandleInner {
+    fn load(model_id: &str) -> anyhow::Result<Self> {
+        let api = hf_hub::api::sync::Api::new()?;
+        let repo = api.repo(hf_hub::Repo::new(
+            model_id.to_string(),
+            hf_hub::RepoType::Model,
+        ));
+
+        let config_path = repo.get("config.json")?;
+        let tokenizer_path = repo.get("tokenizer.json")?;
+        let weights_path = repo.get("model.safetensors")?;
+
+        let cfg: DeBertaConfig = serde_json::from_str(&std::fs::read_to_string(&config_path)?)?;
+        let num_labels = cfg.id2label.as_ref().map(|m| m.len()).unwrap_or(2).max(1);
+        let score_idx = if num_labels == 1 { 0 } else { num_labels - 1 };
+
+        let tokenizer =
+            Tokenizer::from_file(&tokenizer_path).map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
+
+        let device = Device::Cpu;
+        // SAFETY: mmap is safe here — the weights file is read-only and not
+        // mutated; we hold a shared reference for the lifetime of the process.
+        let vb =
+            unsafe { VarBuilder::from_mmaped_safetensors(&[&weights_path], DType::F32, &device)? };
+        let model = DebertaV2SeqClassificationModel::load(vb, &cfg, None)?;
+
+        Ok(Self {
+            model,
+            tokenizer,
+            device,
+            score_idx,
+        })
+    }
+
+    /// Score a single (query, doc) pair.  Returns NEG_INFINITY on tokenizer error.
+    fn score_pair(&self, query: &str, doc: &str) -> f32 {
+        (|| -> anyhow::Result<f32> {
+            let enc = self
+                .tokenizer
+                .encode((query, doc), true)
+                .map_err(|e| anyhow::anyhow!("encode: {e}"))?;
+            let len = enc.get_ids().len().min(MAX_SEQ_LEN);
+            let ids: Vec<u32> = enc.get_ids()[..len].to_vec();
+            let mask: Vec<u8> = enc.get_attention_mask()[..len]
+                .iter()
+                .map(|&x| x as u8)
+                .collect();
+            let type_ids: Vec<u32> = enc.get_type_ids()[..len].to_vec();
+
+            let input_ids = Tensor::new(ids.as_slice(), &self.device)?.unsqueeze(0)?;
+            let attention_mask = Tensor::new(mask.as_slice(), &self.device)?.unsqueeze(0)?;
+            let token_type_ids = Tensor::new(type_ids.as_slice(), &self.device)?.unsqueeze(0)?;
+
+            let logits =
+                self.model
+                    .forward(&input_ids, Some(token_type_ids), Some(attention_mask))?;
+            // logits: [1, num_labels] — take the score column and squeeze to scalar.
+            let score = logits.get(0)?.get(self.score_idx)?.to_scalar::<f32>()?;
+            Ok(score)
+        })()
+        .unwrap_or(f32::NEG_INFINITY)
+    }
+}
+
+/// Reranker backed by a local DeBERTa-v2 model via candle (pure Rust, CPU-only).
+///
+/// The model is downloaded from HuggingFace on first use and memory-mapped from
+/// disk on every process start (fast — the OS page-cache keeps it warm between
+/// queries). Fails open: if loading or scoring fails, `apply_rerank` returns the
+/// original order unchanged.
+pub(crate) struct CandleReranker {
+    /// Singleton model state — `OnceLock` so the 1–2 s load cost is paid once.
+    inner: &'static OnceLock<anyhow::Result<CandleInner>>,
+    model_id: &'static str,
+}
+
+// One global slot per model id (only one model used today).
+static CANDLE_INNER: OnceLock<anyhow::Result<CandleInner>> = OnceLock::new();
+
+impl CandleReranker {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: &CANDLE_INNER,
+            model_id: MXBAI_MODEL_ID,
+        }
+    }
+
+    fn get_inner(&self) -> anyhow::Result<&CandleInner> {
+        let result = self.inner.get_or_init(|| CandleInner::load(self.model_id));
+        match result {
+            Ok(inner) => Ok(inner),
+            Err(e) => anyhow::bail!("candle reranker unavailable: {e:#}"),
+        }
+    }
+}
+
+// CandleInner: DebertaV2SeqClassificationModel and Tokenizer are both Send + Sync on CPU.
+// SAFETY: candle CPU tensors + HF tokenizers are thread-safe for read-only inference.
+unsafe impl Send for CandleInner {}
+unsafe impl Sync for CandleInner {}
+
+#[async_trait::async_trait]
+impl CrossEncoder for CandleReranker {
+    async fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<usize>> {
+        // Pair strings for the blocking closure.
+        let query = query.to_owned();
+        let docs: Vec<String> = docs.iter().map(|s| s.to_string()).collect();
+
+        // Get or initialize the model. Wrapping in a Mutex is not needed because
+        // we own the &'static reference via OnceLock; &CandleInner is Send.
+        let inner = match self.get_inner() {
+            Ok(i) => i as *const CandleInner as usize, // raw pointer for Send boundary
+            Err(e) => {
+                tracing::warn!("candle reranker load failed, keeping original order: {e:#}");
+                return Ok(Vec::new()); // apply_rerank treats empty as "keep original"
+            }
+        };
+
+        tokio::task::spawn_blocking(move || {
+            // SAFETY: the pointer is valid for the entire process lifetime
+            // (stored in a `'static OnceLock`), and we only read from it.
+            let inner = unsafe { &*(inner as *const CandleInner) };
+            let mut scored: Vec<(usize, f32)> = docs
+                .iter()
+                .enumerate()
+                .map(|(i, doc)| (i, inner.score_pair(&query, doc)))
+                .collect();
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored.into_iter().map(|(i, _)| i).collect::<Vec<usize>>()
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("candle rerank join: {e}"))
+    }
+}
+
+// ── LLM listwise helper ───────────────────────────────────────────────────────
 
 /// Extract 1-based passage numbers from a model response and convert to 0-based
 /// indices. Tolerant of prose around the numbers; dedupes and drops out-of-range.
