@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.51.0] — 2026-06-16
+
+UX polish from the experience audit. (Several audited items — job-warning badges, model-role chips, the
+graph "approximate edge" caveat, the chunk tooltip — were already in place; these close the genuine gaps.)
+
+### Changed
+
+- **Scoped Ask shows the way out.** When a question is scoped to a file/folder, the answer now carries an
+  inline note ("Answered within X only — clear the ✕ chip to search everywhere"), so a thin or empty
+  scoped reply isn't mistaken for "Indexa doesn't know it."
+- **CLI errors point somewhere.** A failed command now prints a Troubleshooting line — run `indexa doctor`
+  (checks Ollama liveness, models, config) or read the log at `<data-dir>/logs/indexa.log` — then exits
+  non-zero, instead of a bare error.
+
 ## [0.50.0] — 2026-06-16
 
 "Format Wave 3": Apple iWork, binary symbols, and Outlook `.msg` — three more types Indexa understands.

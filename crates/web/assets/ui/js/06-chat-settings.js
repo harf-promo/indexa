@@ -172,9 +172,20 @@ async function doAsk() {
       '<div class="explain-body" data-q="' + escapeAttr(q) + '" data-scope="' + escapeAttr(scopeForAsk || '') + '">' +
       '<button class="btn-sm explain-load-btn">Show retrieval breakdown</button></div></details>';
   };
+  // When the question was scoped to a file/folder, the answer only saw that subtree — so a
+  // thin or "nothing found" reply might just mean the scope was too narrow. Surface the way
+  // out inline (the ✕ chip already clears it) so a scoped dead-end isn't mistaken for "Indexa
+  // doesn't know".
+  const renderScopeHint = function() {
+    if (!scopeForAsk) return '';
+    var name = scopeForAsk.split('/').filter(Boolean).pop() || scopeForAsk;
+    return '<div class="ask-scope-hint" style="margin-top:8px;color:var(--muted);font-size:12px">' +
+      '&#x21B3; Answered within <strong>' + escapeHtml(name) + '</strong> only — ' +
+      'clear the scope (the &#x2715; chip above the question box) to search everywhere.</div>';
+  };
   const renderAnswer = function() {
     return renderSteps() + renderMarkdown(answerText.replace(/^\s+/, '')) +
-      renderSources(sources) + renderConfidence() + renderExplain();
+      renderSources(sources) + renderConfidence() + renderExplain() + renderScopeHint();
   };
   const repaint = function() {
     bubble.innerHTML = renderAnswer();
