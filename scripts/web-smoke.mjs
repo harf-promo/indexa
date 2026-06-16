@@ -312,10 +312,12 @@ try {
     statsText !== null && /files/.test(statsText),
     `stats=${JSON.stringify(statsText)}`);
 
-  // Check 3 — tree tab shows the fixture root. /api/roots registers the
-  // PARENT of the scanned path, so the root row's label is the sandbox dir
-  // name (indexa-smoke-XXXXXX), not "smoke-fixture".
-  const rootName = basename(sandbox);
+  // Check 3 — tree tab shows the fixture root. /api/roots returns the indexed
+  // root itself — the scanned directory — so the root row's label is the scanned
+  // dir name ("smoke-fixture"), not its un-indexed parent. (Before v0.44,
+  // root_paths() returned the un-indexed parent dir; PR #238 fixed that, so the
+  // tree now anchors on the directory you actually indexed.)
+  const rootName = basename(fixture);
   const treeText = await poll(
     async () => {
       const t = await cdp.eval('document.getElementById("tree-list").textContent');
