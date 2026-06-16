@@ -34,6 +34,16 @@ impl Parser for ArchiveParser {
         )
     }
 
+    fn declared_formats(&self) -> &'static [(&'static str, crate::types::Support)] {
+        use crate::types::Support::*;
+        &[
+            ("zip", Metadata),
+            ("tar", Metadata),
+            ("tar.gz", Metadata),
+            ("tgz", Metadata),
+        ]
+    }
+
     fn parse(&self, path: &Path) -> Result<Extracted> {
         let name = file_name_lower(path);
         let (entries, mime) = if name.ends_with(".zip") {

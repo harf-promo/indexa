@@ -658,6 +658,8 @@
     <span class="engine-val" id="engine-pressure-val">&#x2014;</span>
   </span>
   <button class="engine-release" id="engine-release-btn" onclick="releaseModels()" title="Unload Indexa's loaded local models to free their RAM. Not a system purge — it only releases Indexa's own models." aria-label="Release Indexa's loaded models">&#x21BA; Free models</button>
+  <button class="engine-release" id="engine-mem-btn" onclick="showMemoryConsumers()" title="Show the apps using the most RAM so you can decide what to quit. Read-only — Indexa never closes or purges anything." aria-label="Show what's using memory">&#x1F50D; What&#x2019;s using RAM</button>
+  <div class="engine-mem-popover" id="engine-mem-popover" role="dialog" aria-label="Top memory consumers" hidden></div>
   <!-- Live build progress — shown only while a job is running (fed from the job SSE the UI already opens) -->
   <span class="engine-job" id="engine-job" title="Current build" hidden>
     <span class="engine-job-sep" aria-hidden="true">&#x2502;</span>

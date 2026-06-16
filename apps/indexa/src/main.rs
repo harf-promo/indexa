@@ -304,6 +304,7 @@ async fn main() -> Result<()> {
             deep,
             json,
         } => commands::cmd_status(unknown, deep, json, &cfg).await,
+        Commands::Formats { json, level } => commands::cmd_formats(json, level).await,
         Commands::Rm { paths, recursive } => commands::cmd_rm(paths, recursive).await,
         Commands::Prune { dry_run } => commands::cmd_prune(dry_run).await,
         Commands::Doctor {

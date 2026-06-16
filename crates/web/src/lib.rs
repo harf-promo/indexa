@@ -327,6 +327,7 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/api/telemetry", get(api_telemetry))
         .route("/api/telemetry/stream", get(api_telemetry_stream))
         .route("/api/engine/release", post(api_engine_release))
+        .route("/api/engine/processes", get(api_engine_processes))
         .route("/api/models", get(api_models))
         .route("/api/models/installed", get(api_models_installed))
         .route("/api/models/pull", post(api_models_pull))

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.0] — 2026-06-16
+
+"Know what's supported, see what's using your RAM": a queryable formats list, an honest memory readout,
+and clearer empty states.
+
+### Added
+
+- **`indexa formats`** (+ the MCP `list_supported_formats` tool — now 46) lists every file format Indexa
+  understands with its support level (full = text extracted · metadata = listing/EXIF only · stub =
+  recognised but not extracted · textfallback = sniffed as text) and MIME type; `--json` and `--level`
+  filters. Backs the "understands every file" claim with a queryable, drift-tested list — parsers declare
+  their formats via the new `Parser::declared_formats`.
+- **"What's using my RAM" readout** — the engine bar gains a read-only popover (and `GET /api/engine/processes`)
+  listing the top memory-consuming processes so you can decide what to quit. Indexa **does not** purge or
+  kill other apps' memory: that's invasive and counterproductive (macOS hands back free cache on demand).
+  This is the honest, useful answer, alongside the existing Free Models button and conservative profile.
+
+### Changed
+
+- Clearer empty states: the Map and folder tree now say "no summaries built yet — index for search"
+  (distinct from a bare scan), and the ⚡ row-action tooltip explains the deep/embed phase vs. scanning.
+
 ## [0.48.0] — 2026-06-16
 
 "Understand even more files" (format Wave 2): email, archives, and opt-in scanned-PDF OCR.

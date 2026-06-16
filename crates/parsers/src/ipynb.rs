@@ -22,6 +22,11 @@ impl Parser for IpynbParser {
         false
     }
 
+    fn declared_formats(&self) -> &'static [(&'static str, crate::types::Support)] {
+        use crate::types::Support::*;
+        &[("ipynb", Full)]
+    }
+
     fn parse(&self, path: &Path) -> Result<Extracted> {
         let raw = std::fs::read_to_string(path)?;
         let json: serde_json::Value = serde_json::from_str(&raw)

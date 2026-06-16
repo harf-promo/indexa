@@ -35,6 +35,22 @@ pub(crate) async fn api_engine_release(State(s): State<AppState>) -> impl IntoRe
     Json(serde_json::json!({ "released": true }))
 }
 
+/// `GET /api/engine/processes` — the top memory-consuming processes system-wide, so the user
+/// can decide what to quit to free RAM. **Read-only**: Indexa reports, it never kills or purges
+/// (an app can't safely reclaim another process's memory, and a system cache purge is
+/// counterproductive — see the engine-bar help). Heavier than the telemetry sample (a full
+/// process refresh), so it's a manual, on-demand poll, off the runtime via `spawn_blocking`.
+pub(crate) async fn api_engine_processes() -> impl IntoResponse {
+    let procs = tokio::task::spawn_blocking(|| indexa_core::resource::top_memory_consumers(12))
+        .await
+        .unwrap_or_default();
+    let arr: Vec<_> = procs
+        .into_iter()
+        .map(|p| serde_json::json!({ "pid": p.pid, "name": p.name, "rss_bytes": p.rss_bytes }))
+        .collect();
+    Json(serde_json::json!({ "processes": arr }))
+}
+
 /// `GET /api/telemetry` — the latest telemetry snapshot (poll-friendly fallback).
 pub(crate) async fn api_telemetry(State(s): State<AppState>) -> impl IntoResponse {
     let sample = s.telemetry.borrow().clone();

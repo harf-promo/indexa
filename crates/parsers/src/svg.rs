@@ -21,6 +21,11 @@ impl Parser for SvgParser {
         mime == "image/svg+xml"
     }
 
+    fn declared_formats(&self) -> &'static [(&'static str, crate::types::Support)] {
+        use crate::types::Support::*;
+        &[("svg", Full)]
+    }
+
     fn parse(&self, path: &Path) -> Result<Extracted> {
         let raw = std::fs::read_to_string(path)?;
         let text = extract_svg_text(&raw);

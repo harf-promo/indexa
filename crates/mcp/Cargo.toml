@@ -17,6 +17,7 @@ indexa-core = { path = "../core" }
 indexa-query = { path = "../query" }
 indexa-embed = { path = "../embed" }
 indexa-llm = { path = "../llm" }
+indexa-parsers = { path = "../parsers" }
 rmcp = { version = "1.7.0", features = ["server", "transport-io", "macros"] }
 schemars = "1"
 

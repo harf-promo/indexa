@@ -128,6 +128,36 @@ pub fn sample_memory_once() -> MemSample {
     sample_memory(&mut sys)
 }
 
+/// One process's resident memory, for the honest "what's using my RAM" readout.
+#[derive(Debug, Clone)]
+pub struct ProcUsage {
+    pub pid: u32,
+    pub name: String,
+    pub rss_bytes: u64,
+}
+
+/// The top `n` processes by resident memory, system-wide — so the user can decide what to
+/// quit to free RAM. **Read-only**: Indexa never kills or purges anything, it only reports.
+/// This performs the expensive full-process refresh that the hot telemetry path deliberately
+/// avoids (see [`sample_memory`]), so call it on demand only — never in a loop.
+pub fn top_memory_consumers(n: usize) -> Vec<ProcUsage> {
+    let mut sys = System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let mut procs: Vec<ProcUsage> = sys
+        .processes()
+        .values()
+        .map(|p| ProcUsage {
+            pid: p.pid().as_u32(),
+            name: p.name().to_string_lossy().into_owned(),
+            rss_bytes: p.memory(),
+        })
+        .filter(|p| p.rss_bytes > 0)
+        .collect();
+    procs.sort_by_key(|p| std::cmp::Reverse(p.rss_bytes));
+    procs.truncate(n);
+    procs
+}
+
 /// Opaque watchdog state that encapsulates the long-lived `sysinfo::System`.
 ///
 /// Create one at the start of a job and call `sample()` before each Ollama
@@ -1047,6 +1077,21 @@ fn format_duration(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn top_memory_consumers_returns_sorted_nonempty() {
+        let top = top_memory_consumers(5);
+        assert!(!top.is_empty(), "the test process itself should be listed");
+        assert!(top.len() <= 5);
+        // Sorted descending by resident memory.
+        for w in top.windows(2) {
+            assert!(
+                w[0].rss_bytes >= w[1].rss_bytes,
+                "must be sorted by RSS desc"
+            );
+        }
+        assert!(top.iter().all(|p| p.rss_bytes > 0));
+    }
 
     fn fake_spec(total_gb: u64, apple_silicon: bool) -> MachineSpec {
         let total = total_gb * 1024 * 1024 * 1024;

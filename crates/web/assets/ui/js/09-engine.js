@@ -180,6 +180,51 @@
       .finally(function () { if (btn) { btn.disabled = false; btn.classList.remove('busy'); } });
   };
 
+  // "What's using my RAM" → list the top memory-consuming processes (read-only) so the user
+  // can decide what to quit. Indexa never closes or purges anything — a cross-app RAM purge is
+  // invasive and counterproductive (the OS hands back free cache on demand); this is the honest,
+  // useful answer to "free up my RAM". Process names are inserted as textContent (no injection).
+  window.showMemoryConsumers = function () {
+    var pop = el('engine-mem-popover');
+    if (!pop) return;
+    if (!pop.hidden) { pop.hidden = true; return; } // toggle off
+    pop.hidden = false;
+    pop.textContent = 'Reading processes…';
+    fetch('/api/engine/processes')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var procs = (d && d.processes) || [];
+        pop.textContent = '';
+        var head = document.createElement('div');
+        head.className = 'engine-mem-head';
+        head.textContent = "What's using your RAM";
+        pop.appendChild(head);
+        var note = document.createElement('div');
+        note.className = 'engine-mem-note';
+        note.textContent = "Quit what you don't need — Indexa won't close these. It never purges other apps' memory (that's invasive, and macOS already manages it).";
+        pop.appendChild(note);
+        procs.forEach(function (p) {
+          var row = document.createElement('div');
+          row.className = 'engine-mem-row';
+          var name = document.createElement('span');
+          name.className = 'engine-mem-name';
+          name.textContent = p.name || '(unknown)';
+          var rss = document.createElement('span');
+          rss.className = 'engine-mem-rss';
+          rss.textContent = fmtGB(p.rss_bytes);
+          row.appendChild(name);
+          row.appendChild(rss);
+          pop.appendChild(row);
+        });
+        var close = document.createElement('button');
+        close.className = 'engine-mem-close';
+        close.textContent = 'Close';
+        close.onclick = function () { pop.hidden = true; };
+        pop.appendChild(close);
+      })
+      .catch(function () { pop.textContent = 'Could not read processes.'; });
+  };
+
   function init() {
     if (el('engine-bar')) connect();
   }

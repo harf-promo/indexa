@@ -19,6 +19,11 @@ impl Parser for EpubParser {
         mime == "application/epub+zip"
     }
 
+    fn declared_formats(&self) -> &'static [(&'static str, crate::types::Support)] {
+        use crate::types::Support::*;
+        &[("epub", Full)]
+    }
+
     fn parse(&self, path: &Path) -> Result<Extracted> {
         let file = std::fs::File::open(path)?;
         let mut archive = zip::ZipArchive::new(file)?;
