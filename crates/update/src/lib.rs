@@ -106,6 +106,80 @@ pub async fn check() -> anyhow::Result<ReleaseInfo> {
     })
 }
 
+/// Parse the semver version from a CHANGELOG section header line, e.g.
+/// `## [0.51.0] — 2026-06-16` → `0.51.0`. Anchors on the **bracketed version only**;
+/// the date separator in this CHANGELOG is an em-dash (U+2014), so never split on
+/// ` - `. Returns `None` for non-version headers like `## [Unreleased]`.
+fn section_version(line: &str) -> Option<Version> {
+    let after_hashes = line.trim_start().strip_prefix("##")?.trim_start();
+    let inner = after_hashes.strip_prefix('[')?;
+    let end = inner.find(']')?;
+    Version::parse(inner[..end].trim()).ok()
+}
+
+/// Assemble the CHANGELOG sections a user gains by updating `from` → `to`: every
+/// version section `V` with `from < V <= to`, in the file's natural newest-first
+/// order. The `## [Unreleased]` section and any non-semver header are skipped.
+///
+/// Returns an empty string when nothing qualifies (same version, a downgrade, or a
+/// parse miss) so the caller can fall back to the single newest section.
+pub fn cumulative_changelog(full_md: &str, from: &Version, to: &Version) -> String {
+    let mut out = String::new();
+    let mut keep = false;
+    for line in full_md.lines() {
+        // A new top-level section ("## …") decides what we keep next. Sub-headings
+        // ("### …") begin with "###" and so never match "## " — they ride along with
+        // their parent section's keep state, as does the section body.
+        if line.starts_with("## ") {
+            keep = match section_version(line) {
+                Some(v) => v > *from && v <= *to,
+                None => false,
+            };
+        }
+        if keep {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Fetch the tag-pinned CHANGELOG and assemble the cumulative release notes for a
+/// `from` → `to` update (see [`cumulative_changelog`]).
+///
+/// `latest.json` (what the updater surfaces as `Update.body`) carries only the single
+/// newest section, because it is baked at release time and cannot know which version
+/// the user is coming from. Only the client knows both ends, so the span is assembled
+/// here: the CHANGELOG is read from `raw.githubusercontent.com` at tag `v{to}` — the
+/// immutable copy shipped with the release being installed, so it always contains every
+/// section up to `to`. Public repo, so no auth (see module docs); reuses the rustls
+/// client and never links OpenSSL.
+///
+/// Fails open: any error (offline, 404, unparseable versions) is returned so the caller
+/// falls back to the single newest section. A changelog hiccup must never block an update.
+pub async fn cumulative_notes(from: &str, to: &str) -> anyhow::Result<String> {
+    let from_v =
+        Version::parse(from.trim_start_matches('v')).context("installed version is not semver")?;
+    let to_v =
+        Version::parse(to.trim_start_matches('v')).context("target version is not semver")?;
+    if from_v >= to_v {
+        // Same version or a downgrade — nothing gained; let the caller use the single section.
+        return Ok(String::new());
+    }
+    let url = format!("https://raw.githubusercontent.com/{REPO}/v{to_v}/CHANGELOG.md");
+    let client = build_client()?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .context("CHANGELOG fetch failed")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("CHANGELOG fetch returned {}", resp.status());
+    }
+    let md = resp.text().await.context("CHANGELOG body read failed")?;
+    Ok(cumulative_changelog(&md, &from_v, &to_v))
+}
+
 /// True when `exe` lives inside a macOS `.app` bundle (`…/Foo.app/Contents/MacOS/bin`).
 ///
 /// The binary self-replace [`apply`] performs is for the standalone CLI only.
@@ -426,8 +500,94 @@ fn permission_error(source: impl std::fmt::Display, path: &std::path::Path) -> a
 
 #[cfg(test)]
 mod tests {
-    use super::{is_inside_app_bundle, self_replace_refusal};
+    use super::{cumulative_changelog, is_inside_app_bundle, self_replace_refusal};
+    use semver::Version;
     use std::path::Path;
+
+    // A miniature CHANGELOG mirroring the real format: em-dash date separator,
+    // an `## [Unreleased]` section, a `# Changelog` preamble, and `### Added` sub-headings.
+    const SAMPLE: &str = "\
+# Changelog
+
+All notable changes to this project.
+
+## [Unreleased]
+
+- nothing yet
+
+## [0.51.0] — 2026-06-16
+
+### Added
+- ui polish
+
+## [0.50.0] — 2026-06-16
+
+### Added
+- format wave 3
+
+## [0.49.0] — 2026-06-16
+
+### Added
+- formats list
+
+## [0.48.0] — 2026-06-16
+
+### Added
+- email parser
+";
+
+    #[test]
+    fn cumulative_changelog_collects_only_the_gained_versions() {
+        let from = Version::parse("0.48.0").unwrap();
+        let to = Version::parse("0.51.0").unwrap();
+        let out = cumulative_changelog(SAMPLE, &from, &to);
+        // Gains 0.51 / 0.50 / 0.49 — NOT the installed 0.48, NOT Unreleased, NOT the preamble.
+        assert!(out.contains("## [0.51.0]"));
+        assert!(out.contains("## [0.50.0]"));
+        assert!(out.contains("## [0.49.0]"));
+        assert!(!out.contains("## [0.48.0]"));
+        assert!(!out.contains("Unreleased"));
+        assert!(!out.contains("All notable changes"));
+        // Section bodies ride along; the installed version's body does not leak in.
+        assert!(out.contains("ui polish"));
+        assert!(out.contains("formats list"));
+        assert!(!out.contains("email parser"));
+        // Newest-first order is preserved (0.51 precedes 0.49).
+        assert!(out.find("0.51.0").unwrap() < out.find("0.49.0").unwrap());
+    }
+
+    #[test]
+    fn cumulative_changelog_is_empty_when_nothing_gained() {
+        let v51 = Version::parse("0.51.0").unwrap();
+        let v50 = Version::parse("0.50.0").unwrap();
+        // Same version → no gain.
+        assert_eq!(cumulative_changelog(SAMPLE, &v51, &v51), "");
+        // Downgrade (from newer than to) → no gain.
+        assert_eq!(cumulative_changelog(SAMPLE, &v51, &v50), "");
+    }
+
+    #[test]
+    fn cumulative_changelog_includes_the_target_section() {
+        // Single-step update gains exactly the target section.
+        let from = Version::parse("0.50.0").unwrap();
+        let to = Version::parse("0.51.0").unwrap();
+        let out = cumulative_changelog(SAMPLE, &from, &to);
+        assert!(out.contains("## [0.51.0]"));
+        assert!(out.contains("ui polish"));
+        assert!(!out.contains("## [0.50.0]"));
+    }
+
+    #[test]
+    fn cumulative_changelog_skips_non_semver_headers() {
+        let md = "## [Unreleased]\n- x\n## [not-a-version]\n- y\n## [0.51.0] — z\n- real\n";
+        let from = Version::parse("0.50.0").unwrap();
+        let to = Version::parse("0.51.0").unwrap();
+        let out = cumulative_changelog(md, &from, &to);
+        assert!(out.contains("## [0.51.0]"));
+        assert!(out.contains("real"));
+        assert!(!out.contains("Unreleased"));
+        assert!(!out.contains("not-a-version"));
+    }
 
     #[test]
     fn detects_macos_app_bundle_binaries() {

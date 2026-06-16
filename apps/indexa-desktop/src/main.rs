@@ -314,12 +314,24 @@ async fn install_update(app: tauri::AppHandle, update: tauri_plugin_updater::Upd
     let version = update.version.clone();
     let title = format!("Indexa {version}");
 
-    // Publish the FULL changelog to the webview, which renders an in-app "update available" modal
+    // Assemble the changelog for EVERY version gained (installed → target), not only the
+    // single newest section `latest.json` carries — so a user jumping several releases sees
+    // all the changes in between, not just the last one. `latest.json` can't do this: it's
+    // baked at release time and doesn't know the user's installed version; only the client
+    // does. Fails open — any fetch/parse problem falls back to `update.body` (the single newest
+    // section), so a changelog hiccup never blocks the update.
+    let installed = env!("CARGO_PKG_VERSION");
+    let notes = match indexa_update::cumulative_notes(installed, &version).await {
+        Ok(s) if !s.trim().is_empty() => Some(s),
+        _ => update.body.clone(),
+    };
+
+    // Publish the changelog to the webview, which renders an in-app "update available" modal
     // (white card, scrollable notes, Install & Relaunch / Later) — no native dialog. Bring the
     // window forward so it's visible. The webview replies via POST /api/update/control, waking
     // `wait_for_update_command` below. (The webview loads a remote URL with no Tauri IPC, so both
     // directions are bridged through the embedded server.)
-    report_update_progress(UpdateProgress::available(version.clone(), update.body.clone()));
+    report_update_progress(UpdateProgress::available(version.clone(), notes));
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
         let _ = win.set_focus();
