@@ -30,6 +30,7 @@ list_files_by_category
 list_open_decisions
 list_packs
 list_saved_queries
+list_supported_formats
 list_weights
 project_overview
 prune

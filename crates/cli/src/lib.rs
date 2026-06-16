@@ -592,6 +592,22 @@ pub enum Commands {
         json: bool,
     },
 
+    /// List every file format Indexa understands, with its support level.
+    #[command(after_help = "Examples:
+  indexa formats
+  indexa formats --json
+  indexa formats --level full")]
+    #[command(display_order = 16)]
+    Formats {
+        /// Emit as a JSON array instead of a table.
+        #[arg(long)]
+        json: bool,
+
+        /// Filter by support level: full, metadata, stub, textfallback.
+        #[arg(long)]
+        level: Option<String>,
+    },
+
     /// Remove one or more paths from the context store.
     #[command(after_help = "Examples:
   indexa rm ~/Documents/old-project

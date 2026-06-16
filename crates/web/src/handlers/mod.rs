@@ -70,7 +70,9 @@ pub(crate) use review::{
 pub(crate) use saved::{api_saved_delete, api_saved_list, api_saved_set};
 pub(crate) use stats::{api_impact, api_map, api_map_treemap, api_roots, api_search, api_stats};
 pub(crate) use summary::{api_summarize_enqueue, api_summary};
-pub(crate) use telemetry::{api_engine_release, api_telemetry, api_telemetry_stream};
+pub(crate) use telemetry::{
+    api_engine_processes, api_engine_release, api_telemetry, api_telemetry_stream,
+};
 pub(crate) use tree::api_tree;
 pub(crate) use ui::{serve_ui, serve_ui_css, serve_ui_js};
 pub(crate) use update::{

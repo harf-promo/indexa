@@ -207,3 +207,33 @@
 
 /* Keep the floating jobs pill clear of the new bottom bar. */
 .jobs-pill { bottom: 44px; }
+
+/* "What's using my RAM" popover — read-only top-consumers list off the engine bar. */
+.engine-mem-popover {
+  position: fixed;
+  right: 12px;
+  bottom: 44px;
+  z-index: 60;
+  width: 340px;
+  max-height: 52vh;
+  overflow-y: auto;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  color: var(--text);
+  font-size: 12px;
+}
+.engine-mem-head { font-weight: 600; margin-bottom: 4px; }
+.engine-mem-note { color: var(--muted); margin-bottom: 10px; line-height: 1.4; }
+.engine-mem-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+  border-top: 1px solid var(--border);
+}
+.engine-mem-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.engine-mem-rss { color: var(--muted); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.engine-mem-close { margin-top: 10px; }

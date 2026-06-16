@@ -159,6 +159,24 @@ impl Parser for CodeParser {
         Self::language_for_mime(mime).is_some()
     }
 
+    fn declared_formats(&self) -> &'static [(&'static str, crate::types::Support)] {
+        use crate::types::Support::*;
+        &[
+            ("rs", Full),
+            ("py", Full),
+            ("js", Full),
+            ("jsx", Full),
+            ("mjs", Full),
+            ("cjs", Full),
+            ("ts", Full),
+            ("tsx", Full),
+            ("mts", Full),
+            ("cts", Full),
+            ("go", Full),
+            ("java", Full),
+        ]
+    }
+
     fn parse(&self, path: &Path) -> Result<Extracted> {
         let source = std::fs::read_to_string(path)?;
         let mime = mime_guess::from_path(path)

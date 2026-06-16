@@ -40,6 +40,24 @@ impl Parser for MediaParser {
         mime.starts_with("audio/") || mime.starts_with("video/")
     }
 
+    fn declared_formats(&self) -> &'static [(&'static str, crate::types::Support)] {
+        use crate::types::Support::*;
+        &[
+            ("mp3", Metadata),
+            ("mp4", Metadata),
+            ("m4a", Metadata),
+            ("flac", Metadata),
+            ("wav", Metadata),
+            ("ogg", Metadata),
+            ("opus", Metadata),
+            ("mkv", Metadata),
+            ("avi", Metadata),
+            ("mov", Metadata),
+            ("webm", Metadata),
+            ("aiff", Metadata),
+        ]
+    }
+
     fn parse(&self, path: &Path) -> Result<Extracted> {
         let text = match run_ffprobe(path) {
             Ok(t) if !t.is_empty() => t,

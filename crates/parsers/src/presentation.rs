@@ -37,6 +37,11 @@ impl Parser for PresentationParser {
         )
     }
 
+    fn declared_formats(&self) -> &'static [(&'static str, crate::types::Support)] {
+        use crate::types::Support::*;
+        &[("pptx", Full), ("ppsx", Full)]
+    }
+
     fn parse(&self, path: &Path) -> anyhow::Result<Extracted> {
         let filename = path
             .file_name()

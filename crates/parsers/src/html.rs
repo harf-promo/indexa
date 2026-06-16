@@ -30,6 +30,11 @@ impl Parser for HtmlParser {
         mime == "text/html" || mime == "application/xhtml+xml"
     }
 
+    fn declared_formats(&self) -> &'static [(&'static str, crate::types::Support)] {
+        use crate::types::Support::*;
+        &[("html", Full), ("htm", Full), ("xhtml", Full)]
+    }
+
     fn parse(&self, path: &Path) -> Result<Extracted> {
         let html = std::fs::read_to_string(path)?;
         // htmd does not drop <script>/<style> content, so remove those blocks first (mirrors

@@ -59,6 +59,31 @@ impl IndexaMcp {
         Ok(ok_text(out))
     }
 
+    /// List the file formats Indexa can parse + their support level.
+    #[tool(
+        description = "List the file formats Indexa understands, each with its support level \
+                       (full = text extracted, metadata = listing/EXIF only, stub = recognised \
+                       but not extracted, textfallback = sniffed as text) and MIME type. Lets an \
+                       agent check whether a file type will be indexed before adding it to scope."
+    )]
+    pub(crate) async fn list_supported_formats(&self) -> Result<CallToolResult, ErrorData> {
+        let formats = indexa_parsers::registry::Registry::new().supported_formats();
+        let mut out = String::from("Indexa supported formats:\n");
+        for f in &formats {
+            let ext = if f.extension.starts_with('(') {
+                f.extension.clone()
+            } else {
+                format!(".{}", f.extension)
+            };
+            out.push_str(&format!(
+                "  {ext:<14} {:<12} {}\n",
+                f.support_level,
+                f.mime.as_deref().unwrap_or("—")
+            ));
+        }
+        Ok(ok_text(out))
+    }
+
     /// Report the effective Indexa configuration (models, retrieval, scan) — no secrets.
     #[tool(
         description = "Return Indexa's effective configuration: embedding + describer models, \

@@ -34,6 +34,24 @@ impl Parser for ImageParser {
         mime.starts_with("image/")
     }
 
+    fn declared_formats(&self) -> &'static [(&'static str, crate::types::Support)] {
+        use crate::types::Support::*;
+        &[
+            ("jpg", Metadata),
+            ("jpeg", Metadata),
+            ("png", Metadata),
+            ("webp", Metadata),
+            ("heic", Metadata),
+            ("tiff", Metadata),
+            ("cr2", Metadata),
+            ("nef", Metadata),
+            ("arw", Metadata),
+            ("dng", Metadata),
+            ("bmp", Metadata),
+            ("gif", Metadata),
+        ]
+    }
+
     fn parse(&self, path: &Path) -> Result<Extracted> {
         let mut parts: Vec<String> = Vec::new();
 

@@ -7,6 +7,7 @@ mod doctor;
 mod eval;
 mod export;
 mod fingerprint;
+mod formats;
 mod graph;
 mod helpers;
 mod index;
@@ -43,6 +44,7 @@ pub(crate) use doctor::cmd_doctor;
 pub(crate) use eval::cmd_eval;
 pub(crate) use export::cmd_export;
 pub(crate) use fingerprint::cmd_fingerprint;
+pub(crate) use formats::cmd_formats;
 pub(crate) use graph::cmd_graph;
 pub(crate) use index::cmd_index;
 pub(crate) use insights::{

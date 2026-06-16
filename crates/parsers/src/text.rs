@@ -67,6 +67,22 @@ impl Parser for TextParser {
         mime.starts_with("text/plain")
     }
 
+    fn declared_formats(&self) -> &'static [(&'static str, crate::types::Support)] {
+        use crate::types::Support::*;
+        &[
+            ("txt", Full),
+            ("log", Full),
+            ("conf", Full),
+            ("ini", Full),
+            ("yaml", Full),
+            ("yml", Full),
+            ("json", Full),
+            ("toml", Full),
+            ("xml", Full),
+            ("css", Full),
+        ]
+    }
+
     fn parse(&self, path: &Path) -> anyhow::Result<Extracted> {
         let text = std::fs::read_to_string(path)?;
         let chunks = self.fixed_chunks(path, &text);
@@ -100,6 +116,11 @@ impl MarkdownParser {
 impl Parser for MarkdownParser {
     fn accepts_mime(&self, mime: &str) -> bool {
         mime == "text/markdown" || mime == "text/x-markdown"
+    }
+
+    fn declared_formats(&self) -> &'static [(&'static str, crate::types::Support)] {
+        use crate::types::Support::*;
+        &[("md", Full), ("mdx", Full)]
     }
 
     fn parse(&self, path: &Path) -> anyhow::Result<Extracted> {

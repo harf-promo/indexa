@@ -85,7 +85,7 @@ function buildTreeNode(node) {
     badge +
     '<span class="tree-row-actions">' +
     '<button data-act="scan"      title="Re-scan"              aria-label="Re-scan">&#x21BB;</button>' +
-    '<button data-act="deep"      title="Index for search (embed this folder for retrieval)" aria-label="Index for search">&#x26A1;</button>' +
+    '<button data-act="deep"      title="Index for search: parse and embed this folder so you can search and ask about its contents (the deep phase — scanning only lists files)" aria-label="Index for search">&#x26A1;</button>' +
     '<button data-act="summarize" title="Summarize"            aria-label="Summarize">&#x1F4DD;</button>' +
     '<button data-act="remove"    title="Remove from context"  aria-label="Remove from context">&#x1F5D1;</button>' +
     '</span>';

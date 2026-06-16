@@ -42,7 +42,7 @@ use crate::pdf::PdfParser;
 use crate::presentation::PresentationParser;
 use crate::svg::SvgParser;
 use crate::text::{MarkdownParser, TextParser};
-use crate::types::{Extracted, Parser};
+use crate::types::{Extracted, Parser, Support};
 use anyhow::{bail, Result};
 use std::path::Path;
 
@@ -119,6 +119,45 @@ impl Registry {
             Err(_) => bail!("parser panicked on {}", path.display()),
         }
     }
+
+    /// Aggregate the `(extension, support level)` pairs every parser declares into a sorted,
+    /// deduped list (earlier parsers — including plugins prepended via [`Registry::register`] —
+    /// win a conflict). A trailing catch-all row records that extensionless / unknown-but-UTF-8
+    /// files are still indexed as plain text. Powers `indexa formats` and the MCP tool, so the
+    /// "understands every file" claim is queryable rather than asserted.
+    pub fn supported_formats(&self) -> Vec<SupportedFormat> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out: Vec<SupportedFormat> = Vec::new();
+        for parser in &self.parsers {
+            for (ext, level) in parser.declared_formats() {
+                if seen.insert(*ext) {
+                    out.push(SupportedFormat {
+                        extension: (*ext).to_string(),
+                        support_level: level.as_str(),
+                        mime: mime_guess::from_ext(ext).first().map(|m| m.to_string()),
+                    });
+                }
+            }
+        }
+        out.sort_by(|a, b| a.extension.cmp(&b.extension));
+        out.push(SupportedFormat {
+            extension: "(other text)".to_string(),
+            support_level: Support::TextFallback.as_str(),
+            mime: Some("text/*".to_string()),
+        });
+        out
+    }
+}
+
+/// One advertised file format — a row of [`Registry::supported_formats`].
+#[derive(Debug, Clone)]
+pub struct SupportedFormat {
+    /// File extension without the dot (e.g. `"pdf"`); the synthetic catch-all is `"(other text)"`.
+    pub extension: String,
+    /// Support level: `"full"` / `"metadata"` / `"stub"` / `"textfallback"`.
+    pub support_level: &'static str,
+    /// Best-guess MIME type for the extension, if known.
+    pub mime: Option<String>,
 }
 
 // ── Free-function API (backward-compatible) ────────────────────────────────────
@@ -214,6 +253,29 @@ pub fn parse_guarded(path: &Path, size_bytes: u64, max_bytes: u64) -> Result<Ext
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supported_formats_lists_levels_and_is_sorted() {
+        let formats = Registry::new().supported_formats();
+        let find = |ext: &str| formats.iter().find(|f| f.extension == ext).cloned();
+
+        // Representative levels across parser kinds.
+        assert_eq!(find("pdf").unwrap().support_level, "full");
+        assert_eq!(find("png").unwrap().support_level, "metadata");
+        assert_eq!(find("zip").unwrap().support_level, "metadata");
+        assert_eq!(find("ppt").unwrap().support_level, "stub"); // legacy OLE = honest stub
+        assert_eq!(find("eml").unwrap().support_level, "full");
+        assert_eq!(find("html").unwrap().support_level, "full");
+
+        // The catch-all textfallback row is always present and last-ish.
+        assert!(formats.iter().any(|f| f.support_level == "textfallback"));
+
+        // Sorted by extension (the trailing catch-all aside) and deduped.
+        let exts: Vec<&str> = formats.iter().map(|f| f.extension.as_str()).collect();
+        let mut deduped = exts.clone();
+        deduped.dedup();
+        assert_eq!(exts.len(), deduped.len(), "no duplicate extensions");
+    }
 
     #[test]
     fn looks_like_text_accepts_extensionless_text() {

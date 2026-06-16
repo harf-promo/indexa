@@ -19,6 +19,11 @@ impl Parser for PdfParser {
         mime == "application/pdf"
     }
 
+    fn declared_formats(&self) -> &'static [(&'static str, crate::types::Support)] {
+        use crate::types::Support::*;
+        &[("pdf", Full)]
+    }
+
     fn parse(&self, path: &Path) -> Result<Extracted> {
         let bytes = std::fs::read(path)?;
 

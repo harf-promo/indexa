@@ -53,7 +53,7 @@ async function loadTreemap() {
     treemapData = await r.json();
 
     if (!treemapData || !treemapData.length) {
-      if (svg) svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" fill="var(--muted)" font-size="13">No context yet — index a folder for search first.</text>';
+      if (svg) svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" fill="var(--muted)" font-size="13">No summaries built yet — index a folder for search to populate the map (scanning only lists files).</text>';
       return;
     }
 

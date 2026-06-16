@@ -123,6 +123,31 @@ pub fn chunk_words(
     }
 }
 
+/// How fully a parser extracts a format — surfaced by `indexa formats` so the
+/// "understands every file" claim stays queryable and honest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Support {
+    /// Content is parsed into searchable text (code, PDF text layer, Office, HTML, …).
+    Full,
+    /// Only metadata/listing is extracted (image EXIF, media ffprobe, archive entry names).
+    Metadata,
+    /// Recognised but not extracted — a quiet placeholder (e.g. legacy OLE binaries).
+    Stub,
+    /// Sniffed as UTF-8 text with no dedicated parser (extensionless / unknown text files).
+    TextFallback,
+}
+
+impl Support {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Support::Full => "full",
+            Support::Metadata => "metadata",
+            Support::Stub => "stub",
+            Support::TextFallback => "textfallback",
+        }
+    }
+}
+
 /// Trait implemented by every file parser.
 pub trait Parser: Send + Sync {
     /// Returns true if this parser handles the given path.
@@ -137,6 +162,14 @@ pub trait Parser: Send + Sync {
     fn accepts_mime(&self, mime: &str) -> bool;
     /// Parse the file at `path` and return extracted chunks.
     fn parse(&self, path: &std::path::Path) -> anyhow::Result<Extracted>;
+
+    /// The `(extension, support level)` pairs this parser advertises, for `indexa formats`.
+    /// Default: none (parsers matched by MIME only, or that don't want to be advertised).
+    /// A parser with mixed levels (e.g. Office: `.docx` Full but legacy `.ppt` Stub) lists
+    /// each extension with its true level.
+    fn declared_formats(&self) -> &'static [(&'static str, Support)] {
+        &[]
+    }
 }
 
 #[cfg(test)]

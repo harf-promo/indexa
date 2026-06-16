@@ -39,7 +39,7 @@ async function loadMap() {
     const r = await fetch('/api/map');
     const d = await r.json();
     if (!d.total_dirs && !d.total_chunks) {
-      table.innerHTML = '<tr><td colspan="2" style="color:var(--muted);padding:12px 10px">No context yet. Add a folder and index it for search first.</td></tr>';
+      table.innerHTML = '<tr><td colspan="2" style="color:var(--muted);padding:12px 10px">No summaries built yet. Add a folder and index it for search (scanning only lists files).</td></tr>';
       return;
     }
     // Coverage percentage across directories

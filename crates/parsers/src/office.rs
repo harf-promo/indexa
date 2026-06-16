@@ -41,6 +41,23 @@ impl Parser for OfficeParser {
         )
     }
 
+    fn declared_formats(&self) -> &'static [(&'static str, crate::types::Support)] {
+        use crate::types::Support::*;
+        &[
+            ("xlsx", Full),
+            ("xls", Full),
+            ("xlsm", Full),
+            ("ods", Full),
+            ("csv", Full),
+            ("tsv", Full),
+            ("docx", Full),
+            ("odt", Full),
+            ("rtf", Full),
+            ("ppt", Stub),
+            ("pps", Stub),
+        ]
+    }
+
     fn parse(&self, path: &Path) -> Result<Extracted> {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
