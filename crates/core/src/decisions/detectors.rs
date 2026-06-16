@@ -139,7 +139,10 @@ const IDIOM_SYMBOLS: &[&str] = &[
 
 /// A symbol so ubiquitous that disambiguating it is busywork: a known idiom, or a
 /// common accessor/builder prefix (`with_`/`set_`/`get_`/`is_`/`to_`/`from_`/`on_`).
-fn is_idiom_symbol(name: &str) -> bool {
+///
+/// Also reused by summary enrichment (`indexa_query`) to drop idiomatic names from a
+/// code file's "API surface" header, so a single denylist governs both surfaces.
+pub fn is_idiom_symbol(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     IDIOM_SYMBOLS.contains(&n.as_str())
         || [

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.45.0] — 2026-06-16
+
+"Summaries that name the API": file summaries are now built from a representative sample across the
+file's chunks (not chunk 0 alone), and code files get their public symbols injected so the summary —
+and retrieval — can name the functions and types a file actually exports.
+
+### Changed
+
+- **Richer summary input.** `summarize` composes each file summary from a document-level sample across
+  the file's chunks (via the shared contextual `build_doc_context`, bounded to 4 000 chars) instead of
+  the first chunk alone, so multi-section files are represented rather than just their opening.
+- **API surface in code summaries.** For code files, the symbols the file *defines* (from the stored
+  `defines` code-graph edges — no re-parse) are prepended to the summary input, with idiomatic noise
+  (`new` / `default` / `with_*` / `get_*` / …) filtered via the shared `is_idiom_symbol` denylist. File
+  summaries now name the real functions/types a file exports, so "which file defines X" and "what does
+  this file export" retrieve and answer better. Both enrichments reuse already-indexed data (no extra
+  LLM call) and fail open to the plain sample. Existing summaries regenerate only when their file
+  content changes or you re-run `summarize`.
+
 ## [0.44.0] — 2026-06-16
 
 "What is this project?": the no-argument project overview and tree root now work, retrieval defaults

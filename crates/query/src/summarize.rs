@@ -147,6 +147,31 @@ fn is_preamble_label(label: &str) -> bool {
         )
 }
 
+/// For a code file, the comma-joined top-level symbols it defines (functions, types,
+/// classes), drawn from the stored `defines` code-graph edges — no re-parse, so it only
+/// works after `deep`. Idiomatic noise (`new`/`default`/`with_*`/`get_*`/…) is dropped via
+/// the shared [`is_idiom_symbol`](indexa_core::decisions::detectors::is_idiom_symbol) so the
+/// header names the file's real API. Returns `None` for non-code files, files with no
+/// `defines` edges, or when nothing survives filtering — the caller then omits the header.
+fn api_surface(store: &Store, path: &str) -> Option<String> {
+    let edges = store.edges_from(path).ok()?;
+    let mut names: Vec<String> = Vec::new();
+    for e in edges {
+        if e.kind == "defines"
+            && !indexa_core::decisions::detectors::is_idiom_symbol(&e.to_ref)
+            && !names.contains(&e.to_ref)
+        {
+            names.push(e.to_ref);
+        }
+    }
+    names.truncate(12);
+    if names.is_empty() {
+        None
+    } else {
+        Some(names.join(", "))
+    }
+}
+
 /// Summarise one file and persist the row. Returns true if successful.
 ///
 /// When `on_fragment` is `Some`, each generated token is forwarded to the
@@ -186,16 +211,29 @@ pub async fn summarize_file(
         }
     }
 
-    // Try to get a content sample. Prefer first chunk text (already parsed),
-    // fall back to raw file bytes.
-    let sample: Vec<u8> = if let Ok(Some(first_chunk)) = store.first_chunk_text(path) {
-        first_chunk.into_bytes()
-    } else {
-        match std::fs::read(path) {
-            Ok(bytes) => bytes.into_iter().take(4096).collect(),
-            Err(_) => return Ok(SummaryWrite::NoContent), // unreadable file
+    // Content sample for the describer. Compose a document-level sample from the file's
+    // chunks via the shared contextual helper (representative across sections, bounded to
+    // 4 000 chars) rather than chunk 0 alone; fall back to raw bytes when no chunks are
+    // stored. For code files, prepend the API surface — the symbols this file defines,
+    // from the code graph — so the summary can name the functions/types it exports. Both
+    // reuse existing data (no extra LLM call) and fail open to the plain sample.
+    let mut sample_text: String = match store.chunks_for_path(path, 64) {
+        Ok(chunks) if !chunks.is_empty() => {
+            let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+            crate::contextual::build_doc_context(&texts)
         }
+        _ => match std::fs::read(path) {
+            Ok(bytes) => {
+                let n = bytes.len().min(4096);
+                String::from_utf8_lossy(&bytes[..n]).into_owned()
+            }
+            Err(_) => return Ok(SummaryWrite::NoContent), // unreadable file
+        },
     };
+    if let Some(api) = api_surface(store, path) {
+        sample_text = format!("// API surface (symbols this file defines): {api}\n\n{sample_text}");
+    }
+    let sample: Vec<u8> = sample_text.into_bytes();
 
     let mut summary_text: Option<String> = None;
     let mut passes_run: i64 = 0;
@@ -842,6 +880,38 @@ mod tests {
             ),
             "It rolls up child summaries."
         );
+    }
+
+    #[test]
+    fn api_surface_lists_defines_and_drops_idioms() {
+        use indexa_core::store::{EdgeRecord, Store};
+        let mut store = Store::open_in_memory().unwrap();
+        let edge = |to: &str, kind: &str| EdgeRecord {
+            from_path: "/p/lib.rs".to_owned(),
+            kind: kind.to_owned(),
+            to_ref: to.to_owned(),
+        };
+        store
+            .upsert_edges(&[
+                edge("QueryBuilder", "defines"),
+                edge("mint_token", "defines"),
+                edge("new", "defines"),           // idiom → dropped
+                edge("with_capacity", "defines"), // idiom prefix → dropped
+                edge("std::io", "imports"),       // not a define → ignored
+            ])
+            .unwrap();
+        let api = super::api_surface(&store, "/p/lib.rs")
+            .expect("a code file with defines edges has an API surface");
+        assert!(api.contains("QueryBuilder"), "{api}");
+        assert!(api.contains("mint_token"), "{api}");
+        assert!(!api.contains("new"), "idiom dropped: {api}");
+        assert!(
+            !api.contains("with_capacity"),
+            "idiom prefix dropped: {api}"
+        );
+        assert!(!api.contains("std::io"), "non-defines ignored: {api}");
+        // A file with no `defines` edges yields no header.
+        assert!(super::api_surface(&store, "/p/other.rs").is_none());
     }
 
     #[test]
