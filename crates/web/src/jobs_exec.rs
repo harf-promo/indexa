@@ -439,6 +439,10 @@ async fn run_deep_phase(
     let transcribe = state.config.parsers.audio.transcribe;
     let transcribe_binary = state.config.parsers.audio.transcribe_binary().to_owned();
     let transcribe_model = state.config.parsers.audio.model.clone();
+    // Optional PDF OCR (opt-in): pdftoppm + tesseract for scanned PDFs with no text layer.
+    let ocr_enabled = state.config.parsers.pdf.ocr_enabled();
+    let ocr_binary = state.config.parsers.pdf.ocr_binary().to_owned();
+    let ocr_lang = state.config.parsers.pdf.ocr_lang.clone();
     let video_ffmpeg = state.config.parsers.video.ffmpeg_binary().to_owned();
     let video_model = state.config.parsers.video.caption_model().to_owned();
     let video_fps = state.config.parsers.video.fps();
@@ -612,6 +616,56 @@ async fn run_deep_phase(
                             pressure: None,
                         },
                     ),
+                }
+            }
+
+            // PDF OCR (opt-in): a scanned PDF with no text layer is rasterised + OCR'd and the
+            // recognised text appended as a chunk. Blocking subprocess → spawn_blocking; fails open.
+            if ocr_enabled && extracted.mime == "application/pdf" {
+                let layer_words: usize = extracted
+                    .chunks
+                    .iter()
+                    .map(|c| c.text.split_whitespace().count())
+                    .sum();
+                if layer_words < 10 {
+                    let bin = ocr_binary.clone();
+                    let lang = ocr_lang.clone();
+                    let p = entry.path.clone();
+                    let res = tokio::task::spawn_blocking(move || {
+                        indexa_parsers::pdf::ocr_pdf(&p, &bin, lang.as_deref())
+                    })
+                    .await;
+                    match res {
+                        Ok(Ok(text)) if !text.trim().is_empty() => {
+                            let seq = extracted.chunks.len();
+                            extracted.chunks.push(indexa_parsers::types::Chunk {
+                                source: entry.path.clone(),
+                                seq,
+                                heading: "ocr".to_owned(),
+                                text,
+                                language: None,
+                            });
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => push(
+                            handle,
+                            JobEvent::Warning {
+                                stage: "deep".to_owned(),
+                                item_path: Some(path_str.clone()),
+                                message: format!("OCR failed: {e:#}"),
+                                pressure: None,
+                            },
+                        ),
+                        Err(e) => push(
+                            handle,
+                            JobEvent::Warning {
+                                stage: "deep".to_owned(),
+                                item_path: Some(path_str.clone()),
+                                message: format!("OCR task panicked: {e}"),
+                                pressure: None,
+                            },
+                        ),
+                    }
                 }
             }
 

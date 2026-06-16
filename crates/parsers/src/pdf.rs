@@ -5,7 +5,7 @@
 //! opt-in enhancement (Marker or Tesseract, configurable in config.toml).
 
 use crate::types::{Chunk, Extracted, Parser};
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 use std::path::Path;
 
 pub struct PdfParser;
@@ -120,6 +120,48 @@ fn word_window_chunks(
     crate::types::chunk_words(path, text, heading, None, 800, 100, seq, chunks);
 }
 
+/// OCR a scanned PDF (one with no text layer): rasterise each page to PNG with `pdftoppm`
+/// (poppler) and run `tesseract` on it, concatenating the recognised text. Both are external
+/// tools — if either is missing or fails this returns `Err`, so the caller falls open to the
+/// (empty) text-layer result rather than crashing. Opt-in via `[parsers.pdf] backend = "ocr"`;
+/// it runs in the indexing pipeline (`deep`/web), not the stateless parser.
+pub fn ocr_pdf(path: &Path, tesseract_bin: &str, lang: Option<&str>) -> Result<String> {
+    use std::process::Command;
+    let dir = tempfile::tempdir()?;
+    let prefix = dir.path().join("page");
+    let status = Command::new("pdftoppm")
+        .args(["-png", "-r", "200"])
+        .arg(path)
+        .arg(&prefix)
+        .status()
+        .map_err(|e| anyhow!("pdftoppm unavailable ({e}); install poppler for PDF OCR"))?;
+    if !status.success() {
+        bail!("pdftoppm failed to rasterise {}", path.display());
+    }
+    let mut pages: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("png"))
+        .collect();
+    pages.sort();
+    let mut text = String::new();
+    for page in pages {
+        let mut cmd = Command::new(tesseract_bin);
+        cmd.arg(&page).arg("stdout");
+        if let Some(l) = lang {
+            cmd.args(["-l", l]);
+        }
+        let out = cmd.output().map_err(|e| {
+            anyhow!("{tesseract_bin} unavailable ({e}); install tesseract for PDF OCR")
+        })?;
+        if out.status.success() {
+            text.push_str(&String::from_utf8_lossy(&out.stdout));
+            text.push('\n');
+        }
+    }
+    Ok(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +187,16 @@ mod tests {
             extracted.chunks[0].text.contains("bad.pdf")
                 || extracted.chunks[0].text.contains("PDF")
         );
+    }
+
+    #[test]
+    fn ocr_pdf_missing_tools_is_graceful() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("scan.pdf");
+        std::fs::write(&p, b"%PDF-1.4 minimal").unwrap();
+        // With a bogus tesseract binary (and pdftoppm typically absent in CI), this must
+        // return an Err rather than panic — the pipeline then falls open to the text layer.
+        let _ = ocr_pdf(&p, "indexa-nonexistent-tesseract-binary", Some("eng"));
     }
 
     #[test]
