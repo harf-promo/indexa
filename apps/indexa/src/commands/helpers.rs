@@ -121,10 +121,71 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
 pub(crate) fn require_index_db() -> Result<Option<PathBuf>> {
     let db_path = index_db_path()?;
     if !db_path.exists() {
-        println!("No index found. Run `indexa scan <path>` first.");
+        println!("No index found. Run `indexa index <path>` first.");
         return Ok(None);
     }
     Ok(Some(db_path))
+}
+
+/// Quick Ollama readiness check. Returns `Ok(())` if Ollama is reachable and all
+/// required models are pulled. On failure, prints actionable guidance and returns `Err`.
+///
+/// Skips the check entirely when the embedding and describer providers are both non-Ollama
+/// (e.g. `claude-code`), so Claude-subscription users are never blocked.
+pub(crate) async fn preflight_ollama(cfg: &Config) -> anyhow::Result<()> {
+    // Only gate on Ollama providers. If neither provider is Ollama, skip silently.
+    let embed_is_ollama = cfg.embedding.provider == "ollama";
+    let describer_is_ollama = cfg.describer.provider == "ollama";
+    if !embed_is_ollama && !describer_is_ollama {
+        return Ok(());
+    }
+
+    let base = indexa_llm::OllamaLlm::resolve_base_url(Some(cfg.embedding.base_url.as_str()));
+
+    // Build the list of models the current config needs from Ollama.
+    let mut required: Vec<(&str, &str)> = Vec::new();
+    if embed_is_ollama {
+        required.push((cfg.embedding.model.as_str(), "embeddings"));
+    }
+    if describer_is_ollama {
+        required.push((cfg.describer.file_model.as_str(), "file summaries"));
+        if cfg.describer.dir_model != cfg.describer.file_model {
+            required.push((cfg.describer.dir_model.as_str(), "dir roll-ups / Q&A"));
+        }
+    }
+
+    let installed = match indexa_llm::ollama_list_models(&base).await {
+        Ok(list) => list,
+        Err(_) => {
+            eprintln!("❌ Ollama is not running. Start it with: ollama serve");
+            anyhow::bail!("Ollama is not reachable at {base}");
+        }
+    };
+
+    let mut missing = Vec::new();
+    for (model, role) in &required {
+        if !model_installed_check(&installed, model) {
+            eprintln!("❌ Model '{model}' ({role}) not pulled. Run: ollama pull {model}");
+            missing.push(*model);
+        }
+    }
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "{} required model(s) not pulled: {}",
+            missing.len(),
+            missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Lenient model-name match: `nomic-embed-text` ↔ `nomic-embed-text:latest`.
+fn model_installed_check(installed: &[String], want: &str) -> bool {
+    installed.iter().any(|m| {
+        m == want
+            || m == &format!("{want}:latest")
+            || (!want.contains(':') && m.split(':').next() == Some(want))
+    })
 }
 
 /// Build an embedder from config, optionally overriding the model name.

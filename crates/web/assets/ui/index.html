@@ -104,6 +104,7 @@
             <div id="welcome-empty" hidden>
               <h2>Welcome to Indexa &mdash; your local context engine</h2>
               <p>Point Indexa at a folder and it builds a searchable context map of everything inside &mdash; entirely on your machine. After that, your AI tools answer from it instead of re-reading your files every time.</p>
+              <p style="font-size:13px;color:var(--muted);margin-top:-6px">Understands code, presentations, Word documents, PDFs, notes, images, and more &mdash; indexed as first-class content.</p>
               <ol class="onboard-steps">
                 <li><strong>Add a folder.</strong> A code repo, your Documents, a notes vault &mdash; anything.</li>
                 <li><strong>Indexa builds context.</strong> It scans, embeds, and summarizes locally with Ollama. No files leave your machine.</li>
@@ -134,7 +135,7 @@
             <div class="welcome">
               <h2>Ask your local context</h2>
               <p>Ask a question about your files in plain language, export to your AI tool, or browse the tree. Add a folder first if you haven&#x2019;t yet.<br><br>
-              <code>&#x201C;where are my tax documents?&#x201D;</code> &nbsp;&middot;&nbsp; <code>&#x201C;where is auth handled in this repo?&#x201D;</code></p>
+              <code>&#x201C;What is this project about?&#x201D;</code> &nbsp;&middot;&nbsp; <code>&#x201C;where are my tax documents?&#x201D;</code> &nbsp;&middot;&nbsp; <code>&#x201C;where is auth handled in this repo?&#x201D;</code></p>
             </div>
           </div>
         </div>
@@ -217,7 +218,7 @@
       <!-- File-aware Ask: shows "Asking about: <selection>" when scoped; ✕ clears to whole-index. -->
       <div class="ask-scope-chip" id="ask-scope-chip" hidden></div>
       <select id="saved-q" title="Saved searches (also: indexa saved)" aria-label="Saved searches" hidden></select>
-      <input type="text" id="q" placeholder="Ask your local context&#x2026;" autocomplete="off" aria-label="Ask a question">
+      <input type="text" id="q" placeholder="Ask your local context&#x2026; e.g. &#x201C;What is this project about?&#x201D;" autocomplete="off" aria-label="Ask a question">
       <label class="toggle-label ask-agentic-toggle" title="Agentic: plan &rarr; search &rarr; refine across multiple hops. Better for compositional questions; a bit slower.">
         <input type="checkbox" id="ask-agentic"><span class="toggle-text">Agentic</span>
       </label>

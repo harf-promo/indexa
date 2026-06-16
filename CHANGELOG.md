@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.0] — 2026-06-16
+
+"Fast, legible & visible": re-indexing is dramatically faster (skips unchanged chunks), retrieval
+is more diverse (MMR), three new MCP tools surface what the engine already knew, and the product
+finally shows you what it can do.
+
+### Added
+
+- **Embedding cache (content-hash per-chunk).** Re-indexing now skips unchanged chunks: each chunk
+  gets a SHA-256 of its raw text; on subsequent `deep` / `index` runs, only chunks whose text
+  changed are sent to the embedder. The first re-index after any edit is now proportional to
+  *what changed*, not to the size of the whole file. Existing databases upgrade transparently
+  (new `content_hash` column, nullable for legacy rows).
+- **MMR diversity in retrieval.** Context packing now applies Maximal Marginal Relevance to
+  re-score candidates before budget fill, penalising near-duplicate chunks (slide footers, licence
+  blocks, repeated boilerplate). Tune with `[retrieval] mmr_lambda` (0 = max diversity, 1 = off;
+  default 0.5). Never drops a hit — only reorders.
+- **Three new MCP tools (now 45 total):**
+  - `project_overview` — synthesise a plain-language summary of the whole indexed project (or a
+    scoped subtree) in one call; much faster than `ask` for "what is this project about?".
+  - `explain_retrieval` — return the full retrieval trace for any question (sparse/dense/fused
+    stages, top-k scores); use it to understand or debug why `ask` returned specific sources.
+  - `inspect` — return all indexed facts about a path (kind, size, chunks, language, summary,
+    model, category, weight, code-graph edges); the same data as the web "Indexed facts" panel.
+- **`indexa describe` whole-project mode.** Running `indexa describe` with no path now prints the
+  project overview instead of requiring a specific file path.
+- **Auto-preflight for `indexa index` / `deep`.** When Ollama is the provider and it isn't running
+  or a required model isn't pulled, the command now prints an actionable hint ("Start Ollama" /
+  "run: ollama pull X") before any work begins, instead of failing mid-pipeline with a raw error.
+- **Plain-language UX polish.** "Why these sources?" trace gets a "How Indexa found these files"
+  caption; graph centrality tooltip glosses "how many files depend on it"; the staleness health
+  banner now has a one-click "Re-index now" button; the Ask welcome and onboarding copy surfaces
+  project-level questions and document/presentation indexing.
+- **Correct first-step hints.** CLI "no index found" messages now recommend `indexa index <path>`
+  (the one-shot pipeline) instead of the power-user `scan`/`deep` stages.
+- **Shared text utility.** `indexa_core::text::truncate_chars` / `snippet` unify three previously
+  inconsistent char-boundary truncation idioms across the codebase.
+
+### Changed
+
+- **Simplified web contextual-retrieval path.** The web deep-scan blurb loop now calls the same
+  `contextual_embed_texts` helper as the CLI (killed the last prompt-drift risk between paths).
+- **Deduplicated ollama.rs prompt builders.** `describe` / `describe_stream` and `summarize_dir` /
+  `summarize_dir_stream` now share a single private prompt-building function each (previously the
+  prompt strings were duplicated between the stream and buffered variants).
+- **Removed dead `micro_benchmark` config field.** The `[resource] micro_benchmark` field was
+  declared and parsed but never read; its promised behaviour was never implemented. Removed.
+- **Deduplicated JS escape helpers.** Four `escapeHtml`-equivalent functions (`escW`, `escI`,
+  `escG`, `esc`) scattered across the web UI's JS files were consolidated into the single canonical
+  `escapeHtml` defined in `08-util-palette-init.js`.
+
 ## [0.41.0] — 2026-06-16
 
 "Understand the whole project": Indexa now makes sense of a real work directory — presentations,

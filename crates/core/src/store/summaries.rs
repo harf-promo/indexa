@@ -2,6 +2,7 @@
 
 use super::search::{blob_to_embedding, embedding_to_blob, like_prefix};
 use super::{Store, SummaryRecord};
+use crate::text::snippet;
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension, Row};
 use sha2::{Digest, Sha256};
@@ -76,16 +77,8 @@ pub fn abstract_from(summary: &str) -> String {
         .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(trimmed.len());
     let first = trimmed[..end].trim();
-    // Cap length on a char boundary.
-    const MAX: usize = 120;
-    if first.len() <= MAX {
-        return first.to_owned();
-    }
-    let mut cut = MAX;
-    while cut > 0 && !first.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}…", first[..cut].trim_end())
+    // Cap at 120 Unicode characters; `snippet` appends "…" when truncated.
+    snippet(first, 120).into_owned()
 }
 
 /// Map a row from the `summaries` table (in the canonical column order used by

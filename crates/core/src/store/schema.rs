@@ -401,6 +401,34 @@ impl Store {
             tx.commit()?;
         }
 
+        // Migration: add chunks.content_hash (v0.42) — a SHA-256 hex digest of the raw
+        // chunk text, used as a cache key to skip re-embedding chunks whose text is unchanged.
+        // Nullable so existing rows (NULL) are treated as "no cache" and re-embedded normally.
+        // The companion index makes the per-file hash lookup fast.
+        //
+        // Guard with an IMMEDIATE transaction (same pattern as the AUTOINCREMENT migration):
+        // the fast pre-check avoids the write-lock on the common "already migrated" path, and
+        // the re-check inside the exclusive lock prevents "duplicate column" races when
+        // multiple processes open the DB concurrently on a legacy database.
+        let needs_content_hash = |conn: &rusqlite::Connection| -> rusqlite::Result<bool> {
+            conn.prepare("SELECT 1 FROM pragma_table_info('chunks') WHERE name = 'content_hash'")?
+                .exists([])
+                .map(|present| !present)
+        };
+        if needs_content_hash(&self.conn)? {
+            let tx = self
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if needs_content_hash(&tx)? {
+                tx.execute_batch(
+                    "ALTER TABLE chunks ADD COLUMN content_hash TEXT;
+                     CREATE INDEX IF NOT EXISTS idx_chunks_content_hash
+                         ON chunks(entry_path, content_hash);",
+                )?;
+            }
+            tx.commit()?;
+        }
+
         // Referential integrity for chunks/summaries/edges → entries is maintained by
         // MANUAL multi-table cleanup in entries.rs (delete_entry / delete_subtree /
         // delete_path_artifacts_exact), NOT by a database FK. There is deliberately no

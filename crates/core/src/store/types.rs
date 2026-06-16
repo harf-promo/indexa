@@ -9,6 +9,9 @@ pub struct ChunkRecord {
     pub language: Option<String>,
     pub embedding: Option<Vec<f32>>,
     pub embed_model: Option<String>,
+    /// SHA-256 hex digest of `text` (the raw source chunk, not the enriched blurb).
+    /// `None` on records constructed without a hash (treated as "no cache" on upsert).
+    pub content_hash: Option<String>,
 }
 
 /// One code-relationship-graph edge (see the `edges` table). `kind` is `"imports"`

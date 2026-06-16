@@ -38,7 +38,7 @@ function renderInsightsResult(kind, d, el) {
       + clusters.map(function (c, i) {
         return '<div style="margin-top:8px"><em>Cluster ' + (i + 1) + ' — similarity ' + (c.similarity * 100).toFixed(0) + '%</em>'
           + '<ul style="margin:2px 0 0 16px;padding:0">'
-          + c.paths.map(function (p) { return '<li style="list-style:disc">' + escI(p) + '</li>'; }).join('')
+          + c.paths.map(function (p) { return '<li style="list-style:disc">' + escapeHtml(p) + '</li>'; }).join('')
           + '</ul>'
           + dismissEvidenceBtn('duplicate', i)
           + '</div>';
@@ -55,7 +55,7 @@ function renderInsightsResult(kind, d, el) {
       + entries.map(function (e, i) {
         return '<tr style="border-top:1px solid var(--border)">'
           + '<td style="padding:2px 6px;color:var(--muted)">' + e.days_since_modified + 'd</td>'
-          + '<td style="padding:2px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escI(e.path) + '</td>'
+          + '<td style="padding:2px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(e.path) + '</td>'
           + '<td style="padding:2px 6px;text-align:right;white-space:nowrap">' + dismissEvidenceBtn('archive', i) + '</td>'
           + '</tr>';
       }).join('')
@@ -65,9 +65,9 @@ function renderInsightsResult(kind, d, el) {
     var modified = d.modified || [];
     el.innerHTML = '<strong>Last ' + (d.days || 7) + ' day(s):</strong>'
       + '<div style="margin-top:6px"><em>Added (' + d.added_count + '):</em>'
-      + (added.length === 0 ? ' <span style="color:var(--muted)">none</span>' : '<ul style="margin:2px 0 0 16px;padding:0">' + added.map(function (p) { return '<li style="list-style:circle;color:var(--green)">+ ' + escI(p) + '</li>'; }).join('') + '</ul>')
+      + (added.length === 0 ? ' <span style="color:var(--muted)">none</span>' : '<ul style="margin:2px 0 0 16px;padding:0">' + added.map(function (p) { return '<li style="list-style:circle;color:var(--green)">+ ' + escapeHtml(p) + '</li>'; }).join('') + '</ul>')
       + '</div><div style="margin-top:6px"><em>Modified (' + d.modified_count + '):</em>'
-      + (modified.length === 0 ? ' <span style="color:var(--muted)">none</span>' : '<ul style="margin:2px 0 0 16px;padding:0">' + modified.map(function (p) { return '<li style="list-style:circle;color:var(--accent)">~ ' + escI(p) + '</li>'; }).join('') + '</ul>')
+      + (modified.length === 0 ? ' <span style="color:var(--muted)">none</span>' : '<ul style="margin:2px 0 0 16px;padding:0">' + modified.map(function (p) { return '<li style="list-style:circle;color:var(--accent)">~ ' + escapeHtml(p) + '</li>'; }).join('') + '</ul>')
       + '</div>';
   }
 }
@@ -111,8 +111,4 @@ function dismissInsightEvidence(kind, idx) {  // eslint-disable-line no-unused-v
       loadReviewCount(); // an open question may have been dismissed with it
     })
     .catch(function (e2) { toast('Network error: ' + e2.message, 'error'); });
-}
-
-function escI(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }

@@ -1387,6 +1387,7 @@ mod tests {
                 language: None,
                 embedding: None,
                 embed_model: None,
+                content_hash: None,
             })
             .collect()
     }

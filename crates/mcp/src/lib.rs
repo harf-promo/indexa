@@ -21,6 +21,7 @@ mod curation;
 mod graph;
 mod insights;
 mod packs;
+mod query_extras;
 mod retrieval;
 mod review;
 
@@ -55,6 +56,7 @@ pub use packs::{
     CreatePackMcpParams, DeletePackMcpParams, ExportPackParams, GetPackParams, PackPathsParams,
     SearchPackParams,
 };
+pub use query_extras::{ExplainRetrievalParams, InspectPathParams, ProjectOverviewParams};
 pub use retrieval::{
     AskParams, BrowseParams, GetChunkContextParams, GetSummaryParams, ReadFileParams, SearchParams,
 };
@@ -127,6 +129,7 @@ impl IndexaMcp {
             + Self::router_review()
             + Self::router_insights()
             + Self::router_admin()
+            + Self::router_query_extras()
     }
 }
 

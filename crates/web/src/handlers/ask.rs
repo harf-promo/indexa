@@ -37,6 +37,7 @@ fn qa_config(state: &AppState, body: &AskRequest) -> QaConfig {
         use_recency_weight: state.config.retrieval.recency_boost,
         recency_days: state.config.retrieval.recency_days,
         max_steps: state.config.retrieval.agentic_max_steps,
+        mmr_lambda: state.config.retrieval.mmr_lambda,
         scope: body
             .scope
             .as_deref()

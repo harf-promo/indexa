@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
@@ -235,6 +236,10 @@ pub struct QaConfig {
     /// Max retrieval hops for the agentic ([`answer_agentic`]) path. Clamped to
     /// `1..=AGENTIC_MAX_STEPS_CAP`. Ignored by the one-shot [`answer`].
     pub max_steps: usize,
+    /// MMR (Maximal Marginal Relevance) lambda (v0.42).
+    /// `1.0` disables MMR (pure relevance). `0.5` = balanced (default).
+    /// `0.0` = maximum diversity. See [`RetrievalConfig::mmr_lambda`].
+    pub mmr_lambda: f32,
 }
 
 impl Default for QaConfig {
@@ -252,8 +257,99 @@ impl Default for QaConfig {
             use_recency_weight: false,
             recency_days: 90,
             max_steps: 3,
+            mmr_lambda: 0.5,
         }
     }
+}
+
+// ── MMR (Maximal Marginal Relevance) re-ranking ───────────────────────────────
+
+/// Cosine similarity between two equal-length f32 vectors.
+/// Returns 0.0 when either vector has zero norm (rather than NaN).
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        0.0
+    } else {
+        dot / (norm_a * norm_b)
+    }
+}
+
+/// MMR score for one candidate chunk.
+///
+/// `mmr = λ * relevance - (1 - λ) * max_sim_to_selected`
+///
+/// When `selected` is empty (no chunk chosen yet) the diversity penalty is zero,
+/// so the first pick is always the highest-relevance chunk.
+fn mmr_score(
+    hit: &SearchHit,
+    selected: &[&[f32]],
+    lambda: f32,
+    embeddings: &HashMap<i64, Vec<f32>>,
+) -> f32 {
+    let rel = hit.rrf_score as f32;
+    if selected.is_empty() {
+        return rel;
+    }
+    let max_sim = match embeddings.get(&hit.chunk_id) {
+        Some(v) => selected
+            .iter()
+            .map(|s| cosine(v, s))
+            .fold(f32::NEG_INFINITY, f32::max),
+        None => 0.0, // no embedding → no penalty (fail-open)
+    };
+    lambda * rel - (1.0 - lambda) * max_sim
+}
+
+/// Greedy MMR selection over `candidates`.
+///
+/// Each iteration picks the candidate with the highest MMR score (relevance
+/// balanced against max similarity to already-selected items), adds it to the
+/// result, and repeats until the candidate pool is exhausted.
+///
+/// **Early returns (no re-ordering):**
+/// - `lambda >= 1.0` — pure relevance, MMR is a no-op.
+/// - Fewer than 2 candidates — nothing to re-order.
+/// - `embeddings` is empty — no vectors to compute similarity with.
+fn apply_mmr(
+    mut candidates: Vec<SearchHit>,
+    embeddings: &HashMap<i64, Vec<f32>>,
+    lambda: f32,
+) -> Vec<SearchHit> {
+    if lambda >= 1.0 || candidates.len() < 2 || embeddings.is_empty() {
+        return candidates;
+    }
+    let mut selected_vecs: Vec<&[f32]> = Vec::with_capacity(candidates.len());
+    let mut result = Vec::with_capacity(candidates.len());
+
+    // Greedy MMR selection — O(n²) in the number of candidates; at top_k=8..20
+    // this is negligible.
+    while !candidates.is_empty() {
+        let best_idx = candidates
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| {
+                let sa = mmr_score(a, &selected_vecs, lambda, embeddings);
+                let sb = mmr_score(b, &selected_vecs, lambda, embeddings);
+                sa.total_cmp(&sb)
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+
+        let hit = candidates.remove(best_idx);
+        // Record the selected embedding so subsequent picks are penalised for
+        // similarity to it. If no embedding exists for this chunk, push nothing —
+        // future picks won't be penalised relative to it (safe fail-open).
+        if let Some(v) = embeddings.get(&hit.chunk_id) {
+            // SAFETY: `embeddings` is a `&HashMap` borrowed for the life of this
+            // function, so the slice reference is valid for the whole loop.
+            selected_vecs.push(v.as_slice());
+        }
+        result.push(hit);
+    }
+    result
 }
 
 /// Synchronous retrieval: hybrid search + summary boost. Kept separate so the
@@ -315,6 +411,31 @@ pub(crate) fn retrieve(
             .partial_cmp(&a.rrf_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    // v0.42: MMR (Maximal Marginal Relevance) diversity re-ranking.
+    // Applied after all boosts so the penalty operates on the final relevance
+    // scores. Skipped when lambda >= 1.0 (pure relevance / disabled) or when
+    // the mode is sparse-only (no embeddings stored per chunk). Fails open:
+    // any error fetching embeddings leaves the original order intact.
+    if cfg.mmr_lambda < 1.0 && !hits.is_empty() && !matches!(cfg.mode, HybridMode::Sparse) {
+        let ids: Vec<i64> = hits.iter().map(|h| h.chunk_id).collect();
+        match store.embeddings_for_chunks(&ids) {
+            Ok(embeddings) if !embeddings.is_empty() => {
+                hits = apply_mmr(hits, &embeddings, cfg.mmr_lambda);
+            }
+            Ok(_) => {
+                // No embeddings stored for these chunks (index never had deep embeddings);
+                // keep the relevance-sorted order.
+            }
+            Err(e) => {
+                // Fail open: log and preserve existing order so ask never errors
+                // due to MMR plumbing.
+                tracing::warn!(
+                    mmr_lambda = cfg.mmr_lambda,
+                    "MMR embedding fetch failed, skipping diversity re-ranking: {e:#}"
+                );
+            }
+        }
+    }
     Ok(hits)
 }
 
@@ -356,7 +477,7 @@ const BROAD_INTENT_TERMS: [&str; 20] = [
     "the whole project",
 ];
 
-fn is_broad_intent(question: &str) -> bool {
+pub fn is_broad_intent(question: &str) -> bool {
     let q = question.to_ascii_lowercase();
     BROAD_INTENT_TERMS.iter().any(|t| q.contains(t))
 }
@@ -400,13 +521,18 @@ fn common_ancestor(paths: &[String]) -> Option<String> {
 /// Budget split:
 /// - `overview_budget` chars max for the overview block.
 /// - Callers subtract `result.len()` from their chunk budget.
-fn build_project_overview(
+pub fn build_project_overview(
     store: &Store,
     hits: &[SearchHit],
     scope: Option<&str>,
     overview_budget: usize,
 ) -> String {
-    if overview_budget == 0 || hits.is_empty() {
+    if overview_budget == 0 {
+        return String::new();
+    }
+    // When no scope is provided we need hits to derive the root; when a scope is provided
+    // explicitly we can build an overview without any hits (e.g. standalone MCP tool).
+    if hits.is_empty() && scope.is_none() {
         return String::new();
     }
 
@@ -1530,6 +1656,7 @@ mod tests {
                 language: None,
                 embedding: None,
                 embed_model: None,
+                content_hash: None,
             }])
             .unwrap();
         (dir, path)
@@ -1781,6 +1908,7 @@ mod tests {
                 language: None,
                 embedding: None,
                 embed_model: None,
+                content_hash: None,
             })
             .collect();
         store.upsert_chunks(&records).unwrap();
@@ -2155,5 +2283,69 @@ mod tests {
         // Must be valid UTF-8 (would panic on invalid slice otherwise)
         assert!(std::str::from_utf8(result.as_bytes()).is_ok());
         assert!(result.len() <= s.len());
+    }
+
+    // ── MMR (Maximal Marginal Relevance) re-ranking ───────────────────────────
+
+    fn make_hit(id: i64, score: f64) -> SearchHit {
+        SearchHit {
+            chunk_id: id,
+            entry_path: format!("/doc{id}.md"),
+            seq: 0,
+            heading: String::new(),
+            text: "x".to_owned(),
+            rrf_score: score,
+        }
+    }
+
+    #[test]
+    fn mmr_with_identical_chunks_demotes_second() {
+        // Two hits share the same embedding (cosine sim = 1.0).
+        // A third hit is orthogonal (cosine sim = 0.0) but has a lower raw score.
+        //
+        // With lambda=0.5:
+        //   First pick  = A (highest relevance; no selected yet, so no diversity penalty).
+        //   MMR(C | A)  = 0.5*0.5  - 0.5*0.0 =  0.25   (orthogonal → zero penalty)
+        //   MMR(B | A)  = 0.5*0.8  - 0.5*1.0 = -0.1    (identical  → max penalty)
+        //   → Second pick must be C, third must be B.
+        let hit_a = make_hit(1, 0.9);
+        let hit_b = make_hit(2, 0.8); // identical embedding to A
+        let hit_c = make_hit(3, 0.5); // lower raw score but maximally diverse
+
+        let mut embeddings: HashMap<i64, Vec<f32>> = HashMap::new();
+        embeddings.insert(1, vec![1.0, 0.0, 0.0]);
+        embeddings.insert(2, vec![1.0, 0.0, 0.0]); // identical to A → max penalty
+        embeddings.insert(3, vec![0.0, 1.0, 0.0]); // orthogonal to A → zero penalty
+
+        let result = apply_mmr(vec![hit_a, hit_b, hit_c], &embeddings, 0.5);
+
+        assert_eq!(
+            result[0].chunk_id, 1,
+            "first pick must be highest-relevance hit"
+        );
+        assert_eq!(
+            result[1].chunk_id, 3,
+            "diverse hit (C) must beat identical hit (B) in second position"
+        );
+        assert_eq!(result[2].chunk_id, 2, "identical hit (B) must be last");
+    }
+
+    #[test]
+    fn mmr_lambda_1_0_is_unchanged() {
+        // lambda=1.0 is the "pure relevance / MMR disabled" case.
+        // apply_mmr must early-return without reordering the input.
+        let hits = vec![make_hit(10, 0.9), make_hit(20, 0.6), make_hit(30, 0.3)];
+
+        let mut embeddings: HashMap<i64, Vec<f32>> = HashMap::new();
+        embeddings.insert(10, vec![1.0, 0.0]);
+        embeddings.insert(20, vec![1.0, 0.0]); // identical — would be demoted if lambda < 1
+        embeddings.insert(30, vec![0.0, 1.0]);
+
+        let result = apply_mmr(hits, &embeddings, 1.0);
+
+        // Order must be byte-for-byte identical to the input.
+        assert_eq!(result[0].chunk_id, 10);
+        assert_eq!(result[1].chunk_id, 20);
+        assert_eq!(result[2].chunk_id, 30);
     }
 }

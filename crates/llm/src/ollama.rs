@@ -244,6 +244,67 @@ impl OllamaLlm {
         anyhow::bail!("Ollama stream ended without completion (done=true never received)")
     }
 
+    /// Build the prompt for a single-file description or multi-pass refinement.
+    /// Shared by [`Describer::describe`] and [`Describer::describe_stream`] so the two
+    /// paths can never diverge.
+    fn build_describe_prompt(path: &str, sample: &str, previous_summary: Option<&str>) -> String {
+        let base = match previous_summary {
+            None => format!(
+                "Briefly describe what this file is about in 1-2 sentences.\nFile: {path}\nContent:\n{sample}"
+            ),
+            Some(prev) => format!(
+                "We have provided an existing summary up to a certain point:\n{prev}\n\n\
+                 We have the opportunity to refine the existing summary (only if needed) \
+                 with some more context below.\n\
+                 File: {path}\nContent:\n{sample}\n\n\
+                 Given the new context, refine the original summary. \
+                 If the context isn't useful, return the original summary."
+            ),
+        };
+        format!("{base}\n\n{}", crate::SUMMARY_OUTPUT_RULE)
+    }
+
+    /// Build the prompt for a directory roll-up or multi-pass refinement.
+    /// Shared by [`Describer::summarize_dir`] and [`Describer::summarize_dir_stream`] so
+    /// the two paths can never diverge.
+    fn build_dir_prompt(
+        dir_path: &str,
+        children: &[ChildSummary],
+        previous_summary: Option<&str>,
+    ) -> String {
+        let n_files = children.iter().filter(|c| c.kind == "file").count();
+        let n_dirs = children.iter().filter(|c| c.kind == "dir").count();
+        let bullets = children
+            .iter()
+            .take(30)
+            .map(|c| {
+                let icon = if c.kind == "dir" { "📁" } else { "📄" };
+                format!("  {icon} {}: {}", c.name, c.summary)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let base_desc = format!(
+            "You are describing a folder so a future search can understand its purpose.\n\
+             Folder: {dir_path}\n\
+             Direct children ({n_files} files, {n_dirs} subfolders):\n\
+             {bullets}\n\n\
+             Write 2-4 sentences capturing: (1) what this folder is for, \
+             (2) the kinds of work or content inside, (3) anything notable. \
+             Do not list filenames. Speak about themes."
+        );
+        let prompt = match previous_summary {
+            None => base_desc,
+            Some(prev) => format!(
+                "We have provided an existing summary up to a certain point:\n{prev}\n\n\
+                 We have the opportunity to refine the existing summary (only if needed) \
+                 with some more context below.\n{base_desc}\n\n\
+                 Given the new context, refine the original summary. \
+                 If the context isn't useful, return the original summary."
+            ),
+        };
+        format!("{prompt}\n\n{}", crate::SUMMARY_OUTPUT_RULE)
+    }
+
     /// Explicitly unload a model from Ollama by sending keep_alive=0.
     /// Best-effort: errors are logged but not propagated.
     pub async fn unload(&self, model: &str) {
@@ -450,20 +511,7 @@ impl Describer for OllamaLlm {
             .chars()
             .take(800)
             .collect::<String>();
-        let prompt = match previous_summary {
-            None => format!(
-                "Briefly describe what this file is about in 1-2 sentences.\nFile: {path}\nContent:\n{sample}"
-            ),
-            Some(prev) => format!(
-                "We have provided an existing summary up to a certain point:\n{prev}\n\n\
-                 We have the opportunity to refine the existing summary (only if needed) \
-                 with some more context below.\n\
-                 File: {path}\nContent:\n{sample}\n\n\
-                 Given the new context, refine the original summary. \
-                 If the context isn't useful, return the original summary."
-            ),
-        };
-        let prompt = format!("{prompt}\n\n{}", crate::SUMMARY_OUTPUT_RULE);
+        let prompt = Self::build_describe_prompt(path, &sample, previous_summary);
         Generator::generate(self, &prompt).await
     }
 
@@ -480,20 +528,7 @@ impl Describer for OllamaLlm {
             .chars()
             .take(800)
             .collect::<String>();
-        let prompt = match previous_summary {
-            None => format!(
-                "Briefly describe what this file is about in 1-2 sentences.\nFile: {path}\nContent:\n{sample}"
-            ),
-            Some(prev) => format!(
-                "We have provided an existing summary up to a certain point:\n{prev}\n\n\
-                 We have the opportunity to refine the existing summary (only if needed) \
-                 with some more context below.\n\
-                 File: {path}\nContent:\n{sample}\n\n\
-                 Given the new context, refine the original summary. \
-                 If the context isn't useful, return the original summary."
-            ),
-        };
-        let prompt = format!("{prompt}\n\n{}", crate::SUMMARY_OUTPUT_RULE);
+        let prompt = Self::build_describe_prompt(path, &sample, previous_summary);
         Generator::generate_stream(self, &prompt, on_fragment).await
     }
 
@@ -506,37 +541,7 @@ impl Describer for OllamaLlm {
         previous_summary: Option<&str>,
         on_fragment: &mut (dyn FnMut(String) + Send),
     ) -> Result<String> {
-        let n_files = children.iter().filter(|c| c.kind == "file").count();
-        let n_dirs = children.iter().filter(|c| c.kind == "dir").count();
-        let bullets = children
-            .iter()
-            .take(30)
-            .map(|c| {
-                let icon = if c.kind == "dir" { "📁" } else { "📄" };
-                format!("  {icon} {}: {}", c.name, c.summary)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let base_desc = format!(
-            "You are describing a folder so a future search can understand its purpose.\n\
-             Folder: {dir_path}\n\
-             Direct children ({n_files} files, {n_dirs} subfolders):\n\
-             {bullets}\n\n\
-             Write 2-4 sentences capturing: (1) what this folder is for, \
-             (2) the kinds of work or content inside, (3) anything notable. \
-             Do not list filenames. Speak about themes."
-        );
-        let prompt = match previous_summary {
-            None => base_desc,
-            Some(prev) => format!(
-                "We have provided an existing summary up to a certain point:\n{prev}\n\n\
-                 We have the opportunity to refine the existing summary (only if needed) \
-                 with some more context below.\n{base_desc}\n\n\
-                 Given the new context, refine the original summary. \
-                 If the context isn't useful, return the original summary."
-            ),
-        };
-        let prompt = format!("{prompt}\n\n{}", crate::SUMMARY_OUTPUT_RULE);
+        let prompt = Self::build_dir_prompt(dir_path, children, previous_summary);
         let model = self.effective_dir_model().to_owned();
         self.stream_with_model(&model, &prompt, on_fragment).await
     }
@@ -547,39 +552,7 @@ impl Describer for OllamaLlm {
         children: &[ChildSummary],
         previous_summary: Option<&str>,
     ) -> Result<String> {
-        let n_files = children.iter().filter(|c| c.kind == "file").count();
-        let n_dirs = children.iter().filter(|c| c.kind == "dir").count();
-
-        let bullets = children
-            .iter()
-            .take(30)
-            .map(|c| {
-                let icon = if c.kind == "dir" { "📁" } else { "📄" };
-                format!("  {icon} {}: {}", c.name, c.summary)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let base_desc = format!(
-            "You are describing a folder so a future search can understand its purpose.\n\
-             Folder: {dir_path}\n\
-             Direct children ({n_files} files, {n_dirs} subfolders):\n\
-             {bullets}\n\n\
-             Write 2-4 sentences capturing: (1) what this folder is for, \
-             (2) the kinds of work or content inside, (3) anything notable. \
-             Do not list filenames. Speak about themes."
-        );
-        let prompt = match previous_summary {
-            None => base_desc,
-            Some(prev) => format!(
-                "We have provided an existing summary up to a certain point:\n{prev}\n\n\
-                 We have the opportunity to refine the existing summary (only if needed) \
-                 with some more context below.\n{base_desc}\n\n\
-                 Given the new context, refine the original summary. \
-                 If the context isn't useful, return the original summary."
-            ),
-        };
-        let prompt = format!("{prompt}\n\n{}", crate::SUMMARY_OUTPUT_RULE);
+        let prompt = Self::build_dir_prompt(dir_path, children, previous_summary);
 
         // Use the dedicated dir model if configured
         let model = self.effective_dir_model().to_owned();

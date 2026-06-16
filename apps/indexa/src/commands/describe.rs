@@ -3,12 +3,28 @@ use indexa_core::store::Store;
 
 use super::helpers::require_index_db;
 
-pub(crate) async fn cmd_describe(path: String) -> Result<()> {
+pub(crate) async fn cmd_describe(path: Option<String>) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };
 
-    let expanded = shellexpand::tilde(&path).into_owned();
+    // No path → whole-project overview from directory roll-up summaries.
+    if path.is_none() {
+        let store = Store::open(&db_path)?;
+        // Use the first indexed root as the scope so build_project_overview can find the
+        // root directory summary (the function needs either hits or an explicit scope).
+        let roots = store.root_paths().unwrap_or_default();
+        let scope = roots.first().map(|s| s.as_str());
+        let overview = indexa_query::build_project_overview(&store, &[], scope, 4000);
+        if overview.is_empty() {
+            println!("No project overview available. Run `indexa summarize` first to build directory roll-ups.");
+        } else {
+            println!("{overview}");
+        }
+        return Ok(());
+    }
+
+    let expanded = shellexpand::tilde(path.as_deref().unwrap()).into_owned();
     let store = Store::open(&db_path)?;
 
     match store.summary_by_path(&expanded)? {

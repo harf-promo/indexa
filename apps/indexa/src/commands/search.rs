@@ -39,7 +39,7 @@ pub(crate) async fn cmd_search(
         if json {
             println!("[]");
         } else {
-            println!("No deep-scanned content found. Run `indexa deep <path>` first.");
+            println!("No deep-scanned content found. Run `indexa index <path>` first.");
         }
         return Ok(());
     }

@@ -137,6 +137,7 @@ pub(crate) async fn cmd_watch(
                                 language: chunk.language.clone(),
                                 embedding,
                                 embed_model: Some(embed_model.clone()),
+                                content_hash: None,
                             });
                         }
                         records

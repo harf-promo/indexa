@@ -60,6 +60,7 @@ fn build_index(dir: &Path, chunks: &[(&str, usize, &str, Option<Vec<f32>>)]) -> 
             language: None,
             embedding: emb.clone(),
             embed_model: None,
+            content_hash: None,
         })
         .collect();
     store.upsert_chunks(&recs).unwrap();
