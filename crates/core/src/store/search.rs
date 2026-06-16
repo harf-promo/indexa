@@ -278,6 +278,11 @@ impl Store {
     }
 
     /// One level of the tree: entries under `parent_path` with their summary states.
+    ///
+    /// An empty `parent_path` lists the indexed *roots* (directory entries whose
+    /// parent is not itself indexed) rather than entries with a literal empty
+    /// parent — no row carries an empty `parent_path`, so the old `= ?1` form
+    /// returned nothing for the first-load / `browse_tree("")` case.
     pub fn tree_level(&self, parent_path: &str) -> Result<Vec<TreeNode>> {
         let mut stmt = self.conn.prepare(
             "SELECT e.path, e.kind, e.size,
@@ -297,7 +302,9 @@ impl Store {
                        AND (d.path = e.path OR d.path LIKE e.path || '/%')) AS subtree_total
              FROM entries e
              LEFT JOIN summary_queue sq ON sq.path = e.path
-             WHERE e.parent_path = ?1
+             WHERE (?1 <> '' AND e.parent_path = ?1)
+                OR (?1 = '' AND e.kind = 'dir'
+                    AND NOT EXISTS (SELECT 1 FROM entries p WHERE p.path = e.parent_path))
              ORDER BY e.kind DESC, e.path",
         )?;
         let rows = stmt.query_map(params![parent_path], row_to_tree_node)?;

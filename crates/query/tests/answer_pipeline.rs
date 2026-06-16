@@ -98,6 +98,10 @@ async fn rrf_pipeline_synthesizes_with_sources() {
     };
     let cfg = QaConfig {
         mode: HybridMode::Rrf,
+        // Isolate the retrieve → synthesize path. Rerank is on by default since v0.44; with the
+        // LLM backend it would issue a second StubGenerator call, tripping the "one synthesis
+        // call" assertion below. Reranking has its own coverage in `rerank.rs`.
+        rerank: false,
         ..QaConfig::default()
     };
 

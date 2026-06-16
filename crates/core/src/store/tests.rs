@@ -797,6 +797,57 @@ fn deleting_a_subtree_removes_classifications_under_it() {
 }
 
 #[test]
+fn root_paths_returns_indexed_root_not_fs_parent() {
+    // Regression (v0.44): root_paths() must return the indexed root *directory*
+    // (the project the user actually indexed), not its un-indexed filesystem parent.
+    // The old form returned `DISTINCT parent_path`, so `project_overview()` with no
+    // scope resolved to the FS parent (which has no summary) and walked *away* from the
+    // data — the "what is this project?" entry point came back empty.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            dummy_entry("/proj/indexa", EntryKind::Dir, 0),
+            dummy_entry("/proj/indexa/src", EntryKind::Dir, 0),
+            dummy_entry("/proj/indexa/src/a.rs", EntryKind::File, 10),
+            // A second, disjoint indexed root (mirrors a multi-project index).
+            dummy_entry("/other/app", EntryKind::Dir, 0),
+            dummy_entry("/other/app/main.rs", EntryKind::File, 5),
+        ])
+        .unwrap();
+    let roots = store.root_paths().unwrap();
+    assert_eq!(
+        roots,
+        vec!["/other/app".to_string(), "/proj/indexa".to_string()],
+        "roots are the indexed dirs, not /proj or /other or any nested child dir"
+    );
+}
+
+#[test]
+fn tree_level_empty_path_lists_roots() {
+    // Regression (v0.44): browse_tree("") and the web api_tree first-load call
+    // tree_level(""). No row carries an empty parent_path, so the old `= ?1` form
+    // returned nothing. An empty path now lists the indexed roots; a non-empty path
+    // still lists that node's direct children unchanged.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            dummy_entry("/proj/indexa", EntryKind::Dir, 0),
+            dummy_entry("/proj/indexa/src", EntryKind::Dir, 0),
+            dummy_entry("/proj/indexa/src/a.rs", EntryKind::File, 10),
+        ])
+        .unwrap();
+    let nodes = store.tree_level("").unwrap();
+    assert_eq!(nodes.len(), 1, "exactly one indexed root");
+    assert_eq!(nodes[0].path, "/proj/indexa");
+    let children = store.tree_level("/proj/indexa").unwrap();
+    let names: Vec<&str> = children.iter().map(|n| n.path.as_str()).collect();
+    assert!(
+        names.contains(&"/proj/indexa/src"),
+        "non-empty path still lists direct children"
+    );
+}
+
+#[test]
 fn tree_level_rolls_up_subtree_coverage() {
     // PR-2: each tree node carries a {covered, partial, total} directory-summary rollup
     // for its subtree, so the UI can show a calm static glyph + determinate count instead

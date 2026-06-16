@@ -13,7 +13,7 @@ over CLI, a web UI, and MCP.
 
 ## The uncontested intersection
 
-No competitor occupies all six of these at once. Indexa does:
+No competitor occupies all seven of these at once. Indexa does:
 
 1. **Local-first** — offline, private, free; your data never leaves the machine unless you point it at a cloud model.
 2. **Whole-disk *and* code** — documents, code, images, audio, video; not repo-only, not docs-only.
@@ -21,6 +21,7 @@ No competitor occupies all six of these at once. Indexa does:
 4. **Four interfaces** — CLI, local web workspace, a signed/notarized macOS desktop app, and a native **MCP** server for agents.
 5. **Resource-aware** — a memory watchdog that won't freeze the machine running local models.
 6. **Dual-audience** — saves *cloud* tools their paid tokens **and** gives *local* models context they can't hold.
+7. **Queryable at every level** — a bottom-up roll-up gives *every folder* its own composed summary at L0/L1/L2 — not just per-file chunks, not one whole-repo brick. Addressable context at each tier of the tree.
 
 Most tools nail one or two. The combination is the moat.
 
@@ -47,7 +48,9 @@ Most tools nail one or two. The combination is the moat.
   and "entity-level packing to cut tokens." *That's the wedge: **retrieve the slice, don't pack the repo.**
   Indexa serves the ~2–4K tokens that answer the question from a persistent index. And when you do want a
   file, Indexa's `export --signatures` (code-skeleton) + `--token-budget` + on-export secret-scan make the
-  packed slice smaller and safer than a raw dump.*
+  packed slice smaller and safer than a raw dump. And a packer emits a flat brick or per-file list with no
+  intermediate structure; Indexa's bottom-up roll-up means "what is the `auth/` folder for?" has a
+  precomputed answer and "what is this whole project?" is one synthesis — neither re-reads a file.*
 - **AnythingLLM / Khoj / Onyx** — local "second brain" / doc-chat. But ingest is **manual** (drop folders
   in), they're heavier (Postgres/Docker), and they have no code intelligence. *Indexa points at any folder,
   is a single binary, and treats code as a first-class citizen.*

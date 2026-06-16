@@ -246,18 +246,23 @@ impl Store {
         Ok(n)
     }
 
-    /// Return the implicit root paths — parent directories of indexed entries
-    /// that are not themselves entries. These are the top-level nodes for the
-    /// tree view when the user hasn't added an explicit root row.
+    /// Return the indexed root paths — indexed directory entries whose parent is
+    /// not itself an indexed entry. These are the top-level nodes for the tree
+    /// view (e.g. the project root the user indexed); their real filesystem
+    /// parent lives outside the index, so they anchor the roll-up.
+    ///
+    /// Note: this returns the indexed root *entry* itself (`e1.path`), not its
+    /// un-indexed filesystem parent — passing the parent to `summary_by_path`
+    /// would miss the root summary and walk away from the data.
     pub fn root_paths(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT parent_path
+            "SELECT DISTINCT e1.path
                FROM entries e1
-              WHERE parent_path != ''
+              WHERE e1.kind = 'dir'
                 AND NOT EXISTS (
                     SELECT 1 FROM entries e2 WHERE e2.path = e1.parent_path
                 )
-              ORDER BY parent_path",
+              ORDER BY e1.path",
         )?;
         let rows = stmt.query_map([], |r| r.get(0))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

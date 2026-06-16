@@ -43,7 +43,7 @@ window. See [Why an external context store helps local models](methodology.md#wh
                  └─ dispatches by extension → correct Parser impl
                     TextParser / MarkdownParser / CodeParser (tree-sitter) /
                     PdfParser / EpubParser / OrgParser / OfficeParser /
-                    ImageParser / MediaParser
+                    PresentationParser / ImageParser / MediaParser
                  → Vec<Chunk> { heading, text, language, seq }
 
 3. Embed         crates/embed::Embedder::embed(chunk.text)
@@ -57,6 +57,42 @@ window. See [Why an external context store helps local models](methodology.md#wh
 ```
 
 Files: [`apps/indexa/src/main.rs`](../apps/indexa/src/main.rs) · [`crates/parsers/src/registry.rs`](../crates/parsers/src/registry.rs) · [`crates/core/src/store/`](../crates/core/src/store/)
+
+---
+
+## Data flow — `indexa summarize`
+
+After `deep` has parsed and embedded chunks, `summarize` writes the hierarchical roll-up — the
+context graph the README's *How the context builds* tree depicts. It runs **bottom-up** so a parent
+never re-reads raw files; it stands on its children's summaries.
+
+```
+1. Phase 1 — file pass    crates/query::summarize  (file pass)
+                          └─ for each file with chunks: sample content → LLM Describer writes the
+                             L1 summary; the L0 abstract is its first sentence; both are embedded
+                             into the same vector space as chunks (so summaries are retrievable too)
+                          → summaries row { path, kind='file', summary (L1), summary_l0 (L0),
+                            embedding, source_hash, provider, passes }
+
+2. Phase 2 — dir roll-up  crates/query::summarize  (directory pass, deepest-first)
+                          └─ for each directory: gather its children's summaries → compose a parent
+                             summary via build_dir_prompt ("speak about themes, not filenames") →
+                             embed → store. Ancestors are re-pended so a parent rolls up only after
+                             its children finish — folder into parent folder, up to the root.
+
+3. Freshness gate         crates/query::summarize  (Merkle source_hash)
+                          └─ a directory's hash folds in all child hashes; an unchanged subtree
+                             skips the LLM call entirely on re-summarize.
+
+4. Queue                  crates/core::store  (summary_queue)
+                          └─ background work tracked as pending / in_flight / done / failed
+```
+
+Every node — file and directory — is then independently retrievable at three tiers: **L0** (one-line
+abstract), **L1** (full summary), **L2** (raw chunks). `project_overview` stitches the root L1 + top
+child L0s into a background block for broad "what is this project?" questions.
+
+Files: [`crates/query/src/summarize.rs`](../crates/query/src/summarize.rs) · [`crates/llm/src/ollama.rs`](../crates/llm/src/ollama.rs) (`build_dir_prompt`) · [`crates/core/src/store/summaries.rs`](../crates/core/src/store/summaries.rs)
 
 ---
 
@@ -80,12 +116,12 @@ so the future is `Send` (required by the axum web server and the rmcp MCP server
 
    (empty hits → short-circuit with a "run `indexa deep`/`summarize` first" message — no LLM call)
 
-3. Rerank        crates/query::apply_rerank(LlmReranker, …)     [only if cfg.rerank = true]
+3. Rerank        crates/query::apply_rerank(LlmReranker, …)     [on by default since v0.44; cfg.rerank]
                  └─ one listwise local-model call reorders candidates; FAILS OPEN (any error/empty
                     /unparseable output → original order, so it can never make `ask` worse)
 
 4. Synthesize    crates/query::synthesize_from_hits(hits, llm, question, &cfg)
-                 └─ builds a context window from top chunks (default budget: 4000 chars)
+                 └─ builds a context window from top chunks (default budget: 8000 chars)
                     sends to the LLM (Ollama gemma3:12b default, or configured model)
                  → Answer { answer: String, sources: Vec<SourceCitation> }
 ```
