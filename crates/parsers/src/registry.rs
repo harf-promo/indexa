@@ -31,11 +31,13 @@
 use crate::code::CodeParser;
 use crate::epub::EpubParser;
 use crate::image::ImageParser;
+use crate::ipynb::IpynbParser;
 use crate::media::MediaParser;
 use crate::office::OfficeParser;
 use crate::org::OrgParser;
 use crate::pdf::PdfParser;
 use crate::presentation::PresentationParser;
+use crate::svg::SvgParser;
 use crate::text::{MarkdownParser, TextParser};
 use crate::types::{Extracted, Parser};
 use anyhow::{bail, Result};
@@ -65,10 +67,12 @@ impl Registry {
     pub fn new() -> Self {
         Self {
             parsers: vec![
+                Box::new(IpynbParser), // .ipynb (JSON) — by extension, before generic text
                 Box::new(CodeParser),
                 Box::new(PdfParser),
                 Box::new(EpubParser),
                 Box::new(OrgParser::default()),
+                Box::new(SvgParser), // must precede ImageParser (image/svg+xml)
                 Box::new(ImageParser),
                 Box::new(MediaParser),
                 Box::new(PresentationParser), // must precede OfficeParser (pptx vs. ppt)
@@ -115,25 +119,11 @@ impl Registry {
 
 /// Convenience: parse `path` using the default built-in registry.
 /// Most callers should use this; use [`Registry`] only for plugin extension.
+///
+/// Delegates to [`Registry::new`] so the built-in parser list lives in exactly one place —
+/// a new parser is added there and is picked up by both this free function and `Registry`.
 pub fn parse(path: &Path) -> Result<Extracted> {
-    let mime = mime_guess::from_path(path)
-        .first_or_octet_stream()
-        .to_string();
-
-    let parsers: Vec<Box<dyn Parser>> = vec![
-        Box::new(CodeParser),
-        Box::new(PdfParser),
-        Box::new(EpubParser),
-        Box::new(OrgParser::default()),
-        Box::new(ImageParser),
-        Box::new(MediaParser),
-        Box::new(PresentationParser), // must precede OfficeParser (pptx vs. ppt)
-        Box::new(OfficeParser),
-        Box::new(MarkdownParser::default()),
-        Box::new(TextParser::default()),
-    ];
-
-    dispatch(&parsers, path, &mime)
+    Registry::new().parse(path)
 }
 
 /// Core dispatch logic shared by [`Registry::parse`] and the free-function [`parse`].

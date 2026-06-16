@@ -44,14 +44,20 @@ Each file type has a dedicated parser. Parsers are tried in order:
 | Parser | Extensions | Notes |
 |---|---|---|
 | Code | `.rs .py .js .ts .tsx .go .java .mjs .cts .mts` | tree-sitter AST chunking |
+| Notebook | `.ipynb` | one chunk per cell; code cells language-tagged from the kernel; outputs skipped |
 | PDF | `.pdf` | pdf-extract (text-layer); scanned PDFs produce minimal output |
+| EPUB | `.epub` | spine-order chapters, XHTML tags stripped |
+| SVG | `.svg` | text / `<title>` / `<desc>` extracted; path geometry & CSS ignored (no OCR of outlined text) |
 | Image | `.jpg .jpeg .png .webp .heic .tiff .cr2 .nef .arw .dng .bmp .gif` | EXIF metadata extraction |
 | Media | `.mp3 .mp4 .m4a .flac .wav .ogg .opus .mkv .avi .mov .webm .aiff` | ffprobe metadata (duration, tags) |
-| Office | `.xlsx .xls .ods .csv .tsv .docx .odt .rtf` | calamine (spreadsheets), zip/XML strip (docx) |
-| Markdown | `.md .mdx` | heading-based structure chunker |
+| Presentation | `.pptx .ppsx` | one chunk per slide + speaker notes (charts/SmartArt not extracted) |
+| Office | `.xlsx .xls .ods .csv .tsv .docx .odt .rtf` | calamine (spreadsheets); zip/XML for docx; RTF control-word stripper (skips font/colour/style tables) |
+| Markdown | `.md .mdx` | heading-based structure chunker; YAML frontmatter (`title`/`tags`/`date`/…) lifted into a leading chunk |
 | Text | `.txt .log .conf .yaml .yml .json .toml .xml .html .css` | fixed-window chunker |
 
 For files not matched by extension, MIME type detection is used as a fallback. Plain `text/*` files fall through to the text parser.
+
+**Known parsing gaps (honest coverage).** Structured HTML (currently fixed-window text, not heading-aware), scanned-PDF OCR, email (`.eml`/`.msg`), archives (`.zip`/`.tar`), Apple iWork, legacy `.ppt`/`.doc` (OLE binary — quiet stub), and binary-symbol extraction are not yet parsed; media/binary files without captioning contribute only metadata. These are the roadmap's next waves — "understands every file" means *text and metadata from every common type, with the rest listed honestly*, not full semantic extraction of every format.
 
 ---
 

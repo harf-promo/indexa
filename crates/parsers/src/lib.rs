@@ -3,12 +3,14 @@
 pub mod code;
 pub mod epub;
 pub mod image;
+pub mod ipynb;
 pub mod media;
 pub mod office;
 pub mod org;
 pub mod pdf;
 pub mod presentation;
 pub mod registry;
+pub mod svg;
 pub mod text;
 pub mod types;
 
