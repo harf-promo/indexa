@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.50.0] — 2026-06-16
+
+"Format Wave 3": Apple iWork, binary symbols, and Outlook `.msg` — three more types Indexa understands.
+
+### Added
+
+- **Apple iWork** (`.pages` / `.numbers` / `.key`) — extracts text from the embedded preview PDF (rendered
+  snapshot, via the existing PDF path; **zero new dependency**). A file without a preview yields a quiet stub.
+- **Binary symbols** (`.so` / `.dylib` / `.exe` / `.o` / `.wasm` / `.jar`) — lists the symbols/exports a
+  compiled artifact declares (ELF/Mach-O/PE via `object`, wasm via `wasmparser`, `.jar` class names), so
+  "what defines X" can reach a binary. Names only — no disassembly; a stripped binary is a quiet stub.
+- **Outlook `.msg`** — now extracted (subject + body from the OLE MAPI streams via `cfb`) instead of a
+  stub. Legacy `.ppt`/`.doc` (PowerPoint/Word binary) remain honest stubs.
+
+### Notes
+
+- New deps `object`, `wasmparser`, `cfb` are Apache-2.0/MIT and pure-Rust — verified openssl-free on host
+  **and** `aarch64-unknown-linux-gnu`, and `cargo deny` (licenses + advisories) clean.
+- `indexa formats` now lists 84 formats; `docs/methodology.md` updated. Recursive archive extraction (vs.
+  the current listing) remains a deliberate non-goal for now.
+
 ## [0.49.0] — 2026-06-16
 
 "Know what's supported, see what's using your RAM": a queryable formats list, an honest memory readout,

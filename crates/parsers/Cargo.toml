@@ -42,3 +42,6 @@ htmd = { workspace = true }
 tar = "0.4.46"
 flate2 = "1.1.9"
 mail-parser = "0.11.3"
+object = "0.39.1"
+wasmparser = "0.252.0"
+cfb = "0.14.0"

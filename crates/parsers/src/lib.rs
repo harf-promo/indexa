@@ -1,12 +1,14 @@
 //! File type parsers: text, Markdown, source code (tree-sitter), images, audio/video, office.
 
 pub mod archive;
+pub mod binary;
 pub mod code;
 pub mod email;
 pub mod epub;
 pub mod html;
 pub mod image;
 pub mod ipynb;
+pub mod iwork;
 pub mod media;
 pub mod office;
 pub mod org;

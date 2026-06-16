@@ -26,7 +26,7 @@ impl Parser for EmailParser {
 
     fn declared_formats(&self) -> &'static [(&'static str, crate::types::Support)] {
         use crate::types::Support::*;
-        &[("eml", Full), ("msg", Stub)]
+        &[("eml", Full), ("msg", Full)]
     }
 
     fn parse(&self, path: &Path) -> Result<Extracted> {
@@ -37,7 +37,8 @@ impl Parser for EmailParser {
             .unwrap_or("unknown");
 
         let text = if ext == "msg" {
-            format!("Email: {display} (Outlook .msg — headers/body not extracted)")
+            extract_msg(path)
+                .unwrap_or_else(|| format!("Email: {display} (Outlook .msg — no extractable text)"))
         } else {
             let bytes = std::fs::read(path)?;
             match MessageParser::default().parse(&bytes) {
@@ -109,6 +110,54 @@ fn render_email(msg: &Message) -> String {
     out
 }
 
+/// Extract subject + body from an Outlook `.msg` (an OLE compound file) by reading its MAPI
+/// property streams via `cfb`. Top-level properties live at the root as `__substg1.0_PPPPTTTT`
+/// streams (PPPP = property tag, TTTT = type: `001F` Unicode / `001E` ASCII). We read
+/// PidTagSubject (0x0037) and PidTagBody (0x1000). Returns `None` on any read failure so the
+/// caller falls open to a stub. PowerPoint/Word legacy OLE (`.ppt`/`.doc`) is not handled.
+fn extract_msg(path: &Path) -> Option<String> {
+    let mut comp = cfb::open(path).ok()?;
+    let mut out = String::new();
+    if let Some(subject) = read_mapi_string(&mut comp, 0x0037) {
+        out.push_str("Subject: ");
+        out.push_str(subject.trim());
+        out.push('\n');
+    }
+    if let Some(body) = read_mapi_string(&mut comp, 0x1000) {
+        out.push('\n');
+        out.push_str(body.trim());
+    }
+    if out.trim().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Read one MAPI property as a string — Unicode (`001F`, UTF-16LE) preferred, then ASCII (`001E`).
+fn read_mapi_string(comp: &mut cfb::CompoundFile<std::fs::File>, prop: u16) -> Option<String> {
+    use std::io::Read;
+    let unicode = format!("/__substg1.0_{prop:04X}001F");
+    if let Ok(mut stream) = comp.open_stream(&unicode) {
+        let mut buf = Vec::new();
+        if stream.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+            let u16s: Vec<u16> = buf
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            return Some(String::from_utf16_lossy(&u16s));
+        }
+    }
+    let ascii = format!("/__substg1.0_{prop:04X}001E");
+    if let Ok(mut stream) = comp.open_stream(&ascii) {
+        let mut buf = Vec::new();
+        if stream.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+            return Some(String::from_utf8_lossy(&buf).into_owned());
+        }
+    }
+    None
+}
+
 /// First address of a From/To field as `"Name <addr>"` (or just one of them).
 fn addr_str(addr: &Address) -> String {
     addr.first()
@@ -164,6 +213,43 @@ mod tests {
             "{:?}",
             ex.chunks[0].text
         );
+    }
+
+    #[test]
+    fn msg_extracts_subject_and_body() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("mail.msg");
+        {
+            // Build a minimal .msg: OLE compound file with the MAPI subject/body streams.
+            let mut comp = cfb::create(&p).unwrap();
+            let subj: Vec<u8> = "Release plan"
+                .encode_utf16()
+                .flat_map(|u| u.to_le_bytes())
+                .collect();
+            let body: Vec<u8> = "Ship v0.50 on Friday."
+                .encode_utf16()
+                .flat_map(|u| u.to_le_bytes())
+                .collect();
+            comp.create_stream("/__substg1.0_0037001F")
+                .unwrap()
+                .write_all(&subj)
+                .unwrap();
+            comp.create_stream("/__substg1.0_1000001F")
+                .unwrap()
+                .write_all(&body)
+                .unwrap();
+            comp.flush().unwrap();
+        }
+        let ex = EmailParser.parse(&p).unwrap();
+        let all: String = ex
+            .chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(all.contains("Release plan"), "{all}");
+        assert!(all.contains("Ship v0.50 on Friday"), "{all}");
     }
 
     #[test]
