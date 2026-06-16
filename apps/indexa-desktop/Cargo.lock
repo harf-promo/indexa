@@ -2217,6 +2217,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "htmd"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7eee9b00ee2e599b4f86507157e3db786e7a3319fc225f0e9584151dbea2291d"
+dependencies = [
+ "html5ever",
+ "markup5ever_rcdom",
+ "phf 0.13.1",
+]
+
+[[package]]
 name = "html5ever"
 version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2528,7 +2539,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-core"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2554,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-desktop"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "brotli",
@@ -2576,7 +2587,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-embed"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2591,7 +2602,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-http-util"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "reqwest 0.12.28",
  "tokio",
@@ -2599,7 +2610,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-llm"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2616,10 +2627,11 @@ dependencies = [
 
 [[package]]
 name = "indexa-parsers"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "calamine",
+ "htmd",
  "kamadak-exif",
  "mime_guess",
  "pdf-extract",
@@ -2641,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-query"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2663,7 +2675,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-update"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -2678,7 +2690,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-web"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3240,6 +3252,18 @@ dependencies = [
  "log",
  "tendril",
  "web_atoms",
+]
+
+[[package]]
+name = "markup5ever_rcdom"
+version = "0.38.0+unofficial"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "333171ccdf66e915257740d44e38ea5b1b19ce7b45d33cc35cb6f118fbd981ff"
+dependencies = [
+ "html5ever",
+ "markup5ever",
+ "tendril",
+ "xml5ever",
 ]
 
 [[package]]
@@ -5527,6 +5551,7 @@ dependencies = [
  "parking_lot",
  "phf_shared 0.13.1",
  "precomputed-hash",
+ "serde",
 ]
 
 [[package]]
@@ -7997,6 +8022,16 @@ checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
  "rustix",
+]
+
+[[package]]
+name = "xml5ever"
+version = "0.38.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3dc9559429edf0cd3f327cc0afd9d6b36fa8cec6d93107b7fbe64f806b5f2d9"
+dependencies = [
+ "log",
+ "markup5ever",
 ]
 
 [[package]]
