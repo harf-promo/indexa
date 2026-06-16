@@ -101,6 +101,50 @@ OpenAI and other cloud providers are supported as opt-in alternatives (see [Conf
 
 ---
 
+## Hierarchical summarization & roll-up
+
+Indexa doesn't just embed chunks — it writes a **summary for every node** and composes them up the
+directory tree. This is the hierarchical context graph referenced in
+[Why an external context store helps local models](#why-an-external-context-store-helps-local-models).
+
+**Three tiers, defined.** Every file *and* every directory carries:
+
+- **L0** — a one-line abstract (the first sentence of L1), for cheap scanning.
+- **L1** — the full 1–4 sentence summary.
+- **L2** — the raw content (the chunks themselves; files only).
+
+All three are independently retrievable: MCP `get_summary` takes `tier = l0 | l1 | l2`, and the web
+tree and CLI surface the same.
+
+**Two-phase, bottom-up.**
+
+1. **File pass.** Each file with chunks is summarised by the local LLM from a content sample; the L1
+   summary is embedded into the same vector space as chunks, so summaries participate in hybrid
+   retrieval alongside raw content.
+2. **Directory pass.** Directories are summarised deepest-first. A folder's summary is *composed from
+   its children's summaries* — "speak about themes, not filenames" — never by re-reading the raw
+   files. Each parent waits for its children, so the roll-up climbs folder → parent folder → root.
+
+**Why bottom-up.** A parent stands on its children's summaries rather than the raw tree, which keeps
+cost bounded and lets an unchanged subtree skip the LLM entirely on re-summarise (a Merkle-style
+`source_hash` folds in every child's hash — see
+[Freshness limits of incremental re-summarize](#freshness-limits-of-incremental-re-summarize)).
+
+**How it answers broad questions.** When a question is broad ("what is this project?", "how is X
+architected?"), the answer prompt is prefixed with a **project-overview block** — the root's L1 plus
+its top child directories' L0s — so the model has the shape of the whole before it reads any chunk.
+
+**Honest limits.** Summaries are LLM-generated and can be imprecise; the raw L2 is always one
+drill-down away to verify. A file with no extractable text (an un-captioned image, an opaque binary)
+contributes only its path + classification to its folder's roll-up — so "every folder has context"
+is true *structurally*, but a folder of un-captioned media rolls up thin until captioning or
+transcription is enabled (see [What's opt-in](#whats-opt-in-not-default)). The directory prompt also
+samples a bounded number of children for the LLM call even though the freshness hash covers all of
+them, so a parent summary may not name every child by content while still refreshing when membership
+changes.
+
+---
+
 ## Index storage
 
 ### SQLite + FTS5 + custom vector storage

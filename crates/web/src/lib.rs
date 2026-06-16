@@ -1058,9 +1058,13 @@ mod tests {
         std::fs::write(&outfile, "secret\n").unwrap();
 
         let mut store = Store::open_in_memory().unwrap();
-        // Entry under `root` (which is itself not an entry) → root_paths() yields `root`.
+        // Mirror a real scan: the root dir is indexed alongside the file under it, so
+        // root_paths() yields `root` and the file is confined within it.
         store
-            .upsert_entries(&[entry(infile.to_str().unwrap(), EntryKind::File)])
+            .upsert_entries(&[
+                entry(root.to_str().unwrap(), EntryKind::Dir),
+                entry(infile.to_str().unwrap(), EntryKind::File),
+            ])
             .unwrap();
         let state = state_with(store);
 

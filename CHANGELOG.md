@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.0] — 2026-06-16
+
+"What is this project?": the no-argument project overview and tree root now work, retrieval defaults
+are tuned to surface specifics instead of "the context doesn't say," and the README leads with how
+Indexa rolls a summary of every file up into folder and whole-project context.
+
+### Fixed
+
+- **`project_overview` (no scope) and the tree root listing returned nothing** even though the
+  roll-up existed. `Store::root_paths()` returned the indexed root's *un-indexed filesystem parent*
+  instead of the indexed root directory itself, so the overview resolved to a summary-less path and
+  walked away from the data; `tree_level("")` matched on an empty `parent_path` that no row carries.
+  Both now resolve the indexed roots correctly — a pure read-path SQL fix, no re-index needed — so
+  `browse_tree`, the web tree's first load, and `project_overview` answer "what is this project?"
+  out of the box. As a side effect, `read_file` / file-preview path-confinement is tightened: files
+  are confined to the actually-indexed project, not its broader filesystem parent.
+
+### Changed
+
+- **Sharper answers by default.** Retrieval now reranks by default (`[retrieval] rerank = true`,
+  `"llm"` backend — reuses the already-loaded generation model, no download, fails open), retrieves
+  a wider candidate pool (`top_k` 8 → 12), and packs more context into synthesis (`context_budget`
+  4000 → 8000 chars), so answers cite concrete specifics. Set `rerank = false` to opt out. Code-intent
+  questions ("which function implements…") bias MMR toward relevance so the implementing file's own
+  chunks survive the diversity pass.
+
+### Documentation
+
+- **README leads with the roll-up.** A new *How the context builds* section + a committed diagram
+  (`docs/assets/rollup-tree.svg`) show per-file → per-folder → whole-project synthesis and the
+  L0 / L1 / L2 tiers. Added an `indexa summarize` data-flow to `docs/architecture.md`, a hierarchical
+  summarization & roll-up section to `docs/methodology.md`, and framed the persistent roll-up as the
+  competitive moat in `docs/COMPETITIVE.md`.
+
 ## [0.43.1] — 2026-06-16
 
 "Sharper retrieval": a local DeBERTa-v2 cross-encoder reranker joins the LLM reranker, and agents

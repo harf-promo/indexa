@@ -1,8 +1,12 @@
 # Indexa
 
+<p align="center">
+  <img src="docs/assets/rollup-tree.svg" alt="Indexa writes a summary for every file, composes those into a summary for every folder, and rolls them up the directory tree into one whole-project synthesis — every node queryable at three tiers: L0 one-line abstract, L1 full summary, L2 raw content." width="100%">
+</p>
+
 **The local context engine for AI.**
 
-Your AI meets your codebase cold on every session — burning paid tokens to relearn what it knew yesterday, or choking on a context window that can't hold your repo at all. Indexa reads your code or your entire disk **once, on your machine**, builds a persistent hierarchical context store, and serves any AI tool the precise, ranked slice it needs — instantly, every time.
+Your AI meets your codebase cold on every session — burning paid tokens to relearn what it knew yesterday, or choking on a context window that can't hold your repo at all. Indexa reads your code or your entire disk **once, on your machine**: it writes a summary for **every file**, composes those into a summary for **every folder**, and rolls them up the tree — folder into parent folder, up and up — into one **whole-project synthesis**. Then it serves any AI tool the precise, ranked slice it needs, at any level — a one-line abstract, a full summary, or the raw content — instantly, every time.
 
 ```bash
 indexa index  ~/code/my-repo            # scan + embed + summarize in one command
@@ -54,6 +58,33 @@ indexa mcp                                                 # expose the live ind
 
 ---
 
+## How the context builds — every file, rolled up
+
+Indexa builds context in two phases:
+
+**Phase 1 — describe every file.** Each parseable file gets an LLM-written summary: a one-line abstract (**L0**) and a full 1–4 sentence summary (**L1**), with the raw content always one drill-down away (**L2**).
+
+**Phase 2 — roll it up the tree.** Folders are summarised *bottom-up*: each folder's summary is composed from its **children's summaries** — not by re-reading the raw files — folder into parent folder, all the way to a single whole-project synthesis. Every node, file and folder alike, is independently queryable at L0 / L1 / L2.
+
+```text
+my-repo/                    ← whole-project synthesis
+│   L0  "Rust workspace: a local context engine…"   ·   L1 full summary   ·   L2 raw
+│
+├── crates/query/           L0 · L1   (folder summary, composed from its files)
+│   ├── qa.rs               L0 · L1 · L2
+│   └── summarize.rs        L0 · L1 · L2
+├── crates/core/            L0 · L1
+│   └── store.rs            L0 · L1 · L2
+└── docs/                   L0 · L1
+    └── USAGE.md            L0 · L1 · L2
+
+  Phase 1: every file is summarised   →   Phase 2: folders compose their children, up and up
+```
+
+So an agent **scans cheaply** with L0 one-liners, **drills to L1** where a folder looks relevant, and spends tokens on **L2 raw content** only for the few files that actually matter — over CLI, web, or MCP. (That progressive disclosure is what makes the worked example below land at ~94% fewer tokens.) Files Indexa can't extract text from — say, an image without captioning enabled — still take their place in the tree by path and category; their *content* joins the roll-up once captioning or transcription is on.
+
+---
+
 ## Why Indexa
 
 **Stop paying to re-teach your AI your own codebase.** Every coding assistant wakes up amnesiac. Before it helps, it reads its way back to orientation — burning context window, paid tokens, and your patience on a lesson it learned five minutes ago. Indexa teaches it *once*: it builds a persistent, hierarchical context store on your machine and serves a small ranked slice on demand, so the model spends its budget on the work you asked for.
@@ -86,7 +117,7 @@ This is not a repo-to-prompt converter. It is not a document chat app. It is not
 ## What Indexa does
 
 - **One-command context** — `indexa index <path>` scans, embeds, and summarises in a single step. Context is ready immediately; no pipeline to manage.
-- **Two-phase context** — an instant surface scan (zero AI, classifies code vs media vs build artifacts) then deep context: parse → chunk → embed → LLM file summaries rolled up bottom-up into a hierarchical context graph, with **L0 / L1 / L2 progressive disclosure** (one-line abstract → full summary → raw content).
+- **Context that rolls up** — an instant surface scan (zero AI; classifies code vs media vs build artifacts), then deep context: parse → chunk → embed → an LLM summary for **every file**, composed **bottom-up** into a summary for **every folder**, up to one whole-project synthesis — all addressable at **L0 / L1 / L2** (one-line abstract → full summary → raw content). See *[How the context builds](#how-the-context-builds--every-file-rolled-up)* above.
 - **Hybrid retrieval** — keyword (BM25) + semantic (vector) fused with RRF, plus an **opt-in ANN index** that keeps dense search fast on 50K-plus-chunk corpora.
 - **Local multimodal** *(opt-in, on-device)* — caption images with a local vision model and transcribe audio with a local whisper CLI, so you can find media by what's *in* it, not just its filename.
 - **Code intelligence** — a code-relationship graph (imports + defined symbols + call edges) across Rust, Python, JS/TS, Go, and Java, plus `who_calls`, `blast_radius`, and an interactive **call-graph visualization** in the web Map tab — all queryable over MCP.

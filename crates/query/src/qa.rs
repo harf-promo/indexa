@@ -223,7 +223,8 @@ pub struct QaConfig {
     pub summary_weight: f32,
     /// Depth-boost coefficient α for summary cosine search.
     pub summary_depth_alpha: f32,
-    /// Apply a cross-encoder rerank pass after retrieval (default off). Fails open.
+    /// Apply a rerank pass after retrieval (default on; `"llm"` backend reuses the
+    /// loaded generation model). Fails open.
     pub rerank: bool,
     /// Which reranker backend to use when `rerank = true`.
     /// `"llm"` = listwise LLM call (default). `"cross-encoder"` = candle DeBERTa-v2.
@@ -247,14 +248,14 @@ pub struct QaConfig {
 impl Default for QaConfig {
     fn default() -> Self {
         Self {
-            top_k: 8,
-            context_budget: 4000,
+            top_k: 12,
+            context_budget: 8000,
             mode: HybridMode::Rrf,
             scope: None,
             rrf_k: 60.0,
             summary_weight: 0.0,
             summary_depth_alpha: 0.15,
-            rerank: false,
+            rerank: true,
             rerank_backend: "llm".to_string(),
             use_weights: true,
             use_recency_weight: false,
@@ -419,11 +420,21 @@ pub(crate) fn retrieve(
     // scores. Skipped when lambda >= 1.0 (pure relevance / disabled) or when
     // the mode is sparse-only (no embeddings stored per chunk). Fails open:
     // any error fetching embeddings leaves the original order intact.
-    if cfg.mmr_lambda < 1.0 && !hits.is_empty() && !matches!(cfg.mode, HybridMode::Sparse) {
+    //
+    // v0.44: for code-intent questions ("which function implements…", or a bare
+    // identifier) the user wants the implementing file's chunks, not topical
+    // diversity — diversifying can drop the very chunk that names the answer.
+    // Bias toward relevance (≥0.8) so same-file detail survives the diversity pass.
+    let mmr_lambda = if is_code_intent(question) {
+        cfg.mmr_lambda.max(0.8)
+    } else {
+        cfg.mmr_lambda
+    };
+    if mmr_lambda < 1.0 && !hits.is_empty() && !matches!(cfg.mode, HybridMode::Sparse) {
         let ids: Vec<i64> = hits.iter().map(|h| h.chunk_id).collect();
         match store.embeddings_for_chunks(&ids) {
             Ok(embeddings) if !embeddings.is_empty() => {
-                hits = apply_mmr(hits, &embeddings, cfg.mmr_lambda);
+                hits = apply_mmr(hits, &embeddings, mmr_lambda);
             }
             Ok(_) => {
                 // No embeddings stored for these chunks (index never had deep embeddings);
@@ -433,7 +444,7 @@ pub(crate) fn retrieve(
                 // Fail open: log and preserve existing order so ask never errors
                 // due to MMR plumbing.
                 tracing::warn!(
-                    mmr_lambda = cfg.mmr_lambda,
+                    mmr_lambda,
                     "MMR embedding fetch failed, skipping diversity re-ranking: {e:#}"
                 );
             }

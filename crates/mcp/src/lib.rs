@@ -276,16 +276,25 @@ mod tests {
         let dbpath = dbdir.path().join("idx.db");
         {
             let mut store = Store::open(&dbpath).unwrap();
-            // Insert only the file; its parent dir (the root) is not itself an entry, so
-            // `root_paths()` reports the root — mirroring a real scan.
+            // Mirror a real scan: the root directory is indexed as a Dir entry alongside the
+            // file under it, so `root_paths()` reports the indexed root dir.
             store
-                .upsert_entries(&[Entry {
-                    path: inside.clone(),
-                    kind: EntryKind::File,
-                    size: 11,
-                    modified: None,
-                    hint: None,
-                }])
+                .upsert_entries(&[
+                    Entry {
+                        path: root.path().to_path_buf(),
+                        kind: EntryKind::Dir,
+                        size: 0,
+                        modified: None,
+                        hint: None,
+                    },
+                    Entry {
+                        path: inside.clone(),
+                        kind: EntryKind::File,
+                        size: 11,
+                        modified: None,
+                        hint: None,
+                    },
+                ])
                 .unwrap();
         }
         let mcp = IndexaMcp::new(

@@ -258,7 +258,10 @@ pub struct RetrievalConfig {
     pub rrf_k: usize,
     /// Number of results to retrieve before reranking.
     pub top_k: usize,
-    /// Enable cross-encoder reranking (adds ~200ms; requires a reranker model).
+    /// Rerank retrieved hits before synthesis (default on). With the default
+    /// `"llm"` backend this reuses the already-loaded generation model — no
+    /// extra dependency or download — and fails open. See `rerank_backend` for
+    /// the higher-quality (opt-in) cross-encoder.
     pub rerank: bool,
     /// Weight of summary hits relative to chunk hits in RRF fusion (0.0 = disabled).
     pub summary_weight: f32,
@@ -322,11 +325,11 @@ impl Default for RetrievalConfig {
         Self {
             hybrid: HybridMode::Rrf,
             rrf_k: 60,
-            top_k: 8,
-            rerank: false,
+            top_k: 12,
+            rerank: true,
             summary_weight: 0.0,
             summary_depth_alpha: 0.15,
-            context_budget: 4000,
+            context_budget: 8000,
             ann: false,
             ann_min_chunks: 50_000,
             use_weights: true,
@@ -783,6 +786,11 @@ auto_reindex = "7d"
         assert_eq!(cfg.embedding.model, "nomic-embed-text");
         assert_eq!(cfg.embedding.dim, 768);
         assert_eq!(cfg.retrieval.rrf_k, 60);
+        // v0.44: wider retrieval + rerank-on by default (LLM backend, no download, fails open).
+        assert_eq!(cfg.retrieval.top_k, 12);
+        assert_eq!(cfg.retrieval.context_budget, 8000);
+        assert!(cfg.retrieval.rerank);
+        assert_eq!(cfg.retrieval.rerank_backend, "llm");
         assert!(!cfg.parsers.audio.transcribe);
         assert!(!cfg.parsers.image.caption);
         // Caption model falls back to the default vision model when unset.
