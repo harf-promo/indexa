@@ -104,10 +104,11 @@ impl Parser for MarkdownParser {
 
     fn parse(&self, path: &Path) -> anyhow::Result<Extracted> {
         let raw = std::fs::read_to_string(path)?;
+        let (frontmatter, body) = split_frontmatter(&raw);
 
         let opts =
             Options::ENABLE_TABLES | Options::ENABLE_FOOTNOTES | Options::ENABLE_STRIKETHROUGH;
-        let parser = MdParser::new_ext(&raw, opts);
+        let parser = MdParser::new_ext(&body, opts);
 
         let mut sections: Vec<(String, String)> = Vec::new(); // (heading_breadcrumb, text)
         let mut current_heading: Vec<String> = Vec::new();
@@ -201,6 +202,23 @@ impl Parser for MarkdownParser {
             }
         }
 
+        // Lift frontmatter metadata (title/tags/date/…) into a leading, searchable chunk.
+        if let Some(meta) = frontmatter {
+            chunks.insert(
+                0,
+                Chunk {
+                    source: path.to_path_buf(),
+                    seq: 0,
+                    heading: "frontmatter".into(),
+                    text: meta,
+                    language: None,
+                },
+            );
+            for (i, c) in chunks.iter_mut().enumerate() {
+                c.seq = i;
+            }
+        }
+
         Ok(Extracted {
             source: path.to_path_buf(),
             mime: "text/markdown".into(),
@@ -208,6 +226,50 @@ impl Parser for MarkdownParser {
             edges: Vec::new(),
         })
     }
+}
+
+/// Split a leading YAML frontmatter block (`---` … `---`) from the markdown body.
+///
+/// Returns `(Some("key: val · …"), body)` when a *closed* frontmatter block is present,
+/// lifting the common `title`/`tags`/`date`/`description`/`author` keys so they become
+/// searchable; arbitrary nested YAML is ignored. Returns `(None, raw)` when there is no
+/// frontmatter (or it is never closed), leaving a leading `---` horizontal rule intact.
+fn split_frontmatter(raw: &str) -> (Option<String>, String) {
+    if raw.lines().next().map(str::trim_end) != Some("---") {
+        return (None, raw.to_owned());
+    }
+    let mut fields: Vec<String> = Vec::new();
+    let mut closed = false;
+    let mut consumed = 1; // the opening "---"
+    for line in raw.lines().skip(1) {
+        consumed += 1;
+        if line.trim_end() == "---" {
+            closed = true;
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            let key = k.trim().to_ascii_lowercase();
+            if matches!(
+                key.as_str(),
+                "title" | "tags" | "date" | "description" | "author"
+            ) {
+                let val = v.trim().trim_matches(|c| c == '"' || c == '\'');
+                if !val.is_empty() {
+                    fields.push(format!("{key}: {val}"));
+                }
+            }
+        }
+    }
+    if !closed {
+        return (None, raw.to_owned());
+    }
+    let body = raw.lines().skip(consumed).collect::<Vec<_>>().join("\n");
+    let meta = if fields.is_empty() {
+        None
+    } else {
+        Some(fields.join(" · "))
+    };
+    (meta, body)
 }
 
 #[cfg(test)]
@@ -250,5 +312,44 @@ mod tests {
         let extracted = parser.parse(&p).unwrap();
         assert_eq!(extracted.chunks.len(), 1);
         assert!(extracted.chunks[0].heading.is_empty());
+    }
+
+    #[test]
+    fn markdown_lifts_frontmatter_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("post.md");
+        std::fs::write(
+            &p,
+            "---\ntitle: My Post\ntags: rust, indexing\ndate: 2026-06-16\n---\n\n# Body\n\nThe actual content.",
+        )
+        .unwrap();
+        let ex = MarkdownParser::default().parse(&p).unwrap();
+        assert_eq!(ex.chunks[0].heading, "frontmatter");
+        assert_eq!(ex.chunks[0].seq, 0);
+        assert!(
+            ex.chunks[0].text.contains("title: My Post"),
+            "{}",
+            ex.chunks[0].text
+        );
+        assert!(ex.chunks[0].text.contains("tags: rust, indexing"));
+        let body: String = ex
+            .chunks
+            .iter()
+            .skip(1)
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(body.contains("actual content"), "{body}");
+        assert!(!body.contains("---"), "fence leaked into body: {body}");
+    }
+
+    #[test]
+    fn markdown_without_frontmatter_is_unaffected() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("plain.md");
+        std::fs::write(&p, "# Title\n\nNo frontmatter here.").unwrap();
+        let ex = MarkdownParser::default().parse(&p).unwrap();
+        assert!(ex.chunks.iter().all(|c| c.heading != "frontmatter"));
+        assert!(ex.chunks[0].heading.contains("Title"));
     }
 }

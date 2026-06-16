@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.46.0] — 2026-06-16
+
+"Understands more files": new parsers for Jupyter notebooks, SVG, and clean RTF, plus Markdown
+frontmatter extraction — and the built-in parser list now lives in exactly one place.
+
+### Added
+
+- **Jupyter `.ipynb`** — one chunk per cell (code cells language-tagged from the kernel; outputs
+  skipped), so notebooks are indexed as their source instead of noisy JSON.
+- **SVG `.svg`** — extracts `<text>` / `<title>` / `<desc>` content; path geometry and CSS are
+  ignored (no OCR of outlined glyphs). Diagrams become searchable by their labels.
+- **Markdown frontmatter** — a leading `---` YAML block (`title`/`tags`/`date`/`description`/`author`)
+  is lifted into a searchable chunk instead of being treated as body text.
+
+### Changed
+
+- **RTF is parsed, not dumped.** `.rtf` now goes through a control-word stripper that drops markup
+  and skips font/colour/style tables and `\*` ignorable destinations, leaving the prose — previously
+  the raw control words leaked into the index.
+- **Single parser registry.** The built-in parser list was duplicated between `Registry::new` and the
+  free `parse` function; the free function now delegates to the registry, so a new parser is added in
+  one place.
+
+### Notes
+
+`docs/methodology.md` now documents the full parser table plus an honest "known parsing gaps" list
+(structured HTML, OCR, email, archives, Apple iWork, binary symbols) — the next format waves.
+
 ## [0.45.0] — 2026-06-16
 
 "Summaries that name the API": file summaries are now built from a representative sample across the

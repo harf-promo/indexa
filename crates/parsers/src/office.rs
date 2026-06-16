@@ -55,6 +55,8 @@ impl Parser for OfficeParser {
                         .unwrap_or("unknown")
                 )
             }),
+            // RTF: strip control words/groups so the prose is indexed, not the markup.
+            "rtf" => parse_rtf(path).unwrap_or_default(),
             // Legacy binary PowerPoint (OLE compound doc, no pure-Rust extractor).
             // Return a quiet stub so the deep phase stores *something* instead of
             // counting this as a hard_error ("no parser"). Real text is not extracted.
@@ -81,6 +83,7 @@ impl Parser for OfficeParser {
             "csv" | "tsv" => "text/csv",
             "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "odt" => "application/vnd.oasis.opendocument.text",
+            "rtf" => "application/rtf",
             _ => "application/octet-stream",
         };
 
@@ -113,6 +116,130 @@ impl Parser for OfficeParser {
             edges: Vec::new(),
         })
     }
+}
+
+/// Names of RTF destination groups whose content is metadata/binary, not body prose, and
+/// is skipped wholesale (the font/colour/style tables, doc info, embedded pictures, list
+/// tables, …). Footnotes/headers/footers are deliberately NOT here — their text is content.
+const RTF_SKIP_DESTINATIONS: &[&str] = &[
+    "fonttbl",
+    "colortbl",
+    "stylesheet",
+    "info",
+    "pict",
+    "themedata",
+    "latentstyles",
+    "listtable",
+    "listoverridetable",
+    "rsidtbl",
+    "generator",
+    "datastore",
+    "xmlnstbl",
+];
+
+/// Strip RTF control words/groups, returning the visible prose.
+///
+/// RTF is `{\rtf1 …}`: control words are `\word` (optionally a signed numeric arg and a
+/// single trailing-space delimiter), `\'xx` is a hex-escaped byte, `{`/`}` delimit groups,
+/// `\par`/`\line`/`\tab`/`\page`/`\sect`/`\cell`/`\row` are whitespace, and a group beginning
+/// `\*` (ignorable destination) or one of [`RTF_SKIP_DESTINATIONS`] (font/colour/style tables,
+/// doc info, pictures, …) is dropped entirely. This is a pragmatic stripper — not a full RTF
+/// reader — good enough to index the prose. Hex escapes (`\'xx`) are dropped, not decoded.
+fn parse_rtf(path: &Path) -> Result<String> {
+    let raw = std::fs::read_to_string(path)?;
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    let mut depth: i32 = 0;
+    let mut skip_depth: Option<i32> = None; // skip text while depth >= this
+    let mut at_group_start = false; // a control word now would be the group's destination
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => {
+                depth += 1;
+                at_group_start = true;
+            }
+            '}' => {
+                if matches!(skip_depth, Some(d) if depth <= d) {
+                    skip_depth = None;
+                }
+                depth -= 1;
+                at_group_start = false;
+            }
+            '\\' => match chars.peek() {
+                // Escaped literal `\`, `{`, `}`.
+                Some('\\') | Some('{') | Some('}') => {
+                    if let Some(lit) = chars.next() {
+                        if skip_depth.is_none() {
+                            out.push(lit);
+                        }
+                    }
+                    at_group_start = false;
+                }
+                // `\'xx` hex byte — drop the apostrophe + two hex digits.
+                Some('\'') => {
+                    chars.next();
+                    chars.next();
+                    chars.next();
+                    at_group_start = false;
+                }
+                // `\*` ignorable destination — skip the whole group.
+                Some('*') => {
+                    chars.next();
+                    if skip_depth.is_none() {
+                        skip_depth = Some(depth);
+                    }
+                    at_group_start = false;
+                }
+                // Control word: letters, optional signed number, optional trailing space.
+                Some(p) if p.is_ascii_alphabetic() => {
+                    let mut word = String::new();
+                    while let Some(&n) = chars.peek() {
+                        if n.is_ascii_alphabetic() {
+                            word.push(n);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    if matches!(chars.peek(), Some('-')) {
+                        chars.next();
+                    }
+                    while matches!(chars.peek(), Some(d) if d.is_ascii_digit()) {
+                        chars.next();
+                    }
+                    if matches!(chars.peek(), Some(' ')) {
+                        chars.next(); // single trailing-space delimiter
+                    }
+                    if at_group_start
+                        && skip_depth.is_none()
+                        && RTF_SKIP_DESTINATIONS.contains(&word.as_str())
+                    {
+                        skip_depth = Some(depth);
+                    } else if skip_depth.is_none()
+                        && matches!(
+                            word.as_str(),
+                            "par" | "line" | "tab" | "page" | "sect" | "cell" | "row"
+                        )
+                    {
+                        out.push(' ');
+                    }
+                    at_group_start = false;
+                }
+                // Lone backslash — drop.
+                _ => at_group_start = false,
+            },
+            '\r' | '\n' => { /* RTF line breaks are not content */ }
+            _ => {
+                if skip_depth.is_none() {
+                    out.push(c);
+                }
+                if !c.is_whitespace() {
+                    at_group_start = false;
+                }
+            }
+        }
+    }
+    Ok(out.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 /// Parse xlsx/xls/ods spreadsheets via calamine.
@@ -287,6 +414,31 @@ mod tests {
         assert!(p.accepts_path(Path::new("doc.docx")));
         assert!(!p.accepts_path(Path::new("file.pdf")));
         assert!(!p.accepts_path(Path::new("file.rs")));
+    }
+
+    #[test]
+    fn rtf_strips_control_words_and_skips_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("note.rtf");
+        std::fs::write(
+            &p,
+            r"{\rtf1\ansi\deff0 {\fonttbl{\f0 Times New Roman;}}\f0\fs24 Hello \b bold\b0  world.\par Second line here.}",
+        )
+        .unwrap();
+        let ex = OfficeParser.parse(&p).unwrap();
+        let text: String = ex
+            .chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("Hello"), "{text}");
+        assert!(text.contains("bold"), "{text}");
+        assert!(text.contains("world"), "{text}");
+        assert!(text.contains("Second line here"), "{text}");
+        assert!(!text.contains("rtf1"), "control word leaked: {text}");
+        assert!(!text.contains("fonttbl"), "{text}");
+        assert!(!text.contains("Times"), "font table not skipped: {text}");
     }
 
     #[test]
