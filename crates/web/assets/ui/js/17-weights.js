@@ -23,9 +23,9 @@ function renderWeightsList(weights) {
     + weights.map(function (w) {
       var color = w.weight > 1 ? 'var(--green)' : w.weight < 1 ? 'var(--red)' : 'var(--muted)';
       return '<tr style="border-top:1px solid var(--border)">'
-        + '<td style="padding:3px 6px;color:var(--muted)">' + escW(w.target_kind) + '</td>'
+        + '<td style="padding:3px 6px;color:var(--muted)">' + escapeHtml(w.target_kind) + '</td>'
         + '<td style="padding:3px 6px;text-align:right;color:' + color + '">' + w.weight.toFixed(2) + '</td>'
-        + '<td style="padding:3px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:250px" title="' + escW(w.target) + '">' + escW(w.target) + '</td>'
+        + '<td style="padding:3px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:250px" title="' + escapeHtml(w.target) + '">' + escapeHtml(w.target) + '</td>'
         + '<td style="padding:3px 6px"><button class="btn-sm btn-danger" style="font-size:10px;padding:1px 6px" onclick="deleteWeight(' + JSON.stringify(w.target_kind) + ',' + JSON.stringify(w.target) + ')">✕</button></td>'
         + '</tr>';
     }).join('')
@@ -84,7 +84,7 @@ function suggestWeights() {  // eslint-disable-line no-unused-vars
         + suggestions.map(function (s) {
           return '<tr style="border-top:1px solid var(--border)">'
             + '<td style="padding:3px 6px;text-align:right;color:var(--accent)">' + s.weight.toFixed(2) + '</td>'
-            + '<td style="padding:3px 6px;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:300px">' + escW(s.path) + '</td>'
+            + '<td style="padding:3px 6px;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:300px">' + escapeHtml(s.path) + '</td>'
             + '</tr>';
         }).join('') + '</table>';
     })
@@ -106,9 +106,3 @@ function applyWeightSuggestions(suggestions) {  // eslint-disable-line no-unused
   });
 }
 
-// Named escW (not esc) to avoid colliding with 16-context-packs.js's esc() —
-// both files are concatenated into one UI_JS bundle, so a shared name would
-// silently have one definition overwrite the other.
-function escW(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}

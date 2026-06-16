@@ -20,7 +20,7 @@ pub(crate) async fn cmd_report(
     };
     let store = Store::open(&db_path)?;
     if store.chunk_count()? == 0 {
-        println!("No deep-scanned content found. Run `indexa deep <path>` first.");
+        println!("No deep-scanned content found. Run `indexa index <path>` first.");
         return Ok(());
     }
 
@@ -52,6 +52,7 @@ pub(crate) async fn cmd_report(
         use_recency_weight: cfg.retrieval.recency_boost,
         recency_days: cfg.retrieval.recency_days,
         max_steps: cfg.retrieval.agentic_max_steps,
+        mmr_lambda: cfg.retrieval.mmr_lambda,
     };
 
     let mut answers: Vec<Answer> = Vec::with_capacity(qs.len());

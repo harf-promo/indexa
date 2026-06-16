@@ -289,6 +289,22 @@ pub struct RetrievalConfig {
     pub recency_boost: bool,
     /// Recency window in days for `recency_boost` (files older than this stay neutral).
     pub recency_days: i64,
+    /// MMR (Maximal Marginal Relevance) lambda for retrieval diversity (v0.42).
+    ///
+    /// Controls the trade-off between relevance and diversity when re-ranking
+    /// retrieved chunks before synthesis:
+    /// - `1.0` — pure relevance (MMR disabled; identical to no-MMR behaviour).
+    /// - `0.5` — balanced (default): similar to the top hit are demoted,
+    ///   promoting diverse coverage of the question.
+    /// - `0.0` — maximum diversity: every chunk selected maximises distance from
+    ///   previously selected ones (ignores relevance entirely).
+    ///
+    /// MMR only runs when embeddings are available (dense or RRF mode) and
+    /// `mmr_lambda < 1.0`; it fails open — any error fetching embeddings leaves
+    /// the original rank order unchanged.
+    ///
+    /// TOML: `[retrieval] mmr_lambda = 0.3`
+    pub mmr_lambda: f32,
 }
 
 impl Default for RetrievalConfig {
@@ -308,6 +324,7 @@ impl Default for RetrievalConfig {
             agentic_max_steps: 3,
             recency_boost: false,
             recency_days: 90,
+            mmr_lambda: 0.5,
         }
     }
 }
@@ -574,10 +591,6 @@ pub struct ResourceConfig {
     /// 0 = unload immediately (most conservative).
     /// Overrides the profile default when > 0.
     pub keep_alive_secs: i64,
-
-    /// Run a quick micro-benchmark at job start to measure real throughput
-    /// for the chosen model, improving ETA accuracy.  Default: true.
-    pub micro_benchmark: bool,
 }
 
 impl Default for ResourceConfig {
@@ -587,7 +600,6 @@ impl Default for ResourceConfig {
             headroom_gb: 0.0, // 0 = use profile default
             auto_select_model: true,
             keep_alive_secs: 0, // 0 = use profile default
-            micro_benchmark: true,
         }
     }
 }

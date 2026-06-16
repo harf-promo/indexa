@@ -645,6 +645,7 @@ mod tests {
             language: Some(lang.to_owned()),
             embedding: None,
             embed_model: None,
+            content_hash: None,
         }
     }
 

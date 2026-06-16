@@ -80,7 +80,8 @@ async function loadExplain(body, btn) {
 }
 
 function renderExplainTrace(t) {
-  var head = '<div class="explain-meta">mode <b>' + escapeHtml(t.mode) + '</b>' +
+  var caption = '<p class="explain-caption">How Indexa found these files:</p>';
+  var head = caption + '<div class="explain-meta">mode <b>' + escapeHtml(t.mode) + '</b>' +
     ' · top_k ' + t.top_k + (t.rerank ? ' · reranked' : '') + (t.use_weights ? ' · weighted' : '') +
     (t.scope ? ' · scoped to ' + escapeHtml(t.scope) : '') + '</div>';
   var stages = (t.stages || []).map(function (st) {

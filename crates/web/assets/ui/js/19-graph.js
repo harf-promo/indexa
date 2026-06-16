@@ -36,7 +36,7 @@ function loadGraph(scope) {  // eslint-disable-line no-unused-vars
       .then(function (r) { return r.json(); })
       .then(function (roots) {
         sel.innerHTML = (roots || []).map(function (r) {
-          return '<option value="' + escG(r.path) + '">' + escG(r.name || r.path) + '</option>';
+          return '<option value="' + escapeHtml(r.path) + '">' + escapeHtml(r.name || r.path) + '</option>';
         }).join('');
         fetchGraph(scope || (roots && roots[0] && roots[0].path) || '');
       })
@@ -101,7 +101,7 @@ function renderGraph(d) {
     var resolvedNote = bare > 0
       ? ' · ' + bare + ' bare-name (approximate)'
       : (d.strict ? ' · strict (bare-name dropped)' : ' · all scope-resolved');
-    meta.textContent = nodes.length + ' files · ' + edges.length + ' edges · node size = centrality'
+    meta.textContent = nodes.length + ' files · ' + edges.length + ' edges · node size = centrality (how many files depend on it)'
       + (d.truncated ? ' · ⚠ truncated (showing the heaviest)' : '')
       + resolvedNote;
   }
@@ -243,10 +243,10 @@ function renderGraph(d) {
       setHighlight(o.id);
       if (tip) {
         tip.hidden = false;
-        tip.innerHTML = '<strong>' + escG(o.label) + '</strong><br>'
-          + '<span class="graph-tip-path">' + escG(o.id) + '</span><br>'
+        tip.innerHTML = '<strong>' + escapeHtml(o.label) + '</strong><br>'
+          + '<span class="graph-tip-path">' + escapeHtml(o.id) + '</span><br>'
           + 'calls ' + o.node.out_degree + ' file(s) · called by ' + o.node.in_degree
-          + '<br>centrality ' + Math.round(o.prNorm * 100) + ' / 100';
+          + '<br>importance (links from ' + o.node.in_degree + ' file' + (o.node.in_degree === 1 ? '' : 's') + '): ' + Math.round(o.prNorm * 100) + '/100';
         if (ev) { tip.style.left = (ev.clientX + 12) + 'px'; tip.style.top = (ev.clientY + 12) + 'px'; }
       }
     } else {
@@ -319,7 +319,3 @@ function runForceLayout(nodes, links, W, H) {
 }
 
 function clearSvg(svg) { while (svg.firstChild) svg.removeChild(svg.firstChild); }
-
-function escG(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}

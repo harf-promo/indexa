@@ -330,6 +330,7 @@ impl IndexaMcp {
             use_recency_weight: self.config.retrieval.recency_boost,
             recency_days: self.config.retrieval.recency_days,
             max_steps: self.config.retrieval.agentic_max_steps,
+            mmr_lambda: self.config.retrieval.mmr_lambda,
         };
 
         // Single shared, Send-safe pipeline (embed → scoped retrieve → optional

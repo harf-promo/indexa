@@ -11,6 +11,7 @@ delete_pack
 delete_weight
 dependencies
 dismiss_decision
+explain_retrieval
 export_pack
 get_chunk_context
 get_decision
@@ -23,12 +24,14 @@ insights_duplicates
 insights_languages
 insights_largest
 insights_stale
+inspect
 list_classifications
 list_files_by_category
 list_open_decisions
 list_packs
 list_saved_queries
 list_weights
+project_overview
 prune
 query_config
 read_file

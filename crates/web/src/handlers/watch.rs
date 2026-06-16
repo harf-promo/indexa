@@ -176,6 +176,7 @@ pub(crate) async fn api_watch_start(
                                     language: chunk.language.clone(),
                                     embedding,
                                     embed_model: Some(embed_model.clone()),
+                                    content_hash: None,
                                 });
                             }
                             records

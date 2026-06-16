@@ -23,6 +23,7 @@ fn dummy_chunk(path: &str, seq: usize, text: &str) -> ChunkRecord {
         language: None,
         embedding: None,
         embed_model: None,
+        content_hash: None,
     }
 }
 

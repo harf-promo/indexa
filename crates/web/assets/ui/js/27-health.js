@@ -19,6 +19,15 @@
         msg.textContent =
           '⚠ Your index is stale' + age +
           ' — answers may miss recent changes. Re-index, or turn on Watch to keep it current.';
+        var reindexBtn = document.createElement('button');
+        reindexBtn.textContent = 'Re-index now';
+        reindexBtn.className = 'btn-sm';
+        reindexBtn.title = 'Rebuild context for all roots';
+        reindexBtn.setAttribute('aria-label', 'Re-index all roots now');
+        reindexBtn.addEventListener('click', function () {
+          bar.remove();
+          if (typeof reindexAll === 'function') reindexAll();
+        });
         var x = document.createElement('button');
         x.textContent = '✕';
         x.title = 'Dismiss';
@@ -27,6 +36,7 @@
           'background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;';
         x.addEventListener('click', function () { bar.remove(); });
         bar.appendChild(msg);
+        bar.appendChild(reindexBtn);
         bar.appendChild(x);
         document.body.insertBefore(bar, document.body.firstChild);
       })

@@ -24,15 +24,17 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.41.0)
+## Current feature surface (v0.42.0)
 
 **CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize; `--contextual` flag) · `scan` · `deep` (`--contextual` flag) ·
-`summarize` · `describe` · `inspect` (per-path "what's indexed here") · `map` · `worker` · `pack`
+`summarize` · `describe` (no-path = whole-project overview; with path = per-file summary) · `inspect` (per-path "what's indexed here") · `map` · `worker` · `pack`
 (Context Packs; `pack add-url` = remote sources) · `weight` (Importance
 weighting) · `insights` (duplicates/stale/diff) · `graph` (file-to-file call graph) · `export` ·
 `ask` · `watch` · `serve` (`--host 0.0.0.0` for LAN) · `mcp` (+ `mcp install [--client]`, auto-detects)
 · `completion <shell>` · `status` (`--json` incl. per-tool savings) · `rm` · `prune` (orphan-row GC) ·
 `doctor` (`--apply-ollama-env`) · `fingerprint` · `classify` · `update`.
+
+**Fast, legible & visible (v0.42):** (A) **Embedding cache** — `content_hash TEXT` column on `chunks`; SHA-256 of raw chunk text used as cache key; re-indexing skips embedding unchanged chunks (`cached_embeddings_by_hash` store method; schema migration in `schema.rs` with IMMEDIATE-transaction guard for concurrency). (B) **MMR diversity** — `apply_mmr` + `mmr_score` + `cosine` in `qa.rs`; `embeddings_for_chunks` store method; wired into `retrieve()` after boosts; `[retrieval] mmr_lambda` config (default 0.5; 1.0 = off; fails open). (C) **45 MCP tools** (was 42): `project_overview` (calls `build_project_overview` + `is_broad_intent`, now pub), `explain_retrieval` (calls `explain_retrieval` from qa.rs), `inspect` (calls same store methods as web inspect handler); `golden_tools.txt` updated; doc counts updated. (D) **`indexa describe` no-path** → whole-project overview (`describe.rs`; `path: Option<String>` in CLI). (E) **Auto-preflight** — `preflight_ollama(cfg)` in `helpers.rs` (liveness + model-presence probe extracted from doctor.rs); called at top of `cmd_index` + `cmd_deep`. (F) **UX polish** — Ask welcome gets project-level example chip; "Why these sources?" gets caption; graph centrality tooltip glossed; health banner "Re-index now" button; CLI hints → `indexa index <path>`. (G) **Simplification** — 4 JS escape clones deleted (→ `escapeHtml`); `ollama.rs` extracted `build_describe_prompt`/`build_dir_prompt`; web contextual loop uses `contextual_embed_texts` helper (kills loop drift); dead `micro_benchmark` config field removed; `indexa_core::text::{truncate_chars, snippet}` shared util. ⚠️ DO NOT reintroduce the `total−used` basis (v0.28.1 invariant) or the `micro_benchmark` field.
 
 **Memory budget invariant (v0.28.1):** `resource::compute_budget` keys on `available_bytes`
 (sysinfo `available_memory()` = macOS XNU active+inactive+free), NOT `total − used_memory()` —
@@ -187,7 +189,7 @@ table + `boost_with_weights` in QA) · Insights (v0.16, `find_*_duplicates`/`fin
 MCP `agentic` / web "Agentic" checkbox — bounded plan→search→refine loop, fails open) · **universal
 macOS desktop build** (v0.20, `--target universal-apple-darwin`, `darwin-universal` updater key).
 
-**MCP server:** **42 tools** (`crates/mcp/src/lib.rs`). Code-graph tools: `dependencies` /
+**MCP server:** **45 tools** (`crates/mcp/src/lib.rs`). Code-graph tools: `dependencies` /
 `who_imports` / `who_calls` / `blast_radius` / `code_graph`. The call graph is bare-name matched
 (case-sensitive, 1-hop, 7 languages) — caveats in `docs/methodology.md`; label honestly in any UI.
 v0.28 added `query_config` (effective config, no secrets), `list_files_by_category` (classification

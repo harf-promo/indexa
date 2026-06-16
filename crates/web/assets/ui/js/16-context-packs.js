@@ -29,9 +29,9 @@ function renderPackList(packs) {
   }
   if (empty) empty.style.display = 'none';
   list.innerHTML = packs.map(function (p) {
-    var desc = p.description ? ' <span style="color:var(--muted);font-size:11px">— ' + esc(p.description) + '</span>' : '';
-    return '<div class="key-row" style="justify-content:space-between;flex-wrap:wrap;gap:4px" data-pack-name="' + esc(p.name) + '">'
-      + '<span style="font-size:13px"><strong>' + esc(p.name) + '</strong>' + desc + ' <span style="color:var(--muted);font-size:11px">(' + p.path_count + ' path' + (p.path_count === 1 ? '' : 's') + ')</span></span>'
+    var desc = p.description ? ' <span style="color:var(--muted);font-size:11px">— ' + escapeHtml(p.description) + '</span>' : '';
+    return '<div class="key-row" style="justify-content:space-between;flex-wrap:wrap;gap:4px" data-pack-name="' + escapeHtml(p.name) + '">'
+      + '<span style="font-size:13px"><strong>' + escapeHtml(p.name) + '</strong>' + desc + ' <span style="color:var(--muted);font-size:11px">(' + p.path_count + ' path' + (p.path_count === 1 ? '' : 's') + ')</span></span>'
       + '<span style="display:flex;gap:4px">'
       + '<button class="btn-sm" style="font-size:11px" onclick="openPackEditor(' + JSON.stringify(p.name) + ')">Edit</button>'
       + '<button class="btn-sm" style="font-size:11px" onclick="quickExportPack(' + JSON.stringify(p.name) + ')">Export</button>'
@@ -100,7 +100,7 @@ function refreshPackEditorPaths(name) {
       }
       container.innerHTML = paths.map(function (p) {
         return '<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;gap:4px">'
-          + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" title="' + esc(p) + '">' + esc(p) + '</span>'
+          + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" title="' + escapeHtml(p) + '">' + escapeHtml(p) + '</span>'
           + '<button class="btn-sm btn-danger" style="font-size:10px;padding:1px 6px;flex-shrink:0" onclick="removePackPath(' + JSON.stringify(p) + ')">✕</button>'
           + '</div>';
       }).join('');
@@ -198,19 +198,10 @@ function searchCurrentPack() {  // eslint-disable-line no-unused-vars
         return;
       }
       resultsEl.innerHTML = hits.map(function (h) {
-        var heading = h.heading ? ' <span style="color:var(--muted)">[' + esc(h.heading) + ']</span>' : '';
-        return '<div style="margin-bottom:6px"><strong style="color:var(--accent)">' + esc(h.path) + '</strong>' + heading
-          + '<div style="color:var(--muted);margin-top:2px">' + esc(h.snippet.slice(0, 160)) + '</div></div>';
+        var heading = h.heading ? ' <span style="color:var(--muted)">[' + escapeHtml(h.heading) + ']</span>' : '';
+        return '<div style="margin-bottom:6px"><strong style="color:var(--accent)">' + escapeHtml(h.path) + '</strong>' + heading
+          + '<div style="color:var(--muted);margin-top:2px">' + escapeHtml(h.snippet.slice(0, 160)) + '</div></div>';
       }).join('');
     })
     .catch(function (e) { resultsEl.textContent = 'Error: ' + e.message; });
-}
-
-// HTML-escape helper (shared pattern used across the UI).
-function esc(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }

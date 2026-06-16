@@ -154,13 +154,14 @@ pub enum Commands {
         passes: Option<u32>,
     },
 
-    /// Print the summary and breadcrumb chain for a specific path.
+    /// Print the summary and breadcrumb chain for a specific path, or a whole-project overview.
     #[command(after_help = "Examples:
-  indexa describe ~/Documents/taxes")]
+  indexa describe ~/Documents/taxes
+  indexa describe")]
     #[command(display_order = 35)]
     Describe {
-        /// Path to describe.
-        path: String,
+        /// Path to describe (omit for whole-project overview).
+        path: Option<String>,
     },
 
     /// Show exactly what's indexed for a path: entry, chunks, summary, classification, weight, graph.

@@ -1,7 +1,7 @@
 //! Deep-scan chunk writes and chunk-level queries.
 
 use super::entries::delete_chunks_under_prefix;
-use super::search::embedding_to_blob;
+use super::search::{blob_to_embedding, embedding_to_blob};
 use super::{ChunkRecord, Store};
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
@@ -80,8 +80,8 @@ impl Store {
             // 2. Insert the new chunk set, keeping FTS5 in sync on the fresh rowid.
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO chunks
-                 (entry_path, seq, heading, text, language, embedding, embed_model)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (entry_path, seq, heading, text, language, embedding, embed_model, content_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             let mut fts_ins = tx.prepare_cached(
                 "INSERT INTO chunks_fts(text, heading, entry_path, chunk_id)
@@ -99,6 +99,7 @@ impl Store {
                     c.language,
                     embedding_blob,
                     c.embed_model,
+                    c.content_hash,
                 ])?;
 
                 let rowid = tx.last_insert_rowid();
@@ -107,6 +108,36 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Returns a map of `content_hash → embedding` for chunks already stored under
+    /// `entry_path`.  Only rows where BOTH `content_hash` and `embedding` are non-NULL
+    /// are returned — a NULL embedding means the previous deep run failed to embed that
+    /// chunk, so it must not be reused.
+    ///
+    /// Used by the deep-scan path to skip re-embedding chunks whose source text (and
+    /// therefore hash) has not changed since the last run.
+    pub fn cached_embeddings_by_hash(
+        &self,
+        entry_path: &str,
+    ) -> Result<std::collections::HashMap<String, Vec<f32>>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT content_hash, embedding FROM chunks
+              WHERE entry_path = ?1
+                AND content_hash IS NOT NULL
+                AND embedding IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(params![entry_path], |r| {
+            let hash: String = r.get(0)?;
+            let blob: Vec<u8> = r.get(1)?;
+            Ok((hash, blob))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (hash, blob) = row?;
+            map.insert(hash, blob_to_embedding(&blob));
+        }
+        Ok(map)
     }
 
     /// Delete all chunks (and their FTS5 entries) for a given file path.
@@ -232,6 +263,33 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Fetch stored embeddings for a set of chunk ids.
+    ///
+    /// Returns a map of `chunk_id → embedding`. Ids with no stored embedding (or an
+    /// invalid blob) are silently omitted so callers can fail-open if some vectors are
+    /// missing. Used by the MMR re-ranking pass in `retrieve()` (v0.42).
+    pub fn embeddings_for_chunks(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Vec<f32>>> {
+        if ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let mut map = std::collections::HashMap::with_capacity(ids.len());
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id, embedding FROM chunks WHERE id = ?1")?;
+        for &id in ids {
+            if let Ok(Some(blob)) = stmt.query_row(params![id], |r| r.get::<_, Option<Vec<u8>>>(1))
+            {
+                if blob.len().is_multiple_of(4) && !blob.is_empty() {
+                    map.insert(id, super::search::blob_to_embedding(&blob));
+                }
+            }
+        }
+        Ok(map)
+    }
+
     /// Text of the first chunk for a given file path (used as description input).
     pub fn first_chunk_text(&self, entry_path: &str) -> Result<Option<String>> {
         let text: Option<String> = self
@@ -264,6 +322,7 @@ impl Store {
                 language: r.get::<_, Option<String>>(3)?,
                 embedding: None,
                 embed_model: None,
+                content_hash: None,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -290,8 +349,96 @@ impl Store {
                 language: r.get::<_, Option<String>>(4)?,
                 embedding: None,
                 embed_model: None,
+                content_hash: None,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod chunk_cache_tests {
+    use super::*;
+    use crate::store::Store;
+
+    #[test]
+    fn cached_embeddings_returns_stored_vector_for_matching_hash() {
+        let mut store = Store::open_in_memory().unwrap();
+
+        // Insert a chunk with a known hash and embedding.
+        let vec = vec![0.1_f32, 0.2, 0.3];
+        store
+            .upsert_chunks(&[ChunkRecord {
+                entry_path: "/test/a.rs".to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: "hello world".to_owned(),
+                language: None,
+                embedding: Some(vec.clone()),
+                embed_model: Some("nomic".to_owned()),
+                content_hash: Some("abc123".to_owned()),
+            }])
+            .unwrap();
+
+        let cache = store.cached_embeddings_by_hash("/test/a.rs").unwrap();
+        assert!(
+            cache.contains_key("abc123"),
+            "expected hash key 'abc123' in cache"
+        );
+        let cached_vec = &cache["abc123"];
+        // Round-trip through f32 LE bytes so we use approx equality.
+        for (a, b) in vec.iter().zip(cached_vec.iter()) {
+            assert!((a - b).abs() < 1e-6, "embedding mismatch: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn cached_embeddings_excludes_null_embedding_rows() {
+        let mut store = Store::open_in_memory().unwrap();
+
+        // A chunk with a hash but NULL embedding (prior embed failure).
+        store
+            .upsert_chunks(&[ChunkRecord {
+                entry_path: "/test/b.rs".to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: "content".to_owned(),
+                language: None,
+                embedding: None, // no vector stored
+                embed_model: None,
+                content_hash: Some("deadbeef".to_owned()),
+            }])
+            .unwrap();
+
+        let cache = store.cached_embeddings_by_hash("/test/b.rs").unwrap();
+        assert!(
+            cache.is_empty(),
+            "a chunk with NULL embedding must not appear in the cache"
+        );
+    }
+
+    #[test]
+    fn cached_embeddings_excludes_null_hash_rows() {
+        let mut store = Store::open_in_memory().unwrap();
+
+        // A legacy chunk with no hash (pre-v0.42 row).
+        store
+            .upsert_chunks(&[ChunkRecord {
+                entry_path: "/test/c.rs".to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: "old content".to_owned(),
+                language: None,
+                embedding: Some(vec![0.5, 0.6]),
+                embed_model: Some("nomic".to_owned()),
+                content_hash: None, // legacy row
+            }])
+            .unwrap();
+
+        let cache = store.cached_embeddings_by_hash("/test/c.rs").unwrap();
+        assert!(
+            cache.is_empty(),
+            "a chunk with NULL content_hash must not appear in the cache"
+        );
     }
 }

@@ -3,7 +3,7 @@
 // the SVG render + force layout and publishes its highlight controls + `graphState`;
 // this file adds the legend, the plain-language "What is this?" help, and the
 // click-to-focus / expand-neighbors / reset interactions. Pure vanilla DOM; reuses
-// `escG`, `graphState`, `fetchGraph`, `currentGraphScope` from 19-graph.js.
+// `graphState`, `fetchGraph`, `currentGraphScope` from 19-graph.js; `escapeHtml` from 08-util-palette-init.js.
 
 // Toggle the plain-language graph explainer (mirrors toggleMapHelp in 07-map.js).
 function toggleGraphHelp() {  // eslint-disable-line no-unused-vars
@@ -61,8 +61,8 @@ function showGraphFocusBar(id) {
   if (!bar) return;
   var base = String(id).split('/').pop() || id;
   if (label) {
-    label.innerHTML = 'Focused: <strong>' + escG(base) + '</strong> '
-      + '<span class="graph-focus-path">' + escG(id) + '</span>';
+    label.innerHTML = 'Focused: <strong>' + escapeHtml(base) + '</strong> '
+      + '<span class="graph-focus-path">' + escapeHtml(id) + '</span>';
   }
   bar.hidden = false;
 }

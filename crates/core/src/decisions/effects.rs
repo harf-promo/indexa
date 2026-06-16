@@ -491,6 +491,7 @@ mod tests {
                 language: None,
                 embedding: None,
                 embed_model: None,
+                content_hash: None,
             }])
             .unwrap();
         let d = decided(51, "language", "/r/x.rb", json!({}), "ruby");

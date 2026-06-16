@@ -2,7 +2,7 @@ use anyhow::Result;
 use indexa_core::config::Config;
 use indexa_core::store::Store;
 
-use super::helpers::index_db_path;
+use super::helpers::{index_db_path, preflight_ollama};
 use super::{cmd_deep, cmd_scan, cmd_summarize};
 
 /// One-shot context build: scan → deep embed → summarize.
@@ -18,6 +18,9 @@ pub(crate) async fn cmd_index(
     contextual: bool,
     cfg: &Config,
 ) -> Result<()> {
+    // ── Preflight: confirm Ollama is up and required models are pulled ─────────
+    preflight_ollama(cfg).await?;
+
     // ── Phase 1: scan ─────────────────────────────────────────────────────────
     println!("── Phase 1 / 3 · Scan ──────────────────────────────────────");
     cmd_scan(paths.clone(), false, cfg).await?;

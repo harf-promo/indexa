@@ -141,7 +141,7 @@ pub(crate) async fn cmd_ask(
                 "{}",
                 serde_json::to_string_pretty(&AnswerJson {
                     question,
-                    answer: "No deep-scanned content found. Run `indexa deep <path>` first."
+                    answer: "No deep-scanned content found. Run `indexa index <path>` first."
                         .to_owned(),
                     sources: Vec::new(),
                     confidence: None,
@@ -149,7 +149,7 @@ pub(crate) async fn cmd_ask(
                 })?
             );
         } else {
-            println!("No deep-scanned content found. Run `indexa deep <path>` first.");
+            println!("No deep-scanned content found. Run `indexa index <path>` first.");
         }
         return Ok(());
     }
@@ -187,6 +187,7 @@ pub(crate) async fn cmd_ask(
         use_recency_weight: cfg.retrieval.recency_boost,
         recency_days: cfg.retrieval.recency_days,
         max_steps,
+        mmr_lambda: cfg.retrieval.mmr_lambda,
     };
 
     // `store` is no longer needed by the query path — `answer` opens its own
