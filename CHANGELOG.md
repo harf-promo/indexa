@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.48.0] — 2026-06-16
+
+"Understand even more files" (format Wave 2): email, archives, and opt-in scanned-PDF OCR.
+
+### Added
+
+- **Email `.eml`** — parsed with `mail-parser` (Apache-2.0/MIT, pure Rust): subject, from/to, date,
+  body (plain text, or the HTML part converted), and attachment *names*. `.msg` (Outlook OLE) gets a
+  quiet stub rather than a hard error.
+- **Archives `.zip` / `.tar` / `.tar.gz` / `.tgz`** — listed by entry name + size, so an archive is
+  searchable by the files it contains. Shallow (entry contents are not extracted — avoids zip bombs);
+  registered after the Office/EPUB parsers so it never claims their zip containers.
+- **Scanned-PDF OCR (opt-in).** Set `[parsers.pdf] backend = "ocr"` to OCR PDFs with no text layer:
+  pages are rasterised with `pdftoppm` (poppler) and recognised with `tesseract` (`ocr_binary` /
+  `ocr_lang` configurable). Both are external tools; OCR fails open to the text layer when they're
+  unavailable, and runs in the indexing pipeline (CLI `deep`/`index` and the web build).
+
+### Fixed
+
+- **Dead PDF `backend` config.** `[parsers.pdf] backend` defaulted to `"pdfium"` but nothing ever read
+  it (no pdfium dependency existed). The default is now the honest `"text"`, with `"ocr"` wired.
+
+### Notes
+
+New dependencies `tar`, `flate2`, `mail-parser` are all Apache-2.0/MIT and pure-Rust — verified
+openssl-free on host and `aarch64-unknown-linux-gnu`, and `cargo deny` clean.
+
 ## [0.47.0] — 2026-06-16
 
 "Read the web too": HTML files are now parsed structurally instead of as flat text.

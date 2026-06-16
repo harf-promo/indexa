@@ -457,15 +457,35 @@ impl Default for ParsersConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PdfParserConfig {
-    /// "pdfium" (default) | "marker" (better for scanned/complex PDFs, requires Marker CLI)
+    /// `"text"` (default) — text-layer extraction only (pdf-extract). `"ocr"` — additionally
+    /// OCR pages with no text layer (scanned PDFs): rasterise with `pdftoppm` (poppler) and
+    /// recognise with `tesseract`. Both are external tools; OCR is opt-in and fails open to
+    /// the text layer when they're unavailable.
     pub backend: String,
+    /// OCR engine binary when `backend = "ocr"` (default `tesseract`).
+    pub ocr_binary: Option<String>,
+    /// Optional tesseract language hint passed as `-l`, e.g. `"eng"` or `"eng+ara"`.
+    pub ocr_lang: Option<String>,
 }
 
 impl Default for PdfParserConfig {
     fn default() -> Self {
         Self {
-            backend: "pdfium".into(),
+            backend: "text".into(),
+            ocr_binary: None,
+            ocr_lang: None,
         }
+    }
+}
+
+impl PdfParserConfig {
+    /// True when OCR of scanned (text-layer-less) PDFs is enabled.
+    pub fn ocr_enabled(&self) -> bool {
+        self.backend.eq_ignore_ascii_case("ocr")
+    }
+    /// OCR engine binary (defaults to `tesseract`).
+    pub fn ocr_binary(&self) -> &str {
+        self.ocr_binary.as_deref().unwrap_or("tesseract")
     }
 }
 

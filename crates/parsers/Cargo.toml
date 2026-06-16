@@ -39,3 +39,6 @@ tempfile = { workspace = true }
 quick-xml = "0.40"
 # HTML → Markdown conversion (Apache-2.0; already used by the remote-source fetch path)
 htmd = { workspace = true }
+tar = "0.4.46"
+flate2 = "1.1.9"
+mail-parser = "0.11.3"

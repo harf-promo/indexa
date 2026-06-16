@@ -140,6 +140,10 @@ pub(crate) async fn cmd_deep(
     let transcribe = cfg.parsers.audio.transcribe;
     let transcribe_binary = cfg.parsers.audio.transcribe_binary().to_owned();
     let transcribe_model = cfg.parsers.audio.model.clone();
+    // Optional PDF OCR (opt-in): pdftoppm + tesseract for scanned PDFs with no text layer.
+    let ocr_enabled = cfg.parsers.pdf.ocr_enabled();
+    let ocr_binary = cfg.parsers.pdf.ocr_binary().to_owned();
+    let ocr_lang = cfg.parsers.pdf.ocr_lang.clone();
 
     for root in &roots {
         println!(
@@ -267,6 +271,51 @@ pub(crate) async fn cmd_deep(
                             eprint!("\r\x1b[K");
                         }
                         eprintln!("  transcription task panicked for {path_str}: {e}");
+                    }
+                }
+            }
+
+            // PDF OCR (opt-in): a scanned PDF with no text layer gets rasterised + OCR'd and
+            // the recognised text appended as an extra chunk. Blocking subprocess →
+            // spawn_blocking; fails open (a missing tool just leaves the text-layer stub).
+            if ocr_enabled && extracted.mime == "application/pdf" {
+                let layer_words: usize = extracted
+                    .chunks
+                    .iter()
+                    .map(|c| c.text.split_whitespace().count())
+                    .sum();
+                if layer_words < 10 {
+                    let bin = ocr_binary.clone();
+                    let lang = ocr_lang.clone();
+                    let p = entry.path.clone();
+                    let res = tokio::task::spawn_blocking(move || {
+                        indexa_parsers::pdf::ocr_pdf(&p, &bin, lang.as_deref())
+                    })
+                    .await;
+                    match res {
+                        Ok(Ok(text)) if !text.trim().is_empty() => {
+                            let seq = extracted.chunks.len();
+                            extracted.chunks.push(indexa_parsers::types::Chunk {
+                                source: entry.path.clone(),
+                                seq,
+                                heading: "ocr".to_owned(),
+                                text,
+                                language: None,
+                            });
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
+                            if show_progress {
+                                eprint!("\r\x1b[K");
+                            }
+                            eprintln!("  OCR failed for {path_str}: {e:#}");
+                        }
+                        Err(e) => {
+                            if show_progress {
+                                eprint!("\r\x1b[K");
+                            }
+                            eprintln!("  OCR task panicked for {path_str}: {e}");
+                        }
                     }
                 }
             }

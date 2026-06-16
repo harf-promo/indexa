@@ -28,7 +28,9 @@
 //! Custom parsers are inserted **before** the built-in fallbacks, so they take
 //! precedence for any MIME type they claim.
 
+use crate::archive::ArchiveParser;
 use crate::code::CodeParser;
+use crate::email::EmailParser;
 use crate::epub::EpubParser;
 use crate::html::HtmlParser;
 use crate::image::ImageParser;
@@ -78,6 +80,8 @@ impl Registry {
                 Box::new(MediaParser),
                 Box::new(PresentationParser), // must precede OfficeParser (pptx vs. ppt)
                 Box::new(OfficeParser),
+                Box::new(EmailParser),           // .eml/.msg
+                Box::new(ArchiveParser), // .zip/.tar/.tar.gz — after office/epub so it never claims their zip containers
                 Box::new(HtmlParser::default()), // .html/.htm → Markdown, before the text fallback
                 Box::new(MarkdownParser::default()),
                 Box::new(TextParser::default()),
