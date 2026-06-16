@@ -35,11 +35,9 @@ ignore = [
     # harassment incident), NOT a vulnerability, no upgrade. Used only by hnsw_rs's index
     # file dump/load, which Indexa never calls (the ANN index is built in-memory only).
     { id = "RUSTSEC-2025-0141", reason = "transitive via hnsw_rs/bincode 1.3.3; unmaintained-not-vuln; dump/load path unused" },
-    # number_prefix 0.4.0 → indicatif → hf-hub; unmaintained display-only dep, no replacement
-    { id = "RUSTSEC-2025-0119", reason = "transitive via hf-hub/indicatif/number_prefix; unmaintained, display-only, no upgrade available" },
-    # paste 1.0.15 → candle-core / candle-transformers; proc-macro crate marked unmaintained
-    # with no replacement. Used internally by candle for macro expansion; no security impact.
-    { id = "RUSTSEC-2024-0436", reason = "transitive via candle-core/candle-transformers/paste; proc-macro only, no security impact" },
+    # paste 1.0.15 → candle-core / candle-transformers (via gemm); proc-macro crate marked
+    # unmaintained with no replacement. Used internally by candle for macro expansion; no security impact.
+    { id = "RUSTSEC-2024-0436", reason = "transitive via candle-core/gemm/paste; proc-macro only, no security impact" },
 ]
 
 [bans]
