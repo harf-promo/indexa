@@ -19,7 +19,7 @@ members = [
 exclude = ["apps/indexa-desktop"]
 
 [workspace.package]
-version = "0.43.0"
+version = "0.43.1"
 edition = "2021"
 authors = ["Harf Promo <ahmed541991@gmail.com>"]
 license = "Apache-2.0"
@@ -101,9 +101,13 @@ candle-core = "0.9"
 candle-nn = "0.9"
 candle-transformers = "0.9"
 # HuggingFace model hub — model file cache (Apache-2.0).
-# Uses ureq+native-tls for model downloads only (not subject to the reqwest/rustls
-# security invariant, which covers server-facing API calls).
-hf-hub = { version = "0.3", default-features = false, features = ["online"] }
+# v0.5 + the `ureq` feature gives the sync download API backed by ureq 3, whose
+# default TLS is rustls + ring (NOT native-tls/openssl, NOT aws-lc). This keeps
+# the tree openssl-free so it cross-compiles to aarch64-linux — same crypto
+# provider (ring) the reqwest/rustls invariant already relies on. Do NOT enable
+# the `native-tls`/`default-tls` features: they pull openssl-sys and break the
+# Linux ARM64 cross build (the v0.43.0 release failure).
+hf-hub = { version = "0.5", default-features = false, features = ["ureq"] }
 # HF tokenizer (Apache-2.0). onig = Oniguruma, compiled from bundled C source and
 # statically linked — same pattern as rusqlite's bundled SQLite, safe for notarization.
 tokenizers = { version = "0.20", default-features = false, features = ["onig"] }

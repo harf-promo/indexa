@@ -7,10 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.43.0] — 2026-06-16
+## [0.43.1] — 2026-06-16
 
 "Sharper retrieval": a local DeBERTa-v2 cross-encoder reranker joins the LLM reranker, and agents
-can now explicitly opt into reranking per query via the MCP `ask` tool.
+can now explicitly opt into reranking per query via the MCP `ask` tool. (The v0.43.0 tag failed to
+build for Linux ARM64 and never produced a release; v0.43.1 is the first published v0.43 build.)
 
 ### Added
 
@@ -25,6 +26,14 @@ can now explicitly opt into reranking per query via the MCP `ask` tool.
   rather than inheriting the server default. Both params default to the server config when omitted.
 - **`rerank_backend` config key.** `[retrieval] rerank_backend = "llm"` (default, listwise LLM)
   or `"cross-encoder"` (candle DeBERTa-v2). Works with all surfaces: CLI `ask`, web, MCP.
+
+### Fixed
+
+- **Linux ARM64 release build.** `hf-hub` now uses `ureq` + rustls (`features = ["ureq"]` on
+  hf-hub 0.5, ureq 3's default rustls + ring backend) instead of the v0.43.0 native-tls path, which
+  pulled `openssl-sys` and failed to cross-compile to `aarch64-unknown-linux-gnu` — the failure that
+  blocked the v0.43.0 release. The tree is now openssl-free, matching the existing reqwest/rustls
+  invariant. Verified with a real ARM64-Linux cross-build.
 
 ## [0.42.0] — 2026-06-16
 
