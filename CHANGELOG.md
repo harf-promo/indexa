@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.47.0] — 2026-06-16
+
+"Read the web too": HTML files are now parsed structurally instead of as flat text.
+
+### Added
+
+- **HTML parser** (`.html`/`.htm`/`.xhtml`). `<script>`/`<style>` are stripped, the page is converted
+  to Markdown (htmd — Apache-2.0, already used by the remote-source fetch path), then chunked through
+  the shared heading-aware Markdown sectioner, so an `<h1>`/`<h2>` structure becomes the same breadcrumb
+  headings a `.md` file gets. Previously `.html` fell through to the fixed-window text parser.
+  Dynamic/JS-rendered content is not executed; tables flatten to Markdown.
+
+### Changed
+
+- Markdown sectioning is now a shared `chunk_markdown` helper used by both the Markdown and HTML
+  parsers — no duplicated logic.
+
 ## [0.46.0] — 2026-06-16
 
 "Understands more files": new parsers for Jupyter notebooks, SVG, and clean RTF, plus Markdown

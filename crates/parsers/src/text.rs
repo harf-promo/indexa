@@ -106,101 +106,7 @@ impl Parser for MarkdownParser {
         let raw = std::fs::read_to_string(path)?;
         let (frontmatter, body) = split_frontmatter(&raw);
 
-        let opts =
-            Options::ENABLE_TABLES | Options::ENABLE_FOOTNOTES | Options::ENABLE_STRIKETHROUGH;
-        let parser = MdParser::new_ext(&body, opts);
-
-        let mut sections: Vec<(String, String)> = Vec::new(); // (heading_breadcrumb, text)
-        let mut current_heading: Vec<String> = Vec::new();
-        let mut current_text = String::new();
-        let mut in_heading = false;
-        let mut heading_buf = String::new();
-
-        for event in parser {
-            match event {
-                Event::Start(Tag::Heading { level, .. }) => {
-                    // flush current section
-                    if !current_text.trim().is_empty() {
-                        sections
-                            .push((current_heading.join(" > "), current_text.trim().to_owned()));
-                        current_text.clear();
-                    }
-                    in_heading = true;
-                    heading_buf.clear();
-                    // truncate breadcrumb to current level depth
-                    let depth = match level {
-                        HeadingLevel::H1 => 0,
-                        HeadingLevel::H2 => 1,
-                        HeadingLevel::H3 => 2,
-                        _ => 3,
-                    };
-                    current_heading.truncate(depth);
-                }
-                Event::End(TagEnd::Heading(_)) => {
-                    in_heading = false;
-                    if !heading_buf.is_empty() {
-                        current_heading.push(heading_buf.trim().to_owned());
-                    }
-                }
-                Event::Text(t) | Event::Code(t) => {
-                    if in_heading {
-                        heading_buf.push_str(&t);
-                    } else {
-                        current_text.push_str(&t);
-                        current_text.push(' ');
-                    }
-                }
-                Event::SoftBreak | Event::HardBreak if !in_heading => {
-                    current_text.push('\n');
-                }
-                _ => {}
-            }
-        }
-        // flush last section
-        if !current_text.trim().is_empty() {
-            sections.push((current_heading.join(" > "), current_text.trim().to_owned()));
-        }
-
-        // Split any section that exceeds chunk_size words into smaller chunks.
-        let mut chunks = Vec::new();
-        let mut seq = 0usize;
-
-        for (heading, text) in sections {
-            let words: Vec<&str> = text.split_whitespace().collect();
-            if words.len() <= self.chunk_size {
-                // Even a short-word section can be char-huge; cap it.
-                for piece in split_char_budget(&text, MAX_CHUNK_CHARS) {
-                    chunks.push(Chunk {
-                        source: path.to_path_buf(),
-                        seq,
-                        heading: heading.clone(),
-                        text: piece.to_owned(),
-                        language: None,
-                    });
-                    seq += 1;
-                }
-            } else {
-                let mut start = 0;
-                while start < words.len() {
-                    let end = (start + self.chunk_size).min(words.len());
-                    let window = words[start..end].join(" ");
-                    for piece in split_char_budget(&window, MAX_CHUNK_CHARS) {
-                        chunks.push(Chunk {
-                            source: path.to_path_buf(),
-                            seq,
-                            heading: heading.clone(),
-                            text: piece.to_owned(),
-                            language: None,
-                        });
-                        seq += 1;
-                    }
-                    if end == words.len() {
-                        break;
-                    }
-                    start += self.chunk_size.saturating_sub(100); // 100-word overlap
-                }
-            }
-        }
+        let mut chunks = chunk_markdown(path, &body, self.chunk_size);
 
         // Lift frontmatter metadata (title/tags/date/…) into a leading, searchable chunk.
         if let Some(meta) = frontmatter {
@@ -226,6 +132,105 @@ impl Parser for MarkdownParser {
             edges: Vec::new(),
         })
     }
+}
+
+/// Section a Markdown string into heading-breadcrumbed chunks (≤ `chunk_size` words each,
+/// 100-word overlap on long sections, each char-capped). Shared by [`MarkdownParser`] and the
+/// HTML parser, which converts HTML → Markdown first.
+pub(crate) fn chunk_markdown(path: &Path, markdown: &str, chunk_size: usize) -> Vec<Chunk> {
+    let opts = Options::ENABLE_TABLES | Options::ENABLE_FOOTNOTES | Options::ENABLE_STRIKETHROUGH;
+    let parser = MdParser::new_ext(markdown, opts);
+
+    let mut sections: Vec<(String, String)> = Vec::new(); // (heading_breadcrumb, text)
+    let mut current_heading: Vec<String> = Vec::new();
+    let mut current_text = String::new();
+    let mut in_heading = false;
+    let mut heading_buf = String::new();
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                // flush current section
+                if !current_text.trim().is_empty() {
+                    sections.push((current_heading.join(" > "), current_text.trim().to_owned()));
+                    current_text.clear();
+                }
+                in_heading = true;
+                heading_buf.clear();
+                // truncate breadcrumb to current level depth
+                let depth = match level {
+                    HeadingLevel::H1 => 0,
+                    HeadingLevel::H2 => 1,
+                    HeadingLevel::H3 => 2,
+                    _ => 3,
+                };
+                current_heading.truncate(depth);
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                in_heading = false;
+                if !heading_buf.is_empty() {
+                    current_heading.push(heading_buf.trim().to_owned());
+                }
+            }
+            Event::Text(t) | Event::Code(t) => {
+                if in_heading {
+                    heading_buf.push_str(&t);
+                } else {
+                    current_text.push_str(&t);
+                    current_text.push(' ');
+                }
+            }
+            Event::SoftBreak | Event::HardBreak if !in_heading => {
+                current_text.push('\n');
+            }
+            _ => {}
+        }
+    }
+    // flush last section
+    if !current_text.trim().is_empty() {
+        sections.push((current_heading.join(" > "), current_text.trim().to_owned()));
+    }
+
+    // Split any section that exceeds chunk_size words into smaller chunks.
+    let mut chunks = Vec::new();
+    let mut seq = 0usize;
+    for (heading, text) in sections {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        if words.len() <= chunk_size {
+            // Even a short-word section can be char-huge; cap it.
+            for piece in split_char_budget(&text, MAX_CHUNK_CHARS) {
+                chunks.push(Chunk {
+                    source: path.to_path_buf(),
+                    seq,
+                    heading: heading.clone(),
+                    text: piece.to_owned(),
+                    language: None,
+                });
+                seq += 1;
+            }
+        } else {
+            let mut start = 0;
+            while start < words.len() {
+                let end = (start + chunk_size).min(words.len());
+                let window = words[start..end].join(" ");
+                for piece in split_char_budget(&window, MAX_CHUNK_CHARS) {
+                    chunks.push(Chunk {
+                        source: path.to_path_buf(),
+                        seq,
+                        heading: heading.clone(),
+                        text: piece.to_owned(),
+                        language: None,
+                    });
+                    seq += 1;
+                }
+                if end == words.len() {
+                    break;
+                }
+                start += chunk_size.saturating_sub(100); // 100-word overlap
+            }
+        }
+    }
+    chunks
 }
 
 /// Split a leading YAML frontmatter block (`---` … `---`) from the markdown body.

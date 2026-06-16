@@ -30,6 +30,7 @@
 
 use crate::code::CodeParser;
 use crate::epub::EpubParser;
+use crate::html::HtmlParser;
 use crate::image::ImageParser;
 use crate::ipynb::IpynbParser;
 use crate::media::MediaParser;
@@ -77,6 +78,7 @@ impl Registry {
                 Box::new(MediaParser),
                 Box::new(PresentationParser), // must precede OfficeParser (pptx vs. ppt)
                 Box::new(OfficeParser),
+                Box::new(HtmlParser::default()), // .html/.htm → Markdown, before the text fallback
                 Box::new(MarkdownParser::default()),
                 Box::new(TextParser::default()),
             ],
