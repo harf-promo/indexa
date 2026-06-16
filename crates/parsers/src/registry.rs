@@ -29,12 +29,14 @@
 //! precedence for any MIME type they claim.
 
 use crate::archive::ArchiveParser;
+use crate::binary::BinaryParser;
 use crate::code::CodeParser;
 use crate::email::EmailParser;
 use crate::epub::EpubParser;
 use crate::html::HtmlParser;
 use crate::image::ImageParser;
 use crate::ipynb::IpynbParser;
+use crate::iwork::IworkParser;
 use crate::media::MediaParser;
 use crate::office::OfficeParser;
 use crate::org::OrgParser;
@@ -79,9 +81,11 @@ impl Registry {
                 Box::new(ImageParser),
                 Box::new(MediaParser),
                 Box::new(PresentationParser), // must precede OfficeParser (pptx vs. ppt)
+                Box::new(IworkParser),        // .pages/.numbers/.key → embedded preview PDF
                 Box::new(OfficeParser),
                 Box::new(EmailParser),           // .eml/.msg
                 Box::new(ArchiveParser), // .zip/.tar/.tar.gz — after office/epub so it never claims their zip containers
+                Box::new(BinaryParser),  // .so/.dylib/.exe/.wasm/.jar — symbol/export listing
                 Box::new(HtmlParser::default()), // .html/.htm → Markdown, before the text fallback
                 Box::new(MarkdownParser::default()),
                 Box::new(TextParser::default()),

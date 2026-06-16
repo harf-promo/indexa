@@ -51,16 +51,18 @@ Each file type has a dedicated parser. Parsers are tried in order:
 | Image | `.jpg .jpeg .png .webp .heic .tiff .cr2 .nef .arw .dng .bmp .gif` | EXIF metadata extraction |
 | Media | `.mp3 .mp4 .m4a .flac .wav .ogg .opus .mkv .avi .mov .webm .aiff` | ffprobe metadata (duration, tags) |
 | Presentation | `.pptx .ppsx` | one chunk per slide + speaker notes (charts/SmartArt not extracted) |
+| iWork | `.pages .numbers .key` | text from the embedded preview PDF (rendered snapshot; not every cell/formula) |
 | Office | `.xlsx .xls .ods .csv .tsv .docx .odt .rtf` | calamine (spreadsheets); zip/XML for docx; RTF control-word stripper (skips font/colour/style tables) |
-| Email | `.eml .msg` | mail-parser: subject/from/to/date + body + attachment names (`.msg` Outlook = quiet stub) |
+| Email | `.eml .msg` | mail-parser (`.eml`: subject/from/to/date + body + attachment names); `.msg` Outlook OLE: subject + body from MAPI streams (cfb) |
 | Archive | `.zip .tar .tar.gz .tgz` | lists entry names + sizes (shallow; entry content not extracted) |
+| Binary | `.so .dylib .exe .o .wasm .jar` | symbol / export names (object + wasmparser; `.jar` class names) — no disassembly |
 | HTML | `.html .htm .xhtml` | `<script>`/`<style>` stripped, HTML→Markdown (htmd), then heading-aware chunks |
 | Markdown | `.md .mdx` | heading-based structure chunker; YAML frontmatter (`title`/`tags`/`date`/…) lifted into a leading chunk |
 | Text | `.txt .log .conf .yaml .yml .json .toml .xml .css` | fixed-window chunker |
 
 For files not matched by extension, MIME type detection is used as a fallback. Plain `text/*` files fall through to the text parser.
 
-**Known parsing gaps (honest coverage).** Apple iWork (`.pages`/`.numbers`/`.key`), legacy `.ppt`/`.doc` and Outlook `.msg` (OLE binary — quiet stub), recursive archive extraction, and binary-symbol extraction are not yet parsed; media/binary files without captioning contribute only metadata, and PDF OCR needs external tools (poppler + tesseract) and is opt-in. "Understands every file" means *text and metadata from every common type, with the rest listed honestly* — not full semantic extraction of every format.
+**Known parsing gaps (honest coverage).** Legacy `.ppt`/`.doc` (PowerPoint/Word OLE binary — quiet stub; Outlook `.msg` IS now extracted), recursive archive extraction (archives are listed, not recursed into), chart/SmartArt text in slides, and text drawn as SVG paths are not parsed; media/binary files without captioning contribute only metadata, and PDF OCR needs external tools (poppler + tesseract) and is opt-in. "Understands every file" means *text and metadata from every common type, with the rest listed honestly* — not full semantic extraction of every format.
 
 ---
 
