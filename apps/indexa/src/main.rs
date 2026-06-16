@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
         config::load_default()?
     };
 
-    match cli.command {
+    let result = match cli.command {
         Commands::Index {
             paths,
             embed_model,
@@ -319,5 +319,18 @@ async fn main() -> Result<()> {
         }
         Commands::Update { check, yes, pin } => commands::cmd_update(check, yes, pin).await,
         Commands::Completion { shell } => commands::cmd_completion(shell),
+    };
+
+    // On failure, print the error plus where to look next — the log file and `indexa doctor`
+    // (which checks Ollama liveness, model presence, and config) — so a terse error isn't a
+    // dead end. Then exit non-zero.
+    if let Err(e) = result {
+        eprintln!("Error: {e:#}");
+        eprintln!(
+            "\nTroubleshooting: run `indexa doctor` to check models & config, or see the log at {}/indexa.log",
+            log_dir.display()
+        );
+        std::process::exit(1);
     }
+    Ok(())
 }
