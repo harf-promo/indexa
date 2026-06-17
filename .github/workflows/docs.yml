@@ -3,7 +3,7 @@ name: Docs
 # Offline-only link check: validates relative file links and anchors across all
 # Markdown (the drift class that actually bites — renamed/moved docs), without
 # the flakiness or rate limits of fetching external URLs. Path-filtered so it
-# only spends Actions minutes on docs PRs.
+# only runs on docs PRs (skips CI churn when no Markdown changed).
 on:
   pull_request:
     paths:

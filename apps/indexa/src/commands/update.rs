@@ -19,6 +19,7 @@ pub(crate) async fn cmd_update(check_only: bool, yes: bool, pin: Option<String>)
     if check_only {
         if info.update_available {
             println!("Update available: v{}", info.latest);
+            print_whats_new(&info.current, &info.latest).await;
         } else if let Some(ref p) = pin {
             println!("Pin requested: {p}");
         }
@@ -29,6 +30,9 @@ pub(crate) async fn cmd_update(check_only: bool, yes: bool, pin: Option<String>)
     // ── Resolve the target tag ────────────────────────────────────────────────
     let target_tag = pin.as_deref().unwrap_or(&info.latest_tag);
     let target_ver = target_tag.trim_start_matches('v');
+
+    // Show every version's notes between installed and target before asking to confirm.
+    print_whats_new(&info.current, target_ver).await;
 
     // ── Confirm ───────────────────────────────────────────────────────────────
     if !yes {
@@ -53,4 +57,16 @@ pub(crate) async fn cmd_update(check_only: bool, yes: bool, pin: Option<String>)
     println!("  Restart indexa to use the new version.");
 
     Ok(())
+}
+
+/// Print the cumulative changelog for the versions gained by updating `from` → `to`
+/// (the same span the desktop app shows). Fail-open: any fetch/parse problem is silent,
+/// so the update flow never breaks over a changelog hiccup.
+async fn print_whats_new(from: &str, to: &str) {
+    if let Ok(notes) = indexa_update::cumulative_notes(from, to).await {
+        let notes = notes.trim();
+        if !notes.is_empty() {
+            println!("\n  What's new:\n{notes}");
+        }
+    }
 }

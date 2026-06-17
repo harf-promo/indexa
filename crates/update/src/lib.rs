@@ -2,7 +2,7 @@
 //! replace the running binary with the downloaded one.
 //!
 //! All requests use the **public** GitHub API/CDN — no authentication is needed
-//! once `harf-promo/indexa` is public. The rustls TLS stack is used throughout;
+//! because `harf-promo/indexa` is public. The rustls TLS stack is used throughout;
 //! OpenSSL is never linked.
 
 use std::io::Write as _;

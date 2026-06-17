@@ -12,6 +12,16 @@ use tokio_stream::{wrappers::WatchStream, StreamExt};
 use crate::dto::{err_json, UpdateControlRequest, UpdateRequest};
 use crate::update_control::{send_command, UpdateCommand};
 
+/// Map a `cumulative_notes` result to the JSON `notes` field: `Some` only on a non-empty
+/// success, `None` on error or empty. Fail-open — a changelog fetch/parse problem must never
+/// break the update-check response. Pure, so it's unit-tested without a network.
+fn notes_field(r: anyhow::Result<String>) -> Option<String> {
+    match r {
+        Ok(s) if !s.trim().is_empty() => Some(s),
+        _ => None,
+    }
+}
+
 /// `GET /api/update/check` — returns the current and latest version without
 /// modifying anything. Network errors are swallowed so a transient GitHub
 /// outage never breaks the page load.
@@ -21,13 +31,25 @@ pub(crate) async fn api_update_check() -> Response {
     // the menu-bar pointer instead of "Update now".
     let desktop = std::env::var("INDEXA_DESKTOP").as_deref() == Ok("1");
     match indexa_update::check().await {
-        Ok(info) => Json(serde_json::json!({
-            "current":          info.current,
-            "latest":           info.latest,
-            "update_available": info.update_available,
-            "desktop":          desktop,
-        }))
-        .into_response(),
+        Ok(info) => {
+            // When an update exists, also fetch the cumulative changelog (installed → latest)
+            // so the Software Update panel can show a "What's new" span, not just a version
+            // number. Only on update_available, so an up-to-date poll adds no extra fetch.
+            // Fail-open: a changelog hiccup yields `null`, never an error.
+            let notes = if info.update_available {
+                notes_field(indexa_update::cumulative_notes(&info.current, &info.latest).await)
+            } else {
+                None
+            };
+            Json(serde_json::json!({
+                "current":          info.current,
+                "latest":           info.latest,
+                "update_available": info.update_available,
+                "desktop":          desktop,
+                "notes":            notes,
+            }))
+            .into_response()
+        }
         Err(e) => {
             tracing::warn!(error = %e, "update check failed");
             // Return current version only; do not surface errors to the UI.
@@ -144,4 +166,23 @@ pub(crate) async fn api_update_progress_stream() -> impl IntoResponse {
         Ok::<Event, Infallible>(Event::default().data(data))
     });
     Sse::new(stream).keep_alive(KeepAlive::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::notes_field;
+
+    #[test]
+    fn notes_field_is_fail_open() {
+        // Non-empty success → Some.
+        assert_eq!(
+            notes_field(Ok("## [0.53.0]\n- thing".into())),
+            Some("## [0.53.0]\n- thing".to_string())
+        );
+        // Whitespace-only / empty → None (no "What's new" section).
+        assert_eq!(notes_field(Ok("   \n".into())), None);
+        assert_eq!(notes_field(Ok(String::new())), None);
+        // Error → None (offline, 404, parse miss) — never surfaced as a failure.
+        assert_eq!(notes_field(Err(anyhow::anyhow!("offline"))), None);
+    }
 }

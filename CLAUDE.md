@@ -218,7 +218,7 @@ Claude Chrome extension is unavailable, verify with a zero-dep headless-Chrome C
 
 ## Git workflow
 
-This is in the `harf-promo` org (private repo, free-tier Actions minutes). **Never push directly to `main`.** Always:
+This is in the `harf-promo` org (public repo; branch protection on `main` requires a PR + green CI). **Never push directly to `main`.** Always:
 1. `git checkout -b <short-feature-name>`
 2. Commit with sign-off (`git commit -s`) — the DCO workflow requires `Signed-off-by` on every commit
 3. Push the branch; open a PR; squash-merge on green CI

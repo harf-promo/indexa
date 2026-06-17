@@ -53,7 +53,7 @@ impl Parser for ArchiveParser {
         } else {
             (list_tar(path, false), "application/x-tar")
         };
-        let entries = entries.unwrap_or_default();
+        let (entries, truncated) = entries.unwrap_or_default();
 
         let display = path
             .file_name()
@@ -62,11 +62,19 @@ impl Parser for ArchiveParser {
         let listing = if entries.is_empty() {
             format!("Archive: {display} (empty, encrypted, or unreadable)")
         } else {
-            format!(
+            let mut s = format!(
                 "Archive {display} — {} entries:\n{}",
                 entries.len(),
                 entries.join("\n")
-            )
+            );
+            // The cap skips directory rows, so entries.len() can be below MAX_ENTRIES even
+            // when truncated — rely on the explicit flag, not the row count, to stay honest.
+            if truncated {
+                s.push_str(&format!(
+                    "\n(listing truncated — showing first {MAX_ENTRIES})"
+                ));
+            }
+            s
         };
 
         let mut chunks = Vec::new();
@@ -107,9 +115,12 @@ fn file_name_lower(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
-fn list_zip(path: &Path) -> Result<Vec<String>> {
+/// Returns `(entry listing, truncated)`. `truncated` is true when the archive held more
+/// than `MAX_ENTRIES` entries and the listing was capped.
+fn list_zip(path: &Path) -> Result<(Vec<String>, bool)> {
     let file = std::fs::File::open(path)?;
     let mut zip = zip::ZipArchive::new(file)?;
+    let truncated = zip.len() > MAX_ENTRIES;
     let n = zip.len().min(MAX_ENTRIES);
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
@@ -119,10 +130,12 @@ fn list_zip(path: &Path) -> Result<Vec<String>> {
             }
         }
     }
-    Ok(out)
+    Ok((out, truncated))
 }
 
-fn list_tar(path: &Path, gz: bool) -> Result<Vec<String>> {
+/// Returns `(entry listing, truncated)`. A tar entry stream has no length, so truncation
+/// is detected by the iterator still yielding once we've consumed `MAX_ENTRIES` entries.
+fn list_tar(path: &Path, gz: bool) -> Result<(Vec<String>, bool)> {
     let file = std::fs::File::open(path)?;
     let reader: Box<dyn Read> = if gz {
         Box::new(flate2::read::GzDecoder::new(file))
@@ -131,7 +144,12 @@ fn list_tar(path: &Path, gz: bool) -> Result<Vec<String>> {
     };
     let mut archive = tar::Archive::new(reader);
     let mut out = Vec::new();
-    for entry in archive.entries()?.take(MAX_ENTRIES) {
+    let mut truncated = false;
+    for (i, entry) in archive.entries()?.enumerate() {
+        if i >= MAX_ENTRIES {
+            truncated = true;
+            break;
+        }
         let Ok(entry) = entry else { continue };
         let size = entry.header().size().unwrap_or(0);
         let Ok(p) = entry.path() else { continue };
@@ -140,7 +158,7 @@ fn list_tar(path: &Path, gz: bool) -> Result<Vec<String>> {
             out.push(format!("{ps} ({size} bytes)"));
         }
     }
-    Ok(out)
+    Ok((out, truncated))
 }
 
 #[cfg(test)]
@@ -174,6 +192,42 @@ mod tests {
         assert!(all.contains("src/main.rs"), "{all}");
         assert!(all.contains("README.md"), "{all}");
         assert!(all.contains("entries"), "{all}");
+        // A small archive must NOT claim truncation.
+        assert!(!all.contains("truncated"), "{all}");
+    }
+
+    #[test]
+    fn zip_over_cap_reports_truncation() {
+        use zip::write::FileOptions;
+        let buf = Vec::new();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(buf));
+        let opts = FileOptions::<()>::default().compression_method(zip::CompressionMethod::Stored);
+        // One more than the cap so the listing is capped and the notice fires.
+        for i in 0..(MAX_ENTRIES + 5) {
+            zip.start_file(format!("f{i}.txt"), opts).unwrap();
+            zip.write_all(b"x").unwrap();
+        }
+        let bytes = zip.finish().unwrap().into_inner();
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("huge.zip");
+        std::fs::write(&p, bytes).unwrap();
+
+        let ex = ArchiveParser.parse(&p).unwrap();
+        let all: String = ex
+            .chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            all.contains("listing truncated"),
+            "expected truncation notice"
+        );
+        assert!(
+            all.contains(&MAX_ENTRIES.to_string()),
+            "should name the cap"
+        );
     }
 
     #[test]
