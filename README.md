@@ -189,9 +189,14 @@ xattr -d com.apple.quarantine /usr/local/bin/indexa   # bypass Gatekeeper if pro
 # Windows x64:   indexa-x86_64-windows.exe
 ```
 
-Pull the local models (one-time, ~11 GB total; everything runs offline after this):
+Indexa runs on local models (one-time download, ~11 GB total; everything runs offline after this).
+The first time you `index`, Indexa **detects the missing models and offers to pull them for you** with a
+live progress bar — just say yes. To check your setup first, or pull manually:
 
 ```bash
+indexa doctor                  # checks Ollama + which models are present, with fix-it hints
+
+# (optional) pull manually instead of the first-run prompt:
 ollama pull nomic-embed-text   # embeddings (~270 MB)
 ollama pull gemma3:4b          # file summaries (~2.5 GB)
 ollama pull gemma3:12b         # answers + directory roll-ups (~8 GB)

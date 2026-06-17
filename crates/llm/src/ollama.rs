@@ -54,6 +54,65 @@ pub async fn ollama_list_models(base_url: &str) -> Result<Vec<String>> {
     Ok(models)
 }
 
+/// One progress frame from `POST /api/pull` (Ollama streams NDJSON). `status` is the human
+/// phase ("pulling manifest", "downloading …", "success"); for download phases `completed`
+/// and `total` are byte counts.
+#[derive(Deserialize)]
+struct PullProgress {
+    status: Option<String>,
+    completed: Option<u64>,
+    total: Option<u64>,
+    error: Option<String>,
+}
+
+/// Pull `model` via `POST {base_url}/api/pull` (streamed), invoking `on_progress(status,
+/// completed_bytes, total_bytes)` for each NDJSON frame so a caller can render a live bar.
+/// A connect timeout fails fast when Ollama is down, but there is **no overall timeout** — a
+/// multi-GB pull legitimately runs for minutes; failures surface via the stream's error frame
+/// or a dropped connection.
+pub async fn ollama_pull(
+    base_url: &str,
+    model: &str,
+    mut on_progress: impl FnMut(&str, Option<u64>, Option<u64>),
+) -> Result<()> {
+    let url = format!("{}/api/pull", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({ "name": model, "stream": true }))
+        .send()
+        .await
+        .context("connecting to Ollama for pull")?
+        .error_for_status()
+        .context("Ollama returned an error status for pull")?;
+
+    let mut stream = resp.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.context("reading Ollama pull stream")?;
+        buf.extend_from_slice(&bytes);
+        // NDJSON: one JSON progress object per line.
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line_bytes = buf.drain(..=pos).collect::<Vec<u8>>();
+            let line = String::from_utf8_lossy(&line_bytes);
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(p) = serde_json::from_str::<PullProgress>(line) {
+                if let Some(err) = p.error {
+                    anyhow::bail!("Ollama pull error: {err}");
+                }
+                on_progress(p.status.as_deref().unwrap_or(""), p.completed, p.total);
+            }
+        }
+    }
+    Ok(())
+}
+
 pub struct OllamaLlm {
     pub(crate) base_url: String,
     pub(crate) model: String,

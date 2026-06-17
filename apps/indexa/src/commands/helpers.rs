@@ -163,19 +163,70 @@ pub(crate) async fn preflight_ollama(cfg: &Config) -> anyhow::Result<()> {
     };
 
     let mut missing = Vec::new();
-    for (model, role) in &required {
+    for (model, _role) in &required {
         if !model_installed_check(&installed, model) {
-            eprintln!("❌ Model '{model}' ({role}) not pulled. Run: ollama pull {model}");
             missing.push(*model);
         }
     }
     if !missing.is_empty() {
-        anyhow::bail!(
-            "{} required model(s) not pulled: {}",
-            missing.len(),
-            missing.join(", ")
-        );
+        return offer_to_pull(&base, &missing).await;
     }
+    Ok(())
+}
+
+/// Offer to pull the missing Ollama models (interactive), rendering a live per-model progress
+/// bar. In a non-interactive shell (piped / CI) it keeps the actionable manual instruction and
+/// fails fast, so a script never blocks on a prompt. The download has no overall timeout.
+async fn offer_to_pull(base: &str, missing: &[&str]) -> anyhow::Result<()> {
+    use std::io::{IsTerminal, Write};
+
+    if !std::io::stdin().is_terminal() {
+        for m in missing {
+            eprintln!("❌ Model '{m}' not pulled. Run: ollama pull {m}");
+        }
+        anyhow::bail!("{} required model(s) not pulled", missing.len());
+    }
+
+    println!(
+        "\nIndexa needs {} local model(s) that aren't pulled yet:",
+        missing.len()
+    );
+    for m in missing {
+        println!("  • {m}");
+    }
+    print!("Download them now via Ollama? [Y/n] ");
+    let _ = std::io::stdout().flush();
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let ans = input.trim().to_lowercase();
+    if ans == "n" || ans == "no" {
+        for m in missing {
+            eprintln!("Skipped — to pull manually later: ollama pull {m}");
+        }
+        anyhow::bail!("required models not pulled");
+    }
+
+    let show = std::io::stderr().is_terminal();
+    for m in missing {
+        println!("Pulling {m} …");
+        indexa_llm::ollama_pull(base, m, |status, completed, total| {
+            if !show {
+                return;
+            }
+            let pct = match (completed, total) {
+                (Some(c), Some(t)) if t > 0 => format!(" {}%", c * 100 / t),
+                _ => String::new(),
+            };
+            eprint!("\r\x1b[K  {m}: {status}{pct}");
+            let _ = std::io::stderr().flush();
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("pulling {m}: {e:#}"))?;
+        if show {
+            eprintln!("\r\x1b[K  {m}: done ✓");
+        }
+    }
+    println!("All required models pulled. ✓");
     Ok(())
 }
 
