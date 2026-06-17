@@ -294,7 +294,9 @@ function renderBreadcrumb() {
 }
 
 /* ── Map sub-view toggle ── */
-var mapSubView = 'treemap';
+// Default Map sub-view: the interactive knowledge graph is the flagship view, so opening
+// Map lands on the force-directed graph (it blooms on entry), not the treemap table.
+var mapSubView = 'graph';
 
 function switchMapView(view) {
   mapSubView = view;

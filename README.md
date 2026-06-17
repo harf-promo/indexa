@@ -26,27 +26,39 @@ claude "given @.context.xml, find the auth flow and add MFA"
 
 Four commands. One context. Every session.
 
-```console
-$ indexa index ~/code/my-repo
-Scanning ~/code/my-repo
-  1,284 entries indexed.
-  Embedded 6,470 new chunks.
-  318 summaries generated.
-Context is ready.
+Real output — this is Indexa indexing its own repository (so the numbers are reproducible):
 
-$ indexa ask "where is auth handled?"
-Searching 6,470 indexed chunks...
+```console
+$ cd indexa && indexa index .          # index the repo you just cloned
+── Phase 1 / 3 · Scan ──────────────────────────────────────
+Scanning .
+  552 entries
+── Phase 2 / 3 · Deep context ──────────────────────────────
+  parsing + embedding …
+── Phase 3 / 3 · Summaries ─────────────────────────────────
+  summarizing …
+
+✓ Context is ready.
+  Ask:    indexa ask "<question>"
+  Export: indexa export <path> --format xml > context.xml
+
+$ indexa ask "How does Indexa rank search results?"
+Searching 3,315 indexed chunks...
 
 Answer:
-Authentication is handled in src/auth/middleware.rs (the `require_auth` route
-guard) and src/auth/login.rs (the `login` entry point). Session tokens are
-minted and validated in src/auth/session.rs. [1, 2, 3]
+Indexa ranks results with a configurable hybrid process — sparse + dense fused
+with RRF, an optional cross-encoder reranker, folder-summary blending, and
+per-file importance weights. [1]
 
 Sources:
-  [1] src/auth/middleware.rs — require_auth
-  [2] src/auth/login.rs — login
-  [3] src/auth/session.rs — mint_token
+  [1] docs/config.md — Configuration Reference > Retrieval
+  [2] crates/query/src/qa.rs — retrieve
+confidence: medium — 12 moderate matches
 ```
+
+Or open the web workspace (`indexa serve`) — the **Map** lands on an interactive, force-directed knowledge graph of your codebase: each dot is a file, sized by how many other files depend on it; solid lines are confident call edges, dashed lines are approximate name matches (Indexa labels what it isn't sure of). Click a hub to focus it, then expand its neighbors.
+
+![Indexa's web workspace — an interactive knowledge graph of the codebase, files sized by centrality](docs/assets/web-graph.png)
 
 Then hand the context to your AI tool — or let your agent pull it live over MCP:
 

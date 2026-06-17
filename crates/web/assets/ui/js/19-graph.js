@@ -109,6 +109,13 @@ function renderGraph(d) {
   var rect = svg.getBoundingClientRect();
   var W = rect.width || 800, H = rect.height || 500;
 
+  // Pan/zoom viewport: identity at first paint (viewBox == pixel size), then wheel-zoom
+  // + drag-pan adjust it. Re-rendering resets the view to the full graph. Handlers are
+  // wired once (idempotent).
+  graphState.view = { x: 0, y: 0, w: W, h: H, baseW: W };
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+  wireGraphZoomPan(svg);
+
   // Centrality drives node size: normalize PageRank to the most-central node in
   // the displayed subgraph so the biggest hubs stand out regardless of scale.
   var maxPr = nodes.reduce(function (m, n) { return Math.max(m, n.pagerank || 0); }, 0) || 1;
@@ -143,7 +150,8 @@ function renderGraph(d) {
     neighbors[l.target.id][l.source.id] = true;
   });
 
-  runForceLayout(layout, links, W, H);
+  // Nodes/edges are drawn at their seed (circle) positions; the force layout then runs
+  // as an animation below, so the graph visibly blooms into shape.
 
   // ── Draw ──
   var gEdges = document.createElementNS(GRAPH_NS, 'g');
@@ -271,51 +279,140 @@ function renderGraph(d) {
 
   // Legend + conditional bare-name caveat (built from live data in 25-graph-explore.js).
   if (typeof renderGraphLegend === 'function') renderGraphLegend(d);
+
+  // Animate the force layout so the graph blooms from its seed circle into its final
+  // shape — the shareable moment. Respects prefers-reduced-motion (settles instantly).
+  animateGraphLayout(layout, links, lineEls, nodeEls, W, H);
 }
 
-// Compact Fruchterman-Reingold style force layout (~250 cooling ticks).
-function runForceLayout(nodes, links, W, H) {
+// One Fruchterman-Reingold cooling step (repulsion + edge attraction + capped move).
+// `k` = ideal edge length, `temp` = max displacement this step. Mutates node x/y.
+function forceTick(nodes, links, W, H, k, temp) {
   var n = nodes.length;
-  if (n === 0) return;
-  var area = W * H;
-  var k = Math.sqrt(area / n) * 0.8;     // ideal edge length
-  var temp = W * 0.10;                    // initial max displacement
-  var iters = n > 120 ? 150 : 250;
-
-  for (var step = 0; step < iters; step++) {
-    // Repulsion (O(n²) — bounded by the API's node cap).
-    for (var i = 0; i < n; i++) {
-      nodes[i].vx = 0; nodes[i].vy = 0;
-      for (var j = 0; j < n; j++) {
-        if (i === j) continue;
-        var dx = nodes[i].x - nodes[j].x;
-        var dy = nodes[i].y - nodes[j].y;
-        var dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
-        var rep = (k * k) / dist;
-        nodes[i].vx += (dx / dist) * rep;
-        nodes[i].vy += (dy / dist) * rep;
-      }
+  for (var i = 0; i < n; i++) {
+    nodes[i].vx = 0; nodes[i].vy = 0;
+    for (var j = 0; j < n; j++) {
+      if (i === j) continue;
+      var dx = nodes[i].x - nodes[j].x;
+      var dy = nodes[i].y - nodes[j].y;
+      var dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+      var rep = (k * k) / dist;
+      nodes[i].vx += (dx / dist) * rep;
+      nodes[i].vy += (dy / dist) * rep;
     }
-    // Attraction along edges.
-    for (var e = 0; e < links.length; e++) {
-      var s = links[e].source, t = links[e].target;
-      var dx2 = s.x - t.x, dy2 = s.y - t.y;
-      var d2 = Math.sqrt(dx2 * dx2 + dy2 * dy2) || 0.01;
-      var att = (d2 * d2) / k;
-      var ox = (dx2 / d2) * att, oy = (dy2 / d2) * att;
-      s.vx -= ox; s.vy -= oy;
-      t.vx += ox; t.vy += oy;
-    }
-    // Apply with temperature cap + keep inside bounds.
-    for (var m = 0; m < n; m++) {
-      var disp = Math.sqrt(nodes[m].vx * nodes[m].vx + nodes[m].vy * nodes[m].vy) || 0.01;
-      nodes[m].x += (nodes[m].vx / disp) * Math.min(disp, temp);
-      nodes[m].y += (nodes[m].vy / disp) * Math.min(disp, temp);
-      nodes[m].x = Math.max(20, Math.min(W - 20, nodes[m].x));
-      nodes[m].y = Math.max(20, Math.min(H - 20, nodes[m].y));
-    }
-    temp *= 0.97; // cool down
   }
+  for (var e = 0; e < links.length; e++) {
+    var s = links[e].source, t = links[e].target;
+    var dx2 = s.x - t.x, dy2 = s.y - t.y;
+    var d2 = Math.sqrt(dx2 * dx2 + dy2 * dy2) || 0.01;
+    var att = (d2 * d2) / k;
+    var ox = (dx2 / d2) * att, oy = (dy2 / d2) * att;
+    s.vx -= ox; s.vy -= oy;
+    t.vx += ox; t.vy += oy;
+  }
+  for (var m = 0; m < n; m++) {
+    var disp = Math.sqrt(nodes[m].vx * nodes[m].vx + nodes[m].vy * nodes[m].vy) || 0.01;
+    nodes[m].x += (nodes[m].vx / disp) * Math.min(disp, temp);
+    nodes[m].y += (nodes[m].vy / disp) * Math.min(disp, temp);
+    nodes[m].x = Math.max(20, Math.min(W - 20, nodes[m].x));
+    nodes[m].y = Math.max(20, Math.min(H - 20, nodes[m].y));
+  }
+}
+
+// Push the current layout positions into the SVG DOM (node transforms + edge endpoints).
+function syncGraphPositions(lineEls, nodeEls) {
+  for (var i = 0; i < nodeEls.length; i++) {
+    var o = nodeEls[i].obj;
+    nodeEls[i].el.setAttribute('transform', 'translate(' + o.x + ',' + o.y + ')');
+  }
+  for (var j = 0; j < lineEls.length; j++) {
+    var l = lineEls[j].link;
+    lineEls[j].el.setAttribute('x1', l.source.x); lineEls[j].el.setAttribute('y1', l.source.y);
+    lineEls[j].el.setAttribute('x2', l.target.x); lineEls[j].el.setAttribute('y2', l.target.y);
+  }
+}
+
+// Run the cooling schedule. With motion allowed, spread the ticks across animation frames
+// (a few per frame) so the graph blooms; otherwise settle synchronously. A single rAF handle
+// lives on graphState so a re-render cancels the previous animation.
+function animateGraphLayout(layout, links, lineEls, nodeEls, W, H) {
+  if (graphState._raf) { cancelAnimationFrame(graphState._raf); graphState._raf = null; }
+  var n = layout.length;
+  if (n === 0) return;
+  var k = Math.sqrt((W * H) / n) * 0.8;
+  var temp = W * 0.10;
+  var total = n > 120 ? 150 : 250;
+  var done = 0;
+
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) {
+    while (done < total) { forceTick(layout, links, W, H, k, temp); temp *= 0.97; done++; }
+    syncGraphPositions(lineEls, nodeEls);
+    return;
+  }
+  var perFrame = 3; // physics ticks per frame — visible motion without a slow settle
+  function frame() {
+    for (var s = 0; s < perFrame && done < total; s++) {
+      forceTick(layout, links, W, H, k, temp);
+      temp *= 0.97;
+      done++;
+    }
+    syncGraphPositions(lineEls, nodeEls);
+    graphState._raf = done < total ? requestAnimationFrame(frame) : null;
+  }
+  graphState._raf = requestAnimationFrame(frame);
+}
+
+// Apply the current pan/zoom viewport to the SVG viewBox.
+function applyGraphView(svg) {
+  var v = graphState.view;
+  if (v) svg.setAttribute('viewBox', v.x + ' ' + v.y + ' ' + v.w + ' ' + v.h);
+}
+
+// Wire wheel-zoom (around the cursor) + drag-pan (on the empty background, not nodes) once.
+// Coordinates are converted client→user space via the live viewBox so zoom tracks the cursor.
+function wireGraphZoomPan(svg) {
+  if (svg.__zoomWired) return;
+  svg.__zoomWired = true;
+
+  svg.addEventListener('wheel', function (ev) {
+    var v = graphState.view;
+    if (!v) return;
+    ev.preventDefault();
+    var rect = svg.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    var ux = v.x + (ev.clientX - rect.left) / rect.width * v.w;
+    var uy = v.y + (ev.clientY - rect.top) / rect.height * v.h;
+    var factor = ev.deltaY < 0 ? 0.85 : 1.18; // wheel up = zoom in
+    var nw = Math.max(v.baseW * 0.2, Math.min(v.baseW * 2, v.w * factor));
+    var ratio = nw / v.w;
+    var nh = v.h * ratio;
+    v.x = ux - (ux - v.x) * ratio;
+    v.y = uy - (uy - v.y) * ratio;
+    v.w = nw; v.h = nh;
+    applyGraphView(svg);
+  }, { passive: false });
+
+  var panning = false, lastX = 0, lastY = 0;
+  svg.addEventListener('mousedown', function (ev) {
+    if (ev.target !== svg) return; // only the background grabs; nodes keep click-to-focus
+    panning = true; lastX = ev.clientX; lastY = ev.clientY;
+    svg.classList.add('graph-panning');
+  });
+  window.addEventListener('mousemove', function (ev) {
+    if (!panning) return;
+    var v = graphState.view;
+    if (!v) return;
+    var rect = svg.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    v.x -= (ev.clientX - lastX) / rect.width * v.w;
+    v.y -= (ev.clientY - lastY) / rect.height * v.h;
+    lastX = ev.clientX; lastY = ev.clientY;
+    applyGraphView(svg);
+  });
+  window.addEventListener('mouseup', function () {
+    if (panning) { panning = false; svg.classList.remove('graph-panning'); }
+  });
 }
 
 function clearSvg(svg) { while (svg.firstChild) svg.removeChild(svg.firstChild); }

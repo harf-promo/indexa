@@ -52,7 +52,12 @@ function switchTab(tab) {
   });
   const sv = document.getElementById('summary-view');
   if (sv) sv.style.display = (tab === 'tree' && selectedPath !== null) ? 'block' : '';
-  if (tab === 'map') loadMap();
+  // Enter the Map tab on its ACTIVE sub-view (graph by default), not unconditionally the
+  // table — otherwise the default graph panel shows empty until clicked. Mirrors refreshMap.
+  if (tab === 'map') {
+    if (typeof switchMapView === 'function') switchMapView(typeof mapSubView !== 'undefined' && mapSubView ? mapSubView : 'graph');
+    else loadMap();
+  }
   // Mirror the active tab into the URL (deep-linking, v0.37). Drawers returned above.
   if (typeof writeHash === 'function') writeHash();
 }

@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.54.0] — 2026-06-17
+## [0.55.0] — 2026-06-17
+
+The knowledge graph becomes the flagship view, and the README stops lying.
+
+### Changed
+
+- **The interactive code graph is now the default Map view, and it animates.** Opening **Map** lands on the
+  force-directed knowledge graph (was a third sub-tab behind the treemap), and the layout now *blooms* into
+  shape via an animated cooling loop instead of snapping into place. Added **wheel-zoom** (around the cursor)
+  and **drag-to-pan**. Nodes are still sized by centrality; edges still show the honest resolution tier
+  (solid = confident, dashed = approximate bare-name match). Respects `prefers-reduced-motion` (settles
+  instantly). All vanilla SVG — no new dependencies.
+- **The README's "See it work" output is now real.** The previous console block showed fabricated numbers and
+  an invented answer; it's replaced with Indexa's actual 3-phase indexing output and a real `ask` answer
+  (Indexa indexing its own repo, so the numbers are reproducible). For a project whose pitch is "every claim
+  is true," the front page now holds to it.
 
 Deeper code-graph reachability and richer slide parsing.
 
