@@ -146,6 +146,7 @@ async function doAsk() {
   let sources = [];
   let steps = []; // agentic per-hop queries (empty for one-shot ask)
   let confidence = null; // retrieval-shape confidence, from the terminal 'done' event
+  let impact = null; // per-answer byte savings vs whole-file context, from the 'done' event
   // The agentic retrieval hops, shown as subtle chips above the answer so the user sees
   // what the model searched for while it works.
   const renderSteps = function() {
@@ -161,6 +162,23 @@ async function doAsk() {
     if (!confidence || !confidence.level) return '';
     return '<div class="ask-confidence">confidence: ' + escapeHtml(confidence.level) +
       (confidence.basis ? ' — ' + escapeHtml(confidence.basis) : '') + '</div>';
+  };
+  // Binary byte size (matches the server's human_bytes: 1 decimal, KB/MB/GB).
+  const fmtBytes = function(n) {
+    if (n >= 1073741824) return (n / 1073741824).toFixed(1) + ' GB';
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+    return n + ' B';
+  };
+  // The "retrieve the slice" win, made concrete for THIS answer: how much smaller the served
+  // context was than pasting the cited files whole. Absent (empty) on no-match answers and
+  // older servers — purely additive, like the confidence line.
+  const renderImpact = function() {
+    if (!impact || !impact.saved_percent) return '';
+    return '<div class="ask-impact" title="Indexa retrieved only the relevant slice instead of the whole cited files — that is the token budget you saved on this answer.">' +
+      '\u{1F4C9} served ' + escapeHtml(fmtBytes(impact.served_bytes)) + ' vs ' +
+      escapeHtml(fmtBytes(impact.counterfactual_bytes)) + ' of source — <strong>' +
+      escapeHtml(String(impact.saved_percent)) + '% less</strong> to your AI tool</div>';
   };
   // Render the partial answer (leading whitespace from the model's first token trimmed so
   // it doesn't briefly indent) + sources, keeping the view pinned to the bottom.
@@ -185,7 +203,7 @@ async function doAsk() {
   };
   const renderAnswer = function() {
     return renderSteps() + renderMarkdown(answerText.replace(/^\s+/, '')) +
-      renderSources(sources) + renderConfidence() + renderExplain() + renderScopeHint();
+      renderSources(sources) + renderConfidence() + renderImpact() + renderExplain() + renderScopeHint();
   };
   const repaint = function() {
     bubble.innerHTML = renderAnswer();
@@ -195,7 +213,11 @@ async function doAsk() {
     if (ev.type === 'sources') { sources = ev.sources || []; }
     else if (ev.type === 'fragment') { answerText += ev.text; repaint(); }
     else if (ev.type === 'step') { steps.push(ev); repaint(); }
-    else if (ev.type === 'done') { if (ev.confidence) { confidence = ev.confidence; repaint(); } }
+    else if (ev.type === 'done') {
+      if (ev.confidence) confidence = ev.confidence;
+      if (ev.impact) impact = ev.impact;
+      if (ev.confidence || ev.impact) repaint();
+    }
     else if (ev.type === 'error') { throw new Error(ev.message || 'Generation failed'); }
     // 'done' is terminal; the loop ends when the stream closes.
   };

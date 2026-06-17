@@ -181,6 +181,19 @@ honesty:** `cmd_export` now `bail!`s (stderr + non-zero exit) on no-index / no-s
 instead of `println!`-to-stdout + `Ok(())` — a silent success used to write the notice INTO a piped
 file. Slicing is CLI-only for now (web `/api/export` + `pack export` not yet wired).
 
+**Per-Ask impact readout (v0.59, "see the savings"):** every `ask` surfaces the concrete
+"retrieve the slice" win for that answer. `crates/query/src/impact.rs` — `AnswerImpact
+{served_bytes, counterfactual_bytes}` + `saved_percent()` (capped at 99 — a real answer always
+serves something, so never "100% less") + `is_meaningful()` (gates the readout: cited files
+existed AND serving was smaller) + `human()`; `served_bytes(answer)` = answer text + delivered
+citations (shared accounting across surfaces). Byte formatting unified in
+`indexa_core::text::human_bytes` (usage.rs `human_size` now delegates to it). Surfaced: web
+stream terminal `done` event gains an `impact` object → `06-chat-settings.js renderImpact()`
+under the answer; buffered `/api/ask` → `AskResponse.impact`; CLI `ask` prints an `impact:` line
++ `--json` `impact` field; `record_ask_usage` returns the impact (reuses the counterfactual it
+already computed for telemetry — no extra query). Honest: compares vs the **cited** files, not
+the whole repo.
+
 **Remote sources (v0.32, "reach"):** `indexa pack add-url <pack> <url>` fetches a GitHub issue/PR (public
 API → Markdown) or web page (HTML→Markdown via `html2md`, `<script>`/`<style>` stripped) → caches a local
 file under `<data_dir>/sources/<slug>-<sha8>.md` → `add_pack_paths` (cache-as-file: NO schema change, NO

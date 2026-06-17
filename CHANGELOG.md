@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.59.0] — 2026-06-17
+
+See the savings: every answer now shows how much smaller the served context was than the source it drew on.
+
+### Added
+
+- **Per-answer impact readout.** Each `ask` now reports the concrete "retrieve the slice" win for
+  *that* answer — e.g. `served 4.2 KB vs 1.8 MB of source — 99% less to your AI tool`. It appears under
+  the answer in the web workspace, as a line in the CLI (`indexa ask`), and as an `impact` object
+  (`served_bytes` / `counterfactual_bytes` / `saved_percent`) in `indexa ask --json` and the
+  `POST /api/ask` response. The README's token-savings pitch is now verifiable at the point of use,
+  not just in aggregate `status`. The figure is honest: it compares against the **cited** files (not
+  the whole repo), is shown only when there was a real win, and is capped at 99% (a real answer always
+  serves *something*). The byte counts come from the existing usage telemetry — no extra work per query.
+
+### Changed
+
+- **`indexa ask` usage telemetry now counts the citation bytes it serves, not just the answer text.**
+  The CLI's recorded "served" figure (the basis for the cumulative savings in `indexa status`) previously
+  counted only the answer text; it now matches the web surface (answer + delivered citations). This
+  slightly *lowers* reported aggregate savings going forward — the old number modestly overstated them.
+
 ## [0.58.0] — 2026-06-17
 
 Sliced exports: hand your AI tool exactly the part of the repo that matters — and an export now fails loudly instead of writing an empty file.
@@ -28,6 +50,8 @@ Sliced exports: hand your AI tool exactly the part of the repo that matters — 
   stdout** and exited `0` — so `indexa export > ctx.xml` wrote the notice *into* the file and a CI
   step saw success. Both now error to stderr with a non-zero exit, so a piped/automated consumer can
   trust that a successful export is a valid artifact.
+
+## [0.57.0] — 2026-06-17
 
 A maintainer on-ramp: the codebase is easier to read and contribute to, with **no change to behaviour** (every existing test still passes, unchanged).
 
@@ -85,6 +109,8 @@ A flawless first run: no silent model wall, no dead buttons.
   sidebar "+" but never defined — clicking it threw. It now prompts for a folder path and kicks off an
   index job.
 
+## [0.55.0] — 2026-06-17
+
 The knowledge graph becomes the flagship view, and the README stops lying.
 
 ### Changed
@@ -99,6 +125,8 @@ The knowledge graph becomes the flagship view, and the README stops lying.
   an invented answer; it's replaced with Indexa's actual 3-phase indexing output and a real `ask` answer
   (Indexa indexing its own repo, so the numbers are reproducible). For a project whose pitch is "every claim
   is true," the front page now holds to it.
+
+## [0.54.0] — 2026-06-17
 
 Deeper code-graph reachability and richer slide parsing.
 

@@ -177,6 +177,8 @@
 .ask-steps { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 /* Retrieval-shape confidence, a muted line under the answer (from the SSE 'done' event). */
 .ask-confidence { margin-top: 8px; font-size: 11px; color: var(--muted); }
+.ask-impact { margin-top: 6px; font-size: 11px; color: var(--muted); }
+.ask-impact strong { color: var(--accent, var(--fg)); font-weight: 600; }
 .ask-step {
   font-size: 11px; color: var(--muted); background: var(--surface-2);
   border: 1px solid var(--border-subtle, var(--border)); border-radius: 10px;

@@ -432,12 +432,25 @@ pub(crate) struct AskResponse {
     /// (and on older servers — clients must tolerate the field missing).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) confidence: Option<AskConfidence>,
+    /// Per-answer token/byte savings vs. pasting the cited files whole; absent when there's
+    /// nothing meaningful to show (no-match, or serving wasn't smaller). Additive — clients
+    /// and older servers tolerate it missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) impact: Option<AskImpact>,
 }
 
 #[derive(Serialize)]
 pub(crate) struct AskConfidence {
     pub(crate) level: &'static str,
     pub(crate) basis: String,
+}
+
+/// The "retrieve the slice" win, made concrete per answer (see `indexa_query::AnswerImpact`).
+#[derive(Serialize)]
+pub(crate) struct AskImpact {
+    pub(crate) served_bytes: u64,
+    pub(crate) counterfactual_bytes: u64,
+    pub(crate) saved_percent: u8,
 }
 
 #[derive(Serialize)]
