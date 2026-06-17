@@ -276,6 +276,19 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// File paths whose recorded mtime (`modified_s`) is at or after `cutoff_secs`
+    /// (a Unix timestamp). Backs `indexa export --changed-since`. Entries with a NULL
+    /// mtime are excluded (we can't claim they changed within the window). Files only —
+    /// directories don't carry a meaningful content mtime for recency slicing.
+    pub fn paths_modified_since(&self, cutoff_secs: i64) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path FROM entries
+              WHERE kind = 'file' AND modified_s IS NOT NULL AND modified_s >= ?1",
+        )?;
+        let rows = stmt.query_map([cutoff_secs], |r| r.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Flat list of all entries for building client-side tree visualisations (e.g. treemap).
     /// Returns `(path, parent_path, is_dir, size_bytes)`. Capped at 500,000 rows.
     pub fn all_entry_sizes(&self) -> Result<Vec<(String, String, bool, u64)>> {

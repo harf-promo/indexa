@@ -7,7 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.57.0] — 2026-06-17
+## [0.58.0] — 2026-06-17
+
+Sliced exports: hand your AI tool exactly the part of the repo that matters — and an export now fails loudly instead of writing an empty file.
+
+### Added
+
+- **`indexa export --changed-since <window>`** — export only files modified within a window
+  (e.g. `7d`, `12h`, `90m`, `3600s`), plus the directories on the path to them. A relational
+  slice that reuses the index's recorded mtimes — no re-scan. Great for "give my AI tool just
+  what changed this week."
+- **`indexa export --category <name>`** — export only files in a classification category
+  (e.g. `code`, `document`, `media`, `work`). Combine with `--changed-since` to intersect
+  ("code I touched this sprint"). Reuses the classification table.
+
+### Fixed
+
+- **`export` and `pack export` no longer silently succeed when they produced nothing.** Previously,
+  exporting with no index, no summaries, or a slice that matched no files printed a notice **to
+  stdout** and exited `0` — so `indexa export > ctx.xml` wrote the notice *into* the file and a CI
+  step saw success. Both now error to stderr with a non-zero exit, so a piped/automated consumer can
+  trust that a successful export is a valid artifact.
 
 A maintainer on-ramp: the codebase is easier to read and contribute to, with **no change to behaviour** (every existing test still passes, unchanged).
 

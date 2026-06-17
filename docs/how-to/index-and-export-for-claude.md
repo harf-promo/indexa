@@ -34,6 +34,30 @@ high-level map; a deep export includes more file-level detail:
 indexa export ~/code/myproject --format xml --depth 2 > overview.xml
 ```
 
+### Slice to what matters
+
+Instead of the whole tree, export a relational slice — the point of a context engine is to hand
+the AI tool the part that's relevant, not the repo:
+
+```bash
+# Only what changed recently (windows: 7d, 12h, 90m, 3600s) — great for a "what's new" review
+indexa export ~/code/myproject --changed-since 7d > recent.xml
+
+# Only files in a classification category (code / document / media / work / …)
+indexa export ~/code/myproject --category code > code-only.xml
+
+# Combine them: code you touched this sprint
+indexa export ~/code/myproject --changed-since 14d --category code > sprint.xml
+```
+
+Both reuse what's already indexed (recorded mtimes, the classification table) — no re-scan. A
+slice that matches nothing exits non-zero with a message rather than writing an empty file, so
+it's safe to pipe in a script or CI step.
+
+> **Note:** a slice operates within the exported tree, so a shallow `--depth` clips it — a file
+> that matches `--changed-since`/`--category` but sits below the depth cap won't appear. Omit
+> `--depth` (full tree, the default) when you want the slice to find matches at any depth.
+
 ## 3. Hand it to the AI
 
 - **Claude / claude.ai / Claude Code:** attach or paste `myproject.context.xml`, then ask your

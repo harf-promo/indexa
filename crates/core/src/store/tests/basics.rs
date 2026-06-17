@@ -293,3 +293,31 @@ fn delete_entry_clears_summary_and_queue() {
     assert!(store.summary_by_path("/notes.txt").unwrap().is_none());
     assert_eq!(store.queue_stats().unwrap().pending, 0);
 }
+
+#[test]
+fn paths_modified_since_filters_by_mtime_and_kind() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            entry_with_mtime("/r/new.rs", EntryKind::File, 1000),
+            entry_with_mtime("/r/old.rs", EntryKind::File, 100),
+            entry_with_mtime("/r/recentdir", EntryKind::Dir, 1000), // dirs excluded
+            dummy_entry("/r/nomtime.rs", EntryKind::File, 5),       // NULL mtime excluded
+        ])
+        .unwrap();
+
+    let recent = store.paths_modified_since(500).unwrap();
+    assert!(recent.contains(&"/r/new.rs".to_owned()), "recent file kept");
+    assert!(
+        !recent.contains(&"/r/old.rs".to_owned()),
+        "file older than cutoff excluded"
+    );
+    assert!(
+        !recent.iter().any(|p| p == "/r/recentdir"),
+        "directories excluded (no content mtime)"
+    );
+    assert!(
+        !recent.iter().any(|p| p == "/r/nomtime.rs"),
+        "NULL-mtime entry excluded (can't claim it changed)"
+    );
+}

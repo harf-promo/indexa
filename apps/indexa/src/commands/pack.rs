@@ -5,7 +5,9 @@ use indexa_core::{
 };
 use indexa_query::{build_tree, render_json, render_markdown, render_xml};
 
-use super::helpers::{build_embedder, finalize_export, require_index_db, ExportSink};
+use super::helpers::{
+    build_embedder, finalize_export, index_db_path, require_index_db, ExportSink,
+};
 
 /// Resolve and expand a path, canonicalizing `~` prefixes.
 fn expand(p: &str) -> String {
@@ -264,9 +266,12 @@ pub(crate) async fn cmd_pack_export(
     strip_comments: bool,
     no_redact: bool,
 ) -> Result<()> {
-    let Some(db_path) = require_index_db()? else {
-        return Ok(());
-    };
+    // Like `indexa export`, a pack export must produce a valid artifact or fail loudly — never
+    // a silent stdout notice that gets written into a piped file with a zero exit.
+    let db_path = index_db_path()?;
+    if !db_path.exists() {
+        bail!("No index found. Run `indexa index <path>` first.");
+    }
     let store = Store::open(&db_path)?;
     let pack = store
         .pack_by_name(&name)?
