@@ -334,7 +334,8 @@ pub enum Commands {
     /// Show the file-to-file call graph for a directory (who calls whom).
     #[command(after_help = "Examples:
   indexa graph ~/code/myrepo
-  indexa graph ~/code/myrepo/src --limit 50")]
+  indexa graph ~/code/myrepo/src --limit 50
+  indexa graph ~/code/myrepo --blast parse_config --depth 3")]
     #[command(display_order = 31)]
     Graph {
         /// Directory to scope the graph to.
@@ -350,6 +351,16 @@ pub enum Commands {
         /// Report dependency cycles (strongly-connected components) instead of the graph.
         #[arg(long)]
         cycles: bool,
+
+        /// Blast radius mode: list the files that break if you change this function/method
+        /// (a bare symbol name), instead of the whole-scope graph. `path` is ignored.
+        #[arg(long, value_name = "SYMBOL")]
+        blast: Option<String>,
+
+        /// Hops of caller reachability for --blast: 1 = direct callers only, 2 = + one
+        /// transitive hop (default), up to 5 for transitive reach through chains.
+        #[arg(long, default_value = "2")]
+        depth: usize,
     },
 
     /// Find files related to a file via the call graph (it calls them, or they call it).

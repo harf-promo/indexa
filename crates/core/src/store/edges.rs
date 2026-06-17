@@ -726,10 +726,11 @@ impl Store {
         Ok(n as usize)
     }
 
-    /// D2 — 1-hop blast radius for `symbol` (compat wrapper over
-    /// [`Self::blast_radius_resolved`]; same files, no tier breakdown).
+    /// D2 — blast radius for `symbol` (compat wrapper over [`Self::blast_radius_resolved`]
+    /// at the default depth of 2 = direct callers + one transitive hop; same files, no tier
+    /// breakdown).
     pub fn blast_radius(&self, symbol: &str, limit: usize, strict: bool) -> Result<Vec<String>> {
-        Ok(self.blast_radius_resolved(symbol, limit, strict)?.files)
+        Ok(self.blast_radius_resolved(symbol, limit, strict, 2)?.files)
     }
 
     /// v0.25 — 1-hop blast radius with scoped resolution: direct callers of `symbol`
@@ -741,11 +742,16 @@ impl Store {
     ///
     /// The direct set itself is name-matched (the input is a bare name with no definer
     /// to disambiguate against) — see [`Self::who_calls_resolved`] for per-caller tiers.
+    /// `depth` hops of caller reachability: `depth == 1` is direct callers only, `depth == 2`
+    /// adds one transitive hop (the legacy default), and higher depths keep expanding from
+    /// each newly-reached frontier of caller files. `included` doubles as the visited set, so
+    /// cycles terminate; results are capped at `limit`.
     pub fn blast_radius_resolved(
         &self,
         symbol: &str,
         limit: usize,
         strict: bool,
+        depth: usize,
     ) -> Result<BlastRadius> {
         let direct: Vec<String> = {
             let mut stmt = self.conn.prepare(
@@ -792,75 +798,175 @@ impl Store {
         } else {
             direct
         };
-        let direct_set: HashSet<&str> = direct.iter().map(String::as_str).collect();
-
-        // Candidate transitive (caller, exported-symbol) pairs. Resolution happens in
-        // Rust, so bound the candidate set (deterministic order) instead of letting a
-        // generic export (`new`) explode it — the old SQL had the same blowup, just
-        // hidden inside the database.
+        // Resolution happens in Rust, so bound each hop's candidate set (deterministic order)
+        // instead of letting a generic export (`new`) explode it.
         const TRANSITIVE_CANDIDATE_CAP: usize = 10_000;
-        let candidates: Vec<(String, String)> = {
-            let mut stmt = self.conn.prepare(
-                "WITH direct_callers AS (
-                     SELECT DISTINCT from_path FROM edges
-                      WHERE kind = 'calls' AND to_ref = ?1
-                 ),
-                 caller_exports AS (
-                     SELECT DISTINCT to_ref FROM edges
-                      WHERE kind = 'defines'
-                        AND from_path IN (SELECT from_path FROM direct_callers)
-                 )
-                 SELECT DISTINCT from_path, to_ref FROM edges
-                  WHERE kind = 'calls'
-                    AND to_ref IN (SELECT to_ref FROM caller_exports)
-                  ORDER BY from_path, to_ref
-                  LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![symbol, TRANSITIVE_CANDIDATE_CAP as i64], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-
         let mut included: BTreeSet<String> = direct.iter().cloned().collect();
         let mut def_cache: HashMap<String, DefinerIndex> = HashMap::new();
         let mut import_cache: HashMap<String, ImportTargets> = HashMap::new();
         let (mut scoped_transitive, mut bare_transitive) = (0usize, 0usize);
-        for (f, y) in candidates {
-            if direct_set.contains(f.as_str()) || included.contains(&f) {
-                continue;
-            }
-            if !def_cache.contains_key(&y) {
-                def_cache.insert(y.clone(), DefinerIndex::new(self.edges_to("defines", &y)?));
-            }
-            let defs = &def_cache[&y];
-            if defs.set.contains(&f) {
-                continue; // f's call binds to its own definition — not a link here
-            }
-            if !import_cache.contains_key(&f) {
-                let imports = self.imports_of(&f)?;
-                import_cache.insert(f.clone(), import_targets(&f, &imports));
-            }
-            let (tier, targets) = resolve_call(&f, &import_cache[&f], defs);
-            match tier {
-                ResolutionTier::Bare if !strict => {
-                    included.insert(f);
-                    bare_transitive += 1;
+
+        // Hop 1 — the legacy transitive pass: files whose call to a direct caller's exported
+        // symbol resolves back to a direct caller. Guarded by `depth >= 2` so `depth == 1`
+        // returns direct callers only. `frontier` collects the files this hop adds, which seed
+        // the next hop.
+        let mut frontier: Vec<String> = Vec::new();
+        if depth >= 2 {
+            let direct_set: HashSet<&str> = direct.iter().map(String::as_str).collect();
+            let candidates: Vec<(String, String)> = {
+                let mut stmt = self.conn.prepare(
+                    "WITH direct_callers AS (
+                         SELECT DISTINCT from_path FROM edges
+                          WHERE kind = 'calls' AND to_ref = ?1
+                     ),
+                     caller_exports AS (
+                         SELECT DISTINCT to_ref FROM edges
+                          WHERE kind = 'defines'
+                            AND from_path IN (SELECT from_path FROM direct_callers)
+                     )
+                     SELECT DISTINCT from_path, to_ref FROM edges
+                      WHERE kind = 'calls'
+                        AND to_ref IN (SELECT to_ref FROM caller_exports)
+                      ORDER BY from_path, to_ref
+                      LIMIT ?2",
+                )?;
+                let rows = stmt
+                    .query_map(params![symbol, TRANSITIVE_CANDIDATE_CAP as i64], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            for (f, y) in candidates {
+                if direct_set.contains(f.as_str()) || included.contains(&f) {
+                    continue;
                 }
-                ResolutionTier::Bare => {}
-                _ if targets.iter().any(|t| direct_set.contains(t.as_str())) => {
-                    included.insert(f);
-                    scoped_transitive += 1;
+                if let Some(scoped) = self.classify_transitive(
+                    &f,
+                    &y,
+                    &direct_set,
+                    strict,
+                    &mut def_cache,
+                    &mut import_cache,
+                )? {
+                    if scoped {
+                        scoped_transitive += 1;
+                    } else {
+                        bare_transitive += 1;
+                    }
+                    included.insert(f.clone());
+                    frontier.push(f);
                 }
-                _ => {} // resolved to a non-caller definer — cross-noise, dropped
             }
         }
+
+        // Hops 2..depth — keep expanding from the previous frontier of caller files. Each
+        // candidate caller is kept only if its call resolves to a *frontier* file (scoped) or
+        // is a bare-name fallback (dropped under `strict`). `included` is the visited set, so a
+        // cycle (A→B→A) revisits nothing and the loop terminates.
+        let mut hop = 2;
+        while hop < depth && !frontier.is_empty() {
+            let frontier_set: HashSet<&str> = frontier.iter().map(String::as_str).collect();
+            let candidates = self.callers_of_exports(&frontier, TRANSITIVE_CANDIDATE_CAP)?;
+            let mut next: Vec<String> = Vec::new();
+            for (f, y) in candidates {
+                if included.contains(&f) {
+                    continue;
+                }
+                if let Some(scoped) = self.classify_transitive(
+                    &f,
+                    &y,
+                    &frontier_set,
+                    strict,
+                    &mut def_cache,
+                    &mut import_cache,
+                )? {
+                    if scoped {
+                        scoped_transitive += 1;
+                    } else {
+                        bare_transitive += 1;
+                    }
+                    included.insert(f.clone());
+                    next.push(f);
+                }
+            }
+            frontier = next;
+            hop += 1;
+        }
+
         Ok(BlastRadius {
             files: included.into_iter().take(limit).collect(),
             direct: direct.len(),
             scoped_transitive,
             bare_transitive,
         })
+    }
+
+    /// Classify whether candidate caller `f` (which calls exported symbol `y`) links into the
+    /// current `frontier_set`: `Some(true)` if its call resolves (same-dir/import) to a frontier
+    /// file, `Some(false)` if it's kept only as a bare-name fallback, `None` if dropped (binds to
+    /// its own definition, resolves to a non-frontier definer, or bare under `strict`). Fills the
+    /// per-symbol definer cache and per-file import cache so repeated hops stay cheap.
+    #[allow(clippy::too_many_arguments)]
+    fn classify_transitive(
+        &self,
+        f: &str,
+        y: &str,
+        frontier_set: &HashSet<&str>,
+        strict: bool,
+        def_cache: &mut HashMap<String, DefinerIndex>,
+        import_cache: &mut HashMap<String, ImportTargets>,
+    ) -> Result<Option<bool>> {
+        if !def_cache.contains_key(y) {
+            def_cache.insert(
+                y.to_string(),
+                DefinerIndex::new(self.edges_to("defines", y)?),
+            );
+        }
+        let defs = &def_cache[y];
+        if defs.set.contains(f) {
+            return Ok(None); // f's call binds to its own definition — not a link here
+        }
+        if !import_cache.contains_key(f) {
+            let imports = self.imports_of(f)?;
+            import_cache.insert(f.to_string(), import_targets(f, &imports));
+        }
+        let (tier, targets) = resolve_call(f, &import_cache[f], defs);
+        Ok(match tier {
+            ResolutionTier::Bare if !strict => Some(false),
+            ResolutionTier::Bare => None,
+            _ if targets.iter().any(|t| frontier_set.contains(t.as_str())) => Some(true),
+            _ => None, // resolved to a non-frontier definer — cross-noise, dropped
+        })
+    }
+
+    /// Candidate `(caller, exported-symbol)` pairs for the next reachability hop: every file
+    /// that calls a symbol *exported by* one of the `frontier` files. Bounded by `cap` in a
+    /// deterministic order. Returns empty when `frontier` is empty.
+    fn callers_of_exports(&self, frontier: &[String], cap: usize) -> Result<Vec<(String, String)>> {
+        if frontier.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; frontier.len()].join(",");
+        let sql = format!(
+            "WITH caller_exports AS (
+                 SELECT DISTINCT to_ref FROM edges
+                  WHERE kind = 'defines' AND from_path IN ({placeholders})
+             )
+             SELECT DISTINCT from_path, to_ref FROM edges
+              WHERE kind = 'calls'
+                AND to_ref IN (SELECT to_ref FROM caller_exports)
+              ORDER BY from_path, to_ref
+              LIMIT ?"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let cap_i = cap as i64;
+        let mut binds: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(frontier.len() + 1);
+        for f in frontier {
+            binds.push(f);
+        }
+        binds.push(&cap_i);
+        let rows = stmt.query_map(binds.as_slice(), |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Build a file-to-file **call graph** for files under `prefix` (compat wrapper
