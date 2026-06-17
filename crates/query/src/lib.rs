@@ -3,6 +3,7 @@
 pub mod contextual;
 pub mod eval;
 pub mod export;
+pub mod impact;
 pub mod qa;
 pub mod redact;
 pub mod rerank;
@@ -17,6 +18,7 @@ pub use export::{
     approx_tokens, build_tree, prune_tree, render_graph, render_json, render_markdown,
     render_signatures, render_weights, render_xml,
 };
+pub use impact::{served_bytes, AnswerImpact};
 pub use indexa_core::config::HybridMode;
 pub use qa::{
     answer, answer_agentic, answer_agentic_stream, answer_stream, answer_stream_with_ann,

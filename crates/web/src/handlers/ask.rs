@@ -9,14 +9,14 @@ use axum::{
 };
 use indexa_core::config::RetrievalConfig;
 use indexa_core::store::{AnnIndex, Store};
-use indexa_query::{AnswerChunk, QaConfig};
+use indexa_query::{served_bytes, AnswerChunk, AnswerImpact, QaConfig};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::dto::{
-    err_json, AskConfidence, AskRequest, AskResponse, AskSource, ExplainHit, ExplainResponse,
-    ExplainStage,
+    err_json, AskConfidence, AskImpact, AskRequest, AskResponse, AskSource, ExplainHit,
+    ExplainResponse, ExplainStage,
 };
 use crate::AppState;
 
@@ -179,11 +179,12 @@ pub(crate) async fn api_ask(
     };
     match result {
         Ok(answer) => {
-            record_ask_usage(&state.db_path, &answer);
+            let impact = into_ask_impact(record_ask_usage(&state.db_path, &answer));
             Json(AskResponse {
                 confidence: into_ask_confidence(answer.confidence.as_ref()),
                 answer: answer.answer,
                 sources: answer.sources.into_iter().map(into_ask_source).collect(),
+                impact,
             })
             .into_response()
         }
@@ -195,24 +196,38 @@ pub(crate) async fn api_ask(
 /// failure must never fail (or delay-fail) the user's answer. Opens its own
 /// short-lived connection: the buffered handler never locked the shared store,
 /// and the stream task outlives the request scope.
-fn record_ask_usage(db_path: &std::path::Path, answer: &indexa_query::Answer) {
-    let recorded = Store::open(db_path).and_then(|mut s| {
-        let paths: Vec<&str> = answer.sources.iter().map(|x| x.path.as_str()).collect();
-        let counterfactual = s.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
-        // Served = answer + the source snippets actually delivered — counting
-        // less served would inflate the savings (MCP ask counts its full
-        // rendered output the same way).
-        let served = answer.answer.len()
-            + answer
-                .sources
-                .iter()
-                .map(|x| x.path.len() + x.heading.len() + x.snippet.len())
-                .sum::<usize>();
-        s.record_tool_usage("web", "ask", served as u64, counterfactual)
-    });
-    if let Err(e) = recorded {
+/// Record best-effort token-savings telemetry AND return the per-answer impact so the handler
+/// can surface it to the user. A recording failure must never fail (or delay-fail) the answer,
+/// so a store-open error just yields `None`. Opens its own short-lived connection (the buffered
+/// handler never locked the shared store; the stream task outlives the request scope).
+fn record_ask_usage(
+    db_path: &std::path::Path,
+    answer: &indexa_query::Answer,
+) -> Option<AnswerImpact> {
+    let mut s = Store::open(db_path)
+        .map_err(|e| tracing::debug!("usage telemetry skipped: {e:#}"))
+        .ok()?;
+    let paths: Vec<&str> = answer.sources.iter().map(|x| x.path.as_str()).collect();
+    let counterfactual = s.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
+    // Served = answer text + the citation lines actually delivered (shared `served_bytes`
+    // accounting with the CLI surface); counting less would inflate the savings.
+    let served = served_bytes(answer);
+    if let Err(e) = s.record_tool_usage("web", "ask", served, counterfactual) {
         tracing::debug!("usage telemetry skipped: {e:#}");
     }
+    Some(AnswerImpact::new(served, counterfactual))
+}
+
+/// Map an [`AnswerImpact`] to the wire DTO, but only when it's worth showing (cited files
+/// existed and serving was actually smaller) — never a misleading "0% saved" badge.
+fn into_ask_impact(impact: Option<AnswerImpact>) -> Option<AskImpact> {
+    impact
+        .filter(AnswerImpact::is_meaningful)
+        .map(|i| AskImpact {
+            served_bytes: i.served_bytes,
+            counterfactual_bytes: i.counterfactual_bytes,
+            saved_percent: i.saved_percent(),
+        })
 }
 
 /// `POST /api/ask/stream` — same pipeline as [`api_ask`] but server-sent events: one
@@ -286,14 +301,29 @@ pub(crate) async fn api_ask_stream(
 
         let terminal = match result {
             Ok(answer) => {
-                record_ask_usage(&db_path, &answer);
-                // Confidence rides the terminal event (it's known before synthesis but
-                // belongs to the whole answer). Additive: absent on the no-match path
-                // and on older servers, so clients must tolerate it missing.
-                match into_ask_confidence(answer.confidence.as_ref()) {
-                    Some(c) => serde_json::json!({ "type": "done", "confidence": c }),
-                    None => serde_json::json!({ "type": "done" }),
+                let impact = into_ask_impact(record_ask_usage(&db_path, &answer));
+                // Confidence + impact ride the terminal `done` event (both belong to the whole
+                // answer). Additive: each absent on the no-match path and on older servers, so
+                // clients must tolerate either field missing.
+                let mut done = serde_json::Map::new();
+                done.insert("type".into(), serde_json::json!("done"));
+                if let Some(c) = into_ask_confidence(answer.confidence.as_ref()) {
+                    done.insert(
+                        "confidence".into(),
+                        serde_json::to_value(c).unwrap_or_default(),
+                    );
                 }
+                if let Some(i) = impact {
+                    done.insert(
+                        "impact".into(),
+                        serde_json::json!({
+                            "served_bytes": i.served_bytes,
+                            "counterfactual_bytes": i.counterfactual_bytes,
+                            "saved_percent": i.saved_percent,
+                        }),
+                    );
+                }
+                serde_json::Value::Object(done)
             }
             Err(e) => serde_json::json!({ "type": "error", "message": format!("{e:#}") }),
         };

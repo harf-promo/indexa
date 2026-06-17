@@ -54,7 +54,13 @@ Sources:
   [1] docs/config.md — Configuration Reference > Retrieval
   [2] crates/query/src/qa/retrieve.rs — retrieve
 confidence: medium — 12 moderate matches
+
+impact: served 508 B vs 27.3 KB of source — 98% less to your AI tool
 ```
+
+That last line is real and per-answer: Indexa served a ~0.5 KB ranked slice instead of the
+27 KB of source files it drew on. The savings pitch below isn't a slogan — every `ask` prints
+the figure for *that* answer (and `--json` returns it).
 
 Or open the web workspace (`indexa serve`) — the **Map** lands on an interactive, force-directed knowledge graph of your codebase: each dot is a file, sized by how many other files depend on it; solid lines are confident call edges, dashed lines are approximate name matches (Indexa labels what it isn't sure of). Click a hub to focus it, then expand its neighbors.
 

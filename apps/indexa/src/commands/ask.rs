@@ -1,7 +1,8 @@
 use anyhow::Result;
 use indexa_core::{config::HybridMode, store::Store};
 use indexa_query::{
-    answer, answer_agentic, explain_retrieval, Confidence, QaConfig, RetrievalTrace,
+    answer, answer_agentic, explain_retrieval, served_bytes, AnswerImpact, Confidence, QaConfig,
+    RetrievalTrace,
 };
 use serde::Serialize;
 
@@ -49,6 +50,13 @@ struct ConfidenceJson {
 }
 
 #[derive(Serialize)]
+struct ImpactJson {
+    served_bytes: u64,
+    counterfactual_bytes: u64,
+    saved_percent: u8,
+}
+
+#[derive(Serialize)]
 struct AnswerJson {
     question: String,
     answer: String,
@@ -56,6 +64,9 @@ struct AnswerJson {
     /// Retrieval-shape confidence; absent for the no-match short-circuit.
     #[serde(skip_serializing_if = "Option::is_none")]
     confidence: Option<ConfidenceJson>,
+    /// Per-answer byte savings vs. the cited files whole; absent when nothing to show.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    impact: Option<ImpactJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     retrieval: Option<RetrievalJson>,
 }
@@ -145,6 +156,7 @@ pub(crate) async fn cmd_ask(
                         .to_owned(),
                     sources: Vec::new(),
                     confidence: None,
+                    impact: None,
                     retrieval: None,
                 })?
             );
@@ -252,21 +264,30 @@ pub(crate) async fn cmd_ask(
         .await?
     };
 
-    // Best-effort token-savings telemetry — must never fail the user's ask.
-    // (`store` was dropped above so the query path didn't hold two handles; a
+    // Best-effort token-savings telemetry + the per-answer impact readout — must never fail
+    // the user's ask. (`store` was dropped above so the query path didn't hold two handles; a
     // fresh open here is the same cost every other command pays.)
-    match Store::open(&db_path) {
+    let impact: Option<AnswerImpact> = match Store::open(&db_path) {
         Ok(mut s) => {
             let paths: Vec<&str> = answer.sources.iter().map(|x| x.path.as_str()).collect();
             let counterfactual = s.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
-            if let Err(e) =
-                s.record_tool_usage("cli", "ask", answer.answer.len() as u64, counterfactual)
-            {
+            // Served = answer + delivered citations (shared `served_bytes`, consistent with the
+            // web surface). v0.59: this replaced the old answer-text-only count, which slightly
+            // undercounted served bytes (and so overstated savings) in the aggregate `status`.
+            let served = served_bytes(&answer);
+            if let Err(e) = s.record_tool_usage("cli", "ask", served, counterfactual) {
                 tracing::debug!("usage telemetry skipped: {e:#}");
             }
+            Some(AnswerImpact::new(served, counterfactual))
         }
-        Err(e) => tracing::debug!("usage telemetry skipped: {e:#}"),
-    }
+        Err(e) => {
+            tracing::debug!("usage telemetry skipped: {e:#}");
+            None
+        }
+    };
+    // Only surface the readout when it's a real win (cited files existed and serving was
+    // smaller) — never a misleading "0% saved" on a no-match answer.
+    let impact = impact.filter(AnswerImpact::is_meaningful);
 
     if json {
         let out = AnswerJson {
@@ -284,6 +305,11 @@ pub(crate) async fn cmd_ask(
             confidence: answer.confidence.as_ref().map(|c| ConfidenceJson {
                 level: c.level.as_str(),
                 basis: c.basis.clone(),
+            }),
+            impact: impact.map(|i| ImpactJson {
+                served_bytes: i.served_bytes,
+                counterfactual_bytes: i.counterfactual_bytes,
+                saved_percent: i.saved_percent(),
             }),
             retrieval: trace.as_ref().map(trace_to_json),
         };
@@ -338,6 +364,17 @@ pub(crate) async fn cmd_ask(
                 i.strong_floor,
                 if i.embeddings { "on" } else { "off" },
             );
+        }
+    }
+
+    // The "retrieve the slice" win, made concrete for this answer.
+    if let Some(i) = impact {
+        use std::io::IsTerminal;
+        let line = format!("impact: {}", i.human());
+        if std::io::stdout().is_terminal() {
+            println!("\n\x1b[2m{line}\x1b[0m");
+        } else {
+            println!("\n{line}");
         }
     }
 
