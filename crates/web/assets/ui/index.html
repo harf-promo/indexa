@@ -146,9 +146,9 @@
             <h2 class="panel-heading">Context map</h2>
             <button id="map-help-btn" class="btn-sm map-help-btn" onclick="toggleMapHelp()" aria-expanded="false" aria-controls="map-help" title="What is this?">&#x24D8; What is this?</button>
             <div class="map-sub-toggle" role="tablist" aria-label="Map view">
-              <button id="map-tab-treemap" class="map-sub-tab active" role="tab" aria-selected="true" onclick="switchMapView('treemap')">Treemap</button>
+              <button id="map-tab-graph"   class="map-sub-tab active" role="tab" aria-selected="true"  onclick="switchMapView('graph')">Graph</button>
+              <button id="map-tab-treemap" class="map-sub-tab"        role="tab" aria-selected="false" onclick="switchMapView('treemap')">Treemap</button>
               <button id="map-tab-table"   class="map-sub-tab"        role="tab" aria-selected="false" onclick="switchMapView('table')">Table</button>
-              <button id="map-tab-graph"   class="map-sub-tab"        role="tab" aria-selected="false" onclick="switchMapView('graph')">Graph</button>
             </div>
           </div>
           <!-- Plain-language explainer (WS3/WS4): what the map is + the jargon, for a general audience. -->
@@ -162,8 +162,8 @@
             </ul>
             <p class="map-help-terms"><strong>The words:</strong> a <em>chunk</em> is a small searchable piece a file is split into (so AI can find the exact relevant bit, not re-read the whole file); a <em>summary</em> is a short AI-written description of a file or folder; <em>coverage</em> is the share of your folders that have summaries built. The <strong>Graph</strong> tab shows which files call into which.</p>
           </div>
-          <!-- Treemap sub-view (default) -->
-          <div id="map-panel-treemap">
+          <!-- Treemap sub-view -->
+          <div id="map-panel-treemap" hidden>
             <div class="treemap-breadcrumb" id="treemap-breadcrumb" aria-label="Treemap navigation path"></div>
             <svg id="treemap-svg" class="treemap-svg" role="group" aria-label="Context coverage treemap — cells sized by chunk count, colored by coverage state. Tab to navigate, Enter to drill down"></svg>
             <div class="treemap-tooltip" id="treemap-tooltip" role="tooltip" hidden></div>
@@ -179,8 +179,8 @@
           <div id="map-panel-table" hidden>
             <table id="map-table"></table>
           </div>
-          <!-- Graph sub-view (signature / call graph) -->
-          <div id="map-panel-graph" hidden>
+          <!-- Graph sub-view (signature / call graph) — flagship default Map view -->
+          <div id="map-panel-graph">
             <div class="graph-toolbar">
               <label for="graph-scope" class="graph-scope-label">Scope</label>
               <select id="graph-scope" class="graph-scope" aria-label="Graph scope root" onchange="loadGraph(this.value)"></select>

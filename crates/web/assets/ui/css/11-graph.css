@@ -123,3 +123,13 @@
   color: var(--muted);
   line-height: 1.4;
 }
+
+/* Pan/zoom affordance (v0.55): the empty background is grabbable for panning; nodes
+   keep their pointer cursor (click-to-focus). Wheel zooms around the cursor. */
+.graph-svg { cursor: grab; }
+.graph-svg.graph-panning { cursor: grabbing; }
+
+/* Screenshot polish: a soft glow makes the locked/focused hub pop in a shared image. */
+.graph-node.focus .graph-node-circle {
+  filter: drop-shadow(0 0 5px var(--green));
+}
