@@ -425,11 +425,15 @@ pub(crate) fn retrieve(
     // identifier) the user wants the implementing file's chunks, not topical
     // diversity — diversifying can drop the very chunk that names the answer.
     // Bias toward relevance (≥0.8) so same-file detail survives the diversity pass.
+    // Clamp to [0,1]: a hand-edited out-of-range `[retrieval] mmr_lambda` (e.g. negative)
+    // would otherwise make `(1 - lambda) > 1` and invert relevance in `mmr_score`. 1.0 stays
+    // a no-op (the early-return below); 0.0 is pure diversity.
     let mmr_lambda = if is_code_intent(question) {
         cfg.mmr_lambda.max(0.8)
     } else {
         cfg.mmr_lambda
-    };
+    }
+    .clamp(0.0, 1.0);
     if mmr_lambda < 1.0 && !hits.is_empty() && !matches!(cfg.mode, HybridMode::Sparse) {
         let ids: Vec<i64> = hits.iter().map(|h| h.chunk_id).collect();
         match store.embeddings_for_chunks(&ids) {

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.53.0] — 2026-06-17
+
+The v0.52 cumulative changelog now shows up everywhere, plus a few honest edges.
+
+### Added
+
+- **"What's new" in the web Software Update panel.** When an update is available, Settings → Software
+  Update lists every version's notes between your installed version and the latest — the same span the
+  desktop modal shows — fetched only when an update exists, and silently omitted if it can't be fetched.
+- **"What's new" in `indexa update`.** The CLI now prints the cumulative changelog before the confirm
+  prompt (and on `indexa update --check`), so you see what you're getting before installing.
+
+### Changed
+
+- **Archives tell you when a listing is capped.** A `.zip`/`.tar` with more than 5,000 entries now appends
+  "(listing truncated — showing first 5000)" instead of silently showing a partial count as if it were whole.
+- **Model pulls can't hang forever.** The web model-download proxy now aborts with a clear error if Ollama
+  goes silent for 120s mid-stream (a live, slow download is unaffected — there's no overall timeout).
+- **MMR diversity is clamped to a sane range.** A hand-edited out-of-range `[retrieval] mmr_lambda` can no
+  longer invert relevance; it's clamped to `[0, 1]`.
+- **Docs corrected:** the repo is public (not private); the contributing notes reflect that branch
+  protection — not Actions billing — is what requires the PR + CI workflow.
+
 ## [0.52.0] — 2026-06-17
 
 The update window now respects your history.

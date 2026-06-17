@@ -47,6 +47,30 @@ document.addEventListener('DOMContentLoaded', function () {
         }
       }
 
+      // ── "What's new" — cumulative changelog (installed → latest) ───────────
+      // `d.notes` is the span of every version's notes between the running version
+      // and the latest, assembled server-side (null when up to date or on a fetch
+      // hiccup). Render it the same way the desktop update modal does.
+      var whatsNew = document.getElementById('update-whats-new');
+      if (whatsNew) {
+        var raw = (d.update_available && d.notes) ? String(d.notes).trim() : '';
+        if (raw) {
+          whatsNew.innerHTML =
+            '<details open><summary>What’s new</summary><div class="ucl-notes"></div></details>';
+          var notesBody = whatsNew.querySelector('.ucl-notes');
+          if (typeof renderMarkdown === 'function') {
+            notesBody.innerHTML = renderMarkdown(
+              typeof reflowChangelog === 'function' ? reflowChangelog(raw) : raw
+            );
+          } else {
+            notesBody.textContent = raw;
+          }
+          whatsNew.style.display = '';
+        } else {
+          whatsNew.style.display = 'none';
+        }
+      }
+
       // Inside the desktop app, the in-page "Update now" button is disabled: the
       // app updates itself via the Tauri native updater (which installs the
       // notarized .app bundle). A web binary self-replace would corrupt the

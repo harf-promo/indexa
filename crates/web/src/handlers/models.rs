@@ -43,7 +43,13 @@ pub(crate) async fn api_models_pull(
 ) -> Response {
     let base = &state.config.describer.base_url;
     let url = format!("{base}/api/pull");
-    let resp = match reqwest::Client::new()
+    // A connect timeout (so a dead Ollama fails fast) but NO overall timeout — a real
+    // model pull legitimately runs for minutes. The stall guard below is per-chunk.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
+    let resp = match client
         .post(&url)
         .json(&serde_json::json!({"name": body.name, "stream": true}))
         .send()
@@ -52,10 +58,27 @@ pub(crate) async fn api_models_pull(
         Ok(r) => r,
         Err(e) => return err_json(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     };
-    // Proxy the NDJSON stream straight through to the client.
-    let stream = resp
-        .bytes_stream()
-        .map(|r| r.map_err(std::io::Error::other));
+    // Proxy the NDJSON stream to the client with a per-chunk idle deadline. An overall
+    // timeout would kill a slow-but-live download; instead, if Ollama goes silent for
+    // 120s mid-stream we emit one TimedOut error chunk and end the body, so the browser
+    // sees a failure instead of hanging forever. Ollama emits progress lines frequently,
+    // so the window never trips a healthy pull.
+    const IDLE: std::time::Duration = std::time::Duration::from_secs(120);
+    let upstream = resp.bytes_stream();
+    let stream = futures_util::stream::unfold(upstream, |mut s| async move {
+        match tokio::time::timeout(IDLE, s.next()).await {
+            Ok(Some(Ok(bytes))) => Some((Ok(bytes), s)),
+            Ok(Some(Err(e))) => Some((Err(std::io::Error::other(e)), s)),
+            Ok(None) => None, // upstream finished
+            Err(_) => Some((
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Ollama pull stalled (no data for 120s)",
+                )),
+                s,
+            )),
+        }
+    });
     Response::builder()
         .status(200)
         .header("Content-Type", "application/x-ndjson")
