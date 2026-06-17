@@ -322,7 +322,8 @@ async fn main() -> Result<()> {
             files,
             chunks,
             apply_ollama_env,
-        } => commands::cmd_doctor(profile, files, chunks, apply_ollama_env).await,
+            latency,
+        } => commands::cmd_doctor(profile, files, chunks, apply_ollama_env, latency).await,
         Commands::Fingerprint { paths } => commands::cmd_fingerprint(paths).await,
         Commands::Classify { paths, category } => {
             commands::cmd_classify(paths, category, &cfg).await

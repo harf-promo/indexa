@@ -9,6 +9,7 @@ pub(crate) async fn cmd_doctor(
     files_hint: Option<usize>,
     chunks_hint: Option<usize>,
     apply_ollama_env: bool,
+    latency: bool,
 ) -> Result<()> {
     let profile = match profile_str.as_str() {
         "conservative" => ResourceProfile::Conservative,
@@ -168,6 +169,55 @@ pub(crate) async fn cmd_doctor(
         }
     }
     println!();
+
+    // ── Optional model-latency probe (--latency) ──
+    // Times a tiny embed + generate so a slow / overloaded / wrong-host Ollama is caught HERE,
+    // not ten minutes into an index. It loads the models (unlike the checks above), so it's
+    // opt-in. The first call includes model load — that cold-start cost is the realistic
+    // first-index latency, which is exactly the signal worth seeing.
+    let ollama_in_use = cfg.embedding.provider == "ollama" || cfg.describer.provider == "ollama";
+    if ollama_in_use && latency {
+        use indexa_llm::Generator as _;
+        use std::time::Instant;
+        println!("Model latency");
+        if cfg.embedding.provider == "ollama" {
+            match super::helpers::build_embedder(&cfg, None) {
+                Ok(embedder) => {
+                    let t = Instant::now();
+                    match embedder.embed("ping").await {
+                        Ok(_) => {
+                            let ms = t.elapsed().as_millis();
+                            if ms > 2000 {
+                                println!("  ⚠️   embedding ({}): {ms} ms — slow; indexing will crawl (Ollama swapping, or a remote/wrong host?)", cfg.embedding.model);
+                            } else {
+                                println!("  ✅  embedding ({}): {ms} ms", cfg.embedding.model);
+                            }
+                        }
+                        Err(e) => println!("  ❌  embedding probe failed: {e:#}"),
+                    }
+                }
+                Err(e) => println!("  ⚠️   could not build embedder for probe: {e:#}"),
+            }
+        }
+        if cfg.describer.provider == "ollama" {
+            let llm = indexa_llm::OllamaLlm::new(&ollama_base, &cfg.describer.file_model);
+            let t = Instant::now();
+            match llm.generate("Reply with the single word: ok").await {
+                Ok(_) => {
+                    let ms = t.elapsed().as_millis();
+                    if ms > 15000 {
+                        println!("  ⚠️   generation ({}): {ms} ms — slow; summaries and answers will lag", cfg.describer.file_model);
+                    } else {
+                        println!("  ✅  generation ({}): {ms} ms", cfg.describer.file_model);
+                    }
+                }
+                Err(e) => println!("  ❌  generation probe failed: {e:#}"),
+            }
+        }
+        println!();
+    } else if ollama_in_use {
+        println!("  \u{2139}\u{fe0f}   run `indexa doctor --latency` to time the models (catches a slow Ollama before a big index)\n");
+    }
 
     // ── Claude subscription provider (provider = "claude-code") ──
     // All checks here are token-free local probes — no model is invoked.

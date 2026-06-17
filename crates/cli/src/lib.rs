@@ -693,6 +693,11 @@ pub enum Commands {
         /// (then quit + relaunch Ollama); elsewhere prints the `export` lines to add.
         #[arg(long)]
         apply_ollama_env: bool,
+
+        /// Time a tiny embed + generate against Ollama, so a slow/overloaded server is
+        /// caught here instead of mid-index. Loads the models (the other checks don't).
+        #[arg(long)]
+        latency: bool,
     },
 
     /// Detect software and project types in the index by file-pattern signatures.
