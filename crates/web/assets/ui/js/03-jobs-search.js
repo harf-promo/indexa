@@ -25,6 +25,18 @@ async function fireJob(kind, path) {
   }
 }
 
+// Add a folder to the index. Referenced by the empty-state CTA and the sidebar "+" button,
+// but was never defined (clicking threw a ReferenceError) — define it here next to fireJob.
+// There's no server-side directory picker, so the absolute path is entered directly; the same
+// path works with `indexa scan <path>` in a terminal (shown in the button hint).
+function openAddRoot() {  // eslint-disable-line no-unused-vars
+  var path = window.prompt('Folder to index (absolute path):', '');
+  if (path === null) return; // cancelled
+  path = path.trim();
+  if (!path) return;
+  if (typeof fireJob === 'function') fireJob('index', path);
+}
+
 /* Calm, STATIC per-row context-coverage glyph. Replaces the old per-row pending
    strobe: instead of a pulsing ⏳ on every folder during a subtree build, each dir
    shows where its subtree stands — ● built · ◐ partly built · ○ none · ✗ failed.

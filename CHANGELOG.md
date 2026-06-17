@@ -7,7 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.55.0] — 2026-06-17
+## [0.56.0] — 2026-06-17
+
+A flawless first run: no silent model wall, no dead buttons.
+
+### Added
+
+- **Indexa offers to pull the local models for you.** The first time you `index` (or run any command
+  that needs Ollama), if a required model isn't pulled, Indexa now asks — "Download them now? [Y/n]" — and
+  pulls each with a **live progress bar**, instead of failing with a manual `ollama pull` instruction and a
+  silent ~11 GB wait. New `indexa_llm::ollama_pull` streams Ollama's `/api/pull` progress (no new
+  dependency). In a non-interactive shell (CI/pipes) it still prints the manual instruction and exits.
+
+### Changed
+
+- **`indexa deep` shows rate + ETA.** The per-file progress line now reads `[120/4000] 42/s · ETA ~1m ·
+  <file>`, so a long indexing pass visibly progresses instead of looking stuck.
+- **README first-run is honest about setup.** The install section now leads with the auto-pull + `indexa
+  doctor`, rather than presenting the 11 GB download as a manual prerequisite.
+
+### Fixed
+
+- **The "Add a folder" button worked.** `openAddRoot()` was referenced by the empty-state CTA and the
+  sidebar "+" but never defined — clicking it threw. It now prompts for a folder path and kicks off an
+  index job.
 
 The knowledge graph becomes the flagship view, and the README stops lying.
 

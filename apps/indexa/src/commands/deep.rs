@@ -166,6 +166,7 @@ pub(crate) async fn cmd_deep(
         // indicatif, whose transitive `number_prefix` dep is flagged unmaintained (RUSTSEC-2025-0119).
         let show_progress = std::io::stderr().is_terminal();
         let total_files = files.len();
+        let prog_start = std::time::Instant::now();
 
         for (i, entry) in files.iter().enumerate() {
             if show_progress {
@@ -174,7 +175,22 @@ pub(crate) async fn cmd_deep(
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("");
-                eprint!("\r\x1b[K  [{}/{total_files}] {:.50}", i + 1, name);
+                // Cumulative rate + ETA so a long deep pass shows it's progressing, not frozen.
+                let done = i + 1;
+                let elapsed = prog_start.elapsed().as_secs_f64();
+                let rate = if elapsed > 0.5 {
+                    done as f64 / elapsed
+                } else {
+                    0.0
+                };
+                let eta = if rate > 0.0 {
+                    indexa_core::resource::format_duration_pub(
+                        ((total_files - done) as f64 / rate) as u64,
+                    )
+                } else {
+                    "—".to_string()
+                };
+                eprint!("\r\x1b[K  [{done}/{total_files}] {rate:.0}/s · ETA {eta} · {name:.40}");
                 let _ = std::io::stderr().flush();
             }
             let path_str = entry.path.to_string_lossy().into_owned();

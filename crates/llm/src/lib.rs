@@ -15,7 +15,7 @@ pub mod openai_compat;
 
 pub use anthropic::AnthropicLlm;
 pub use claude_code::{claude_status, ClaudeCodeLlm, ClaudeStatus};
-pub use ollama::{caption_image_file, ollama_list_models, OllamaLlm};
+pub use ollama::{caption_image_file, ollama_list_models, ollama_pull, OllamaLlm};
 pub use openai_compat::OpenAICompatLlm;
 
 // HTTP client construction + transient-failure retry policy live in the shared
