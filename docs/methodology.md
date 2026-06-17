@@ -50,7 +50,7 @@ Each file type has a dedicated parser. Parsers are tried in order:
 | SVG | `.svg` | text / `<title>` / `<desc>` extracted; path geometry & CSS ignored (no OCR of outlined text) |
 | Image | `.jpg .jpeg .png .webp .heic .tiff .cr2 .nef .arw .dng .bmp .gif` | EXIF metadata extraction |
 | Media | `.mp3 .mp4 .m4a .flac .wav .ogg .opus .mkv .avi .mov .webm .aiff` | ffprobe metadata (duration, tags) |
-| Presentation | `.pptx .ppsx` | one chunk per slide + speaker notes (charts/SmartArt not extracted) |
+| Presentation | `.pptx .ppsx` | one chunk per slide + speaker notes + deck-level chart & SmartArt text |
 | iWork | `.pages .numbers .key` | text from the embedded preview PDF (rendered snapshot; not every cell/formula) |
 | Office | `.xlsx .xls .ods .csv .tsv .docx .odt .rtf` | calamine (spreadsheets); zip/XML for docx; RTF control-word stripper (skips font/colour/style tables) |
 | Email | `.eml .msg` | mail-parser (`.eml`: subject/from/to/date + body + attachment names); `.msg` Outlook OLE: subject + body from MAPI streams (cfb) |
@@ -62,7 +62,7 @@ Each file type has a dedicated parser. Parsers are tried in order:
 
 For files not matched by extension, MIME type detection is used as a fallback. Plain `text/*` files fall through to the text parser.
 
-**Known parsing gaps (honest coverage).** Legacy `.ppt`/`.doc` (PowerPoint/Word OLE binary — quiet stub; Outlook `.msg` IS now extracted), recursive archive extraction (archives are listed, not recursed into), chart/SmartArt text in slides, and text drawn as SVG paths are not parsed; media/binary files without captioning contribute only metadata, and PDF OCR needs external tools (poppler + tesseract) and is opt-in. "Understands every file" means *text and metadata from every common type, with the rest listed honestly* — not full semantic extraction of every format.
+**Known parsing gaps (honest coverage).** Legacy `.ppt`/`.doc` (PowerPoint/Word OLE binary — quiet stub; Outlook `.msg` IS now extracted), recursive archive extraction (archives are listed, not recursed into), and text drawn as SVG paths are not parsed; media/binary files without captioning contribute only metadata, and PDF OCR needs external tools (poppler + tesseract) and is opt-in. Slide **chart and SmartArt text** IS now extracted (deck-level, v0.54); embedded OLE objects inside slides still aren't. "Understands every file" means *text and metadata from every common type, with the rest listed honestly* — not full semantic extraction of every format.
 
 ---
 

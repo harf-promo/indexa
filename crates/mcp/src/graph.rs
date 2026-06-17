@@ -32,10 +32,15 @@ pub struct WhoCallsParams {
 pub struct BlastRadiusParams {
     /// Bare function or method name whose blast radius to compute.
     pub symbol: String,
-    /// Strict: drop the bare-name fallback on the transitive hop — keep only callers
-    /// whose call resolves (same-dir/import) to a direct caller. Default false.
+    /// Strict: drop the bare-name fallback on the transitive hops — keep only callers
+    /// whose call resolves (same-dir/import) to a frontier caller. Default false.
     #[serde(default)]
     pub strict: bool,
+    /// How many hops of caller reachability to follow: 1 = direct callers only, 2 = direct +
+    /// one transitive hop (default), up to 5 for deeper transitive reach ("what breaks
+    /// through chains"). Clamped to 1..=5.
+    #[serde(default)]
+    pub depth: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -237,18 +242,20 @@ impl IndexaMcp {
         Ok(ok_text(out))
     }
 
-    /// D2 — 1-hop blast radius for a symbol: direct callers and transitive callers,
-    /// with the transitive hop resolved (scoped) where possible.
+    /// D2 — blast radius for a symbol: direct callers and transitive callers to `depth` hops,
+    /// with each transitive hop resolved (scoped) where possible.
     #[tool(
-        description = "D2 code-graph: compute the blast radius of changing a function or method — returns the direct callers plus files whose call to one of those callers' exported symbols resolves back to that caller (same-dir/import resolution; bare-name matches are kept as a labeled fallback). Use to answer 'what breaks if I change X?'. Set `strict: true` to drop the bare-name fallback on the transitive hop. Returns up to 200 results."
+        description = "D2 code-graph: compute the blast radius of changing a function or method — returns the direct callers plus files whose call to a frontier caller's exported symbol resolves back to that caller (same-dir/import resolution; bare-name matches are kept as a labeled fallback). Use to answer 'what breaks if I change X?'. `depth` controls how many hops of caller reachability to follow: 1 = direct callers only, 2 = direct + one transitive hop (default), up to 5 for transitive reach through chains. Set `strict: true` to drop the bare-name fallback on the transitive hops. Returns up to 200 results."
     )]
     pub(crate) async fn blast_radius(
         &self,
         params: Parameters<BlastRadiusParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let store = self.store()?;
+        // Clamp depth to a sane range; default to the legacy 2 (direct + one transitive hop).
+        let depth = params.0.depth.unwrap_or(2).clamp(1, 5);
         let radius = store
-            .blast_radius_resolved(&params.0.symbol, 200, params.0.strict)
+            .blast_radius_resolved(&params.0.symbol, 200, params.0.strict, depth)
             .map_err(mcp_err)?;
         if radius.files.is_empty() {
             return Ok(ok_text(format!(
@@ -264,7 +271,7 @@ impl IndexaMcp {
             .collect::<Vec<_>>()
             .join("\n");
         let mut out = format!(
-            "Blast radius of '{}' ({total} file(s)):\n{body}\n\n\
+            "Blast radius of '{}' (depth {depth}, {total} file(s)):\n{body}\n\n\
              direct callers: {} · transitive: {} resolution-confirmed + {} bare-name{}",
             params.0.symbol,
             radius.direct,

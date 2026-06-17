@@ -33,12 +33,54 @@ pub(crate) async fn cmd_graph(
     limit: usize,
     strict: bool,
     cycles: bool,
+    blast: Option<String>,
+    depth: usize,
 ) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };
     let store = Store::open(&db_path)?;
     let scope = expand(&path);
+
+    // --blast <symbol>: "what breaks if I change this?" — the caller reachability set to
+    // `depth` hops, instead of the whole-scope graph. `path` is ignored in this mode.
+    if let Some(symbol) = blast {
+        let depth = depth.clamp(1, 5);
+        let radius = store.blast_radius_resolved(&symbol, limit.max(200), strict, depth)?;
+        if radius.files.is_empty() {
+            println!("No blast radius found for \"{symbol}\".");
+            println!("Run `indexa deep <path>` on source files first (Rust/Python/JS/TS/Go/Java).");
+            return Ok(());
+        }
+        println!(
+            "Blast radius of \"{symbol}\" (depth {depth}): {} file(s)",
+            radius.files.len()
+        );
+        println!("{}", "─".repeat(60));
+        for f in &radius.files {
+            println!("  {}", basename(f));
+        }
+        println!();
+        println!(
+            "direct callers: {} · transitive: {} resolution-confirmed + {} bare-name{}",
+            radius.direct,
+            radius.scoped_transitive,
+            radius.bare_transitive,
+            if strict {
+                " (strict: bare fallback off)"
+            } else {
+                ""
+            }
+        );
+        if radius.bare_transitive > 0 {
+            println!(
+                "({} transitive file(s) are approximate: {})",
+                radius.bare_transitive,
+                indexa_core::store::BARE_NAME_CAVEAT
+            );
+        }
+        return Ok(());
+    }
 
     // --cycles: report dependency cycles (Tarjan SCC over the call graph) and return.
     if cycles {

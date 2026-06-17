@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.54.0] — 2026-06-17
+
+Deeper code-graph reachability and richer slide parsing.
+
+### Added
+
+- **Transitive blast radius.** "What breaks if I change X?" can now follow the call chain more than one
+  hop. The `blast_radius` MCP tool takes a `depth` (1 = direct callers, 2 = +one transitive hop = the old
+  default, up to 5 for reach through chains), and `indexa graph --blast <symbol> --depth N` exposes the
+  same from the CLI. The walk is cycle-safe (each file is visited once) and bounded.
+- **Chart & SmartArt text from slides.** `.pptx`/`.ppsx` indexing now extracts text from embedded charts
+  (`ppt/charts/chartN.xml`) and SmartArt diagrams (`ppt/diagrams/dataN.xml`) as deck-level chunks, so the
+  numbers and labels living in a chart or org-diagram are searchable — closing a documented parsing gap.
+  (Styling/layout diagram parts are excluded; embedded OLE objects still aren't extracted.)
+
 ## [0.53.0] — 2026-06-17
 
 The v0.52 cumulative changelog now shows up everywhere, plus a few honest edges.

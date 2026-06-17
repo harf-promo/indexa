@@ -6,8 +6,10 @@
 //! (never assume contiguous or lexical ordering).
 //!
 //! # Limitations (known, documented)
-//! - Chart / SmartArt / embedded-object text (stored in `ppt/charts/`, `ppt/diagrams/`)
-//!   is not extracted — those are nested OOXML packages, out of scope for v1.
+//! - Chart text (`ppt/charts/chartN.xml`) and SmartArt node text (`ppt/diagrams/dataN.xml`)
+//!   ARE extracted as deck-level chunks (v0.54) — mapping a chart back to its slide needs the
+//!   rels graph, so they're emitted deck-level. Embedded OLE objects and the chart/diagram
+//!   styling parts (`colorsN`/`layoutN`/`styleN`) are still skipped.
 //! - Slide-master / slide-layout placeholder text is intentionally skipped (template boilerplate).
 //! - Speaker-note ↔ slide mapping uses ordinal position, not the rels graph; when notes
 //!   are sparse the association can be off-by-one. Tracked as future work.
@@ -212,12 +214,51 @@ fn parse_pptx(path: &Path, filename: &str) -> anyhow::Result<Vec<Chunk>> {
         );
     }
 
+    // Chart + SmartArt text — nested OOXML parts the slide pass skips. Emit them as deck-level
+    // chunks (mapping a chart to its slide needs the rels graph; deck-level keeps this
+    // dependency-free and sidesteps the notes off-by-one class of bug). Sorted for determinism.
+    let mut aux_names: Vec<&String> = all_names
+        .iter()
+        .filter(|n| is_chart_or_diagram(n))
+        .collect();
+    aux_names.sort();
+    for name in aux_names {
+        let mut xml = String::new();
+        if archive
+            .by_name(name)
+            .ok()
+            .and_then(|mut e| e.read_to_string(&mut xml).ok())
+            .is_none()
+        {
+            continue;
+        }
+        let text = strip_xml_tags(&xml);
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let heading = if name.contains("/charts/") {
+            "Chart"
+        } else {
+            "Diagram"
+        };
+        crate::types::chunk_words(path, text, heading, None, 800, 100, &mut seq, &mut chunks);
+    }
+
     // If all slides were empty/skipped, return fallback.
     if chunks.is_empty() {
         return Ok(fallback_chunk(path, filename));
     }
 
     Ok(chunks)
+}
+
+/// A chart (`ppt/charts/chartN.xml`) or SmartArt data-model (`ppt/diagrams/dataN.xml`) part?
+/// Only `dataN.xml` carries SmartArt node text; the `colorsN`/`layoutN`/`quickStyleN`/`drawingN`
+/// diagram parts are styling/layout (no user text) and are excluded.
+fn is_chart_or_diagram(name: &str) -> bool {
+    name.ends_with(".xml")
+        && (name.starts_with("ppt/charts/chart") || name.starts_with("ppt/diagrams/data"))
 }
 
 /// Extract numeric suffix from `ppt/slides/slideN.xml` entries.
@@ -453,6 +494,67 @@ mod tests {
             combined.contains("Presentation:"),
             "fallback text expected, got: {combined}"
         );
+    }
+
+    #[test]
+    fn pptx_extracts_chart_and_diagram_text() {
+        use zip::write::FileOptions;
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(cursor);
+        let opts = FileOptions::<()>::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("[Content_Types].xml", opts).unwrap();
+        zip.write_all(b"<?xml version=\"1.0\"?><Types/>").unwrap();
+        // One slide so parse_pptx doesn't fall back.
+        zip.start_file("ppt/slides/slide1.xml", opts).unwrap();
+        zip.write_all(b"<p:sld xmlns:a=\"a\" xmlns:p=\"p\"><a:t>Quarterly deck</a:t></p:sld>")
+            .unwrap();
+        // A chart part: title run + a data value.
+        zip.start_file("ppt/charts/chart1.xml", opts).unwrap();
+        zip.write_all(
+            b"<c:chart xmlns:c=\"c\" xmlns:a=\"a\"><c:title><a:t>Revenue by region</a:t>\
+              </c:title><c:v>42</c:v></c:chart>",
+        )
+        .unwrap();
+        // A SmartArt data model: node text.
+        zip.start_file("ppt/diagrams/data1.xml", opts).unwrap();
+        zip.write_all(
+            b"<dgm:dataModel xmlns:dgm=\"d\" xmlns:a=\"a\"><a:t>Plan</a:t><a:t>Build</a:t>\
+              <a:t>Ship</a:t></dgm:dataModel>",
+        )
+        .unwrap();
+        // A diagram *styling* part — must NOT be extracted (excluded by name; no user text anyway).
+        zip.start_file("ppt/diagrams/colors1.xml", opts).unwrap();
+        zip.write_all(
+            b"<dgm:colors xmlns:dgm=\"d\" xmlns:a=\"a\"><a:srgbClr val=\"FF0000\"/></dgm:colors>",
+        )
+        .unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("charts.pptx");
+        std::fs::write(&p, bytes).unwrap();
+
+        let ex = PresentationParser.parse(&p).unwrap();
+        let all: String = ex
+            .chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(all.contains("Revenue by region"), "chart title: {all}");
+        assert!(all.contains("42"), "chart data value: {all}");
+        assert!(
+            all.contains("Plan") && all.contains("Ship"),
+            "SmartArt node text: {all}"
+        );
+        let headings: String = ex
+            .chunks
+            .iter()
+            .map(|c| c.heading.as_str())
+            .collect::<Vec<_>>()
+            .join("|");
+        assert!(headings.contains("Chart"), "chart heading: {headings}");
+        assert!(headings.contains("Diagram"), "diagram heading: {headings}");
     }
 
     #[test]

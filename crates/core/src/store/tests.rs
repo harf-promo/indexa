@@ -1964,7 +1964,9 @@ fn blast_radius_strict_cuts_bare_transitive_hop() {
         ])
         .unwrap();
 
-    let fuzzy = store.blast_radius_resolved("target", 200, false).unwrap();
+    let fuzzy = store
+        .blast_radius_resolved("target", 200, false, 2)
+        .unwrap();
     assert!(fuzzy.files.contains(&"/a/mid.rs".to_string()));
     assert!(
         fuzzy.files.contains(&"/c/far.rs".to_string()),
@@ -1972,7 +1974,7 @@ fn blast_radius_strict_cuts_bare_transitive_hop() {
     );
     assert_eq!((fuzzy.direct, fuzzy.bare_transitive), (1, 1));
 
-    let strict = store.blast_radius_resolved("target", 200, true).unwrap();
+    let strict = store.blast_radius_resolved("target", 200, true, 2).unwrap();
     assert!(strict.files.contains(&"/a/mid.rs".to_string()));
     assert!(
         !strict.files.contains(&"/c/far.rs".to_string()),
@@ -2000,7 +2002,9 @@ fn blast_radius_scoped_resolution_filters_and_confirms_transitive_callers() {
         ])
         .unwrap();
 
-    let fuzzy = store.blast_radius_resolved("target", 200, false).unwrap();
+    let fuzzy = store
+        .blast_radius_resolved("target", 200, false, 2)
+        .unwrap();
     assert!(fuzzy.files.contains(&"/r/src/far/user.rs".to_string()));
     assert!(
         !fuzzy.files.contains(&"/q/src/local.rs".to_string()),
@@ -2009,12 +2013,84 @@ fn blast_radius_scoped_resolution_filters_and_confirms_transitive_callers() {
     assert!(fuzzy.files.contains(&"/z/noimp.rs".to_string()));
     assert_eq!((fuzzy.scoped_transitive, fuzzy.bare_transitive), (1, 1));
 
-    let strict = store.blast_radius_resolved("target", 200, true).unwrap();
+    let strict = store.blast_radius_resolved("target", 200, true, 2).unwrap();
     assert!(
         strict.files.contains(&"/r/src/far/user.rs".to_string()),
         "an import-confirmed transitive caller survives strict"
     );
     assert!(!strict.files.contains(&"/z/noimp.rs".to_string()));
+}
+
+#[test]
+fn blast_radius_depth_controls_transitive_reach() {
+    let mut store = Store::open_in_memory().unwrap();
+    // A reachability chain (all same dir, so each hop resolves cleanly):
+    //   a.rs calls target()  → direct
+    //   a.rs exports expA ; b.rs calls expA   → hop 2
+    //   b.rs exports expB ; c.rs calls expB   → hop 3
+    store
+        .upsert_edges(&[
+            edge("/p/a.rs", "calls", "target"),
+            edge("/p/a.rs", "defines", "expA"),
+            edge("/p/b.rs", "calls", "expA"),
+            edge("/p/b.rs", "defines", "expB"),
+            edge("/p/c.rs", "calls", "expB"),
+        ])
+        .unwrap();
+
+    // depth 1 = direct callers only.
+    let d1 = store
+        .blast_radius_resolved("target", 200, false, 1)
+        .unwrap();
+    assert_eq!(d1.files, vec!["/p/a.rs".to_string()]);
+    assert_eq!(d1.scoped_transitive + d1.bare_transitive, 0);
+
+    // depth 2 = direct + one transitive hop (reaches b.rs, not c.rs).
+    let d2 = store
+        .blast_radius_resolved("target", 200, false, 2)
+        .unwrap();
+    assert!(d2.files.contains(&"/p/a.rs".to_string()));
+    assert!(d2.files.contains(&"/p/b.rs".to_string()));
+    assert!(
+        !d2.files.contains(&"/p/c.rs".to_string()),
+        "c.rs is two hops out — excluded at depth 2"
+    );
+
+    // depth 3 = reaches c.rs through the chain.
+    let d3 = store
+        .blast_radius_resolved("target", 200, false, 3)
+        .unwrap();
+    assert!(
+        d3.files.contains(&"/p/c.rs".to_string()),
+        "depth 3 reaches the far end of the chain"
+    );
+}
+
+#[test]
+fn blast_radius_deep_terminates_on_cycle() {
+    let mut store = Store::open_in_memory().unwrap();
+    // A cycle through exported symbols: a.rs is the direct caller; a→b via expA, b→a via expB.
+    // A deep walk must visit each file once (included = visited set) and terminate.
+    store
+        .upsert_edges(&[
+            edge("/p/a.rs", "calls", "target"),
+            edge("/p/a.rs", "defines", "expA"),
+            edge("/p/b.rs", "calls", "expA"),
+            edge("/p/b.rs", "defines", "expB"),
+            edge("/p/a.rs", "calls", "expB"),
+        ])
+        .unwrap();
+    // A high depth must not loop forever.
+    let r = store
+        .blast_radius_resolved("target", 200, false, 5)
+        .unwrap();
+    assert!(r.files.contains(&"/p/a.rs".to_string()));
+    assert!(r.files.contains(&"/p/b.rs".to_string()));
+    assert_eq!(
+        r.files.len(),
+        2,
+        "each file visited once — no cycle re-entry"
+    );
 }
 
 #[test]
@@ -3357,7 +3433,7 @@ fn symbol_pin_narrows_who_calls_and_blast_radius() {
         .unwrap();
 
     // Unpinned: both callers are in the blast radius.
-    let br = store.blast_radius_resolved("parse", 100, false).unwrap();
+    let br = store.blast_radius_resolved("parse", 100, false, 2).unwrap();
     assert_eq!(br.direct, 2);
 
     // The user pins /other/tool.py as authoritative via the ledger.
@@ -3379,11 +3455,11 @@ fn symbol_pin_narrows_who_calls_and_blast_radius() {
 
     // Pinned: main.py's call import-resolves to /proj/lib (NOT the pin) → dropped;
     // the bare caller stays (no evidence either way) in non-strict mode.
-    let br = store.blast_radius_resolved("parse", 100, false).unwrap();
+    let br = store.blast_radius_resolved("parse", 100, false, 2).unwrap();
     assert_eq!(br.direct, 1, "import-resolved-elsewhere caller must drop");
     assert!(br.files.contains(&"/misc/script.py".to_owned()));
     // Strict also drops the bare caller.
-    let br = store.blast_radius_resolved("parse", 100, true).unwrap();
+    let br = store.blast_radius_resolved("parse", 100, true, 2).unwrap();
     assert_eq!(br.direct, 0);
 
     // who_calls resolves against the pinned definer only.
