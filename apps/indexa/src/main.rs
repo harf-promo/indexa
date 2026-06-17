@@ -230,6 +230,8 @@ async fn main() -> Result<()> {
             clipboard,
             strip_comments,
             no_redact,
+            changed_since,
+            category,
         } => {
             commands::cmd_export(
                 paths,
@@ -244,6 +246,8 @@ async fn main() -> Result<()> {
                 clipboard,
                 strip_comments,
                 no_redact,
+                changed_since,
+                category,
             )
             .await
         }

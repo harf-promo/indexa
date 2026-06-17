@@ -14,8 +14,8 @@ pub use eval::{
     QuestionMetrics,
 };
 pub use export::{
-    approx_tokens, build_tree, render_graph, render_json, render_markdown, render_signatures,
-    render_weights, render_xml,
+    approx_tokens, build_tree, prune_tree, render_graph, render_json, render_markdown,
+    render_signatures, render_weights, render_xml,
 };
 pub use indexa_core::config::HybridMode;
 pub use qa::{

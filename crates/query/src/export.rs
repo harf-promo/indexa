@@ -72,6 +72,45 @@ pub fn build_tree(
     Ok(Some(build_inner(store, record, root_depth, max_depth)?))
 }
 
+/// Prune an export tree to a relational slice: keep only files in `allow`, plus the
+/// directories on the path to them (so the kept files stay navigable). Backs
+/// `indexa export --changed-since` / `--category`.
+///
+/// Rules:
+/// - A **file** node is kept iff its path is in `allow`.
+/// - A **directory** node is kept iff at least one descendant is kept (its own children
+///   are pruned first). A directory whose path is itself in `allow` is also kept, so a
+///   directory-level match isn't dropped for lacking matching children.
+/// - Returns `None` when nothing under `node` survives (the caller skips that root).
+///
+/// Pure (no store access) and applied AFTER `build_tree`, so the render/redact/budget
+/// pipeline is unchanged — it just sees a smaller tree.
+pub fn prune_tree(
+    node: ExportNode,
+    allow: &std::collections::HashSet<String>,
+) -> Option<ExportNode> {
+    let kept_children: Vec<ExportNode> = node
+        .children
+        .into_iter()
+        .filter_map(|c| prune_tree(c, allow))
+        .collect();
+    let is_dir = node.record.kind == "dir";
+    let self_allowed = allow.contains(&node.record.path);
+    let keep = if is_dir {
+        !kept_children.is_empty() || self_allowed
+    } else {
+        self_allowed
+    };
+    if keep {
+        Some(ExportNode {
+            record: node.record,
+            children: kept_children,
+        })
+    } else {
+        None
+    }
+}
+
 /// Render the tree as XML (primary AI-context format). The `<index>` element carries an
 /// `approx_tokens` estimate of the body so a user can size it before pasting into an AI tool.
 pub fn render_xml(node: &ExportNode, generated_at: &str) -> String {
@@ -544,6 +583,51 @@ mod tests {
         assert!(render_markdown(&tree).contains("tokens (estimate"));
         assert!(approx_tokens("abcdefgh") == 2); // 8 chars / 4
         assert!(approx_tokens("") == 0);
+    }
+
+    #[test]
+    fn prune_tree_keeps_matched_file_and_its_ancestors() {
+        let allow = std::collections::HashSet::from(["/root/src/main.rs".to_owned()]);
+        let pruned = prune_tree(make_tree(), &allow).expect("root survives");
+        // /root kept → only /root/src kept (README.md dropped) → main.rs kept.
+        assert_eq!(pruned.record.path, "/root");
+        assert_eq!(pruned.children.len(), 1, "README.md sibling pruned");
+        let src = &pruned.children[0];
+        assert_eq!(src.record.path, "/root/src");
+        assert_eq!(src.children.len(), 1);
+        assert_eq!(src.children[0].record.path, "/root/src/main.rs");
+    }
+
+    #[test]
+    fn prune_tree_drops_directories_with_no_matched_descendant() {
+        let allow = std::collections::HashSet::from(["/root/README.md".to_owned()]);
+        let pruned = prune_tree(make_tree(), &allow).expect("root survives");
+        // Only README.md matches → the entire /root/src subtree is dropped.
+        assert_eq!(pruned.children.len(), 1);
+        assert_eq!(pruned.children[0].record.path, "/root/README.md");
+    }
+
+    #[test]
+    fn prune_tree_returns_none_when_nothing_matches() {
+        let allow = std::collections::HashSet::from(["/elsewhere/x.rs".to_owned()]);
+        assert!(prune_tree(make_tree(), &allow).is_none());
+        // Empty allow-set ⇒ nothing survives.
+        assert!(prune_tree(make_tree(), &std::collections::HashSet::new()).is_none());
+    }
+
+    #[test]
+    fn prune_tree_keeps_a_directory_matched_by_its_own_path() {
+        // A directory whose path is itself in the allow-set is kept even if none of its
+        // files match (a directory-level match isn't dropped for lacking matching children).
+        let allow = std::collections::HashSet::from(["/root/src".to_owned()]);
+        let pruned = prune_tree(make_tree(), &allow).expect("root survives");
+        assert_eq!(pruned.children.len(), 1);
+        let src = &pruned.children[0];
+        assert_eq!(src.record.path, "/root/src");
+        assert!(
+            src.children.is_empty(),
+            "main.rs (a non-matched file) is still pruned"
+        );
     }
 
     #[test]

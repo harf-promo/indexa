@@ -171,7 +171,15 @@ keeps Linux CI X11-free) + `--strip-comments`. Shared `finalize_export`/`ExportS
 `apps/indexa/src/commands/helpers.rs` (redact→budget→clipboard/file/stdout). **Recency boost (opt-in):**
 `[retrieval] recency_boost`/`recency_days` → `Store::boost_with_recency` in `qa.rs retrieve()` after
 `apply_archive_penalty` (positive twin; mtime-based, NOT git). Don't add a whole-repo "dump" mode — the
-retrieved-slice model is the moat (vs repomix/gitingest token bricks).
+retrieved-slice model is the moat (vs repomix/gitingest token bricks). **v0.58 ("sliced exports"):**
+relational slicing on CLI `export` — `--changed-since <7d|12h|90m|3600s>` (reuses
+`parse_reindex_interval` + new `Store::paths_modified_since`) and `--category <cat>` (reuses
+`Store::classifications_in_category`); both build an allow-set (`build_export_filter`, intersect when
+both given) and prune the built tree via the pure `prune_tree` in `export.rs` (file kept iff in the set;
+dir kept iff a descendant is — applied AFTER `build_tree`, render/redact/budget untouched). **Export
+honesty:** `cmd_export` now `bail!`s (stderr + non-zero exit) on no-index / no-summaries / empty-output
+instead of `println!`-to-stdout + `Ok(())` — a silent success used to write the notice INTO a piped
+file. Slicing is CLI-only for now (web `/api/export` + `pack export` not yet wired).
 
 **Remote sources (v0.32, "reach"):** `indexa pack add-url <pack> <url>` fetches a GitHub issue/PR (public
 API → Markdown) or web page (HTML→Markdown via `html2md`, `<script>`/`<style>` stripped) → caches a local
