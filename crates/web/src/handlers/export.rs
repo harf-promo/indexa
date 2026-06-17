@@ -25,6 +25,10 @@ pub(crate) struct ExportQuery {
     depth: Option<usize>,
     /// Emit a code-skeleton view (symbol signatures, bodies elided) instead of prose summaries.
     signatures: Option<bool>,
+    /// Relational slice: only files modified within this window (e.g. `7d`, `12h`, `90m`).
+    changed_since: Option<String>,
+    /// Relational slice: only files in this classification category (e.g. `code`, `document`).
+    category: Option<String>,
 }
 
 pub(crate) async fn api_export(
@@ -54,23 +58,40 @@ pub(crate) async fn api_export(
         );
     }
 
-    let now = SystemTime::now()
+    let now_secs: i64 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_else(|_| "0".to_owned());
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let now = now_secs.to_string();
 
     let fmt = params.format.as_deref().unwrap_or("xml");
     let signatures = params.signatures.unwrap_or(false);
+
+    // Relational slice (v0.60): same `--changed-since` / `--category` filters as CLI `export`,
+    // shared via `build_export_filter`. `None` ⇒ export everything; a bad duration → 400.
+    let allow = match indexa_query::build_export_filter(
+        &store,
+        params.changed_since.as_deref(),
+        params.category.as_deref(),
+        now_secs,
+    ) {
+        Ok(a) => a,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, format!("{e:#}")),
+    };
 
     let mut out_buf = String::new();
     for root_path in &roots {
         if signatures {
             match store.code_chunks_under(root_path, 0) {
-                Ok(chunks) if !chunks.is_empty() => {
-                    out_buf.push_str(&indexa_query::render_signatures(&chunks, fmt, true));
-                    out_buf.push('\n');
+                Ok(mut chunks) => {
+                    if let Some(a) = &allow {
+                        chunks.retain(|c| a.contains(&c.entry_path));
+                    }
+                    if !chunks.is_empty() {
+                        out_buf.push_str(&indexa_query::render_signatures(&chunks, fmt, true));
+                        out_buf.push('\n');
+                    }
                 }
-                Ok(_) => { /* no indexed code under this path — skip */ }
                 Err(e) => {
                     return err_json(
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -82,6 +103,14 @@ pub(crate) async fn api_export(
         }
         match indexa_query::build_tree(&store, root_path, params.depth) {
             Ok(Some(tree)) => {
+                // Apply the relational slice; skip a root that matched nothing.
+                let tree = match &allow {
+                    Some(a) => match indexa_query::prune_tree(tree, a) {
+                        Some(t) => t,
+                        None => continue,
+                    },
+                    None => tree,
+                };
                 let rendered = match fmt {
                     "md" | "markdown" => indexa_query::render_markdown(&tree),
                     "json" => indexa_query::render_json(&tree),
@@ -103,11 +132,14 @@ pub(crate) async fn api_export(
     }
 
     if out_buf.is_empty() {
-        return err_json(
-            StatusCode::NOT_FOUND,
+        let msg = if allow.is_some() {
+            "Nothing matched the export slice (changed_since / category). \
+             Widen the window/category or drop the filter."
+        } else {
             "No summaries found for the requested path(s). \
-             Run `indexa summarize <path>` first.",
-        );
+             Run `indexa summarize <path>` first."
+        };
+        return err_json(StatusCode::NOT_FOUND, msg);
     }
 
     // Scan exported content for secrets before it leaves the machine over HTTP.

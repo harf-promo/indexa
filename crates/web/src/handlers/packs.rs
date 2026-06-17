@@ -46,6 +46,10 @@ pub(crate) struct PathsBody {
 pub(crate) struct ExportQuery {
     format: Option<String>,
     depth: Option<usize>,
+    /// Relational slice: only files modified within this window (e.g. `7d`, `12h`, `90m`).
+    changed_since: Option<String>,
+    /// Relational slice: only files in this classification category (e.g. `code`, `document`).
+    category: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -183,13 +187,16 @@ pub(crate) async fn api_packs_export(
     Path(name): Path<String>,
     Query(q): Query<ExportQuery>,
 ) -> Response {
-    use indexa_query::{build_tree, render_json, render_markdown, render_xml};
+    use indexa_query::{
+        build_export_filter, build_tree, prune_tree, render_json, render_markdown, render_xml,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let now = SystemTime::now()
+    let now_secs: i64 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_else(|_| "0".to_owned());
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let now = now_secs.to_string();
 
     let format = q.format.as_deref().unwrap_or("xml");
     let depth = q.depth;
@@ -211,6 +218,17 @@ pub(crate) async fn api_packs_export(
         );
     }
 
+    // Relational slice (v0.60): same filters as CLI `pack export`, shared via build_export_filter.
+    let allow = match build_export_filter(
+        &store,
+        q.changed_since.as_deref(),
+        q.category.as_deref(),
+        now_secs,
+    ) {
+        Ok(a) => a,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, format!("{e:#}")),
+    };
+
     let is_xml = format != "md" && format != "markdown" && format != "json";
     let mut buf = String::new();
     if is_xml {
@@ -228,6 +246,14 @@ pub(crate) async fn api_packs_export(
             Ok(None) => continue,
             Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
         };
+        // Apply the relational slice; skip a path that matched nothing.
+        let tree = match &allow {
+            Some(a) => match prune_tree(tree, a) {
+                Some(t) => t,
+                None => continue,
+            },
+            None => tree,
+        };
         let rendered = match format {
             "md" | "markdown" => render_markdown(&tree),
             "json" => render_json(&tree),
@@ -242,13 +268,18 @@ pub(crate) async fn api_packs_export(
     }
 
     if exported == 0 {
-        return err_json(
-            StatusCode::UNPROCESSABLE_ENTITY,
+        let msg = if allow.is_some() {
+            format!(
+                "nothing in pack \"{name}\" matched the slice (changed_since / category) \
+                 — widen it or drop the filter"
+            )
+        } else {
             format!(
                 "no paths in pack \"{name}\" have summaries yet \
                  — run `indexa summarize <path>` first"
-            ),
-        );
+            )
+        };
+        return err_json(StatusCode::UNPROCESSABLE_ENTITY, msg);
     }
 
     let content_type = if format == "json" {

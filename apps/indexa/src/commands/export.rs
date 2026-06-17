@@ -1,11 +1,9 @@
 use anyhow::{bail, Result};
-use indexa_core::config::parse_reindex_interval;
 use indexa_core::store::Store;
 use indexa_query::{
-    build_tree, prune_tree, render_graph, render_json, render_markdown, render_signatures,
-    render_weights, render_xml,
+    build_export_filter, build_tree, prune_tree, render_graph, render_json, render_markdown,
+    render_signatures, render_weights, render_xml,
 };
-use std::collections::HashSet;
 
 use super::helpers::{finalize_export, index_db_path, ExportSink};
 
@@ -66,7 +64,7 @@ pub(crate) async fn cmd_export(
 
     // Relational slice (v0.58): restrict the export to files matching --changed-since and/or
     // --category. `None` ⇒ no filter (export everything); `Some(set)` ⇒ only these file paths.
-    let allow: Option<HashSet<String>> = build_export_filter(
+    let allow = build_export_filter(
         &store,
         changed_since.as_deref(),
         category.as_deref(),
@@ -158,47 +156,4 @@ pub(crate) async fn cmd_export(
             output,
         },
     )
-}
-
-/// Build the relational-slice allow-set for [`cmd_export`]. Returns `None` when no slice
-/// flag is given (export everything), or `Some(set)` of the file paths passing the
-/// filter(s). With both `--changed-since` and `--category`, the result is their
-/// intersection. Reuses [`parse_reindex_interval`] for the duration grammar (`7d`/`12h`/…)
-/// and the classifications table for categories — neither triggers a re-scan.
-fn build_export_filter(
-    store: &Store,
-    changed_since: Option<&str>,
-    category: Option<&str>,
-    now_secs: i64,
-) -> Result<Option<HashSet<String>>> {
-    let mut allow: Option<HashSet<String>> = None;
-
-    if let Some(dur) = changed_since {
-        let secs = parse_reindex_interval(dur).ok_or_else(|| {
-            anyhow::anyhow!(
-                "invalid --changed-since '{dur}': use a window like 7d, 12h, 90m, or 3600s"
-            )
-        })?;
-        let cutoff = now_secs - secs as i64;
-        let set: HashSet<String> = store.paths_modified_since(cutoff)?.into_iter().collect();
-        allow = Some(set);
-    }
-
-    if let Some(cat) = category {
-        // Skip `ignored` rows: a file the user explicitly dismissed from this category keeps
-        // its old `category` as a tombstone, but it must NOT be pulled into the slice — that
-        // would contradict the user's own judgment about what belongs.
-        let set: HashSet<String> = store
-            .classifications_in_category(cat, 0)?
-            .into_iter()
-            .filter(|c| c.source != "ignored")
-            .map(|c| c.path)
-            .collect();
-        allow = Some(match allow {
-            Some(prev) => prev.intersection(&set).cloned().collect(),
-            None => set,
-        });
-    }
-
-    Ok(allow)
 }

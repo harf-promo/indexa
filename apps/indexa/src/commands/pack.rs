@@ -3,7 +3,9 @@ use indexa_core::{
     config::{Config, HybridMode},
     store::Store,
 };
-use indexa_query::{build_tree, render_json, render_markdown, render_xml};
+use indexa_query::{
+    build_export_filter, build_tree, prune_tree, render_json, render_markdown, render_xml,
+};
 
 use super::helpers::{
     build_embedder, finalize_export, index_db_path, require_index_db, ExportSink,
@@ -265,6 +267,8 @@ pub(crate) async fn cmd_pack_export(
     clipboard: bool,
     strip_comments: bool,
     no_redact: bool,
+    changed_since: Option<String>,
+    category: Option<String>,
 ) -> Result<()> {
     // Like `indexa export`, a pack export must produce a valid artifact or fail loudly — never
     // a silent stdout notice that gets written into a piped file with a zero exit.
@@ -282,6 +286,15 @@ pub(crate) async fn cmd_pack_export(
     }
 
     let now = now_str();
+    // Relational slice (v0.60): same `--changed-since` / `--category` filters as `indexa export`,
+    // shared via `build_export_filter`. `None` ⇒ export the whole pack.
+    let now_secs: i64 = now.parse().unwrap_or(0);
+    let allow = build_export_filter(
+        &store,
+        changed_since.as_deref(),
+        category.as_deref(),
+        now_secs,
+    )?;
     let mut out_buf = String::new();
     let is_xml = format != "md" && format != "markdown" && format != "json";
 
@@ -298,9 +311,12 @@ pub(crate) async fn cmd_pack_export(
     for root_path in &paths {
         if signatures {
             // Code-skeleton view (reads chunks; works without summaries).
-            let chunks = store.code_chunks_under(root_path, 0)?;
+            let mut chunks = store.code_chunks_under(root_path, 0)?;
+            if let Some(a) = &allow {
+                chunks.retain(|c| a.contains(&c.entry_path));
+            }
             if chunks.is_empty() {
-                eprintln!("  \u{26a0} No indexed code under {root_path} — run `indexa deep {root_path}` first.");
+                eprintln!("  \u{26a0} No indexed code under {root_path} matched — run `indexa deep {root_path}` first, or widen the slice.");
                 continue;
             }
             out_buf.push_str(&indexa_query::render_signatures(
@@ -319,6 +335,15 @@ pub(crate) async fn cmd_pack_export(
                  — run `indexa summarize {root_path}` first."
             );
             continue;
+        };
+        // Apply the relational slice: prune to matched files + their ancestors; skip a path
+        // with no match.
+        let tree = match &allow {
+            Some(a) => match prune_tree(tree, a) {
+                Some(t) => t,
+                None => continue,
+            },
+            None => tree,
         };
         let rendered = match format.as_str() {
             "md" | "markdown" => render_markdown(&tree),
@@ -343,6 +368,12 @@ pub(crate) async fn cmd_pack_export(
     }
 
     if exported == 0 {
+        if allow.is_some() {
+            bail!(
+                "Nothing in pack \"{name}\" matched the slice (--changed-since / --category). \
+                 Widen the window/category or drop the filter."
+            );
+        }
         let hint = if signatures {
             "have indexed code yet. Run `indexa deep <path>` first."
         } else {

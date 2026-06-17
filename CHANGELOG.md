@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.60.0] — 2026-06-17
+
+Sliced exports, everywhere: the `--changed-since` / `--category` filters now work on every export surface, not just `indexa export`.
+
+### Added
+
+- **`indexa pack export --changed-since <window>` / `--category <name>`** — the relational slice
+  from v0.58 now applies to pack exports too (e.g. export just the code in a pack, or just what
+  changed this week).
+- **Web export slicing** — `GET /api/export` and `GET /api/packs/:name/export` accept
+  `changed_since` and `category` query params, and the web workspace's Export menu gains two
+  optional "changed since" / "category" fields so it's usable from the UI, not just the API.
+- The shared filter is now `indexa_query::build_export_filter` (lifted out of the CLI), so all four
+  export surfaces — CLI `export`, CLI `pack export`, web `/api/export`, web pack export — slice
+  identically and stay in sync.
+
+### Changed
+
+- A web export whose slice matched nothing returns `404` (or `422` for packs) with a clear
+  "widen the slice" message instead of an empty `200` — the same honesty guard the CLI already has.
+
 ## [0.59.0] — 2026-06-17
 
 See the savings: every answer now shows how much smaller the served context was than the source it drew on.

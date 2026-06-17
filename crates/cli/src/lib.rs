@@ -882,6 +882,14 @@ pub enum PackAction {
         /// Do NOT scan the export for secrets before output (redaction is on by default).
         #[arg(long)]
         no_redact: bool,
+        /// Relational slice: export only pack files modified within this window (e.g. `7d`,
+        /// `12h`, `90m`, `3600s`). Uses the index's recorded mtimes — no re-scan.
+        #[arg(long, value_name = "DUR")]
+        changed_since: Option<String>,
+        /// Relational slice: export only pack files in this classification category
+        /// (e.g. `code`, `document`, `media`, `work`). Combine with `--changed-since` to intersect.
+        #[arg(long, value_name = "CAT")]
+        category: Option<String>,
     },
     /// Rename a pack.
     Rename {

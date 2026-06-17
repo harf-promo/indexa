@@ -179,7 +179,12 @@ both given) and prune the built tree via the pure `prune_tree` in `export.rs` (f
 dir kept iff a descendant is — applied AFTER `build_tree`, render/redact/budget untouched). **Export
 honesty:** `cmd_export` now `bail!`s (stderr + non-zero exit) on no-index / no-summaries / empty-output
 instead of `println!`-to-stdout + `Ok(())` — a silent success used to write the notice INTO a piped
-file. Slicing is CLI-only for now (web `/api/export` + `pack export` not yet wired).
+file. **v0.60 ("sliced exports everywhere"):** `build_export_filter` was LIFTED into
+`indexa_query` (pub, single source of truth) and the `--changed-since`/`--category` slice now
+reaches ALL FOUR export surfaces — CLI `export`, CLI `pack export`, web `GET /api/export`, web
+`GET /api/packs/:name/export` (filters as query params) — plus two optional "changed since" /
+"category" fields in the web Export menu (`05-summary.js doExport`). Empty slice → loud failure
+everywhere (CLI bail / web 404|422), never a silent empty artifact.
 
 **Per-Ask impact readout (v0.59, "see the savings"):** every `ask` surfaces the concrete
 "retrieve the slice" win for that answer. `crates/query/src/impact.rs` — `AnswerImpact
