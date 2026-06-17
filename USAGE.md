@@ -145,7 +145,7 @@ Global flag (all commands): `--config <PATH>` overrides the default config locat
 | `completion <shell>` | — | Print a shell-completion script (`bash`/`zsh`/`fish`/…). |
 | `status` | `--unknown`, `--deep`, `--json` | Index stats (+ token-savings by tool); `--deep` adds a coverage health report; `--unknown` lists top unclassified extensions. |
 | `rm <paths…>` | `-r/--recursive` | Remove paths from the index (files on disk are untouched). |
-| `doctor` | `--profile`, `--files N`, `--chunks N` | Machine specs, per-model memory fit, ETA estimates, Ollama env checks. |
+| `doctor` | `--profile`, `--files N`, `--chunks N`, `--latency` | Machine specs, per-model memory fit, ETA estimates, Ollama env checks. `--latency` times a tiny embed + generate to catch a slow Ollama. |
 | `fingerprint` | `--paths` | Detect installed software / project types by file-pattern signatures. |
 | `classify` | `--paths`, `--category <cat>` | Suggest a semantic category (work/personal/archive/media/code/system) per folder. |
 | `report [questions…]` | `--saved NAME`, `--format <md\|xml>`, `--output FILE` | Run several `ask` questions and render one cited document (TOC + answers + sources). |

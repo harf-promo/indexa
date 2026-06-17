@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.62.0] — 2026-06-18
+
+Catch a slow Ollama before it stalls an index.
+
+### Added
+
+- **`indexa doctor --latency`** — times a tiny embed + generate against Ollama and reports each
+  (e.g. `embedding (nomic-embed-text): 820 ms · generation (gemma3:4b): 3800 ms`), warning when
+  either is slow. `doctor` already confirmed the models were *pulled*; this catches the case where
+  they're present but the server is overloaded, swapping, or a slow/remote host — so you find out in
+  one second instead of ten minutes into an index. Opt-in (it loads the models); plain `indexa doctor`
+  stays token-free and now points to the flag.
+
 ## [0.61.0] — 2026-06-17
 
 Maintainer-facing internals cleanup — no behavior change.
