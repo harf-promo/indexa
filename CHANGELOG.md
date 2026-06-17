@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.61.0] — 2026-06-17
+
+Maintainer-facing internals cleanup — no behavior change.
+
+### Changed
+
+- **Split the 1,326-line `jobs_exec.rs` into focused modules.** The web background-job executor is
+  now `jobs_exec/{mod, watchdog, deep}.rs`: the 680-line `run_deep_phase` (the parse → chunk → embed
+  loop with caption / transcribe / OCR / video sub-passes) and the memory watchdog each live in their
+  own file, leaving the orchestration + scan/summarize phases in `mod.rs`. A pure module move (no logic
+  change) — verified by the unchanged test suite, clippy, and an end-to-end `index` run exercising the
+  full scan → deep → summarize pipeline through the split code.
+
 ## [0.60.0] — 2026-06-17
 
 Sliced exports, everywhere: the `--changed-since` / `--category` filters now work on every export surface, not just `indexa export`.
