@@ -220,6 +220,11 @@ function renderSummary(d) {
     '<button role="menuitem" data-export="xml">XML <span class="export-hint">for Claude / Cursor</span></button>' +
     '<button role="menuitem" data-export="md">Markdown</button>' +
     '<button role="menuitem" data-export="json">JSON</button>' +
+    // Optional relational slice — leave blank to export everything. Applied to the chosen format above.
+    '<div class="export-slice">' +
+    '<input id="export-since" class="export-slice-in" placeholder="changed since — e.g. 7d, 12h" aria-label="Export only files changed within this window (e.g. 7d, 12h, 90m)">' +
+    '<input id="export-cat" class="export-slice-in" placeholder="category — e.g. code" aria-label="Export only files in this classification category">' +
+    '</div>' +
     '</div></div>';
 
   return crumbHtml +
@@ -267,6 +272,11 @@ function doExport(path, format) {
     return;
   }
   var url = '/api/export?format=' + encodeURIComponent(format) + '&path=' + encodeURIComponent(path);
+  // Optional relational slice (v0.60): append the filters when the user filled them in.
+  var since = (document.getElementById('export-since') || {}).value;
+  var cat = (document.getElementById('export-cat') || {}).value;
+  if (since && since.trim()) url += '&changed_since=' + encodeURIComponent(since.trim());
+  if (cat && cat.trim()) url += '&category=' + encodeURIComponent(cat.trim());
   window.open(url, '_blank');
   document.querySelectorAll('.export-menu').forEach(function(m) { m.hidden = true; });
 }

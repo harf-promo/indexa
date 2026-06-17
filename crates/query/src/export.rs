@@ -5,9 +5,11 @@
 //! (<https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/use-xml-tags>)
 
 use anyhow::{Context, Result};
+use indexa_core::config::parse_reindex_interval;
 use indexa_core::store::{
     abstract_from, ChunkRecord, CodeGraph, Store, SummaryRecord, WeightRecord,
 };
+use std::collections::HashSet;
 use std::path::Path;
 
 /// Rough token estimate for a rendered string: ~4 chars per token (the common heuristic
@@ -109,6 +111,51 @@ pub fn prune_tree(
     } else {
         None
     }
+}
+
+/// Build the relational-slice allow-set shared by every export surface (CLI `export` /
+/// `pack export`, web `/api/export` / `/api/packs/:name/export`). Returns `None` when no slice
+/// flag is given (export everything), or `Some(set)` of the file paths passing the filter(s).
+/// With both `changed_since` and `category`, the result is their intersection. Reuses
+/// [`parse_reindex_interval`] for the duration grammar (`7d`/`12h`/…) and the classifications
+/// table for categories — neither triggers a re-scan. The caller applies the set via
+/// [`prune_tree`] (summary trees) or by retaining chunks whose `entry_path` is in it (signatures).
+pub fn build_export_filter(
+    store: &Store,
+    changed_since: Option<&str>,
+    category: Option<&str>,
+    now_secs: i64,
+) -> Result<Option<HashSet<String>>> {
+    let mut allow: Option<HashSet<String>> = None;
+
+    if let Some(dur) = changed_since {
+        let secs = parse_reindex_interval(dur).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid --changed-since '{dur}': use a window like 7d, 12h, 90m, or 3600s"
+            )
+        })?;
+        let cutoff = now_secs - secs as i64;
+        let set: HashSet<String> = store.paths_modified_since(cutoff)?.into_iter().collect();
+        allow = Some(set);
+    }
+
+    if let Some(cat) = category {
+        // Skip `ignored` rows: a file the user explicitly dismissed from this category keeps
+        // its old `category` as a tombstone, but it must NOT be pulled into the slice — that
+        // would contradict the user's own judgment about what belongs.
+        let set: HashSet<String> = store
+            .classifications_in_category(cat, 0)?
+            .into_iter()
+            .filter(|c| c.source != "ignored")
+            .map(|c| c.path)
+            .collect();
+        allow = Some(match allow {
+            Some(prev) => prev.intersection(&set).cloned().collect(),
+            None => set,
+        });
+    }
+
+    Ok(allow)
 }
 
 /// Render the tree as XML (primary AI-context format). The `<index>` element carries an
@@ -628,6 +675,70 @@ mod tests {
             src.children.is_empty(),
             "main.rs (a non-matched file) is still pruned"
         );
+    }
+
+    fn file_entry(path: &str, mtime_secs: u64) -> indexa_core::walker::Entry {
+        indexa_core::walker::Entry {
+            path: std::path::PathBuf::from(path),
+            kind: indexa_core::walker::EntryKind::File,
+            size: 100,
+            modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime_secs)),
+            hint: None,
+        }
+    }
+
+    #[test]
+    fn build_export_filter_recency_category_and_intersection() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                file_entry("/r/new.rs", 1000),
+                file_entry("/r/old.rs", 100),
+                file_entry("/r/doc.md", 1000),
+                file_entry("/r/ign.rs", 1000),
+            ])
+            .unwrap();
+        store.confirm_classification("/r/new.rs", "code").unwrap();
+        store.confirm_classification("/r/old.rs", "code").unwrap();
+        store
+            .confirm_classification("/r/doc.md", "document")
+            .unwrap();
+        // A file the user explicitly dismissed from "code": keeps the tombstone category but
+        // must NOT appear in a --category code slice.
+        store.confirm_classification("/r/ign.rs", "code").unwrap();
+        store.ignore_classification("/r/ign.rs").unwrap();
+
+        // No flags → no filter.
+        assert!(build_export_filter(&store, None, None, 2000)
+            .unwrap()
+            .is_none());
+        // Bad duration → error (before touching the store).
+        assert!(build_export_filter(&store, Some("7x"), None, 2000).is_err());
+
+        // changed-since 1500s, now=2000 → cutoff 500 → mtime≥500 keeps new.rs/doc.md/ign.rs, drops old.rs.
+        let recent = build_export_filter(&store, Some("1500s"), None, 2000)
+            .unwrap()
+            .unwrap();
+        assert!(recent.contains("/r/new.rs") && recent.contains("/r/doc.md"));
+        assert!(!recent.contains("/r/old.rs"));
+
+        // category code → new.rs + old.rs; doc.md (document) and ign.rs (ignored) excluded.
+        let code = build_export_filter(&store, None, Some("code"), 2000)
+            .unwrap()
+            .unwrap();
+        assert!(code.contains("/r/new.rs") && code.contains("/r/old.rs"));
+        assert!(
+            !code.contains("/r/ign.rs"),
+            "dismissed (ignored) classification must not slice in"
+        );
+        assert!(!code.contains("/r/doc.md"));
+
+        // Intersection: code AND recent → only new.rs (old.rs is code but stale; doc.md recent but not code).
+        let both = build_export_filter(&store, Some("1500s"), Some("code"), 2000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(both.len(), 1);
+        assert!(both.contains("/r/new.rs"));
     }
 
     #[test]

@@ -358,6 +358,8 @@
 .export-menu button:last-child { border-bottom: none; }
 .export-menu button:hover { background: var(--surface-2); }
 .export-hint { font-size: 11px; color: var(--muted); margin-left: 4px; }
+.export-slice { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-top: 1px solid var(--border); }
+.export-slice-in { font-size: 11px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--fg); }
 
 /* ── Smart label (classification) chip ── */
 .classify-chip-wrap {
