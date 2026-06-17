@@ -15,4 +15,9 @@ Task-focused recipes. For the conceptual overview start with the
 - **[Tune Indexa for a small machine](tune-for-a-small-machine.md)** — keep an 8–16 GB laptop
   responsive while it builds context.
 
+For contributors:
+
+- **[Add an MCP tool](add-an-mcp-tool.md)** — where tools live (router modules, not `lib.rs`),
+  the `#[tool]` pattern, and the golden-list / doc-count contract.
+
 When something misbehaves, see [Troubleshooting](../TROUBLESHOOTING.md) (doctor-first triage).

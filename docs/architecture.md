@@ -126,7 +126,7 @@ so the future is `Send` (required by the axum web server and the rmcp MCP server
                  → Answer { answer: String, sources: Vec<SourceCitation> }
 ```
 
-Files: [`crates/query/src/qa.rs`](../crates/query/src/qa.rs) · [`crates/query/src/rerank.rs`](../crates/query/src/rerank.rs) · [`crates/core/src/store/`](../crates/core/src/store/) · [`crates/llm/src/lib.rs`](../crates/llm/src/lib.rs)
+Files: [`crates/query/src/qa/`](../crates/query/src/qa/) · [`crates/query/src/rerank.rs`](../crates/query/src/rerank.rs) · [`crates/core/src/store/`](../crates/core/src/store/) · [`crates/llm/src/lib.rs`](../crates/llm/src/lib.rs)
 
 ---
 
@@ -204,10 +204,10 @@ slots into one of these seams:
 |---|---|---|
 | Support a new file format | `crates/parsers/` | any existing parser + register it in `registry.rs` (or ship it out-of-tree via the Plugin SDK) |
 | Add an embedding/LLM provider | `crates/embed/` / `crates/llm/` | the Ollama adapter; keep `reqwest` on `rustls-tls` (cross-compile invariant) |
-| Add a store table or query | `crates/core/src/store/` | one file per concern (`weights.rs`, `classify.rs`, …); DDL + migration in `schema.rs` (manual `sqlite_master` detection + IMMEDIATE tx — no `user_version`); invariant tests in `store/tests.rs` |
+| Add a store table or query | `crates/core/src/store/` | one file per concern (`weights.rs`, `classify.rs`, …); DDL + migration in `schema.rs` (manual `sqlite_master` detection + IMMEDIATE tx — no `user_version`); invariant tests under `store/tests/` (one file per concern; fixtures in `tests/mod.rs`) |
 | Add a CLI command | `apps/indexa/src/commands/` | one file per command, wire in `main.rs` |
 | Add a web endpoint | `crates/web/src/handlers/` | one handler module per feature; **new JS/CSS files must be appended to the `include_str!` concat in `crates/web/src/lib.rs` or they are silently dead** |
-| Add an MCP tool | `crates/mcp/src/lib.rs` | `#[tool(description = …)]` method; each tool opens its own `Store`; update the tool-count in README/CLAUDE.md (CI checks it) |
+| Add an MCP tool | a router module under `crates/mcp/src/` (`retrieval.rs` / `graph.rs` / `curation.rs` / `packs.rs` / `review.rs` / `insights.rs` / `admin.rs` / `query_extras.rs`) — **not** `lib.rs` | add a `#[tool(description = …)]` method to the family's `#[tool_router(...)]` `impl IndexaMcp` block; open the index with `self.store()?`; routers compose with `+` in `tool_router()` (lib.rs) automatically. Then `INDEXA_UPDATE_GOLDEN=1 cargo test -p indexa-mcp`, commit `golden_tools.txt`, and bump the count in README/CLAUDE.md. Full guide: [how-to/add-an-mcp-tool.md](how-to/add-an-mcp-tool.md) |
 
 Two store rules that are easy to violate accidentally:
 

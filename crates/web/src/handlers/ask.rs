@@ -7,6 +7,7 @@ use axum::{
     },
     Json,
 };
+use indexa_core::config::RetrievalConfig;
 use indexa_core::store::{AnnIndex, Store};
 use indexa_query::{AnswerChunk, QaConfig};
 use std::convert::Infallible;
@@ -25,23 +26,28 @@ use crate::AppState;
 /// means "whole index", so it's filtered out (an empty prefix would otherwise match nothing
 /// meaningful and only adds a no-op LIKE).
 fn qa_config(state: &AppState, body: &AskRequest) -> QaConfig {
+    qa_config_from(&state.config.retrieval, body.scope.as_deref())
+}
+
+/// Pure field mapping from the server's [`RetrievalConfig`] + the request scope to a
+/// [`QaConfig`]. Split out of [`qa_config`] (which only adds the `AppState` lookup) so the
+/// mapping and the scope normalization are unit-testable without building a full `AppState`.
+fn qa_config_from(r: &RetrievalConfig, scope: Option<&str>) -> QaConfig {
     QaConfig {
-        top_k: state.config.retrieval.top_k,
-        mode: state.config.retrieval.hybrid.clone(),
-        context_budget: state.config.retrieval.context_budget,
-        rrf_k: state.config.retrieval.rrf_k as f32,
-        summary_weight: state.config.retrieval.summary_weight,
-        summary_depth_alpha: state.config.retrieval.summary_depth_alpha,
-        rerank: state.config.retrieval.rerank,
-        rerank_backend: state.config.retrieval.rerank_backend.clone(),
-        use_weights: state.config.retrieval.use_weights,
-        use_recency_weight: state.config.retrieval.recency_boost,
-        recency_days: state.config.retrieval.recency_days,
-        max_steps: state.config.retrieval.agentic_max_steps,
-        mmr_lambda: state.config.retrieval.mmr_lambda,
-        scope: body
-            .scope
-            .as_deref()
+        top_k: r.top_k,
+        mode: r.hybrid.clone(),
+        context_budget: r.context_budget,
+        rrf_k: r.rrf_k as f32,
+        summary_weight: r.summary_weight,
+        summary_depth_alpha: r.summary_depth_alpha,
+        rerank: r.rerank,
+        rerank_backend: r.rerank_backend.clone(),
+        use_weights: r.use_weights,
+        use_recency_weight: r.recency_boost,
+        recency_days: r.recency_days,
+        max_steps: r.agentic_max_steps,
+        mmr_lambda: r.mmr_lambda,
+        scope: scope
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_owned),
@@ -51,7 +57,12 @@ fn qa_config(state: &AppState, body: &AskRequest) -> QaConfig {
 /// Whether agentic retrieval is requested for this call: the request's `agentic` flag,
 /// or the server's `[retrieval] agentic` default when unset.
 fn agentic_requested(state: &AppState, body: &AskRequest) -> bool {
-    body.agentic.unwrap_or(state.config.retrieval.agentic)
+    agentic_from(&state.config.retrieval, body.agentic)
+}
+
+/// Pure twin of [`agentic_requested`]: the per-request flag overrides the server default.
+fn agentic_from(r: &RetrievalConfig, requested: Option<bool>) -> bool {
+    requested.unwrap_or(r.agentic)
 }
 
 /// Lazily build (and cache) the ANN index for dense retrieval, or return `None` to use the
@@ -356,4 +367,80 @@ fn into_ask_confidence(c: Option<&indexa_query::ConfidenceReport>) -> Option<Ask
         level: c.level.as_str(),
         basis: c.basis.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{agentic_from, qa_config_from};
+    use indexa_core::config::RetrievalConfig;
+
+    #[test]
+    fn agentic_flag_overrides_server_default_both_ways() {
+        // Request flag wins regardless of the server default.
+        let off = RetrievalConfig {
+            agentic: false,
+            ..Default::default()
+        };
+        assert!(
+            agentic_from(&off, Some(true)),
+            "explicit true overrides default-off"
+        );
+        let on = RetrievalConfig {
+            agentic: true,
+            ..Default::default()
+        };
+        assert!(
+            !agentic_from(&on, Some(false)),
+            "explicit false overrides default-on"
+        );
+    }
+
+    #[test]
+    fn agentic_unset_falls_back_to_server_default() {
+        let on = RetrievalConfig {
+            agentic: true,
+            ..Default::default()
+        };
+        assert!(agentic_from(&on, None), "None ⇒ server default (on)");
+        let off = RetrievalConfig {
+            agentic: false,
+            ..Default::default()
+        };
+        assert!(!agentic_from(&off, None), "None ⇒ server default (off)");
+    }
+
+    #[test]
+    fn qa_config_blank_scope_becomes_none() {
+        let r = RetrievalConfig::default();
+        // Empty string and whitespace both mean "whole index" → no scope filter.
+        assert!(qa_config_from(&r, None).scope.is_none());
+        assert!(qa_config_from(&r, Some("")).scope.is_none());
+        assert!(qa_config_from(&r, Some("   ")).scope.is_none());
+        // A real path is kept, trimmed of surrounding whitespace.
+        assert_eq!(
+            qa_config_from(&r, Some("  /src/auth  ")).scope.as_deref(),
+            Some("/src/auth")
+        );
+    }
+
+    #[test]
+    fn qa_config_carries_server_retrieval_settings() {
+        let r = RetrievalConfig {
+            top_k: 17,
+            context_budget: 1234,
+            recency_boost: true,  // maps to QaConfig.use_recency_weight
+            agentic_max_steps: 4, // maps to QaConfig.max_steps
+            mmr_lambda: 0.25,
+            ..Default::default()
+        };
+        let cfg = qa_config_from(&r, None);
+        assert_eq!(cfg.top_k, 17);
+        assert_eq!(cfg.context_budget, 1234);
+        assert!(
+            cfg.use_recency_weight,
+            "recency_boost maps to use_recency_weight"
+        );
+        assert_eq!(cfg.max_steps, 4, "agentic_max_steps maps to max_steps");
+        assert_eq!(cfg.mmr_lambda, 0.25);
+    }
 }

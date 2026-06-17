@@ -93,6 +93,7 @@ Full DCO text: https://developercertificate.org/
 - [ ] All commits have `Signed-off-by:`
 - [ ] PR description explains *what* and *why* (not just what the diff shows)
 - [ ] New public API has doc comments; new behaviour has at least one test
+- [ ] If you touched `apps/indexa-desktop/`: `cargo build --manifest-path apps/indexa-desktop/Cargo.toml` passes and `Cargo.lock` is committed
 
 ---
 
@@ -120,6 +121,37 @@ Full DCO text: https://developercertificate.org/
 1. Implement the `Parser` trait in `crates/parsers/src/`.
 2. Register it in `crates/parsers/src/registry.rs`.
 3. Add a test with a sample file in `crates/parsers/tests/fixtures/`.
+
+---
+
+## Adding an MCP tool
+
+Tools are methods on `IndexaMcp`, grouped into router modules under `crates/mcp/src/` — **not**
+defined in `lib.rs`. See the step-by-step guide:
+[docs/how-to/add-an-mcp-tool.md](docs/how-to/add-an-mcp-tool.md). In short: add a
+`#[tool(description = …)]` method to the right router module, then
+`INDEXA_UPDATE_GOLDEN=1 cargo test -p indexa-mcp`, commit `golden_tools.txt`, and bump the tool
+count in `README.md` / `CLAUDE.md` (a contract test enforces both).
+
+---
+
+## Continuous integration
+
+Every pull request to `main` must pass these checks before it can merge:
+
+- **`fmt + clippy + test`** on Ubuntu, macOS, and Windows.
+- **`License and advisory check`** (`cargo-deny`).
+- **`DCO sign-off check`**.
+- **`web smoke (headless Chrome)`** — boots `indexa serve` and exercises the UI.
+- **`desktop build (macOS)`** — the Tauri app is **excluded from `cargo --workspace`** (its
+  webkit deps aren't on the Linux CI runners), so it has its own job. If you touch
+  `apps/indexa-desktop/`, build it locally first:
+
+  ```bash
+  cargo build --manifest-path apps/indexa-desktop/Cargo.toml
+  ```
+
+  Keep `apps/indexa-desktop/Cargo.lock` committed and current (the CI builds `--locked`).
 
 ---
 

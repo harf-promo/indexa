@@ -52,7 +52,7 @@ per-file importance weights. [1]
 
 Sources:
   [1] docs/config.md — Configuration Reference > Retrieval
-  [2] crates/query/src/qa.rs — retrieve
+  [2] crates/query/src/qa/retrieve.rs — retrieve
 confidence: medium — 12 moderate matches
 ```
 

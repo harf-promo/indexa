@@ -1,3 +1,13 @@
+//! `indexa-cli` — the **declarative** command-line surface: the clap [`Parser`] /
+//! [`Subcommand`] tree that defines every `indexa <cmd>` and its flags.
+//!
+//! This crate is intentionally thin — it only parses arguments. The behaviour for each
+//! command lives in `apps/indexa/src/commands/` (one file per command), which matches on
+//! the [`Commands`] enum produced here. Keep argument/flag definitions in this file and
+//! command logic out of it.
+//!
+//! See `docs/architecture.md` for the surface layering.
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]

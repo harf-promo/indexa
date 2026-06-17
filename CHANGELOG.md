@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.57.0] — 2026-06-17
+
+A maintainer on-ramp: the codebase is easier to read and contribute to, with **no change to behaviour** (every existing test still passes, unchanged).
+
+### Changed
+
+- **The 2,377-line Q&A pipeline is split into focused modules.** `crates/query/src/qa.rs` is now
+  `qa/{confidence, mmr, retrieve, explain, synthesize, agentic}.rs` (+ `mod.rs` for the shared types
+  and the public re-exports). The `qa::` public API is byte-identical — a pure file move with
+  `pub(crate)` visibility, proven by the unchanged test suite.
+- **The 3,535-line store test file is split by concern.** `crates/core/src/store/tests.rs` is now
+  `store/tests/` — one file per concern (basics, queue, packs, weights, insights, graph, scoped
+  resolution, entry cleanup, decisions, usage, incremental) with shared fixtures in `tests/mod.rs`.
+  All 132 tests preserved.
+- **The web `ask` retrieval-config mapping is extracted to pure functions** (`qa_config_from` /
+  `agentic_from`), so it can be unit-tested without constructing a full server `AppState`.
+
+### Added
+
+- **Contributor docs.** A new [how-to: add an MCP tool](docs/how-to/add-an-mcp-tool.md) (tools live in
+  router modules, **not** `lib.rs`), a [web-UI assets README](crates/web/assets/ui/README.md)
+  documenting the `include_str!` concat-order convention, `//!` module headers on `indexa-core` and
+  `indexa-cli`, and a CONTRIBUTING section on adding an MCP tool plus the CI / desktop-build gate.
+- **More unit tests** — `apply_mmr` no-op edge cases (fewer than two candidates; no embeddings) and the
+  web `ask` config-mapping (scope normalization, agentic flag precedence).
+
+### Fixed
+
+- **Corrected the contributor map in `docs/architecture.md`.** The "Add an MCP tool" row pointed at
+  `crates/mcp/src/lib.rs` and `#[tool]`; tools are actually defined across eight router modules and
+  composed with `+` in `tool_router()`. The "store table" row now points at the new `store/tests/`
+  layout.
+
 ## [0.56.0] — 2026-06-17
 
 A flawless first run: no silent model wall, no dead buttons.
