@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.52.0] — 2026-06-17
+
+The update window now respects your history.
+
+### Changed
+
+- **The update window shows every version you're getting, not just the newest.** When the desktop app
+  updates across several releases (e.g. 0.49 → 0.52), the changelog modal now lists each in-between version's
+  notes — assembled from the release-tagged `CHANGELOG.md`, newest first — instead of only the latest section.
+  `latest.json` can't do this on its own: it's baked at release time and doesn't know which version you're
+  coming from, so only the app assembles the span. It fails open — if the changelog can't be fetched, it
+  falls back to the single newest section, so an update is never blocked. (The assembling code runs in the
+  app *doing* the updating, so this takes effect for updates **from 0.52 onward** — the jump to 0.52 itself
+  still shows only 0.52's notes.) No new dependencies; reuses the existing rustls HTTP client.
+
 ## [0.51.0] — 2026-06-16
 
 UX polish from the experience audit. (Several audited items — job-warning badges, model-role chips, the
