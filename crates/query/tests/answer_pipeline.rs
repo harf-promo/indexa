@@ -14,7 +14,7 @@ use indexa_core::config::HybridMode;
 use indexa_core::store::{ChunkRecord, Store};
 use indexa_embed::Embedder;
 use indexa_llm::Generator;
-use indexa_query::{answer, QaConfig};
+use indexa_query::{answer, answer_with_ann_history, PriorTurn, QaConfig};
 
 const DIM: usize = 4;
 
@@ -165,4 +165,139 @@ async fn dense_mode_retrieves_by_embedding() {
         .unwrap();
     assert_eq!(ans.answer, "matched");
     assert!(ans.sources.iter().any(|s| s.path.contains("/vec.md")));
+}
+
+// ── Conversational Ask (history threading) ─────────────────────────────────
+
+/// With prior turns, the pipeline rewrites the follow-up (1 LLM call) then synthesizes
+/// (1 LLM call) → exactly 2 generate calls, and embeds the rewritten query once. With no
+/// history the rewrite is skipped entirely (1 generate, the single-shot fast path).
+#[tokio::test]
+async fn history_triggers_one_rewrite_then_synthesis() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = build_index(
+        dir.path(),
+        &[(
+            "/a.md",
+            0,
+            "ferris the crab loves rust",
+            Some(vec![0.5; DIM]),
+        )],
+    );
+    let cfg = QaConfig {
+        mode: HybridMode::Rrf,
+        rerank: false,
+        ..QaConfig::default()
+    };
+
+    // No history → one synthesis call only.
+    let embed0 = Arc::new(AtomicUsize::new(0));
+    let gen0 = Arc::new(AtomicUsize::new(0));
+    let ans0 = answer_with_ann_history(
+        &path,
+        &StubEmbedder {
+            calls: embed0.clone(),
+        },
+        &StubGenerator {
+            reply: "rust answer".to_owned(),
+            calls: gen0.clone(),
+        },
+        "what is rust",
+        &cfg,
+        None,
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(ans0.answer, "rust answer");
+    assert_eq!(
+        gen0.load(Ordering::SeqCst),
+        1,
+        "no history ⇒ no rewrite call"
+    );
+    assert_eq!(embed0.load(Ordering::SeqCst), 1);
+
+    // With history → rewrite + synthesis = two generate calls.
+    let embed1 = Arc::new(AtomicUsize::new(0));
+    let gen1 = Arc::new(AtomicUsize::new(0));
+    let history = vec![PriorTurn {
+        question: "tell me about ferris".to_owned(),
+        answer: "ferris is the rust mascot".to_owned(),
+    }];
+    let ans1 = answer_with_ann_history(
+        &path,
+        &StubEmbedder {
+            calls: embed1.clone(),
+        },
+        &StubGenerator {
+            reply: "rust answer".to_owned(),
+            calls: gen1.clone(),
+        },
+        "and what does it love?",
+        &cfg,
+        None,
+        &history,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ans1.answer, "rust answer");
+    assert_eq!(
+        gen1.load(Ordering::SeqCst),
+        2,
+        "history ⇒ one rewrite + one synthesis"
+    );
+    assert_eq!(
+        embed1.load(Ordering::SeqCst),
+        1,
+        "rewritten query embedded once"
+    );
+}
+
+/// A multi-turn synthesis whose model output runs on into a fabricated next turn is still
+/// trimmed (the in-prompt Q:/A: transcript makes this MORE likely, not less).
+#[tokio::test]
+async fn history_answer_trims_hallucinated_continuation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = build_index(
+        dir.path(),
+        &[(
+            "/a.md",
+            0,
+            "ferris the crab loves rust",
+            Some(vec![0.5; DIM]),
+        )],
+    );
+    let cfg = QaConfig {
+        mode: HybridMode::Rrf,
+        rerank: false,
+        ..QaConfig::default()
+    };
+    let history = vec![PriorTurn {
+        question: "what is ferris".to_owned(),
+        answer: "the rust mascot".to_owned(),
+    }];
+    // The rewrite call also returns this string, but clean_rewrite takes the first line
+    // ("Ferris loves rust.") as the standalone query — harmless for retrieval.
+    let llm = StubGenerator {
+        reply: "Ferris loves rust.\nQUESTION: invented follow-up?\nANSWER: nope".to_owned(),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let ans = answer_with_ann_history(
+        &path,
+        &StubEmbedder {
+            calls: Arc::new(AtomicUsize::new(0)),
+        },
+        &llm,
+        "does it love rust?",
+        &cfg,
+        None,
+        &history,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ans.answer, "Ferris loves rust.");
+    assert!(
+        !ans.answer.contains("invented"),
+        "hallucinated turn must be trimmed"
+    );
 }

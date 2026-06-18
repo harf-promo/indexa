@@ -1,0 +1,42 @@
+/* ── Conversational Ask + structured answers (v0.64) ── */
+
+/* Markdown tables rendered inside chat answer bubbles (renderMarkdown). */
+.bubble .chat-table {
+  border-collapse: collapse;
+  margin: 10px 0;
+  width: 100%;
+  font-size: 13px;
+}
+.bubble .chat-table th,
+.bubble .chat-table td {
+  border: 1px solid var(--border);
+  padding: 5px 9px;
+  text-align: left;
+  vertical-align: top;
+}
+.bubble .chat-table thead th {
+  background: var(--bg-subtle, rgba(127, 127, 127, 0.10));
+  font-weight: 600;
+}
+.bubble .chat-table tbody tr:nth-child(even) td {
+  background: rgba(127, 127, 127, 0.05);
+}
+
+/* "＋ New" conversation button in the Ask input bar — quiet until hovered. */
+#new-convo {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  white-space: nowrap;
+}
+#new-convo:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* Heuristic coverage-gap hint under an answer's confidence line. */
+.ask-uncovered {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}

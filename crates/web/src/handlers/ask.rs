@@ -9,7 +9,7 @@ use axum::{
 };
 use indexa_core::config::RetrievalConfig;
 use indexa_core::store::{AnnIndex, Store};
-use indexa_query::{served_bytes, AnswerChunk, AnswerImpact, QaConfig};
+use indexa_query::{served_bytes, AnswerChunk, AnswerImpact, PriorTurn, QaConfig};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -149,42 +149,55 @@ pub(crate) async fn api_ask(
     let qa_cfg = qa_config(&state, &body);
     let agentic = agentic_requested(&state, &body);
     let ann = ensure_ann(&state).await;
+    // Conversational Ask: load this session's recent turns (empty for a stateless ask).
+    let history = load_history(
+        &state.db_path,
+        body.session_id.as_deref(),
+        qa_cfg.scope.as_deref(),
+    );
 
     // Single shared, Send-safe pipeline (embed → scoped retrieve → optional
-    // rerank → synthesize). `answer_with_ann` opens its own short-lived read connection
-    // from `db_path`, so we don't hold the shared store mutex across the LLM
+    // rerank → synthesize). `answer_with_ann_history` opens its own short-lived read
+    // connection from `db_path`, so we don't hold the shared store mutex across the LLM
     // round-trips. Empty-hit short-circuit lives inside it. Agentic mode runs the
     // bounded plan→search→refine loop first (progress isn't surfaced on this buffered
     // endpoint — the SSE endpoint streams the per-hop steps).
     let result = if agentic {
-        indexa_query::answer_agentic(
+        indexa_query::answer_agentic_history(
             &state.db_path,
             state.embedder.as_ref(),
             state.llm.as_ref(),
             &body.question,
             &qa_cfg,
+            &history,
             &mut |_step, _query| {},
         )
         .await
     } else {
-        indexa_query::answer_with_ann(
+        indexa_query::answer_with_ann_history(
             &state.db_path,
             state.embedder.as_ref(),
             state.llm.as_ref(),
             &body.question,
             &qa_cfg,
             ann.as_deref(),
+            &history,
         )
         .await
     };
     match result {
         Ok(answer) => {
             let impact = into_ask_impact(record_ask_usage(&state.db_path, &answer));
+            // Persist this turn (best-effort) and echo the session id back.
+            if let Some(id) = body.session_id.as_deref() {
+                append_turn_best_effort(&state.db_path, id, &body.question, &answer);
+            }
             Json(AskResponse {
                 confidence: into_ask_confidence(answer.confidence.as_ref()),
                 answer: answer.answer,
                 sources: answer.sources.into_iter().map(into_ask_source).collect(),
                 impact,
+                session_id: body.session_id,
             })
             .into_response()
         }
@@ -216,6 +229,74 @@ fn record_ask_usage(
         tracing::debug!("usage telemetry skipped: {e:#}");
     }
     Some(AnswerImpact::new(served, counterfactual))
+}
+
+/// How many recent turns of a conversation to fold into the prompt. Small by design —
+/// the per-turn budget clamp in the qa pipeline trims further if they don't fit.
+const HISTORY_TURNS: usize = 6;
+
+/// Conversational Ask: ensure the session row exists and load its recent turns as
+/// [`PriorTurn`]s for the qa pipeline. Sync (own short-lived connection, dropped before any
+/// `.await`) and fail-open — a store error just yields no history (a stateless ask). `None`
+/// session_id ⇒ empty, the single-shot default.
+fn load_history(
+    db_path: &std::path::Path,
+    session_id: Option<&str>,
+    scope: Option<&str>,
+) -> Vec<PriorTurn> {
+    let Some(id) = session_id else {
+        return Vec::new();
+    };
+    let mut s = match Store::open(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!("conversation history skipped: {e:#}");
+            return Vec::new();
+        }
+    };
+    if let Err(e) = s.ensure_session(id, scope) {
+        tracing::debug!("ensure_session skipped: {e:#}");
+        return Vec::new();
+    }
+    s.recent_turns(id, HISTORY_TURNS)
+        .map(|turns| {
+            turns
+                .into_iter()
+                .map(|t| PriorTurn {
+                    question: t.question,
+                    answer: t.answer,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Persist a completed turn, best-effort (a failure must never fail the user's answer).
+/// Serializes the citations to the `sources_json` column the store keeps opaque.
+fn append_turn_best_effort(
+    db_path: &std::path::Path,
+    session_id: &str,
+    question: &str,
+    answer: &indexa_query::Answer,
+) {
+    let sources_json = serde_json::to_string(
+        &answer
+            .sources
+            .iter()
+            .map(|s| {
+                serde_json::json!({ "path": s.path, "heading": s.heading, "snippet": s.snippet })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".to_owned());
+    match Store::open(db_path) {
+        Ok(mut s) => {
+            if let Err(e) = s.append_turn(session_id, question, &answer.answer, &sources_json) {
+                tracing::debug!("append_turn skipped: {e:#}");
+            }
+        }
+        Err(e) => tracing::debug!("append_turn skipped: {e:#}"),
+    }
 }
 
 /// Map an [`AnswerImpact`] to the wire DTO, but only when it's worth showing (cited files
@@ -252,6 +333,9 @@ pub(crate) async fn api_ask_stream(
     let embedder = state.embedder.clone();
     let llm = state.llm.clone();
     let question = body.question;
+    let session_id = body.session_id;
+    // Conversational Ask: recent turns folded into the prompt (empty for a stateless ask).
+    let history = load_history(&db_path, session_id.as_deref(), qa_cfg.scope.as_deref());
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
 
@@ -276,24 +360,26 @@ pub(crate) async fn api_ask_stream(
         // Agentic mode streams per-hop `step` events (from the plan→search→refine loop)
         // before the synthesized answer; one-shot mode goes straight to sources+fragments.
         let result = if agentic {
-            indexa_query::answer_agentic_stream(
+            indexa_query::answer_agentic_stream_history(
                 &db_path,
                 embedder.as_ref(),
                 llm.as_ref(),
                 &question,
                 &qa_cfg,
                 ann.as_deref(),
+                &history,
                 &mut on_chunk,
             )
             .await
         } else {
-            indexa_query::answer_stream_with_ann(
+            indexa_query::answer_stream_with_ann_history(
                 &db_path,
                 embedder.as_ref(),
                 llm.as_ref(),
                 &question,
                 &qa_cfg,
                 ann.as_deref(),
+                &history,
                 &mut on_chunk,
             )
             .await
@@ -302,6 +388,10 @@ pub(crate) async fn api_ask_stream(
         let terminal = match result {
             Ok(answer) => {
                 let impact = into_ask_impact(record_ask_usage(&db_path, &answer));
+                // Persist this turn (best-effort) and echo the session id on `done`.
+                if let Some(id) = session_id.as_deref() {
+                    append_turn_best_effort(&db_path, id, &question, &answer);
+                }
                 // Confidence + impact ride the terminal `done` event (both belong to the whole
                 // answer). Additive: each absent on the no-match path and on older servers, so
                 // clients must tolerate either field missing.
@@ -322,6 +412,9 @@ pub(crate) async fn api_ask_stream(
                             "saved_percent": i.saved_percent,
                         }),
                     );
+                }
+                if let Some(id) = &session_id {
+                    done.insert("session_id".into(), serde_json::json!(id));
                 }
                 serde_json::Value::Object(done)
             }
@@ -396,6 +489,7 @@ fn into_ask_confidence(c: Option<&indexa_query::ConfidenceReport>) -> Option<Ask
     c.map(|c| AskConfidence {
         level: c.level.as_str(),
         basis: c.basis.clone(),
+        uncovered: c.uncovered.clone(),
     })
 }
 

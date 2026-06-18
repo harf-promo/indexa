@@ -9,7 +9,7 @@ use rmcp::{
 use serde::Deserialize;
 
 use indexa_core::{config::HybridMode, store::Store};
-use indexa_query::QaConfig;
+use indexa_query::{PriorTurn, QaConfig};
 
 use crate::{
     mcp_err, ok_text, parse_hybrid_mode, path_within_roots, record_usage, IndexaMcp, READ_FILE_CAP,
@@ -92,6 +92,13 @@ pub struct AskParams {
     /// Reranker backend when `rerank` is true: `"llm"` (default) or `"cross-encoder"`.
     #[serde(default)]
     pub rerank_backend: Option<String>,
+    /// Conversational Ask: an opaque conversation id. Pass the SAME id across calls to make
+    /// a multi-turn conversation — the server folds the session's recent turns into the
+    /// prompt, rewrites the follow-up into a standalone query, and records this turn. Omit
+    /// for a stateless single-shot answer (the default). Generate any stable string (e.g. a
+    /// UUID) per conversation.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[tool_router(router = router_retrieval, vis = "pub(crate)")]
@@ -322,6 +329,7 @@ impl IndexaMcp {
             agentic,
             rerank,
             rerank_backend,
+            session_id,
         } = params.0;
         let agentic = agentic.unwrap_or(self.config.retrieval.agentic);
         let cfg = QaConfig {
@@ -345,36 +353,46 @@ impl IndexaMcp {
             mmr_lambda: self.config.retrieval.mmr_lambda,
         };
 
+        // Conversational Ask: when a session id is given, load its recent turns (fail-open;
+        // empty for a stateless ask) so the pipeline can rewrite the follow-up + fold context.
+        let history =
+            load_session_history(&self.db_path, session_id.as_deref(), cfg.scope.as_deref());
+
         // Single shared, Send-safe pipeline (embed → scoped retrieve → optional
-        // rerank → synthesize). `answer` opens its own short-lived read connection
-        // from `db_path`; the empty-hit short-circuit lives inside it. Agentic mode
-        // adds a bounded plan→search→refine loop before synthesis and records the
-        // queries it ran so the agent can see how the answer was gathered.
+        // rerank → synthesize). The `_history` entry points open their own short-lived read
+        // connection from `db_path`; the empty-hit short-circuit lives inside. Agentic mode
+        // adds a bounded plan→search→refine loop before synthesis and records the queries it
+        // ran so the agent can see how the answer was gathered.
         let mut steps: Vec<String> = Vec::new();
         let answer = if agentic {
-            indexa_query::answer_agentic(
+            indexa_query::answer_agentic_history(
                 &self.db_path,
                 self.embedder.as_ref(),
                 self.llm.as_ref(),
                 &question,
                 &cfg,
+                &history,
                 &mut |_step, query| steps.push(query.to_owned()),
             )
             .await
             .map_err(mcp_err)?
         } else {
-            indexa_query::answer(
+            indexa_query::answer_with_ann_history(
                 &self.db_path,
                 self.embedder.as_ref(),
                 self.llm.as_ref(),
                 &question,
                 &cfg,
+                None,
+                &history,
             )
             .await
             .map_err(mcp_err)?
         };
 
-        let mut out = answer.answer;
+        // Clone for the decorated tool output; the original `answer` is kept whole so the
+        // persisted turn stores the clean answer text (without the Sources/Confidence footer).
+        let mut out = answer.answer.clone();
         if !answer.sources.is_empty() {
             out.push_str("\n\nSources:\n");
             for s in &answer.sources {
@@ -391,12 +409,26 @@ impl IndexaMcp {
         // Absent for the no-match short-circuit, whose message stands on its own.
         if let Some(c) = &answer.confidence {
             out.push_str(&format!("\nConfidence: {} ({})\n", c.level, c.basis));
+            // Heuristic coverage gap: question terms absent from every cited source.
+            if let Some(gaps) = c.uncovered.as_ref().filter(|g| !g.is_empty()) {
+                out.push_str(&format!("Possibly uncovered: {}\n", gaps.join(", ")));
+            }
+        }
+        // Conversational Ask: tell the agent which id to reuse to continue the conversation.
+        if let Some(id) = &session_id {
+            out.push_str(&format!(
+                "\nConversation: {id} (pass the same session_id to follow up)\n"
+            ));
         }
 
         if let Ok(mut store) = Store::open(&self.db_path) {
             let paths: Vec<&str> = answer.sources.iter().map(|s| s.path.as_str()).collect();
             let counterfactual = store.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
             record_usage(&mut store, "ask", out.len(), counterfactual);
+            // Persist the turn (best-effort; never fails the answer).
+            if let Some(id) = &session_id {
+                append_session_turn(&mut store, id, &question, &answer);
+            }
         }
 
         Ok(ok_text(out))
@@ -445,4 +477,57 @@ impl IndexaMcp {
 
         Ok(ok_text(body))
     }
+}
+
+/// How many recent turns of a conversation to fold into an MCP `ask` (matches the web surface).
+const ASK_HISTORY_TURNS: usize = 6;
+
+/// Load a conversation's recent turns for the qa pipeline (fail-open: any error ⇒ no history,
+/// i.e. a stateless answer). `None` session_id ⇒ empty.
+fn load_session_history(
+    db_path: &std::path::Path,
+    session_id: Option<&str>,
+    scope: Option<&str>,
+) -> Vec<PriorTurn> {
+    let Some(id) = session_id else {
+        return Vec::new();
+    };
+    let Ok(mut store) = Store::open(db_path) else {
+        return Vec::new();
+    };
+    if store.ensure_session(id, scope).is_err() {
+        return Vec::new();
+    }
+    store
+        .recent_turns(id, ASK_HISTORY_TURNS)
+        .map(|turns| {
+            turns
+                .into_iter()
+                .map(|t| PriorTurn {
+                    question: t.question,
+                    answer: t.answer,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Persist a completed turn, best-effort (serializes citations to the opaque `sources_json`).
+fn append_session_turn(
+    store: &mut Store,
+    session_id: &str,
+    question: &str,
+    answer: &indexa_query::Answer,
+) {
+    let sources_json = serde_json::to_string(
+        &answer
+            .sources
+            .iter()
+            .map(|s| {
+                serde_json::json!({ "path": s.path, "heading": s.heading, "snippet": s.snippet })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".to_owned());
+    let _ = store.append_turn(session_id, question, &answer.answer, &sources_json);
 }

@@ -12,8 +12,11 @@ use indexa_llm::Generator;
 
 use super::confidence::confidence_for;
 use super::retrieve::{build_project_overview, is_broad_intent, retrieve};
-use super::synthesize::{build_prompt, no_match_answer, pack_context, synthesize_from_hits};
-use super::{Answer, AnswerChunk, QaConfig};
+use super::rewrite::resolve_search_query;
+use super::synthesize::{
+    build_prompt, no_match_answer, pack_context, split_history_budget, synthesize_from_hits,
+};
+use super::{Answer, AnswerChunk, PriorTurn, QaConfig};
 
 /// Hard cap on agentic retrieval hops, regardless of `cfg.max_steps`. Each hop is
 /// one retrieval + (except the last) one "decide" LLM call, so this bounds latency.
@@ -44,12 +47,30 @@ pub async fn answer_agentic(
     cfg: &QaConfig,
     on_step: &mut (dyn FnMut(usize, &str) + Send),
 ) -> Result<Answer> {
-    let (hits, overview) =
-        agentic_retrieve(db_path, embedder, llm, question, cfg, None, on_step).await?;
+    answer_agentic_history(db_path, embedder, llm, question, cfg, &[], on_step).await
+}
+
+/// [`answer_agentic`] with prior conversation turns (Conversational Ask). The follow-up
+/// is rewritten into a standalone query for the first hop, and the turns are folded into
+/// the synthesis prompt. `history = &[]` ⇒ identical to [`answer_agentic`].
+#[allow(clippy::too_many_arguments)]
+pub async fn answer_agentic_history(
+    db_path: &Path,
+    embedder: &dyn Embedder,
+    llm: &dyn Generator,
+    question: &str,
+    cfg: &QaConfig,
+    history: &[PriorTurn],
+    on_step: &mut (dyn FnMut(usize, &str) + Send),
+) -> Result<Answer> {
+    let (hits, overview) = agentic_retrieve(
+        db_path, embedder, llm, question, cfg, None, history, on_step,
+    )
+    .await?;
     if hits.is_empty() {
         return Ok(no_match_answer(question));
     }
-    synthesize_from_hits(hits, overview, llm, question, cfg).await
+    synthesize_from_hits(hits, overview, llm, question, cfg, history).await
 }
 
 /// Streaming agentic Q&A: the [`answer_agentic`] hop loop, then a streamed synthesis.
@@ -67,12 +88,38 @@ pub async fn answer_agentic_stream(
     ann: Option<&AnnIndex>,
     on_chunk: &mut (dyn FnMut(AnswerChunk) + Send),
 ) -> Result<Answer> {
+    answer_agentic_stream_history(db_path, embedder, llm, question, cfg, ann, &[], on_chunk).await
+}
+
+/// [`answer_agentic_stream`] with prior conversation turns (Conversational Ask).
+/// `history = &[]` ⇒ identical to [`answer_agentic_stream`].
+#[allow(clippy::too_many_arguments)]
+pub async fn answer_agentic_stream_history(
+    db_path: &Path,
+    embedder: &dyn Embedder,
+    llm: &dyn Generator,
+    question: &str,
+    cfg: &QaConfig,
+    ann: Option<&AnnIndex>,
+    history: &[PriorTurn],
+    on_chunk: &mut (dyn FnMut(AnswerChunk) + Send),
+) -> Result<Answer> {
     // Hop loop — each hop surfaces a Step chunk. The on_step closure's borrow of
     // on_chunk is confined to this block so on_chunk is free for synthesis below.
     let (hits, overview) = {
         let mut on_step =
             |step: usize, query: &str| on_chunk(AnswerChunk::Step(step, query.to_owned()));
-        agentic_retrieve(db_path, embedder, llm, question, cfg, ann, &mut on_step).await?
+        agentic_retrieve(
+            db_path,
+            embedder,
+            llm,
+            question,
+            cfg,
+            ann,
+            history,
+            &mut on_step,
+        )
+        .await?
     };
 
     if hits.is_empty() {
@@ -83,11 +130,12 @@ pub async fn answer_agentic_stream(
     }
 
     // Confidence is a property of the retrieval pool, fixed before synthesis.
-    let confidence = confidence_for(&hits, cfg);
-    let (context, sources) = pack_context(&hits, &overview, cfg.context_budget);
+    let confidence = confidence_for(&hits, cfg, question);
+    let (history_block, chunk_budget) = split_history_budget(history, cfg.context_budget);
+    let (context, sources) = pack_context(&hits, &overview, chunk_budget);
     on_chunk(AnswerChunk::Sources(sources.clone()));
 
-    let prompt = build_prompt(question, &context);
+    let prompt = build_prompt(question, &context, &history_block);
     let mut full = String::new();
     {
         let mut on_frag = |frag: String| {
@@ -109,6 +157,7 @@ pub async fn answer_agentic_stream(
 /// apply on every hop (a follow-up never leaks outside the requested scope). The
 /// `&Store` is opened and dropped inside a sync block each hop so the future stays
 /// `Send` (required by the MCP/web servers).
+#[allow(clippy::too_many_arguments)]
 async fn agentic_retrieve(
     db_path: &Path,
     embedder: &dyn Embedder,
@@ -116,13 +165,16 @@ async fn agentic_retrieve(
     question: &str,
     cfg: &QaConfig,
     ann: Option<&AnnIndex>,
+    history: &[PriorTurn],
     on_step: &mut (dyn FnMut(usize, &str) + Send),
 ) -> Result<(Vec<SearchHit>, String)> {
     let max_steps = cfg.max_steps.clamp(1, AGENTIC_MAX_STEPS_CAP);
     let mut pool: Vec<SearchHit> = Vec::new();
     let mut seen_chunks: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut seen_queries: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut current = question.to_owned();
+    // Conversational: the first hop searches the standalone-rewritten follow-up (history-gated,
+    // fail-open). Subsequent hops are driven by the model's own SEARCH: follow-ups as before.
+    let mut current = resolve_search_query(llm, question, history).await;
 
     for step in 0..max_steps {
         on_step(step + 1, &current);

@@ -11,8 +11,10 @@
 //!   rels graph, so they're emitted deck-level. Embedded OLE objects and the chart/diagram
 //!   styling parts (`colorsN`/`layoutN`/`styleN`) are still skipped.
 //! - Slide-master / slide-layout placeholder text is intentionally skipped (template boilerplate).
-//! - Speaker-note ↔ slide mapping uses ordinal position, not the rels graph; when notes
-//!   are sparse the association can be off-by-one. Tracked as future work.
+//! - Speaker-note ↔ slide mapping follows the rels graph
+//!   (`ppt/slides/_rels/slideN.xml.rels` → `notesSlideM.xml`), so it's correct even when
+//!   only some slides have notes. Files lacking a rels part fall back to ordinal position
+//!   only when notes and slides are 1:1 (otherwise no note is attached, never a wrong one).
 //! - `.ppt` (legacy OLE compound binary) and Apple iWork `.key`/`.pages`/`.numbers` are
 //!   NOT handled here. `.ppt` is claimed by `OfficeParser` which returns a quiet stub.
 
@@ -139,11 +141,16 @@ fn parse_pptx(path: &Path, filename: &str) -> anyhow::Result<Vec<Chunk>> {
                 if s.len() <= 80 {
                     s.to_owned()
                 } else {
-                    // Truncate at last space within 80 chars.
-                    s[..80]
-                        .rfind(' ')
-                        .map(|i| s[..i].to_owned())
-                        .unwrap_or_else(|| s[..80].to_owned())
+                    // Truncate near 80, preferring the last space — but only on a UTF-8 char
+                    // boundary, so a multibyte glyph straddling byte 80 never panics.
+                    let mut end = 80;
+                    while end > 0 && !s.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    let head = &s[..end];
+                    head.rfind(' ')
+                        .map(|i| head[..i].to_owned())
+                        .unwrap_or_else(|| head.to_owned())
                 }
             })
             .unwrap_or_default();
@@ -154,15 +161,26 @@ fn parse_pptx(path: &Path, filename: &str) -> anyhow::Result<Vec<Chunk>> {
             format!("Slide {slide_num}: {title}")
         };
 
-        // Try to find matching speaker notes by ordinal position (not rels).
-        // notes_indices is sorted; find the same-position entry if it exists.
+        // Map this slide to its speaker-notes part via the rels graph
+        // (`ppt/slides/_rels/slideN.xml.rels` → `notesSlideM.xml`), which is correct even
+        // when notes are sparse. Fall back to ordinal position ONLY when notes and slides
+        // are 1:1 (the count matches), where ordinal is safe; otherwise no note.
         let notes_text: Option<String> = {
-            // notes_indices are 1-based entry numbers in order; slide_num's ordinal
-            // position in slide_indices determines which note entry to use.
-            let slide_ordinal = slide_indices.iter().position(|&s| s == *slide_num);
-            let note_num = slide_ordinal
-                .and_then(|pos| notes_indices.get(pos))
-                .copied();
+            let rels_entry = format!("ppt/slides/_rels/slide{slide_num}.xml.rels");
+            let note_num = read_zip_text(&mut archive, &rels_entry)
+                .as_deref()
+                .and_then(notes_target_from_rels)
+                .or_else(|| {
+                    if notes_indices.len() == slide_indices.len() {
+                        slide_indices
+                            .iter()
+                            .position(|&s| s == *slide_num)
+                            .and_then(|pos| notes_indices.get(pos))
+                            .copied()
+                    } else {
+                        None
+                    }
+                });
 
             if let Some(n) = note_num {
                 let notes_entry = format!("ppt/notesSlides/notesSlide{n}.xml");
@@ -273,6 +291,33 @@ fn notes_index(name: &str) -> Option<u32> {
     base.strip_suffix(".xml")?.parse::<u32>().ok()
 }
 
+/// Read a zip entry to a UTF-8 string (best-effort; `None` if absent/unreadable).
+fn read_zip_text(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Option<String> {
+    let mut xml = String::new();
+    archive
+        .by_name(name)
+        .ok()
+        .and_then(|mut e| e.read_to_string(&mut xml).ok())?;
+    Some(xml)
+}
+
+/// Parse a slide's `.rels` XML for its notesSlide target number — the `M` in a
+/// `Target="../notesSlides/notesSlideM.xml"` relationship. Scans for `notesSlide`
+/// immediately followed by digits (the folder token `notesSlides` is followed by `s`,
+/// so it's skipped). Returns the first match, or `None` if the slide has no notes rel.
+fn notes_target_from_rels(rels_xml: &str) -> Option<u32> {
+    let mut rest = rels_xml;
+    while let Some(pos) = rest.find("notesSlide") {
+        let after = &rest[pos + "notesSlide".len()..];
+        let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            return digits.parse::<u32>().ok();
+        }
+        rest = after;
+    }
+    None
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -318,6 +363,19 @@ mod tests {
                 zip.start_file(format!("ppt/notesSlides/notesSlide{num}.xml"), opts)
                     .unwrap();
                 zip.write_all(notes_xml.as_bytes()).unwrap();
+
+                // Slide → notes rels (matches a real PPTX), so the rels-based mapping path
+                // is what the tests exercise.
+                let rels = format!(
+                    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+                       <Relationship Id=\"rId1\" \
+                         Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide\" \
+                         Target=\"../notesSlides/notesSlide{num}.xml\"/>\
+                     </Relationships>"
+                );
+                zip.start_file(format!("ppt/slides/_rels/slide{num}.xml.rels"), opts)
+                    .unwrap();
+                zip.write_all(rels.as_bytes()).unwrap();
             }
         }
 
@@ -555,6 +613,82 @@ mod tests {
             .join("|");
         assert!(headings.contains("Chart"), "chart heading: {headings}");
         assert!(headings.contains("Diagram"), "diagram heading: {headings}");
+    }
+
+    #[test]
+    fn pptx_long_multibyte_title_does_not_panic() {
+        // A >80-byte first line whose codepoint straddles byte 80 (em-dashes are 3 bytes).
+        // The title-truncation must slice on a char boundary, never panic.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("mb.pptx");
+        let long = "Quarterly review ".to_string() + &"— section ".repeat(12);
+        std::fs::write(&p, build_pptx(&[(1, &long, None)])).unwrap();
+        let ex = PresentationParser.parse(&p).unwrap(); // must not panic
+        assert!(!ex.chunks.is_empty());
+    }
+
+    #[test]
+    fn notes_target_from_rels_extracts_number() {
+        let rels = "<Relationships><Relationship Type=\"…/notesSlide\" \
+                    Target=\"../notesSlides/notesSlide3.xml\"/></Relationships>";
+        assert_eq!(notes_target_from_rels(rels), Some(3));
+        // The folder token `notesSlides` (followed by `/`) must not be mistaken for a target.
+        assert_eq!(notes_target_from_rels("just notesSlides/ here"), None);
+        assert_eq!(notes_target_from_rels("<Relationships/>"), None);
+    }
+
+    #[test]
+    fn pptx_sparse_notes_map_to_correct_slide_via_rels() {
+        // Only the SECOND slide has a note, stored as notesSlide1.xml and linked by slide2's
+        // rels. The old ordinal mapping would mis-attach it to slide 1 (off-by-one); the rels
+        // mapping must attach it to slide 2 and leave slide 1 note-free.
+        use zip::write::FileOptions;
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(cursor);
+        let opts = FileOptions::<()>::default().compression_method(zip::CompressionMethod::Stored);
+        let body = |t: &str| {
+            format!(
+                "<p:sld xmlns:a=\"a\" xmlns:p=\"p\"><p:txBody><a:p><a:r><a:t>{t}</a:t>\
+                     </a:r></a:p></p:txBody></p:sld>"
+            )
+        };
+        zip.start_file("[Content_Types].xml", opts).unwrap();
+        zip.write_all(b"<?xml version=\"1.0\"?><Types/>").unwrap();
+        zip.start_file("ppt/slides/slide1.xml", opts).unwrap();
+        zip.write_all(body("First slide alpha").as_bytes()).unwrap();
+        zip.start_file("ppt/slides/slide2.xml", opts).unwrap();
+        zip.write_all(body("Second slide beta").as_bytes()).unwrap();
+        // The single note (stored as notesSlide1.xml) belongs to slide 2.
+        zip.start_file("ppt/notesSlides/notesSlide1.xml", opts)
+            .unwrap();
+        zip.write_all(body("NOTE FOR THE SECOND SLIDE").as_bytes())
+            .unwrap();
+        zip.start_file("ppt/slides/_rels/slide2.xml.rels", opts)
+            .unwrap();
+        zip.write_all(
+            b"<Relationships><Relationship Type=\"x/notesSlide\" \
+              Target=\"../notesSlides/notesSlide1.xml\"/></Relationships>",
+        )
+        .unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sparse.pptx");
+        std::fs::write(&p, bytes).unwrap();
+        let ex = PresentationParser.parse(&p).unwrap();
+
+        let slide1 = ex.chunks.iter().find(|c| c.text.contains("alpha")).unwrap();
+        let slide2 = ex.chunks.iter().find(|c| c.text.contains("beta")).unwrap();
+        assert!(
+            !slide1.text.contains("NOTE FOR THE SECOND SLIDE"),
+            "note must NOT attach to slide 1 (the off-by-one bug): {}",
+            slide1.text
+        );
+        assert!(
+            slide2.text.contains("NOTE FOR THE SECOND SLIDE"),
+            "note must attach to slide 2 via rels: {}",
+            slide2.text
+        );
     }
 
     #[test]

@@ -115,6 +115,7 @@ pub(crate) const UI_CSS: &str = concat!(
     include_str!("../assets/ui/css/16-update-changelog.css"),
     include_str!("../assets/ui/css/17-legible.css"),
     include_str!("../assets/ui/css/18-graph-explore.css"),
+    include_str!("../assets/ui/css/19-conversation.css"),
 );
 pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/01-state-theme-tabs.js"),
@@ -473,6 +474,19 @@ mod tests {
     }
 
     fn state_with(store: Store) -> AppState {
+        state_with_db(store, PathBuf::from(":memory:"))
+    }
+
+    /// A unique temp DB path for tests that need a real file (so a handler's
+    /// `Store::open(db_path)` reopens the SAME database — `:memory:` would not).
+    fn temp_db_path(tag: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("indexa-web-test-{}-{}.db", std::process::id(), tag));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn state_with_db(store: Store, db_path: PathBuf) -> AppState {
         // The sender is dropped immediately; the receiver still yields its last value on
         // `borrow()`, and none of the tested handlers read telemetry anyway.
         let (_tx, telemetry) = tokio::sync::watch::channel(crate::dto::TelemetrySample::default());
@@ -482,7 +496,7 @@ mod tests {
             llm: Arc::new(StubGenerator),
             config: Arc::new(Config::default()),
             jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            db_path: Arc::new(PathBuf::from(":memory:")),
+            db_path: Arc::new(db_path),
             log_dir: Arc::new(std::env::temp_dir()),
             walk_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             machine_spec: Arc::new(indexa_core::resource::detect_machine()),
@@ -900,6 +914,57 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(json["answer"].is_string());
+    }
+
+    #[tokio::test]
+    async fn api_ask_with_session_id_persists_turns() {
+        // Conversational Ask: two POSTs with the same session_id record two turns; the
+        // response echoes the id. Needs a file-backed DB so the handler's own connection
+        // reopens the same database the AppState store points at.
+        let db = temp_db_path("session-roundtrip");
+        let store = Store::open(&db).unwrap();
+        let app = || build_router(state_with_db(Store::open(&db).unwrap(), db.clone()), 7620);
+
+        let (s1, j1) = post_json(
+            app(),
+            "/api/ask",
+            serde_json::json!({ "question": "first?", "session_id": "sess-1" }),
+        )
+        .await;
+        assert_eq!(s1, StatusCode::OK);
+        assert_eq!(j1["session_id"], "sess-1", "response echoes the session id");
+
+        let (s2, _j2) = post_json(
+            app(),
+            "/api/ask",
+            serde_json::json!({ "question": "second?", "session_id": "sess-1" }),
+        )
+        .await;
+        assert_eq!(s2, StatusCode::OK);
+
+        let turns = store.turns_for_session("sess-1").unwrap();
+        assert_eq!(turns.len(), 2, "both turns persisted under the session");
+        assert_eq!(turns[0].question, "first?");
+        assert_eq!(turns[1].question, "second?");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[tokio::test]
+    async fn api_ask_without_session_id_creates_no_session() {
+        // Backward-compat: a stateless ask records no conversation rows and echoes no id.
+        let db = temp_db_path("no-session");
+        let store = Store::open(&db).unwrap();
+        let app = build_router(state_with_db(Store::open(&db).unwrap(), db.clone()), 7620);
+        let (status, json) = post_json(
+            app,
+            "/api/ask",
+            serde_json::json!({ "question": "stateless?" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json.get("session_id").is_none() || json["session_id"].is_null());
+        assert!(store.turns_for_session("anything").unwrap().is_empty());
+        let _ = std::fs::remove_file(&db);
     }
 
     #[tokio::test]

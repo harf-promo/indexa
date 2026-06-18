@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.64.0] — 2026-06-18
+
+Conversational Ask, an MCP Resources + Prompts surface, structured answers, and two
+feature-completeness fixes — all additive (single-shot Ask is unchanged).
+
+### Added
+
+- **Conversational Ask (multi-turn).** Pass a `session_id` and follow-ups remember the
+  conversation: prior turns are folded into the prompt (budget-clamped to ≤25% of the context
+  budget, oldest-first) and the follow-up is rewritten into a standalone retrieval query (one
+  extra local-LLM call, only when there's history — single-shot Ask gains zero latency). Wired
+  across the **web chat** (a persistent thread + a "＋ New conversation" button), the **CLI**
+  (`indexa ask --session-id <id>` / `--continue`, with a `--json` `session_id` field), and the
+  **MCP `ask` tool** (optional `session_id`). Sessions persist in two new tables
+  (`ask_sessions`, `conversation_turns`).
+- **MCP Resources + Prompts.** The MCP server (previously tools-only) now also exposes **4
+  read-only resources** — `indexa://overview`, `indexa://packs`, `indexa://pack/{name}`,
+  `indexa://summary/{path}` (secrets redacted) — and **3 prompt templates**:
+  `onboarding-overview`, `explain-file`, `pack-context`. The 46-tool surface is unchanged.
+- **Markdown tables in answers.** The web chat renderer now draws GFM pipe tables, and the
+  answer prompt gently suggests a table when comparing several items.
+- **Answer coverage hint.** Ask now reports salient question terms that appear in *none* of the
+  cited sources ("may not cover: …") in the CLI, web, and MCP — a heuristic "the index may not
+  cover this aspect" signal (previously an always-empty placeholder).
+
+### Fixed
+
+- **Speaker-note ↔ slide mapping in `.pptx`** now follows the relationships graph
+  (`ppt/slides/_rels/slideN.xml.rels`) instead of ordinal position, so notes attach to the right
+  slide even when only some slides have them (was off-by-one with sparse notes).
+
 ## [0.63.0] — 2026-06-18
 
 Maintainer-facing internals cleanup — no behavior change.

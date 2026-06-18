@@ -341,6 +341,11 @@ pub(crate) struct AskRequest {
     /// whole-index ask. Mirrors `indexa ask --scope` and MCP `ask {scope}`.
     #[serde(default)]
     pub(crate) scope: Option<String>,
+    /// Conversational Ask: an opaque conversation id (client-generated). When present, the
+    /// server folds the session's recent turns into the prompt + rewrites the follow-up, then
+    /// persists this turn. Omit ⇒ a stateless single-shot Ask (today's default).
+    #[serde(default)]
+    pub(crate) session_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -437,12 +442,20 @@ pub(crate) struct AskResponse {
     /// and older servers tolerate it missing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) impact: Option<AskImpact>,
+    /// Echo of the conversation id this turn was recorded under (Conversational Ask); absent
+    /// for a stateless ask. Additive — clients tolerate it missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) session_id: Option<String>,
 }
 
 #[derive(Serialize)]
 pub(crate) struct AskConfidence {
     pub(crate) level: &'static str,
     pub(crate) basis: String,
+    /// Salient question terms absent from every cited source (heuristic coverage gap);
+    /// absent when nothing was missing. Additive — clients tolerate it missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) uncovered: Option<Vec<String>>,
 }
 
 /// The "retrieve the slice" win, made concrete per answer (see `indexa_query::AnswerImpact`).

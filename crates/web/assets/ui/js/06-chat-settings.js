@@ -10,6 +10,31 @@ const sendBtn = document.getElementById('send');
 var askScope = null;       // current path prefix, or null for whole-index
 var lastAskQuestion = '';  // remembered for the "broaden to folder" retry
 
+/* ── Conversational Ask (multi-turn) ──────────────────────────────────────────
+   Each conversation has a client-generated id sent as `session_id` on every ask.
+   The server folds the session's recent turns into the prompt + rewrites the
+   follow-up into a standalone query, so "and why is that?" resolves against the
+   thread. The #chat area already keeps every turn's bubble within a page load;
+   "＋ New" resets the id and clears the thread. */
+var askSessionId = null;
+function ensureAskSession() {
+  if (!askSessionId) {
+    askSessionId = (window.crypto && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : 'sess-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36);
+  }
+  return askSessionId;
+}
+// Start a fresh conversation: drop the id and reset the thread to the welcome state.
+function newConversation() {  // eslint-disable-line no-unused-vars
+  askSessionId = null;
+  chat.innerHTML =
+    '<div class="welcome"><h2>Ask your local context</h2>' +
+    '<p>New conversation. Ask a question about your files in plain language — ' +
+    'follow-ups remember what you just asked.</p></div>';
+  if (qInput) qInput.focus();
+}
+
 function renderAskScopeChip() {
   var slot = document.getElementById('ask-scope-chip');
   if (!slot) return;
@@ -160,8 +185,12 @@ async function doAsk() {
   // (no-match answers, older servers), so this is purely additive.
   const renderConfidence = function() {
     if (!confidence || !confidence.level) return '';
+    var gaps = (confidence.uncovered && confidence.uncovered.length)
+      ? '<div class="ask-uncovered" title="Question terms found in none of the cited sources — the answer may be partial.">may not cover: ' +
+        escapeHtml(confidence.uncovered.join(', ')) + '</div>'
+      : '';
     return '<div class="ask-confidence">confidence: ' + escapeHtml(confidence.level) +
-      (confidence.basis ? ' — ' + escapeHtml(confidence.basis) : '') + '</div>';
+      (confidence.basis ? ' — ' + escapeHtml(confidence.basis) : '') + '</div>' + gaps;
   };
   // Binary byte size (matches the server's human_bytes: 1 decimal, KB/MB/GB).
   const fmtBytes = function(n) {
@@ -229,7 +258,7 @@ async function doAsk() {
     const r = await fetch('/api/ask/stream', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ question: q, agentic: agentic, scope: scopeForAsk })
+      body: JSON.stringify({ question: q, agentic: agentic, scope: scopeForAsk, session_id: ensureAskSession() })
     });
     if (!r.ok || !r.body) throw new Error('Request failed (' + r.status + ')');
 

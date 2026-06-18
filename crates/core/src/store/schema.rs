@@ -204,6 +204,32 @@ impl Store {
                 created_at INTEGER NOT NULL DEFAULT (unixepoch())
             );
 
+            -- Conversational Ask (v0.64): a session groups ordered Q&A turns so a
+            -- follow-up question can be resolved against, and answered with, the prior
+            -- turns. Both tables are brand-new, so the bare CREATE TABLE IF NOT EXISTS
+            -- here is the whole migration (no ALTER / IMMEDIATE-tx guard needed — that
+            -- pattern is only for column-adds / table-recreates that race). Like
+            -- importance_weights / decisions, a conversation is standing user state: it
+            -- SURVIVES entry removal and is NOT cleared by the entries.rs delete paths.
+            CREATE TABLE IF NOT EXISTS ask_sessions (
+                id         TEXT PRIMARY KEY,           -- client- or server-generated opaque id
+                scope      TEXT,                       -- the scope the session was opened with
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE TABLE IF NOT EXISTS conversation_turns (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id   TEXT NOT NULL REFERENCES ask_sessions(id) ON DELETE CASCADE,
+                turn_index   INTEGER NOT NULL,         -- 0-based, monotonic within a session
+                question     TEXT NOT NULL,
+                answer       TEXT NOT NULL,
+                sources_json TEXT NOT NULL DEFAULT '[]', -- serialized [{path,heading,snippet}]
+                created_at   INTEGER NOT NULL DEFAULT (unixepoch()),
+                UNIQUE (session_id, turn_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_turns_session
+                ON conversation_turns(session_id, turn_index);
+
             -- Token-savings telemetry (v0.23): one row per retrieval call, across every
             -- surface ('mcp' | 'web' | 'cli'). surface deliberately has NO CHECK — widening
             -- the edges.kind CHECK cost a table-recreate migration above; valid values live
@@ -445,7 +471,9 @@ impl Store {
         // weights persist across entry removal by design — see store::weights.
         // `decisions`/`decision_paths` are exempt for the same reason: a recorded
         // answer is standing user intent; vanished subjects are expired by the sweep,
-        // not deleted — see store::decisions.)
+        // not deleted — see store::decisions. `ask_sessions`/`conversation_turns` are
+        // exempt too: a conversation is standing user state, not entry-keyed — see
+        // store::sessions.)
 
         Ok(())
     }
