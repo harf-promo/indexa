@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.63.0] — 2026-06-18
+
+Maintainer-facing internals cleanup — no behavior change.
+
+### Changed
+
+- **Split `decisions/detectors.rs` (2,009 lines) into `detectors/{mod, tests}.rs`.** The 1,069-line
+  inline test module moved to its own file; the production code is byte-identical and stays in `mod.rs`.
+  A pure move with zero re-wiring (the test module keeps the same module path, so its `super::`
+  references are unchanged), proven by the 32 detector tests passing unchanged.
+
 ## [0.62.0] — 2026-06-18
 
 Catch a slow Ollama before it stalls an index.
