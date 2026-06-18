@@ -89,7 +89,7 @@ my-repo/                    ← whole-project synthesis
 │   L0  "Rust workspace: a local context engine…"   ·   L1 full summary   ·   L2 raw
 │
 ├── crates/query/           L0 · L1   (folder summary, composed from its files)
-│   ├── qa.rs               L0 · L1 · L2
+│   ├── qa/                 L0 · L1 · L2   (retrieve · synthesize · agentic · …)
 │   └── summarize.rs        L0 · L1 · L2
 ├── crates/core/            L0 · L1
 │   └── store.rs            L0 · L1 · L2
@@ -154,7 +154,8 @@ This is not a repo-to-prompt converter. It is not a document chat app. It is not
   Engine  Building · 42 files/s · ETA 1m12s · gemma3:4b    CPU 38%   RAM 9.1 / 16 GB   pressure: ok
   ```
 - **Desktop app** — a native macOS app that lives in the menu bar. Auto-updates silently. Bundles the web workspace — no separate `indexa serve` needed.
-- **MCP server** — `indexa mcp` exposes the live index to any [MCP](https://modelcontextprotocol.io) client (Claude Desktop, Cursor, Claude Code) over **46 tools** — retrieval (`search · browse_tree · get_summary · read_file · get_chunk_context · ask`), project overview + retrieval trace + path inspection, code graph (`dependencies · who_imports · who_calls · blast_radius · code_graph`), Context Packs, importance weights, smart classification, insights, decision review, config introspection, and indexing triggers.
+- **MCP server** — `indexa mcp` exposes the live index to any [MCP](https://modelcontextprotocol.io) client (Claude Desktop, Cursor, Claude Code) over **46 tools** — retrieval (`search · browse_tree · get_summary · read_file · get_chunk_context · ask`, with multi-turn `session_id`), project overview + retrieval trace + path inspection, code graph (`dependencies · who_imports · who_calls · blast_radius · code_graph`), Context Packs, importance weights, smart classification, insights, decision review, config introspection, and indexing triggers — plus **4 read-only resources** (`indexa://overview · packs · pack/{name} · summary/{path}`) and **3 prompt templates** (`onboarding-overview · explain-file · pack-context`).
+- **Conversational Ask** — pass a `session_id` (CLI `--session-id`/`--continue`, web chat thread, MCP `ask`) and follow-ups remember the conversation: prior turns are folded into the prompt and the follow-up is rewritten into a standalone retrieval query.
 
 ---
 

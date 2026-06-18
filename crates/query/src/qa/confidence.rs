@@ -45,8 +45,10 @@ pub struct ConfidenceReport {
     pub basis: String,
     /// The raw numbers the level was derived from (`indexa ask --explain` prints them).
     pub inputs: ConfidenceInputs,
-    /// Phase-2 placeholder: question aspects retrieval likely did not cover.
-    /// Always `None` today.
+    /// Salient question terms that appear in NONE of the retrieved sources — a heuristic
+    /// "the index may not cover these aspects" hint (see [`compute_uncovered`]). `None`
+    /// when every salient term was covered (or the question had none). Populated by
+    /// [`confidence_for`]; [`assess_confidence`] alone leaves it `None` (it has no question).
     pub uncovered: Option<Vec<String>>,
 }
 
@@ -167,12 +169,110 @@ pub fn assess_confidence(
 }
 
 /// [`assess_confidence`] wired to a [`QaConfig`]: embeddings were available exactly
-/// when the mode embedded the query (everything but sparse-only).
-pub(crate) fn confidence_for(hits: &[SearchHit], cfg: &QaConfig) -> Option<ConfidenceReport> {
-    assess_confidence(
+/// when the mode embedded the query (everything but sparse-only). Also fills in
+/// `uncovered` — salient question terms absent from every retrieved source.
+pub(crate) fn confidence_for(
+    hits: &[SearchHit],
+    cfg: &QaConfig,
+    question: &str,
+) -> Option<ConfidenceReport> {
+    let mut report = assess_confidence(
         hits,
         cfg.top_k,
         cfg.rrf_k,
         !matches!(cfg.mode, HybridMode::Sparse),
-    )
+    )?;
+    report.uncovered = compute_uncovered(question, hits);
+    Some(report)
+}
+
+/// Salient (content) terms of a question: lowercased alphanumeric tokens ≥ 4 chars,
+/// minus a small stop-list of question/instruction words. Deduped, order-preserving.
+fn salient_terms(question: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "what", "where", "when", "which", "whom", "whose", "does", "did", "the", "this", "that",
+        "these", "those", "with", "from", "into", "about", "there", "here", "have", "has", "had",
+        "your", "you", "our", "and", "but", "for", "not", "can", "could", "would", "should",
+        "will", "shall", "explain", "tell", "show", "find", "list", "give", "describe", "please",
+        "file", "files", "code", "using", "used", "their", "they", "them", "work", "works",
+        "working", "make", "makes", "mean", "means", "happen", "happens",
+    ];
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for raw in question.split(|c: char| !c.is_alphanumeric()) {
+        let t = raw.to_lowercase();
+        if t.len() < 4 || STOP.contains(&t.as_str()) {
+            continue;
+        }
+        if seen.insert(t.clone()) {
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// Heuristic "uncovered aspects": salient question terms that appear in NONE of the
+/// retrieved sources' path/heading/text. A cheap signal that the answer may be partial.
+/// Returns `None` when nothing salient is missing (the common case). Capped at 5.
+fn compute_uncovered(question: &str, hits: &[SearchHit]) -> Option<Vec<String>> {
+    let terms = salient_terms(question);
+    if terms.is_empty() {
+        return None;
+    }
+    let mut hay = String::new();
+    for h in hits {
+        hay.push_str(&h.entry_path.to_lowercase());
+        hay.push(' ');
+        hay.push_str(&h.heading.to_lowercase());
+        hay.push(' ');
+        hay.push_str(&h.text.to_lowercase());
+        hay.push(' ');
+    }
+    let missing: Vec<String> = terms
+        .into_iter()
+        .filter(|t| !hay.contains(t.as_str()))
+        .take(5)
+        .collect();
+    if missing.is_empty() {
+        None
+    } else {
+        Some(missing)
+    }
+}
+
+#[cfg(test)]
+mod uncovered_tests {
+    use super::*;
+
+    fn hit_with(path: &str, text: &str) -> SearchHit {
+        SearchHit {
+            chunk_id: 1,
+            entry_path: path.to_owned(),
+            seq: 0,
+            heading: String::new(),
+            text: text.to_owned(),
+            rrf_score: 0.1,
+        }
+    }
+
+    #[test]
+    fn flags_salient_terms_absent_from_all_sources() {
+        let hits = vec![hit_with("/src/auth.rs", "login and session handling")];
+        // "authentication" is covered (substring of nothing — actually not present), "billing"
+        // is absent. "retrieval" word "payments" absent. Stop/short words ignored.
+        let u = compute_uncovered("how does billing and session work?", &hits).unwrap();
+        assert!(u.contains(&"billing".to_string()));
+        assert!(
+            !u.contains(&"session".to_string()),
+            "covered term must not be flagged"
+        );
+    }
+
+    #[test]
+    fn none_when_everything_covered_or_no_salient_terms() {
+        let hits = vec![hit_with("/src/auth.rs", "session login authentication")];
+        assert!(compute_uncovered("how does session login work?", &hits).is_none());
+        // No salient terms (all short/stop words) ⇒ None, never an empty list.
+        assert!(compute_uncovered("what is it?", &hits).is_none());
+    }
 }

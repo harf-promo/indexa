@@ -21,17 +21,34 @@ mod confidence;
 mod explain;
 mod mmr;
 mod retrieve;
+mod rewrite;
 mod synthesize;
 
 #[cfg(test)]
 mod tests;
 
-pub use agentic::{answer_agentic, answer_agentic_stream, AGENTIC_MAX_STEPS_CAP};
+pub use agentic::{
+    answer_agentic, answer_agentic_history, answer_agentic_stream, answer_agentic_stream_history,
+    AGENTIC_MAX_STEPS_CAP,
+};
 pub use confidence::{assess_confidence, Confidence, ConfidenceInputs, ConfidenceReport};
 pub use explain::{explain_retrieval, RetrievalStage, RetrievalTrace};
 pub(crate) use retrieve::retrieve;
 pub use retrieve::{build_project_overview, is_broad_intent};
-pub use synthesize::{answer, answer_stream, answer_stream_with_ann, answer_with_ann};
+pub use synthesize::{
+    answer, answer_stream, answer_stream_with_ann, answer_stream_with_ann_history, answer_with_ann,
+    answer_with_ann_history,
+};
+
+/// A prior conversation turn, folded into the prompt + used to rewrite a follow-up into
+/// a standalone query. Chronological order (oldest first). Deliberately decoupled from
+/// the store's `ConversationTurn` (surfaces map one to the other) so the qa crate stays
+/// schema-agnostic.
+#[derive(Debug, Clone)]
+pub struct PriorTurn {
+    pub question: String,
+    pub answer: String,
+}
 
 /// Result of a Q&A query.
 #[derive(Debug)]

@@ -140,86 +140,20 @@ impl IndexaMcp {
         &self,
         params: Parameters<ExportPackParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        use indexa_query::{
-            build_tree, redact::redact_secrets, render_json, render_markdown, render_signatures,
-            render_xml,
-        };
-        use std::time::{SystemTime, UNIX_EPOCH};
-
         let ExportPackParams {
             name,
             format,
             depth,
             signatures,
         } = params.0;
-        let signatures = signatures.unwrap_or(false);
-        let format = format.as_deref().unwrap_or("xml");
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs().to_string())
-            .unwrap_or_else(|_| "0".to_owned());
-
         let store = self.store()?;
-        let pack = store
-            .pack_by_name(&name)
-            .map_err(mcp_err)?
-            .ok_or_else(|| mcp_err(format!("no pack named \"{name}\"")))?;
-        let paths = store.pack_paths(&pack.id).map_err(mcp_err)?;
-        if paths.is_empty() {
-            return Err(mcp_err(format!(
-                "pack \"{name}\" is empty — add paths first with: \
-                 indexa pack add \"{name}\" <paths…>"
-            )));
-        }
-
-        let is_xml = format != "md" && format != "markdown" && format != "json";
-        let mut buf = String::new();
-        if is_xml {
-            buf.push_str("<context pack=\"");
-            buf.push_str(&xml_escape_mcp(&name));
-            buf.push_str("\" generated=\"");
-            buf.push_str(&now);
-            buf.push_str("\">\n");
-        }
-
-        let mut exported = 0usize;
-        for root_path in &paths {
-            if signatures {
-                let chunks = store.code_chunks_under(root_path, 0).map_err(mcp_err)?;
-                if chunks.is_empty() {
-                    continue;
-                }
-                buf.push_str(&render_signatures(&chunks, format, true));
-                buf.push('\n');
-                exported += 1;
-                continue;
-            }
-            let tree = build_tree(&store, root_path, depth).map_err(mcp_err)?;
-            let Some(tree) = tree else { continue };
-            let rendered = match format {
-                "md" | "markdown" => render_markdown(&tree),
-                "json" => render_json(&tree),
-                _ => render_xml(&tree, &now),
-            };
-            buf.push_str(&rendered);
-            buf.push('\n');
-            exported += 1;
-        }
-        if is_xml {
-            buf.push_str("</context>\n");
-        }
-
-        if exported == 0 {
-            let hint = if signatures {
-                "have indexed code yet — run `indexa deep <path>` first"
-            } else {
-                "have summaries yet — run `indexa summarize <path>` or `indexa index <path>` first"
-            };
-            return Err(mcp_err(format!("no paths in pack \"{name}\" {hint}")));
-        }
-
-        // Never hand a model a secret that slipped into the indexed content.
-        let (buf, _redacted) = redact_secrets(&buf);
+        let buf = export_pack_body(
+            &store,
+            &name,
+            format.as_deref().unwrap_or("xml"),
+            depth,
+            signatures.unwrap_or(false),
+        )?;
         Ok(ok_text(buf))
     }
 
@@ -384,4 +318,87 @@ impl IndexaMcp {
             hits.len()
         )))
     }
+}
+
+/// Render a Context Pack to a single string in `format` (`xml` | `md` | `json`), with
+/// `redact_secrets` applied — the shared body for the `export_pack` tool, the
+/// `indexa://pack/{name}` resource, and the `pack-context` prompt (one redaction site).
+pub(crate) fn export_pack_body(
+    store: &Store,
+    name: &str,
+    format: &str,
+    depth: Option<usize>,
+    signatures: bool,
+) -> Result<String, ErrorData> {
+    use indexa_query::{
+        build_tree, redact::redact_secrets, render_json, render_markdown, render_signatures,
+        render_xml,
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_owned());
+
+    let pack = store
+        .pack_by_name(name)
+        .map_err(mcp_err)?
+        .ok_or_else(|| mcp_err(format!("no pack named \"{name}\"")))?;
+    let paths = store.pack_paths(&pack.id).map_err(mcp_err)?;
+    if paths.is_empty() {
+        return Err(mcp_err(format!(
+            "pack \"{name}\" is empty — add paths first with: indexa pack add \"{name}\" <paths…>"
+        )));
+    }
+
+    let is_xml = format != "md" && format != "markdown" && format != "json";
+    let mut buf = String::new();
+    if is_xml {
+        buf.push_str("<context pack=\"");
+        buf.push_str(&xml_escape_mcp(name));
+        buf.push_str("\" generated=\"");
+        buf.push_str(&now);
+        buf.push_str("\">\n");
+    }
+
+    let mut exported = 0usize;
+    for root_path in &paths {
+        if signatures {
+            let chunks = store.code_chunks_under(root_path, 0).map_err(mcp_err)?;
+            if chunks.is_empty() {
+                continue;
+            }
+            buf.push_str(&render_signatures(&chunks, format, true));
+            buf.push('\n');
+            exported += 1;
+            continue;
+        }
+        let tree = build_tree(store, root_path, depth).map_err(mcp_err)?;
+        let Some(tree) = tree else { continue };
+        let rendered = match format {
+            "md" | "markdown" => render_markdown(&tree),
+            "json" => render_json(&tree),
+            _ => render_xml(&tree, &now),
+        };
+        buf.push_str(&rendered);
+        buf.push('\n');
+        exported += 1;
+    }
+    if is_xml {
+        buf.push_str("</context>\n");
+    }
+
+    if exported == 0 {
+        let hint = if signatures {
+            "have indexed code yet — run `indexa deep <path>` first"
+        } else {
+            "have summaries yet — run `indexa summarize <path>` or `indexa index <path>` first"
+        };
+        return Err(mcp_err(format!("no paths in pack \"{name}\" {hint}")));
+    }
+
+    // Never hand a model a secret that slipped into the indexed content.
+    let (buf, _redacted) = redact_secrets(&buf);
+    Ok(buf)
 }

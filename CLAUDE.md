@@ -24,7 +24,33 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.43.1)
+## Current feature surface (v0.64.0)
+
+**Conversational & complete (v0.64):** three features in one release. **(1) Multi-turn / Conversational
+Ask** — schema-backed sessions (`ask_sessions` + `conversation_turns` in `crates/core/src/store/schema.rs`;
+store methods in `store/sessions.rs`). The qa crate takes history as a `&[PriorTurn]` value arg (stays
+schema-agnostic; `&Store` never crosses `.await`): new `answer_with_ann_history` / `answer_stream_with_ann_history`
+/ `answer_agentic_history` / `answer_agentic_stream_history` in `crates/query/src/qa/{synthesize,agentic}.rs`,
+which the existing single-shot fns delegate to with `&[]` (byte-identical, `Answer` struct unchanged). A
+**follow-up rewrite** (`qa/rewrite.rs::resolve_search_query`) turns "and why?" into a standalone query —
+**one extra `llm.generate()` only when history is non-empty**, fail-open. `build_prompt` gains a budget-clamped
+`CONVERSATION SO FAR` block (≤25% of `context_budget`, oldest-first trim via `split_history_budget`/
+`render_history_block`); `trim_continuation` is kept (multi-turn makes a hallucinated trailing `QUESTION:`
+MORE likely). Threaded through web (`AskRequest.session_id`, both handlers + SSE `done` echo, best-effort
+`append_turn`), MCP (`AskParams.session_id` — **tool count stays 46**), CLI (`--session-id`/`--continue` +
+`default_data_dir()/last_ask_session` pointer file), and the web chat (`06-chat-settings.js` client UUID +
+"＋ New" reset). **(2) MCP Resources + Prompts** — server was tools-only; now `enable_resources()` +
+`enable_prompts()` with hand-written `ServerHandler` methods (no router macro for resources; avoids
+macro-stacking risk) delegating to inner methods in `crates/mcp/src/{resources,prompts}.rs`. **4 resources**
+(`indexa://overview · packs · pack/{name} · summary/{path}`, secrets redacted via the shared
+`packs::export_pack_body`) + **3 prompts** (`onboarding-overview · explain-file · pack-context`); golden
+list in `golden_prompts.txt`. **(3) Markdown tables** in `renderMarkdown` (`08-util-palette-init.js`) +
+a gentle "use a table when comparing" prompt nudge. **Feature-completeness:** `confidence.uncovered` now
+populated (salient question terms absent from every cited source; `compute_uncovered` in `qa/confidence.rs`,
+surfaced in CLI/MCP/web) — no longer a permanent `None`; **presentation speaker-note↔slide mapping** now
+follows the rels graph (`ppt/slides/_rels/slideN.xml.rels`) not ordinal position (fixes the sparse-notes
+off-by-one). 642 workspace tests. ⚠️ No new deps; openssl-free; single-shot Ask path unchanged (zero added
+latency); `19-conversation.css` joined the `include_str!` concat.
 
 **CLI commands** (`indexa <cmd>`): `index` (one-shot scan→deep→summarize; `--contextual` flag) · `scan` · `deep` (`--contextual` flag) ·
 `summarize` · `describe` (no-path = whole-project overview; with path = per-file summary) · `inspect` (per-path "what's indexed here") · `map` · `worker` · `pack`
@@ -222,7 +248,11 @@ macOS desktop build** (v0.20, `--target universal-apple-darwin`, `darwin-univers
 (case-sensitive, 1-hop, 7 languages) — caveats in `docs/methodology.md`; label honestly in any UI.
 v0.28 added `query_config` (effective config, no secrets), `list_files_by_category` (classification
 category → files), `get_chunk_context` (a file's indexed chunks / neighbors of a search hit), plus
-`offset` pagination on `list_open_decisions`.
+`offset` pagination on `list_open_decisions`. **v0.64** added a separate Resources + Prompts surface
+(does NOT change the 46-tool count): **4 resources** (`indexa://overview · packs · pack/{name} ·
+summary/{path}`) + **3 prompts** (`onboarding-overview · explain-file · pack-context`) in
+`crates/mcp/src/{resources,prompts}.rs`, golden-listed in `golden_prompts.txt`; the `ask` tool gained
+an optional `session_id` (Conversational Ask).
 
 **Web UI:** pure vanilla JS + SVG (`createElementNS`), zero frontend libraries. JS/CSS are
 `include_str!`-concatenated in `crates/web/src/lib.rs` — a new `NN-name.js`/`.css` must be added to

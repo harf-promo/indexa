@@ -511,6 +511,16 @@ pub enum Commands {
         #[arg(long, conflicts_with_all = ["agentic", "max_steps"])]
         explain: bool,
 
+        /// Conversational Ask: continue (or start) a conversation under this id. Prior turns
+        /// are folded into the prompt and the follow-up is rewritten into a standalone query.
+        #[arg(long)]
+        session_id: Option<String>,
+
+        /// Continue the most recent conversation (reuses the last `--session-id`). A
+        /// convenience for `--session-id <that id>`; `--session-id` overrides it.
+        #[arg(long = "continue", conflicts_with = "explain")]
+        continue_: bool,
+
         /// Emit the answer (and `--explain` trace, if set) as JSON for scripting.
         #[arg(long)]
         json: bool,

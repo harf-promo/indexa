@@ -34,6 +34,7 @@ mod queue;
 mod saved;
 mod schema;
 mod search;
+mod sessions;
 mod summaries;
 mod types;
 mod usage;
@@ -53,6 +54,7 @@ pub use entries::CoverageEntry;
 pub use insights::{DuplicateCluster, LanguageStat, LargestEntry, StaleEntry, WeeklyDiff};
 pub use prune::OrphanCounts;
 pub use saved::SavedQuery;
+pub use sessions::ConversationTurn;
 // Stub-chunk filter for retrieval (excludes content-free "File: <name>" image/binary
 // placeholders); the query crate's `retrieve()` guard reuses it.
 pub use search::is_stub_chunk;

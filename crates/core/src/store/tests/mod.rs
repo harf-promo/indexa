@@ -16,6 +16,7 @@ mod insights;
 mod packs;
 mod queue;
 mod scoped_resolution;
+mod sessions;
 mod usage;
 mod weights;
 

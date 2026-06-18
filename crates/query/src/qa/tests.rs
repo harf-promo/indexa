@@ -4,7 +4,10 @@ use super::retrieve::{
     apply_archive_penalty, apply_code_intent_boost, common_ancestor, is_code_intent,
     path_is_historical, truncate_on_boundary,
 };
-use super::synthesize::{build_prompt, pack_context, trim_continuation};
+use super::synthesize::{
+    build_prompt, pack_context, render_history_block, split_history_budget, trim_continuation,
+};
+use super::PriorTurn;
 use super::*;
 use anyhow::Result;
 use indexa_core::config::HybridMode;
@@ -35,7 +38,7 @@ fn pack_context_truncates_to_budget() {
 
 #[test]
 fn build_prompt_contains_question_and_context() {
-    let prompt = build_prompt("what is 2+2?", "some context");
+    let prompt = build_prompt("what is 2+2?", "some context", "");
     assert!(prompt.contains("what is 2+2?"));
     assert!(prompt.contains("some context"));
     // v0.29: the prompt must forbid the model from continuing with another question.
@@ -140,6 +143,83 @@ fn trim_continuation_cuts_invented_turn() {
         trim_continuation("  Indexa is a context engine.  "),
         "Indexa is a context engine."
     );
+}
+
+#[test]
+fn trim_continuation_keeps_legit_inline_question_word() {
+    // Conversational prompts now contain a Q:/A: transcript, so the model is more likely
+    // to write "Question:" mid-sentence. Only a LINE-LEADING marker is a continuation;
+    // an inline mention must survive untouched.
+    let s = "The function answers the user's Question: header in the request and returns it.";
+    assert_eq!(trim_continuation(s), s);
+}
+
+// ── Conversational Ask: history block budgeting ────────────────────────────
+
+fn turn(q: &str, a: &str) -> PriorTurn {
+    PriorTurn {
+        question: q.to_owned(),
+        answer: a.to_owned(),
+    }
+}
+
+#[test]
+fn render_history_block_empty_when_no_turns_or_no_budget() {
+    assert_eq!(render_history_block(&[], 1000), "");
+    assert_eq!(render_history_block(&[turn("q", "a")], 0), "");
+}
+
+#[test]
+fn render_history_block_keeps_recent_turns_chronologically() {
+    let history = vec![turn("first?", "one"), turn("second?", "two")];
+    let block = render_history_block(&history, 1000);
+    assert!(block.starts_with("CONVERSATION SO FAR"));
+    let first = block.find("first?").unwrap();
+    let second = block.find("second?").unwrap();
+    assert!(first < second, "turns must be chronological (oldest first)");
+}
+
+#[test]
+fn split_history_budget_drops_oldest_and_leaves_room_for_chunks() {
+    // Three big turns against a small budget: the block is clamped to ≤25%, dropping the
+    // OLDEST turns, and the chunk budget keeps most of the budget.
+    let big = "x".repeat(2000);
+    let history = vec![
+        turn("oldest", &big),
+        turn("middle", &big),
+        turn("newest", &big),
+    ];
+    let budget = 8000;
+    let (block, chunk_budget) = split_history_budget(&history, budget);
+    assert!(!block.is_empty());
+    // History clamped to ~25% of budget.
+    assert!(
+        block.len() <= budget * 25 / 100 + 100,
+        "block too large: {}",
+        block.len()
+    );
+    // The newest turn is always kept; the oldest is dropped to fit.
+    assert!(block.contains("newest"));
+    assert!(
+        !block.contains("oldest"),
+        "oldest turn should be dropped to fit budget"
+    );
+    // Chunks still get the bulk of the budget.
+    assert!(chunk_budget >= budget - budget * 25 / 100 - 100);
+}
+
+#[test]
+fn build_prompt_includes_history_block_and_guidance() {
+    let block = render_history_block(&[turn("what is RRF?", "reciprocal rank fusion")], 1000);
+    let prompt = build_prompt("how is it tuned?", "ctx", &block);
+    // The rendered block header (distinct from the static instruction prose that always
+    // mentions a "CONVERSATION SO FAR block").
+    assert!(prompt.contains("CONVERSATION SO FAR (for reference"));
+    assert!(prompt.contains("reciprocal rank fusion"));
+    assert!(prompt.contains("how is it tuned?"));
+    // Empty history ⇒ no rendered conversation block (single-shot prompt unchanged in spirit).
+    let plain = build_prompt("q", "ctx", "");
+    assert!(!plain.contains("CONVERSATION SO FAR (for reference"));
 }
 
 // ── assess_confidence (retrieval-shape classifier) ─────────────────────────
@@ -914,7 +994,7 @@ fn common_ancestor_divergent_absolute_paths_return_empty_string() {
 
 #[test]
 fn build_prompt_contains_project_overview_guidance() {
-    let prompt = build_prompt("what is this project about?", "PROJECT OVERVIEW:\nfoo");
+    let prompt = build_prompt("what is this project about?", "PROJECT OVERVIEW:\nfoo", "");
     // The prompt must explain the PROJECT OVERVIEW block to the model
     assert!(
         prompt.contains("PROJECT OVERVIEW"),

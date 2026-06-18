@@ -21,10 +21,12 @@ pub use export::{
 pub use impact::{served_bytes, AnswerImpact};
 pub use indexa_core::config::HybridMode;
 pub use qa::{
-    answer, answer_agentic, answer_agentic_stream, answer_stream, answer_stream_with_ann,
-    answer_with_ann, assess_confidence, build_project_overview, explain_retrieval, is_broad_intent,
-    Answer, AnswerChunk, Confidence, ConfidenceInputs, ConfidenceReport, QaConfig, RetrievalStage,
-    RetrievalTrace, SourceCitation, AGENTIC_MAX_STEPS_CAP,
+    answer, answer_agentic, answer_agentic_history, answer_agentic_stream,
+    answer_agentic_stream_history, answer_stream, answer_stream_with_ann,
+    answer_stream_with_ann_history, answer_with_ann, answer_with_ann_history, assess_confidence,
+    build_project_overview, explain_retrieval, is_broad_intent, Answer, AnswerChunk, Confidence,
+    ConfidenceInputs, ConfidenceReport, PriorTurn, QaConfig, RetrievalStage, RetrievalTrace,
+    SourceCitation, AGENTIC_MAX_STEPS_CAP,
 };
 pub use summarize::{
     enqueue_subtree, process_queue_item_with_passes, requeue_subtree, summarize_subtree_sync,

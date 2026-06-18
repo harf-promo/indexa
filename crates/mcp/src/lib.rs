@@ -21,7 +21,9 @@ mod curation;
 mod graph;
 mod insights;
 mod packs;
+mod prompts;
 mod query_extras;
+mod resources;
 mod retrieval;
 mod review;
 
@@ -31,8 +33,14 @@ use std::sync::Arc;
 use anyhow::Result;
 use rmcp::{
     handler::server::router::tool::ToolRouter,
-    model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
-    tool_handler, ErrorData, ServerHandler, ServiceExt,
+    model::{
+        CallToolResult, Content, GetPromptRequestParams, GetPromptResult, Implementation,
+        ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
+        PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, ServerCapabilities,
+        ServerInfo,
+    },
+    service::RequestContext,
+    tool_handler, ErrorData, RoleServer, ServerHandler, ServiceExt,
 };
 
 use indexa_core::{
@@ -140,9 +148,15 @@ impl ServerHandler for IndexaMcp {
         let mut server_info = Implementation::from_build_env();
         server_info.name = "indexa".to_owned();
         server_info.version = env!("CARGO_PKG_VERSION").to_owned();
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(server_info)
-            .with_instructions(
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .enable_prompts()
+                .build(),
+        )
+        .with_server_info(server_info)
+        .with_instructions(
             "Indexa is a local context engine: a hierarchically-summarized index of your files. \
              Navigate with `browse_tree` and `search`; call `get_summary` with tier=l0 (one-line \
              abstract) to scan cheaply, then drill to l1 (full summary) or l2 (raw content). \
@@ -156,9 +170,63 @@ impl ServerHandler for IndexaMcp {
              Code graph: `dependencies`/`who_imports`/`who_calls`/`blast_radius`/`code_graph`. \
              Decision review: `list_open_decisions`/`get_decision`/`answer_decision`/\
 `dismiss_decision`/`decision_history` — questions Indexa needs a human judgment on; \
-             relay them to your user and answer on their behalf."
+             relay them to your user and answer on their behalf. \
+             Resources (`indexa://overview`, `indexa://packs`, `indexa://pack/{name}`, \
+`indexa://summary/{path}`) and Prompts (`onboarding-overview`, `explain-file`, \
+`pack-context`) expose the same index data for browsing/attachment."
                 .to_owned(),
         )
+    }
+
+    // ── Resources (read-only index artifacts) ──────────────────────────────────
+    // Hand-written (resources have no router macro); the inner methods live in
+    // `resources.rs`. Tools stay the source of truth for the 46-tool golden list —
+    // resources/prompts are a separate protocol surface and don't affect it.
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        Ok(ListResourcesResult::with_all_items(
+            self.list_resources_inner(),
+        ))
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        Ok(ListResourceTemplatesResult::with_all_items(
+            self.resource_templates_inner(),
+        ))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        self.read_resource_inner(&request.uri)
+    }
+
+    // ── Prompts (reusable, index-backed templates) ─────────────────────────────
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, ErrorData> {
+        Ok(ListPromptsResult::with_all_items(self.list_prompts_inner()))
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, ErrorData> {
+        self.get_prompt_inner(&request.name, request.arguments.as_ref())
     }
 }
 
@@ -598,5 +666,161 @@ mod tests {
             }))
             .await;
         assert!(dup.is_err(), "duplicate pack name must be rejected");
+    }
+
+    #[tokio::test]
+    async fn ask_with_session_id_records_a_conversation() {
+        // Conversational Ask over MCP: two `ask` calls with the same session_id persist two
+        // turns the next call can see (even over an empty index, which returns a graceful
+        // no-match answer). Omitting the id records nothing.
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        let dbpath = dbdir.path().join("idx.db");
+
+        let mk = |q: &str, sid: Option<&str>| AskParams {
+            question: q.to_owned(),
+            scope: None,
+            mode: None,
+            agentic: Some(false),
+            rerank: Some(false),
+            rerank_backend: None,
+            session_id: sid.map(str::to_owned),
+        };
+
+        assert!(mcp
+            .ask(Parameters(mk("what is here?", Some("c1"))))
+            .await
+            .is_ok());
+        assert!(mcp
+            .ask(Parameters(mk("and what else?", Some("c1"))))
+            .await
+            .is_ok());
+        // A stateless ask must not create a session row.
+        assert!(mcp.ask(Parameters(mk("stateless?", None))).await.is_ok());
+
+        let store = Store::open(&dbpath).unwrap();
+        let turns = store.turns_for_session("c1").unwrap();
+        assert_eq!(turns.len(), 2, "both session turns persisted");
+        assert_eq!(turns[0].question, "what is here?");
+        assert_eq!(turns[1].question, "and what else?");
+    }
+
+    // ── Resources + Prompts (separate protocol surfaces; tool count unaffected) ──
+
+    /// Golden prompt list: any added/removed/renamed prompt is a deliberate diff of
+    /// `golden_prompts.txt`. Regenerate with `INDEXA_UPDATE_GOLDEN=1 cargo test -p indexa-mcp`.
+    #[test]
+    fn prompt_contract_golden_list() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        let mut names: Vec<String> = mcp
+            .list_prompts_inner()
+            .iter()
+            .map(|p| p.name.to_string())
+            .collect();
+        names.sort();
+        let actual = names.join("\n") + "\n";
+        let golden_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("golden_prompts.txt");
+        if std::env::var("INDEXA_UPDATE_GOLDEN").is_ok() {
+            std::fs::write(&golden_path, &actual).unwrap();
+            return;
+        }
+        let golden = std::fs::read_to_string(&golden_path)
+            .expect("crates/mcp/golden_prompts.txt missing — INDEXA_UPDATE_GOLDEN=1 cargo test")
+            .replace("\r\n", "\n");
+        assert_eq!(
+            actual, golden,
+            "MCP prompt surface changed; update golden_prompts.txt"
+        );
+    }
+
+    #[test]
+    fn every_prompt_has_a_description() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        for p in mcp.list_prompts_inner() {
+            assert!(
+                !p.description.as_deref().unwrap_or("").trim().is_empty(),
+                "prompt '{}' has no description",
+                p.name
+            );
+        }
+    }
+
+    #[test]
+    fn resources_round_trip() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        // Static list + templates are non-empty and stable.
+        assert!(!mcp.list_resources_inner().is_empty());
+        assert!(!mcp.resource_templates_inner().is_empty());
+        // Known URIs resolve (overview is graceful even on an empty index).
+        assert!(mcp.read_resource_inner("indexa://overview").is_ok());
+        assert!(mcp.read_resource_inner("indexa://packs").is_ok());
+        // Unknown / unsupported URIs error rather than panic.
+        assert!(mcp.read_resource_inner("indexa://nope").is_err());
+        assert!(mcp.read_resource_inner("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn prompts_round_trip_and_validate_args() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        // No-arg prompt always resolves.
+        assert!(mcp.get_prompt_inner("onboarding-overview", None).is_ok());
+        // Required arg missing → invalid_params; present → ok.
+        assert!(mcp.get_prompt_inner("explain-file", None).is_err());
+        let mut args = serde_json::Map::new();
+        args.insert("path".into(), serde_json::json!("/proj/x.rs"));
+        assert!(mcp.get_prompt_inner("explain-file", Some(&args)).is_ok());
+        // Unknown prompt → error.
+        assert!(mcp.get_prompt_inner("does-not-exist", None).is_err());
+    }
+
+    #[test]
+    fn summary_resource_redacts_secrets() {
+        use indexa_core::store::SummaryRecord;
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_summary(&SummaryRecord {
+                    path: "/proj/secrets.txt".into(),
+                    kind: "file".into(),
+                    parent_path: Some("/proj".into()),
+                    depth: 1,
+                    // A canonical AWS test key — redact_secrets must strip it from the resource.
+                    summary: "Config note: aws_key = AKIAIOSFODNN7EXAMPLE in the deploy script."
+                        .into(),
+                    summary_l0: None,
+                    embedding: None,
+                    child_count: 0,
+                    byte_size: 50,
+                    model: "test".into(),
+                    source_hash: String::new(),
+                    generated_at: 0,
+                })
+                .unwrap();
+        }
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+        let res = mcp
+            .read_resource_inner("indexa://summary//proj/secrets.txt")
+            .unwrap();
+        let json = serde_json::to_string(&res).unwrap();
+        assert!(
+            !json.contains("AKIAIOSFODNN7EXAMPLE"),
+            "AWS key leaked through resource"
+        );
+        assert!(
+            json.contains("[REDACTED-aws-key]"),
+            "expected redaction marker"
+        );
     }
 }

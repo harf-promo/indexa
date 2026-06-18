@@ -266,6 +266,8 @@ async fn main() -> Result<()> {
             agentic,
             max_steps,
             explain,
+            session_id,
+            continue_,
             json,
         } => {
             commands::cmd_ask(
@@ -279,6 +281,8 @@ async fn main() -> Result<()> {
                 agentic,
                 max_steps,
                 explain,
+                session_id,
+                continue_,
                 json,
                 &cfg,
             )

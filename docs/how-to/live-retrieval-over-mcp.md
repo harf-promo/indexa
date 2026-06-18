@@ -82,12 +82,18 @@ The server exposes 46 tools. The ones you'll see used most:
 | `get_summary` (tier `l0`/`l1`/`l2`) | scan cheaply at `l0` (one line), drill to `l1` (full) or `l2` (raw) |
 | `search` | hybrid keyword + semantic search across content |
 | `read_file` | raw file text (confined to indexed roots) |
-| `ask` | grounded RAG answer (supports `scope`, `mode`, `agentic`) |
+| `ask` | grounded RAG answer (supports `scope`, `mode`, `agentic`, and `session_id` for multi-turn) |
 | `dependencies` / `who_imports` / `who_calls` / `blast_radius` / `code_graph` | code-graph navigation (see [debugging the code graph](debug-the-code-graph.md)) |
 | `create_pack` / `add_pack_paths` / `export_pack` | build and hand over Context Packs |
 
 The progressive-disclosure pattern (`l0` → `l1` → `l2`) is the point: the agent surveys with
 one-line abstracts and only spends tokens reading detail where it matters.
+
+Beyond tools, the server also exposes **4 read-only Resources** (`indexa://overview`, `indexa://packs`,
+`indexa://pack/{name}`, `indexa://summary/{path}` — secrets redacted) and **3 Prompts**
+(`onboarding-overview`, `explain-file`, `pack-context`) for clients that browse resources or offer
+prompt templates. **Conversational Ask:** pass the same `session_id` to `ask` across calls and the
+server folds the prior turns into the prompt + rewrites your follow-up into a standalone query.
 
 ## Safety notes
 
