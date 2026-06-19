@@ -35,3 +35,8 @@ indexa-query = { path = "../../crates/query" }
 indexa-web = { path = "../../crates/web" }
 indexa-mcp = { path = "../../crates/mcp" }
 indexa-update = { path = "../../crates/update" }
+
+[dev-dependencies]
+# Already in the tree (via indexa-update et al.); named directly so the status
+# version-skew test can construct `semver::Version` values for `Skew` variants.
+semver = { workspace = true }

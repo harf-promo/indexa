@@ -24,7 +24,29 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.64.0)
+## Current feature surface (v0.65.0)
+
+**Version sync — no more skew (v0.65):** fixes the class of bug where the desktop app updates but the
+standalone CLI it spawns (and the MCP server behind `indexa mcp`) silently stays several versions
+behind, serving stale behavior with no signal. New shared **skew detector** in `crates/update/src/skew.rs`
+(`Skew {InSync|CliBehind|CliAhead|Unknown}` + `Surface {Cli|Mcp}` + pure `classify_skew` + a no-dep
+`parse_plist_short_version` that anchors on the exact `<key>CFBundleShortVersionString</key>` element —
+NOT a loose "Version" substring, which would grab `CFBundleInfoDictionaryVersion`'s `6.0` — +
+`installed_app_version()` reading `/Applications/Indexa.app/Contents/Info.plist`, macOS-only/`None`
+elsewhere + `detect_skew` + `Skew::advice(Surface)` single-source-of-truth message). Surfaced in
+**`indexa doctor`** ("Version sync" section: ✅/ℹ️/⚠️), **`indexa status`** (`app_version`/`version_skew`
+JSON fields via the pure `skew_fields` helper + a human line), and **MCP `get_stats`** (warns an agent it's
+on a stale binary; **tool count stays 46**). The desktop's post-update CLI auto-refresh (silent best-effort
+since v0.39 — the actual root cause) now **verifies** the installed binary's `--version` and writes/clears
+`<data_dir>/cli_skew_warning.json` (`CLI_SKEW_MARKER_FILE`, shared const); web `GET /api/health` reads it
+(`read_cli_skew_marker`, pure+tested) into a `cli_skew` field → a second dismissible banner in `27-health.js`
+(edited in place, concat unchanged). `download_cli_to`'s macOS codesign failure is now logged, not swallowed.
+⚠️ doctor/status/MCP are the **authoritative** detectors (they run in the user's real shell / as the running
+binary); the desktop marker + web banner are **secondary** (the app's `resolve_cli_dir()` walks the launchd
+`$PATH`, which can resolve a different `indexa` than the user's terminal). All fail-open; NO new third-party
+deps (only an internal `indexa-update` path-dep into `crates/mcp`); openssl-free preserved. ⚠️ The "only the
+newest changelog shows when updating across versions" report was NOT a bug — cumulative changelog shipped in
+**v0.52** (`indexa_update::cumulative_notes`); a pre-0.52 binary running the update just predates it.
 
 **Conversational & complete (v0.64):** three features in one release. **(1) Multi-turn / Conversational
 Ask** — schema-backed sessions (`ask_sessions` + `conversation_turns` in `crates/core/src/store/schema.rs`;
