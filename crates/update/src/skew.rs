@@ -102,6 +102,11 @@ impl Skew {
 /// and `CFBundleVersion` keys also end in `Version`, so a looser "first string
 /// after a Version line" scan would grab `6.0`. Returns `None` on any miss
 /// (fail-open); semver validation is left to [`detect_skew`].
+///
+/// Only compiled where it's used: the macOS `installed_app_version` (the `.app`
+/// bundle is macOS-only) and the cross-platform unit tests. Without the `test`
+/// arm, a non-macOS lib build would flag it dead under `-D warnings`.
+#[cfg(any(target_os = "macos", test))]
 fn parse_plist_short_version(xml: &str) -> Option<String> {
     let key_pos = xml.find("<key>CFBundleShortVersionString</key>")?;
     let after = &xml[key_pos..];
