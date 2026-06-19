@@ -10,7 +10,7 @@
 use anyhow::{Context, Result};
 use notify::{
     event::{CreateKind, ModifyKind, RemoveKind},
-    EventKind, RecursiveMode, Watcher,
+    EventKind, RecursiveMode,
 };
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 use std::path::{Path, PathBuf};
@@ -111,7 +111,6 @@ pub fn watch<P: AsRef<Path>>(roots: &[P], cfg: &WatcherConfig) -> Result<WatchSe
     for root in roots {
         let root = root.as_ref();
         debouncer
-            .watcher()
             .watch(root, RecursiveMode::Recursive)
             .with_context(|| format!("watching {}", root.display()))?;
         info!("watching {} for changes", root.display());
