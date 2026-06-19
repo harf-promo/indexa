@@ -393,13 +393,25 @@ async fn install_update(app: tauri::AppHandle, update: tauri_plugin_updater::Upd
     {
         let (dir, on_path) = resolve_cli_dir();
         let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
-        match indexa_update::download_cli_to(&dir, &tag, None).await {
-            Ok(p) => eprintln!(
-                "[indexa-desktop] CLI refreshed to {tag} at {} (on PATH: {on_path})",
-                p.display()
-            ),
-            Err(e) => eprintln!("[indexa-desktop] CLI refresh after update failed (non-fatal): {e:#}"),
-        }
+        let installed = match indexa_update::download_cli_to(&dir, &tag, None).await {
+            Ok(p) => {
+                eprintln!(
+                    "[indexa-desktop] CLI refreshed to {tag} at {} (on PATH: {on_path})",
+                    p.display()
+                );
+                Some(p)
+            }
+            Err(e) => {
+                eprintln!("[indexa-desktop] CLI refresh after update failed (non-fatal): {e:#}");
+                None
+            }
+        };
+        // v0.65: verify the refresh actually landed the new version and record the
+        // outcome, so the web UI (`/api/health`) can surface a "your CLI is stale"
+        // banner when it didn't. The old refresh was silent best-effort — exactly the
+        // trap that left a user's terminal/MCP `indexa` several versions behind with no
+        // signal. Non-fatal; never blocks the imminent restart.
+        record_cli_refresh_outcome(installed.as_deref());
     }
 
     report_update_progress(UpdateProgress::done(title));
@@ -407,6 +419,58 @@ async fn install_update(app: tauri::AppHandle, update: tauri_plugin_updater::Upd
     // The user clicked "Install & Relaunch" in the in-app modal, so restart straight into the new
     // version.
     app.restart();
+}
+
+/// After the post-update CLI refresh, verify the installed binary reports the app's
+/// version, and persist the result so the web UI can surface it.
+///
+/// On success the skew marker is cleared; on any mismatch or failure (download failed,
+/// the binary won't run, codesign killed it, or it landed in a dir the user's shell
+/// doesn't use) `<data_dir>/cli_skew_warning.json` is written so `GET /api/health` can
+/// show a "your terminal/MCP `indexa` is stale" banner. Entirely best-effort — every
+/// error is swallowed so this never blocks the (imminent) restart. doctor/status/MCP
+/// remain the authoritative detectors since they run in the user's real shell.
+fn record_cli_refresh_outcome(installed: Option<&std::path::Path>) {
+    let Some(data_dir) = indexa_core::config::default_data_dir() else {
+        return;
+    };
+    let marker = data_dir.join(indexa_update::CLI_SKEW_MARKER_FILE);
+    let app_version = env!("CARGO_PKG_VERSION");
+
+    // Ask the freshly-installed binary its version, e.g. `indexa 0.65.0` → "0.65.0".
+    let cli_version = installed.and_then(|p| {
+        std::process::Command::new(p)
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .split_whitespace()
+                    .last()
+                    .map(str::to_string)
+            })
+    });
+
+    if cli_version.as_deref() == Some(app_version) {
+        // Synced — clear any marker left by an earlier failed refresh.
+        let _ = std::fs::remove_file(&marker);
+        return;
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let body = serde_json::json!({
+        "app_version": app_version,
+        "cli_version": cli_version,                          // null if unreadable
+        "cli_path": installed.map(|p| p.display().to_string()),
+        "checked_at": now,
+    });
+    if let Ok(text) = serde_json::to_string_pretty(&body) {
+        let _ = std::fs::write(&marker, text);
+    }
 }
 
 /// Download the matching `indexa` CLI binary from this release into a PATH directory, so the

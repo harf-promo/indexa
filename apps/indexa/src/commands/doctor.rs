@@ -447,6 +447,32 @@ pub(crate) async fn cmd_doctor(
         println!();
     }
 
+    // ── Version sync ──────────────────────────────────────────────────────────
+    // Catch the trap where the desktop app updated but the user's terminal `indexa`
+    // (and the MCP server it spawns) stayed stale behind it — serving old behavior
+    // with no signal. Local, offline, fast: compares this binary to the installed
+    // app's Info.plist version. Fails open (no app / unreadable → "nothing to sync").
+    {
+        use indexa_update::{Skew, Surface};
+        println!("Version sync");
+        let skew = indexa_update::detect_skew(env!("CARGO_PKG_VERSION"));
+        match &skew {
+            Skew::CliBehind { .. } => {
+                if let Some(msg) = skew.advice(Surface::Cli) {
+                    println!("  ⚠️   {msg}");
+                }
+            }
+            Skew::CliAhead { cli, app } => {
+                println!(
+                    "  ℹ️   CLI v{cli} is newer than the installed app v{app} (dev build) — fine."
+                );
+            }
+            Skew::InSync => println!("  ✅  CLI matches the installed Indexa app."),
+            Skew::Unknown => println!("  ✅  No installed Indexa app detected — nothing to sync."),
+        }
+        println!();
+    }
+
     // ── Readiness summary ─────────────────────────────────────────────────────
     // The bottom-line answer to "can I index right now?" — driven by the blocking
     // prerequisites the Ollama probe collected (server up + required models pulled).

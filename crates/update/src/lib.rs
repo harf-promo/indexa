@@ -12,6 +12,11 @@ use reqwest::Client;
 use semver::Version;
 use serde::Deserialize;
 
+mod skew;
+pub use skew::{
+    classify_skew, detect_skew, installed_app_version, Skew, Surface, CLI_SKEW_MARKER_FILE,
+};
+
 const REPO: &str = "harf-promo/indexa";
 const USER_AGENT: &str = concat!("indexa/", env!("CARGO_PKG_VERSION"));
 
@@ -468,12 +473,40 @@ pub async fn download_cli_to(
             .map_err(|e| anyhow::anyhow!("could not persist temp file: {e}"))?;
         std::fs::rename(&tmp_path, &dest_for_task)
             .map_err(|e| permission_error(e, &dest_for_task))?;
-        // macOS: ad-hoc sign so Gatekeeper lets the freshly-written binary run (best-effort).
+        // macOS: ad-hoc sign so Gatekeeper (and the macOS 26+ Code Signing Monitor)
+        // lets the freshly-written binary run. Best-effort, but NOT silent — a failed
+        // sign means the next `indexa` launch is killed (exit 137), so we surface it
+        // the same way `apply` does instead of swallowing the error.
         #[cfg(target_os = "macos")]
         if let Some(p) = dest_for_task.to_str() {
-            let _ = std::process::Command::new("codesign")
+            match std::process::Command::new("codesign")
                 .args(["--force", "--sign", "-", p])
-                .output();
+                .output()
+            {
+                Ok(out) if out.status.success() => {
+                    tracing::debug!("codesign ad-hoc sign succeeded for {p}");
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    tracing::warn!(
+                        path = p,
+                        exit_code = ?out.status.code(),
+                        stderr = %stderr.trim(),
+                        "codesign failed on the freshly-installed CLI; \
+                         it may be killed on launch on macOS 26+. \
+                         Run: codesign --force --sign - {}",
+                        p
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = p,
+                        error = %e,
+                        "could not run `codesign` on the installed CLI; \
+                         install Xcode Command Line Tools if you see a 'killed' error."
+                    );
+                }
+            }
         }
         Ok(())
     })

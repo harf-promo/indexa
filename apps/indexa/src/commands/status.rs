@@ -19,9 +19,29 @@ fn is_zero(n: &i64) -> bool {
     *n == 0
 }
 
+/// Map a detected [`indexa_update::Skew`] to the two JSON fields `(app_version, version_skew)`.
+/// In-sync / no-app collapse to `(None, None)` so default `status --json` output is unchanged.
+/// Pure (no IO) so it can be unit-tested without an installed app.
+fn skew_fields(skew: &indexa_update::Skew) -> (Option<String>, Option<String>) {
+    use indexa_update::Skew;
+    match skew {
+        Skew::CliBehind { app, .. } => (Some(app.to_string()), Some("behind".to_owned())),
+        Skew::CliAhead { app, .. } => (Some(app.to_string()), Some("ahead".to_owned())),
+        Skew::InSync | Skew::Unknown => (None, None),
+    }
+}
+
 #[derive(Serialize)]
 struct StatusJson {
     version: String,
+    /// The installed desktop app's version, when it differs from this binary
+    /// (skew detected). Absent when in-sync or no app is installed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    app_version: Option<String>,
+    /// "behind" (this CLI is older than the app — harmful) or "ahead" (dev build).
+    /// Absent when in-sync/unknown, so default output is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version_skew: Option<String>,
     index_path: String,
     index_bytes: u64,
     entries: u64,
@@ -183,8 +203,12 @@ pub(crate) async fn cmd_status(
                 })
                 .collect(),
         });
+        let (app_version, version_skew) =
+            skew_fields(&indexa_update::detect_skew(env!("CARGO_PKG_VERSION")));
         let out = StatusJson {
             version: env!("CARGO_PKG_VERSION").to_owned(),
+            app_version,
+            version_skew,
             index_path: db_path.display().to_string(),
             index_bytes: db_size,
             entries,
@@ -228,6 +252,12 @@ pub(crate) async fn cmd_status(
     }
 
     println!("Indexa:   v{}", env!("CARGO_PKG_VERSION"));
+    // Surface CLI↔app version skew (only the harmful "CLI behind app" case prints).
+    if let Some(msg) =
+        indexa_update::detect_skew(env!("CARGO_PKG_VERSION")).advice(indexa_update::Surface::Cli)
+    {
+        println!("⚠ {msg}");
+    }
     println!("Index:    {} ({})", db_path.display(), format_size(db_size));
     println!("Entries:  {entries} total");
     println!(
@@ -384,4 +414,38 @@ pub(crate) async fn cmd_status(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skew_fields;
+    use indexa_update::Skew;
+    use semver::Version;
+
+    fn v(s: &str) -> Version {
+        Version::parse(s).unwrap()
+    }
+
+    #[test]
+    fn skew_fields_maps_each_state() {
+        // Behind → app version + "behind" (the harmful case worth surfacing).
+        assert_eq!(
+            skew_fields(&Skew::CliBehind {
+                cli: v("0.51.0"),
+                app: v("0.64.0")
+            }),
+            (Some("0.64.0".to_owned()), Some("behind".to_owned()))
+        );
+        // Ahead (dev build) → app version + "ahead".
+        assert_eq!(
+            skew_fields(&Skew::CliAhead {
+                cli: v("0.65.0"),
+                app: v("0.64.0")
+            }),
+            (Some("0.64.0".to_owned()), Some("ahead".to_owned()))
+        );
+        // In-sync / unknown → no fields, so default `status --json` output is unchanged.
+        assert_eq!(skew_fields(&Skew::InSync), (None, None));
+        assert_eq!(skew_fields(&Skew::Unknown), (None, None));
+    }
 }

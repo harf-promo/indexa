@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.65.0] — 2026-06-19
+
+The update window respects your history — and now your terminal does too. When the desktop app
+updates but the standalone CLI it spawns (and the MCP server behind it) stays behind, that skew is
+no longer silent: Indexa detects it and tells you how to fix it.
+
+### Added
+
+- **CLI ↔ app version-skew detection.** `indexa doctor` gains a **Version sync** check and
+  `indexa status` (human + `--json`) reports `app_version`/`version_skew` when your terminal
+  `indexa` is older than the installed desktop app — the trap where the app updated but the CLI
+  (and the MCP server that runs `indexa mcp`) kept serving stale behavior with no signal. The MCP
+  `get_stats` tool warns an agent when it's talking to a stale binary. Each tells you the fix
+  (`indexa update`, then restart MCP). Fail-open and offline; the tool count stays 46.
+- **Stale-CLI banner in the web UI.** After a desktop update whose CLI auto-refresh didn't land the
+  new version, the app records it and the web UI shows a dismissible banner (driven by
+  `GET /api/health`'s new `cli_skew` field).
+
+### Fixed
+
+- **The post-update CLI refresh is no longer silent best-effort.** The desktop app now verifies the
+  refreshed CLI actually reports the new version and surfaces the result instead of swallowing a
+  failed download/sign — the root cause of a CLI/MCP that quietly rotted several versions behind the
+  app. A failed `codesign` on a freshly-installed CLI is now logged rather than discarded.
+
 ## [0.64.0] — 2026-06-18
 
 Conversational Ask, an MCP Resources + Prompts surface, structured answers, and two

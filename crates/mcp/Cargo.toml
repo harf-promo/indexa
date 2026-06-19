@@ -18,6 +18,10 @@ indexa-query = { path = "../query" }
 indexa-embed = { path = "../embed" }
 indexa-llm = { path = "../llm" }
 indexa-parsers = { path = "../parsers" }
+# Internal path-dep (not a third-party crate) — reuses the version-skew detector so
+# `get_stats` can warn an agent it's talking to a stale binary. rustls/reqwest are
+# already transitively present via embed/llm, so the tree stays openssl-free.
+indexa-update = { path = "../update" }
 rmcp = { version = "1.7.0", features = ["server", "transport-io", "macros"] }
 schemars = "1"
 

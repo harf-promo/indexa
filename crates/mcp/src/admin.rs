@@ -28,6 +28,14 @@ impl IndexaMcp {
             "Indexa MCP v{}.  {entries} indexed entries, {chunks} chunks.",
             env!("CARGO_PKG_VERSION")
         );
+        // Version skew: if the installed desktop app is newer than this binary, the
+        // agent is talking to a stale MCP server (the trap where the app updated but
+        // the CLI it spawns didn't). Fail-open — only the harmful "behind" case prints.
+        if let Some(msg) = indexa_update::detect_skew(env!("CARGO_PKG_VERSION"))
+            .advice(indexa_update::Surface::Mcp)
+        {
+            out.push_str(&format!("\n\u{26A0} {msg}"));
+        }
         // Index freshness: warn when the newest indexed chunk is old, so the agent
         // knows the answers may predate recent code/file changes and can re-index.
         if let Ok(Some(ts)) = store.last_indexed_at() {
