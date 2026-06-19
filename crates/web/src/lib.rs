@@ -8,7 +8,7 @@
 //! - `POST /api/ask/stream` — { question } → SSE: `sources` event, then `fragment` events, then `done`
 //! - `POST /api/jobs/index?path=` — start scan→deep→summarize job, returns { job_id }
 //! - `GET /api/jobs`     — list active jobs
-//! - `GET /api/jobs/:id/events` — SSE progress stream
+//! - `GET /api/jobs/{id}/events` — SSE progress stream
 
 mod dto;
 mod handlers;
@@ -344,8 +344,8 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/api/jobs/summarize", post(api_job_summarize))
         .route("/api/jobs/index", post(api_job_index))
         .route("/api/jobs/estimate", get(api_job_estimate))
-        .route("/api/jobs/:id/events", get(api_jobs_events))
-        .route("/api/jobs/:id", get(api_job_get).delete(api_job_delete))
+        .route("/api/jobs/{id}/events", get(api_jobs_events))
+        .route("/api/jobs/{id}", get(api_job_get).delete(api_job_delete))
         .route("/api/entry", delete(api_delete_entry))
         .route("/api/version", get(api_version))
         .route("/api/update/check", get(api_update_check))
@@ -361,15 +361,15 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/api/watch/stop", post(api_watch_stop))
         .route("/api/packs", get(api_packs_list).post(api_packs_create))
         .route("/api/packs/suggest", post(api_packs_suggest))
-        .route("/api/packs/:name", delete(api_packs_delete))
+        .route("/api/packs/{name}", delete(api_packs_delete))
         .route(
-            "/api/packs/:name/paths",
+            "/api/packs/{name}/paths",
             get(api_packs_paths_get)
                 .post(api_packs_paths_add)
                 .delete(api_packs_paths_remove),
         )
-        .route("/api/packs/:name/export", get(api_packs_export))
-        .route("/api/packs/:name/search", get(api_packs_search))
+        .route("/api/packs/{name}/export", get(api_packs_export))
+        .route("/api/packs/{name}/search", get(api_packs_search))
         .route(
             "/api/weights",
             get(api_weights_list)
@@ -389,7 +389,7 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
             post(api_review_dismiss_evidence),
         )
         .route("/api/saved", get(api_saved_list).post(api_saved_set))
-        .route("/api/saved/:name", delete(api_saved_delete))
+        .route("/api/saved/{name}", delete(api_saved_delete))
         .route("/api/insights/duplicates", get(api_insights_duplicates))
         .route("/api/insights/stale", get(api_insights_stale))
         .route("/api/insights/diff", get(api_insights_diff))
