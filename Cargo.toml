@@ -54,8 +54,8 @@ tracing-appender = "0.2"
 # Filesystem
 jwalk = "0.8"
 ignore = "0.4"
-notify = "6"
-notify-debouncer-full = "0.3"
+notify = "8"
+notify-debouncer-full = "0.7"
 
 # Storage
 rusqlite = { version = "0.40", features = ["bundled"] }
