@@ -24,7 +24,7 @@ tree-sitter-typescript = "0.23"
 tree-sitter-go = "0.25"
 tree-sitter-java = "0.23"
 # Image EXIF
-kamadak-exif = "0.5"
+kamadak-exif = "0.6"
 # PDF text extraction (pure Rust, text-layer PDFs)
 pdf-extract = "0.10"
 # Office formats
