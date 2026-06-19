@@ -24,6 +24,7 @@ mod ann;
 mod chunks;
 mod classify;
 mod decisions;
+mod dir_apps;
 mod edges;
 mod entries;
 mod insights;
@@ -46,6 +47,7 @@ mod tests;
 // Re-export every public record type so external paths (`indexa_core::store::*`)
 // are unchanged by the split.
 pub use ann::AnnIndex;
+pub use dir_apps::DetectedApp;
 pub use edges::{
     BlastRadius, ResolutionTier, ResolvedCaller, ResolvedRelatedFile, ScopedCodeGraph,
     BARE_NAME_CAVEAT,

@@ -411,6 +411,17 @@ pub(crate) struct InspectResponse {
     pub(crate) imports: usize,
     pub(crate) defines: usize,
     pub(crate) calls: usize,
+    /// Detected application/structure(s) for this directory (v0.66); primary first.
+    pub(crate) apps: Vec<DetectedAppDto>,
+}
+
+/// One detected application/structure for a directory.
+#[derive(Serialize)]
+pub(crate) struct DetectedAppDto {
+    pub(crate) kind: String,
+    pub(crate) name: String,
+    pub(crate) family: String,
+    pub(crate) is_primary: bool,
 }
 
 /// Response for `GET /api/file` — a file's raw text (capped) for the in-app preview pane.

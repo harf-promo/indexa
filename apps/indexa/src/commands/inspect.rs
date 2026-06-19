@@ -88,6 +88,25 @@ pub(crate) async fn cmd_inspect(path: String) -> Result<()> {
         );
     }
 
+    // Detected application/structure (v0.66): what kind of thing this directory is.
+    let apps = store.apps_for_dir(&expanded).unwrap_or_default();
+    if let Some(primary) = apps.iter().find(|a| a.is_primary).or_else(|| apps.first()) {
+        let others: Vec<&str> = apps
+            .iter()
+            .filter(|a| a.app_kind != primary.app_kind)
+            .map(|a| a.app_name.as_str())
+            .collect();
+        let also = if others.is_empty() {
+            String::new()
+        } else {
+            format!(" (also: {})", others.join(", "))
+        };
+        println!(
+            "  App:       {} [{}]{also}",
+            primary.app_name, primary.family
+        );
+    }
+
     // Resolved importance weight (only show when non-neutral).
     let w = store.weight_for(&expanded)?;
     if (w - 1.0).abs() > f32::EPSILON {

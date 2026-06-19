@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.66.0] — 2026-06-19
+
+Indexa now understands *groups* of files, not just individual ones — it recognizes when a directory
+is a known application or structure (a Rust crate, a Next.js app, a Django project, a macOS `.app`
+bundle, a Terraform module, a Jupyter project, …) and folds that into the index's knowledge.
+
+### Added
+
+- **Application & structure recognition.** A directory is now matched against a signature library to
+  identify what kind of thing it is, across four families: code/frameworks (incl. CMS like
+  WordPress), OS software & bundles (macOS `.app`, Snap, Homebrew, …), infra & config (Docker,
+  Kubernetes, Terraform, Ansible, GitHub Actions, …), and document/data bundles (LaTeX, Quarto,
+  Jupyter, datasets). Detection runs automatically during `indexa index` and is **persisted**, so it
+  surfaces everywhere: `indexa inspect` (an "App" line), the **project overview** that `ask` uses for
+  broad questions (so an answer can say "this folder is a Django app"), MCP `inspect`/`project_overview`,
+  and the web "Indexed facts" panel. `indexa fingerprint` now reads the persisted detections.
+- **Richer signature grammar.** Fingerprints can now require `all_of`/`any_of` markers, forbid
+  `none_of` anti-markers (e.g. a Terraform module but not a `.terraform/` cache), and match nested
+  paths (`Contents/Info.plist`) and globs (`*.xcodeproj`, `*.tf`) — not just direct-child filenames.
+  Overlapping matches are ranked by specificity (Next.js wins over a bare Node package). The user
+  `fingerprints.json` catalog still works; old definitions parse unchanged.
+- **Sourced signature library.** A broad curated built-in library plus a snapshot seeded offline from
+  CycloneDX cdxgen's project-type catalog (Apache-2.0, with per-rule provenance) for the long tail of
+  language manifests. The runtime never fetches anything — the snapshot is committed and regenerated
+  by a maintainer-run generator (`tools/gen-fingerprints`).
+
 ## [0.65.0] — 2026-06-19
 
 The update window respects your history — and now your terminal does too. When the desktop app

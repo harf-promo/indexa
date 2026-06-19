@@ -16,10 +16,10 @@ members = [
 # Excluded from --workspace builds: Tauri requires platform-specific native
 # libraries (webkit2gtk on Linux) that the CI ubuntu-latest runner does not have.
 # Build manually with: cargo build --manifest-path apps/indexa-desktop/Cargo.toml
-exclude = ["apps/indexa-desktop"]
+exclude = ["apps/indexa-desktop", "tools/gen-fingerprints"]
 
 [workspace.package]
-version = "0.65.0"
+version = "0.66.0"
 edition = "2021"
 authors = ["Harf Promo <ahmed541991@gmail.com>"]
 license = "Apache-2.0"

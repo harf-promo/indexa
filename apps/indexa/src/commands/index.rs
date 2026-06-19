@@ -1,5 +1,5 @@
 use anyhow::Result;
-use indexa_core::config::Config;
+use indexa_core::config::{self, Config};
 use indexa_core::store::Store;
 
 use super::helpers::{index_db_path, preflight_ollama};
@@ -61,9 +61,25 @@ pub(crate) async fn cmd_index(
     Ok(())
 }
 
-/// Run the post-index detector pass; returns how many questions it opened.
+/// Run the post-index detector pass; returns how many questions it opened. Also runs the
+/// application/structure recognition pass (v0.66) as a sibling — it writes deterministic facts,
+/// not inbox questions, so a detection failure is logged and never fails the build.
 fn detector_pass(cfg: &Config) -> Result<usize> {
     let mut store = Store::open(&index_db_path()?)?;
     let report = indexa_core::decisions::detectors::run_detectors(&mut store, &cfg.review)?;
+
+    // App/structure recognition: persist what each directory is (Rust crate, Next.js app,
+    // macOS .app bundle, …). Optional user catalog lives next to the config file.
+    let user_fp = config::default_config_path()
+        .parent()
+        .map(|d| d.join("fingerprints.json"));
+    match indexa_core::fingerprint::load(user_fp.as_deref()) {
+        Ok(defs) => {
+            if let Err(e) = indexa_core::app_detect::detect_directory_apps(&mut store, &defs) {
+                tracing::warn!("application detection failed: {e:#}");
+            }
+        }
+        Err(e) => tracing::warn!("fingerprint library load failed: {e:#}"),
+    }
     Ok(report.opened)
 }

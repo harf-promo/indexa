@@ -9,6 +9,7 @@ pub(crate) use std::path::PathBuf;
 
 mod basics;
 mod decisions;
+mod dir_apps;
 mod entry_cleanup;
 mod graph;
 mod incremental;
@@ -137,6 +138,7 @@ fn orphan_rows_for(store: &Store, path: &str) -> i64 {
         + q("SELECT COUNT(*) FROM summaries WHERE path = ?1")
         + q("SELECT COUNT(*) FROM summary_queue WHERE path = ?1")
         + q("SELECT COUNT(*) FROM classifications WHERE path = ?1")
+        + q("SELECT COUNT(*) FROM directory_apps WHERE path = ?1")
 }
 
 /// Populate every entry-keyed child table for `path`, then return the store.
@@ -161,6 +163,22 @@ fn seed_full_entry(store: &mut Store, path: &str) {
         .unwrap();
     store
         .upsert_auto_classifications(&[(path.into(), "file".into(), "code".into(), 0.9)])
+        .unwrap();
+    store
+        .replace_apps_for_dir(
+            path,
+            &[DetectedApp {
+                path: path.to_owned(),
+                app_kind: "rust_crate".to_owned(),
+                app_name: "Rust crate".to_owned(),
+                family: "code".to_owned(),
+                specificity: 10,
+                is_primary: true,
+                markers_json: "[\"Cargo.toml\"]".to_owned(),
+                source: "builtin".to_owned(),
+                detected_at: 0,
+            }],
+        )
         .unwrap();
 }
 

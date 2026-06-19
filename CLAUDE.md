@@ -24,7 +24,35 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.65.0)
+## Current feature surface (v0.66.0)
+
+**Application & structure recognition (v0.66):** Indexa now understands *groups* of files in a
+recognizable layout, not just individual files — that a directory is a Rust crate, a Next.js app, a
+Django project, a macOS `.app` bundle, a Terraform module, a Jupyter project, etc. **Grammar** (in
+`crates/core/src/fingerprint.rs`): `FingerprintDef` extended (backward-compatibly, all new fields
+`#[serde(default)]`) with `any_of`/`none_of` (anti-markers), `kind`/`family`(code|os|infra|data)/
+`specificity` (most-specific-wins), `provenance`. Markers parse by shape: `Cargo.toml`=DirectChild,
+`Contents/Info.plist`=RelPath (nested, tested against the full entry set), `*.xcodeproj`=ChildGlob
+(tiny hand-written `*`/`?` matcher — do NOT promote `globset`; `**` rejected). `detect()` stays pure
+(builds `children` map + `all_paths` set). **Persistence** (re-derivable, follows the
+`classifications` lifecycle NOT decisions/weights): new `directory_apps` table
+(`store/schema.rs` base DDL; multiple rows/dir, `is_primary` = specificity winner) + `store/dir_apps.rs`
+(`DetectedApp` + `replace_apps_for_dir`/`apps_for_dir`/`primary_app_for_dir`/`all_detected_apps`/
+`primary_apps_under`); cleared by all three `entries.rs` delete paths + the `prune.rs` orphan sweep
+(both **orphan guard tests updated** — `directory_apps` added to `orphan_rows_for`/`seed_full_entry`).
+**Detection pass** = a SIBLING of `run_detectors` (NOT folded in — that carries `ReviewConfig`/fatigue
+caps): `crates/core/src/app_detect.rs::detect_directory_apps(store, &defs)` runs `fingerprint::detect`
+over `all_entry_paths`, inverts to per-dir winners (dedup by kind), rewrites rows; wired into
+`apps/indexa/src/commands/index.rs` `detector_pass` after `run_detectors`, **fail-open**. **Surfaced**
+(extend-only, **MCP tool count stays 46**): project overview annotation (`qa/retrieve.rs
+build_project_overview` — one `primary_apps_under` query, budget-safe → `ask` broad answers know the
+stack), `indexa inspect` "App" line, web `/api/inspect` `apps[]` → `05-summary.js` "App" row, MCP
+`inspect` `app:` line (`project_overview` gets it free), and `indexa fingerprint` now reads the
+persisted table (live-compute fallback when empty, e.g. scan-only). **Library** = curated
+`fingerprints_builtin.json` (4 families) + `fingerprints_seed.json` seeded OFFLINE from CycloneDX
+cdxgen project-types (Apache-2.0, per-rule provenance) via `tools/gen-fingerprints` (excluded from the
+workspace, maintainer-run; runtime NEVER fetches) + user `fingerprints.json`. NO new runtime deps;
+openssl-free; fail-open.
 
 **Version sync — no more skew (v0.65):** fixes the class of bug where the desktop app updates but the
 standalone CLI it spawns (and the MCP server behind `indexa mcp`) silently stays several versions

@@ -17,6 +17,7 @@
 //! See `docs/architecture.md` for how this crate fits the wider system and the
 //! "where to add things" contributor map.
 
+pub mod app_detect;
 pub mod config;
 pub mod decisions;
 pub mod fingerprint;

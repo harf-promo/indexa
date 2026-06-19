@@ -11,7 +11,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::dto::{err_json, InspectResponse};
+use crate::dto::{err_json, DetectedAppDto, InspectResponse};
 use crate::AppState;
 
 #[derive(Deserialize)]
@@ -38,6 +38,17 @@ pub(crate) async fn api_inspect(
 
     let classification = store.classification_for(&q.path).ok().flatten();
     let weight = store.weight_for(&q.path).unwrap_or(1.0);
+    let apps: Vec<DetectedAppDto> = store
+        .apps_for_dir(&q.path)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| DetectedAppDto {
+            kind: a.app_kind,
+            name: a.app_name,
+            family: a.family,
+            is_primary: a.is_primary,
+        })
+        .collect();
     let edges = store.edges_from(&q.path).unwrap_or_default();
     let count_kind = |k: &str| edges.iter().filter(|e| e.kind == k).count();
 
@@ -71,6 +82,7 @@ pub(crate) async fn api_inspect(
         imports: count_kind("imports"),
         defines: count_kind("defines"),
         calls: count_kind("calls"),
+        apps,
     })
     .into_response()
 }

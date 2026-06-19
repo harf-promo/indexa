@@ -57,6 +57,7 @@ fn delete_path_artifacts_exact(tx: &Transaction, path: &str) -> rusqlite::Result
     tx.execute("DELETE FROM summaries WHERE path = ?1", params![path])?;
     tx.execute("DELETE FROM summary_queue WHERE path = ?1", params![path])?;
     tx.execute("DELETE FROM classifications WHERE path = ?1", params![path])?;
+    tx.execute("DELETE FROM directory_apps WHERE path = ?1", params![path])?;
     tx.execute("DELETE FROM entries WHERE path = ?1", params![path])
 }
 
@@ -172,6 +173,7 @@ impl Store {
         tx.execute("DELETE FROM summaries WHERE path = ?1", params![path])?;
         tx.execute("DELETE FROM summary_queue WHERE path = ?1", params![path])?;
         tx.execute("DELETE FROM classifications WHERE path = ?1", params![path])?;
+        tx.execute("DELETE FROM directory_apps WHERE path = ?1", params![path])?;
         let n = tx.execute("DELETE FROM entries WHERE path = ?1", params![path])?;
         tx.commit()?;
         Ok(n)
@@ -234,6 +236,10 @@ impl Store {
         )?;
         tx.execute(
             "DELETE FROM classifications WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+            params![exact, child],
+        )?;
+        tx.execute(
+            "DELETE FROM directory_apps WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
             params![exact, child],
         )?;
         let n = tx.execute(

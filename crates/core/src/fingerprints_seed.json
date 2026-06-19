@@ -1,0 +1,370 @@
+[
+  {
+    "name": "Swift package",
+    "category": "code",
+    "family": "code",
+    "kind": "swift_package",
+    "specificity": 10,
+    "description": "Package.swift manifest",
+    "all_of": [
+      "Package.swift"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "CocoaPods project",
+    "category": "code",
+    "family": "code",
+    "kind": "cocoapods_project",
+    "specificity": 10,
+    "description": "Podfile manifest",
+    "all_of": [
+      "Podfile"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Elixir / Mix project",
+    "category": "code",
+    "family": "code",
+    "kind": "elixir_mix",
+    "specificity": 10,
+    "description": "mix.exs manifest",
+    "all_of": [
+      "mix.exs"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Elm project",
+    "category": "code",
+    "family": "code",
+    "kind": "elm_project",
+    "specificity": 10,
+    "description": "elm.json manifest",
+    "all_of": [
+      "elm.json"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Haskell (Stack) project",
+    "category": "code",
+    "family": "code",
+    "kind": "haskell_stack",
+    "specificity": 10,
+    "description": "stack.yaml manifest",
+    "all_of": [
+      "stack.yaml"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Scala (sbt) project",
+    "category": "code",
+    "family": "code",
+    "kind": "sbt_project",
+    "specificity": 10,
+    "description": "build.sbt manifest",
+    "all_of": [
+      "build.sbt"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Clojure (deps) project",
+    "category": "code",
+    "family": "code",
+    "kind": "clojure_deps",
+    "specificity": 10,
+    "description": "deps.edn manifest",
+    "all_of": [
+      "deps.edn"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Clojure (Leiningen) project",
+    "category": "code",
+    "family": "code",
+    "kind": "leiningen_project",
+    "specificity": 10,
+    "description": "project.clj manifest",
+    "all_of": [
+      "project.clj"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Perl distribution",
+    "category": "code",
+    "family": "code",
+    "kind": "perl_dist",
+    "specificity": 10,
+    "description": "cpanfile manifest",
+    "all_of": [
+      "cpanfile"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Conda environment",
+    "category": "code",
+    "family": "code",
+    "kind": "conda_env",
+    "specificity": 10,
+    "description": "environment.yml manifest",
+    "all_of": [
+      "environment.yml"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Pipenv project",
+    "category": "code",
+    "family": "code",
+    "kind": "pipenv_project",
+    "specificity": 10,
+    "description": "Pipfile manifest",
+    "all_of": [
+      "Pipfile"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Conan (C/C++) project",
+    "category": "code",
+    "family": "code",
+    "kind": "conan_project",
+    "specificity": 10,
+    "description": "conanfile.txt manifest",
+    "all_of": [
+      "conanfile.txt"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "vcpkg (C/C++) project",
+    "category": "code",
+    "family": "code",
+    "kind": "vcpkg_project",
+    "specificity": 10,
+    "description": "vcpkg.json manifest",
+    "all_of": [
+      "vcpkg.json"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "CMake project",
+    "category": "code",
+    "family": "code",
+    "kind": "cmake_project",
+    "specificity": 10,
+    "description": "CMakeLists.txt manifest",
+    "all_of": [
+      "CMakeLists.txt"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Meson project",
+    "category": "code",
+    "family": "code",
+    "kind": "meson_project",
+    "specificity": 10,
+    "description": "meson.build manifest",
+    "all_of": [
+      "meson.build"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Bazel workspace",
+    "category": "code",
+    "family": "code",
+    "kind": "bazel_workspace",
+    "specificity": 10,
+    "description": "MODULE.bazel manifest",
+    "all_of": [
+      "MODULE.bazel"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Nim package",
+    "category": "code",
+    "family": "code",
+    "kind": "nim_package",
+    "specificity": 10,
+    "description": "config.nims manifest",
+    "all_of": [
+      "config.nims"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Crystal shard",
+    "category": "code",
+    "family": "code",
+    "kind": "crystal_shard",
+    "specificity": 10,
+    "description": "shard.yml manifest",
+    "all_of": [
+      "shard.yml"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Zig project",
+    "category": "code",
+    "family": "code",
+    "kind": "zig_project",
+    "specificity": 10,
+    "description": "build.zig manifest",
+    "all_of": [
+      "build.zig"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "PHP / Composer project",
+    "category": "code",
+    "family": "code",
+    "kind": "php_composer",
+    "specificity": 10,
+    "description": "composer.json manifest",
+    "all_of": [
+      "composer.json"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Julia project",
+    "category": "code",
+    "family": "code",
+    "kind": "julia_project",
+    "specificity": 10,
+    "description": "Project.toml manifest",
+    "all_of": [
+      "Project.toml"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "OCaml (Dune) project",
+    "category": "code",
+    "family": "code",
+    "kind": "ocaml_dune",
+    "specificity": 10,
+    "description": "dune-project manifest",
+    "all_of": [
+      "dune-project"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  },
+  {
+    "name": "Erlang (rebar3) project",
+    "category": "code",
+    "family": "code",
+    "kind": "erlang_rebar",
+    "specificity": 10,
+    "description": "rebar.config manifest",
+    "all_of": [
+      "rebar.config"
+    ],
+    "provenance": {
+      "source": "CycloneDX cdxgen project-types",
+      "license": "Apache-2.0",
+      "version": "cdxgen-project-types@2025.x (manual transcription)"
+    }
+  }
+]
