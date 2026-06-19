@@ -30,7 +30,7 @@ pdf-extract = "0.10"
 # Office formats
 calamine = { version = "0.26", features = ["dates"] }
 # docx extraction (zip-based)
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 # Media metadata (audio/video via ffprobe subprocess — no extra dep needed)
 serde_json = "1"
 # Temp directories for video frame extraction
