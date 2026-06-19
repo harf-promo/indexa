@@ -1,5 +1,7 @@
 # Rust
 /target/
+# Build dirs of workspace-excluded helper crates (e.g. the offline tools/gen-fingerprints generator).
+tools/*/target/
 Cargo.lock
 # …but commit the desktop binary's lock: it's a workspace-EXCLUDED app whose Tauri
 # dependency graph floats into broken upstream releases (brotli 8.0.3, pcre2) on a

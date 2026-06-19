@@ -262,9 +262,23 @@ pub fn build_project_overview(
         root_rec.summary.trim()
     };
 
+    // Detected application/structure per directory (v0.66), so a broad answer can say
+    // "this folder is a Django app". One indexed query, primaries only; fail-open.
+    let app_by_dir: std::collections::HashMap<String, String> = store
+        .primary_apps_under(&root_rec.path)
+        .map(|apps| apps.into_iter().map(|a| (a.path, a.app_name)).collect())
+        .unwrap_or_default();
+    let app_tag = |path: &str| -> String {
+        app_by_dir
+            .get(path)
+            .map(|n| format!(" [{n}]"))
+            .unwrap_or_default()
+    };
+
     let mut block = format!(
         "PROJECT OVERVIEW (directory roll-up summaries — background context; \
-         cite numbered excerpts below for specific claims):\n{root_name}: {root_summary}\n"
+         cite numbered excerpts below for specific claims):\n{root_name}{}: {root_summary}\n",
+        app_tag(&root_rec.path)
     );
 
     // Append top child-directory L0 abstracts (one-liners) if budget allows.
@@ -278,7 +292,7 @@ pub fn build_project_overview(
             if child_l0.is_empty() {
                 continue;
             }
-            let line = format!("  - {child_name}: {child_l0}\n");
+            let line = format!("  - {child_name}{}: {child_l0}\n", app_tag(&child.path));
             if block.len() + line.len() > overview_budget {
                 break;
             }

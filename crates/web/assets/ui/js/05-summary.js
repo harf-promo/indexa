@@ -132,6 +132,14 @@ function renderInspectFacts(d) {
   if (d.category) {
     row('Category', escapeHtml(d.category) + (typeof d.confidence === 'number' ? ' (' + Math.round(d.confidence * 100) + '%)' : ''));
   }
+  if (d.apps && d.apps.length) {
+    var primary = d.apps.filter(function (a) { return a.is_primary; })[0] || d.apps[0];
+    var others = d.apps.filter(function (a) { return a.kind !== primary.kind; })
+      .map(function (a) { return a.name; });
+    var appVal = escapeHtml(primary.name) + ' (' + escapeHtml(primary.family) + ')' +
+      (others.length ? ' · also ' + escapeHtml(others.join(', ')) : '');
+    row('App', appVal);
+  }
   if (typeof d.weight === 'number' && Math.abs(d.weight - 1) > 0.001) row('Weight', d.weight.toFixed(2));
   if (d.imports || d.defines || d.calls) {
     row('Graph', d.imports + ' imports · ' + d.defines + ' defines · ' + d.calls + ' calls');

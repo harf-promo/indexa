@@ -205,6 +205,25 @@ impl IndexaMcp {
             ));
         }
 
+        // Detected application/structure (v0.66): what kind of thing this directory is.
+        let apps = store.apps_for_dir(&path).unwrap_or_default();
+        if let Some(primary) = apps.iter().find(|a| a.is_primary).or_else(|| apps.first()) {
+            let others: Vec<&str> = apps
+                .iter()
+                .filter(|a| a.app_kind != primary.app_kind)
+                .map(|a| a.app_name.as_str())
+                .collect();
+            let also = if others.is_empty() {
+                String::new()
+            } else {
+                format!(" (also: {})", others.join(", "))
+            };
+            out.push_str(&format!(
+                "  app:      {} [{}]{also}\n",
+                primary.app_name, primary.family
+            ));
+        }
+
         // Importance weight
         out.push_str(&format!("  weight:   {weight:.2}\n"));
 

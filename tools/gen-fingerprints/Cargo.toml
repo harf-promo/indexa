@@ -1,0 +1,15 @@
+[package]
+name = "gen-fingerprints"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Maintainer-run, OFFLINE code generator — NOT part of the workspace, NOT built by CI.
+# It transcribes an external project-type catalog (CycloneDX cdxgen, Apache-2.0) into Indexa
+# fingerprint defs and writes the committed snapshot crates/core/src/fingerprints_seed.json.
+# The runtime never fetches anything; only this generator (re-run by hand) updates the snapshot.
+#   cargo run --manifest-path tools/gen-fingerprints/Cargo.toml
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

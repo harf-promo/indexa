@@ -148,6 +148,30 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_classifications_source   ON classifications(source);
             CREATE INDEX IF NOT EXISTS idx_classifications_category ON classifications(category);
 
+            -- Application/structure recognition (v0.66): which known software/stack/structure
+            -- a DIRECTORY is (Rust crate, Next.js app, macOS .app bundle, Terraform module, …),
+            -- derived by matching file-pattern signatures (see core::fingerprint). Multiple rows
+            -- per dir are allowed (e.g. Node AND Next.js); is_primary flags the most-specific
+            -- winner. Unlike classifications, these carry NO user decision — they are fully
+            -- machine-derived and re-derivable from the tree, so they ARE cleared by the
+            -- entries.rs delete paths and the prune orphan sweep (the classifications lifecycle,
+            -- not the decisions/weights one).
+            CREATE TABLE IF NOT EXISTS directory_apps (
+                path         TEXT NOT NULL,
+                app_kind     TEXT NOT NULL,
+                app_name     TEXT NOT NULL,
+                family       TEXT NOT NULL,
+                specificity  INTEGER NOT NULL DEFAULT 10,
+                is_primary   INTEGER NOT NULL DEFAULT 0,
+                markers_json TEXT NOT NULL DEFAULT '[]',
+                source       TEXT NOT NULL DEFAULT 'builtin',
+                detected_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                PRIMARY KEY (path, app_kind)
+            );
+            CREATE INDEX IF NOT EXISTS idx_dirapps_path    ON directory_apps(path);
+            CREATE INDEX IF NOT EXISTS idx_dirapps_primary ON directory_apps(path) WHERE is_primary = 1;
+            CREATE INDEX IF NOT EXISTS idx_dirapps_kind    ON directory_apps(app_kind);
+
             -- Code-relationship graph (D1 + D2). One row per edge from a code file:
             --   kind='imports' → to_ref is an imported module/path
             --   kind='defines' → to_ref is a symbol defined in the file
@@ -467,7 +491,9 @@ impl Store {
         // The integrity contract (every entry-delete path clears all child rows) is
         // locked by `delete_entry_leaves_no_orphans` / `delete_subtree_leaves_no_orphans`
         // in store::tests — add any new entry-keyed child table to both the cleanup
-        // statements and those tests. (`importance_weights` is intentionally exempt:
+        // statements and those tests. `directory_apps` (v0.66) follows this contract:
+        // machine-derived, re-derivable, so it is cleared on delete + orphan-pruned.
+        // (`importance_weights` is intentionally exempt:
         // weights persist across entry removal by design — see store::weights.
         // `decisions`/`decision_paths` are exempt for the same reason: a recorded
         // answer is standing user intent; vanished subjects are expired by the sweep,

@@ -15,11 +15,17 @@ pub struct OrphanCounts {
     pub queue: u64,
     /// Orphaned classification rows.
     pub classifications: u64,
+    /// Orphaned directory-app detection rows.
+    pub directory_apps: u64,
 }
 
 impl OrphanCounts {
     pub fn is_empty(&self) -> bool {
-        self.chunks == 0 && self.summaries == 0 && self.queue == 0 && self.classifications == 0
+        self.chunks == 0
+            && self.summaries == 0
+            && self.queue == 0
+            && self.classifications == 0
+            && self.directory_apps == 0
     }
 }
 
@@ -43,6 +49,9 @@ impl Store {
             )?,
             classifications: count(
                 "SELECT COUNT(*) FROM classifications WHERE path NOT IN (SELECT path FROM entries)",
+            )?,
+            directory_apps: count(
+                "SELECT COUNT(*) FROM directory_apps WHERE path NOT IN (SELECT path FROM entries)",
             )?,
         })
     }
@@ -82,6 +91,10 @@ impl Store {
         )?;
         tx.execute(
             "DELETE FROM classifications WHERE path NOT IN (SELECT path FROM entries)",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM directory_apps WHERE path NOT IN (SELECT path FROM entries)",
             [],
         )?;
         tx.execute(
