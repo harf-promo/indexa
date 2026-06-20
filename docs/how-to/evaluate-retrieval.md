@@ -48,16 +48,22 @@ indexa eval golden.json --min-hit-rate 0.8       # exit 1 below 80% hit rate (th
 |---|---|---|
 | **hit@k** | any expected path in the top k | fraction of questions that hit (`hit_rate`) |
 | **MRR** | 1 / rank of the first expected path (0 on a miss) | mean reciprocal rank (`mrr`) |
+| **recall@k** | fraction of the *distinct expected paths* covered in the top k | mean (`mean_recall`) |
+| **nDCG@k** | binary-relevance nDCG — how high the expected hits rank (1.0 = packed at top) | mean (`mean_ndcg`) |
 | **citation precision** | fraction of returned hits whose path is expected | mean (`mean_precision`) |
+
+`hit@k` only asks *"any expected path?"*; **recall@k** grades *"how many of them?"* (a 2-path
+question with one retrieved scores 0.5), and **nDCG@k** catches a *ranking* regression — an expected
+hit sliding from #1 to #6 — that `hit@k` is blind to.
 
 Sample output:
 
 ```
-hit  rank      rr   prec  question
-  ✓     1   1.000   0.50  where is auth handled?
-  ✗     -   0.000   0.00  how is the connection pool configured?
+hit  rank      rr   prec    rec  ndcg  question
+  ✓     1   1.000   0.50   1.00  1.00  where is auth handled?
+  ✗     -   0.000   0.00   0.00  0.00  how is the connection pool configured?
 
-2 questions · hit rate 0.50 · MRR 0.500 · precision 0.25 · mode sparse
+2 questions · hit rate 0.50 · MRR 0.500 · recall 0.50 · nDCG 0.500 · precision 0.25 · mode sparse
 ```
 
 Exit code is 0 unless the aggregate hit rate drops below `--min-hit-rate` (default 0, i.e. report

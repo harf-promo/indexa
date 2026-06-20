@@ -114,24 +114,32 @@ pub(crate) async fn cmd_eval(
         );
     } else {
         println!(
-            "{:>3}  {:>4}  {:>6}  {:>5}  question",
-            "hit", "rank", "rr", "prec"
+            "{:>3}  {:>4}  {:>6}  {:>5}  {:>5}  {:>5}  question",
+            "hit", "rank", "rr", "prec", "rec", "ndcg"
         );
         for m in &per_question {
             println!(
-                "{:>3}  {:>4}  {:>6.3}  {:>5.2}  {}",
+                "{:>3}  {:>4}  {:>6.3}  {:>5.2}  {:>5.2}  {:>5.2}  {}",
                 if m.hit { "✓" } else { "✗" },
                 m.first_hit_rank
                     .map_or_else(|| "-".to_owned(), |r| r.to_string()),
                 m.reciprocal_rank,
                 m.precision,
+                m.recall,
+                m.ndcg,
                 truncate(&m.question, 60),
             );
         }
         println!();
         println!(
-            "{} questions · hit rate {:.2} · MRR {:.3} · precision {:.2} · mode {}",
-            summary.questions, summary.hit_rate, summary.mrr, summary.mean_precision, mode
+            "{} questions · hit rate {:.2} · MRR {:.3} · recall {:.2} · nDCG {:.3} · precision {:.2} · mode {}",
+            summary.questions,
+            summary.hit_rate,
+            summary.mrr,
+            summary.mean_recall,
+            summary.mean_ndcg,
+            summary.mean_precision,
+            mode
         );
     }
 

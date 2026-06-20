@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — catching chunking / parsing / tokenization / ranking regressions that fmt/clippy/test can't see.
   Golden `expect_paths` now also accept repo-**relative** paths (boundary-suffix matched against the
   stored absolute path), so a committed fixture is portable across checkouts and machines.
+- **`indexa eval` now reports recall@k and nDCG@k** alongside hit-rate / MRR / precision (per-question
+  columns + run aggregates `mean_recall` / `mean_ndcg`, in the table and `--json`). `hit@k` only asks
+  "any expected path?"; **recall@k** grades how many of them were retrieved, and **nDCG@k** catches a
+  *ranking* regression (an expected hit sliding from #1 to #6) that hit-rate is blind to.
 
 ## [0.67.0] — 2026-06-20
 

@@ -46,6 +46,14 @@ pub struct QuestionMetrics {
     /// Citation precision: fraction of *returned* hits whose entry_path is expected
     /// (denominator is `retrieved`, not `k`, so 3 relevant of 3 returned scores 1.0).
     pub precision: f64,
+    /// recall@k: fraction of the *distinct expected paths* covered by some top-k hit
+    /// (1.0 when every expected path was retrieved). Complements `hit`/`precision` —
+    /// hit@k only asks "any expected path?", recall asks "how many of them?".
+    pub recall: f64,
+    /// nDCG@k with binary relevance: how well the expected hits are ranked *within*
+    /// the top-k, normalized so 1.0 = the relevant hits packed at the top ranks.
+    /// Catches rank demotions (expected hit slides from #1 to #6) that hit@k cannot.
+    pub ndcg: f64,
 }
 
 /// Aggregate over all questions in a run.
@@ -57,6 +65,10 @@ pub struct EvalSummary {
     /// Mean reciprocal rank.
     pub mrr: f64,
     pub mean_precision: f64,
+    /// Mean recall@k across questions.
+    pub mean_recall: f64,
+    /// Mean nDCG@k across questions.
+    pub mean_ndcg: f64,
 }
 
 /// Run retrieval for one golden question and score the ranking. `query_vec` is
@@ -107,6 +119,33 @@ pub fn score_ranking(
     let top = &ranked_paths[..ranked_paths.len().min(k)];
     let first_hit_rank = top.iter().position(|p| is_expected(p)).map(|i| i + 1);
     let matched = top.iter().filter(|p| is_expected(p)).count();
+
+    // recall@k: how many of the DISTINCT expected paths got covered by some top-k hit.
+    // Denominator is the expected set (the authored relevant items), so a 2-path question
+    // with one path retrieved scores 0.5. (precision's denominator is the returned hits.)
+    let recall = if expect_paths.is_empty() {
+        0.0
+    } else {
+        let covered = expect_paths
+            .iter()
+            .filter(|e| top.iter().any(|p| path_matches(p, e)))
+            .count();
+        covered as f64 / expect_paths.len() as f64
+    };
+
+    // nDCG@k (binary relevance): DCG of the expected hits in the top-k, normalized by the
+    // ideal where the same number of relevant hits sit at ranks 1..matched. 1.0 = expected
+    // hits packed at the top; drops as a relevant hit sinks below irrelevant ones — the
+    // ranking-quality signal hit@k is blind to. rank = i+1, so log2(rank+1) = log2(i+2).
+    let dcg: f64 = top
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| is_expected(p))
+        .map(|(i, _)| 1.0 / ((i as f64) + 2.0).log2())
+        .sum();
+    let idcg: f64 = (0..matched).map(|i| 1.0 / ((i as f64) + 2.0).log2()).sum();
+    let ndcg = if idcg > 0.0 { dcg / idcg } else { 0.0 };
+
     QuestionMetrics {
         question: question.to_owned(),
         k,
@@ -119,6 +158,8 @@ pub fn score_ranking(
         } else {
             matched as f64 / top.len() as f64
         },
+        recall,
+        ndcg,
     }
 }
 
@@ -132,6 +173,8 @@ pub fn aggregate(per_question: &[QuestionMetrics]) -> EvalSummary {
             hit_rate: 0.0,
             mrr: 0.0,
             mean_precision: 0.0,
+            mean_recall: 0.0,
+            mean_ndcg: 0.0,
         };
     }
     let nf = n as f64;
@@ -140,6 +183,8 @@ pub fn aggregate(per_question: &[QuestionMetrics]) -> EvalSummary {
         hit_rate: per_question.iter().filter(|m| m.hit).count() as f64 / nf,
         mrr: per_question.iter().map(|m| m.reciprocal_rank).sum::<f64>() / nf,
         mean_precision: per_question.iter().map(|m| m.precision).sum::<f64>() / nf,
+        mean_recall: per_question.iter().map(|m| m.recall).sum::<f64>() / nf,
+        mean_ndcg: per_question.iter().map(|m| m.ndcg).sum::<f64>() / nf,
     }
 }
 
@@ -247,6 +292,45 @@ mod tests {
         assert!(m.hit);
         assert_eq!(m.first_hit_rank, Some(1));
         assert_eq!(m.precision, 1.0);
+    }
+
+    #[test]
+    fn score_ranking_recall_counts_distinct_expected() {
+        // 2 expected, 1 in top-k → recall 0.5 (hit@k still true; recall is the graded view).
+        let m = score_ranking("q", 10, &["/a.md", "/x.md"], &owned(&["/a.md", "/b.md"]));
+        assert!(m.hit);
+        assert!((m.recall - 0.5).abs() < 1e-9);
+        // both expected retrieved → 1.0
+        let m = score_ranking("q", 10, &["/a.md", "/b.md"], &owned(&["/a.md", "/b.md"]));
+        assert!((m.recall - 1.0).abs() < 1e-9);
+        // none retrieved → 0.0
+        let m = score_ranking("q", 10, &["/x.md"], &owned(&["/a.md"]));
+        assert_eq!(m.recall, 0.0);
+    }
+
+    #[test]
+    fn score_ranking_ndcg_rewards_top_rank() {
+        // Expected at rank 1 → perfect nDCG.
+        let m = score_ranking("q", 10, &["/a.md", "/x.md"], &owned(&["/a.md"]));
+        assert!((m.ndcg - 1.0).abs() < 1e-9);
+        // Same hit demoted to rank 3 → nDCG = (1/log2 4)/(1/log2 2) = 0.5, while hit@k is blind.
+        let m = score_ranking("q", 10, &["/x.md", "/y.md", "/a.md"], &owned(&["/a.md"]));
+        assert!(m.hit);
+        assert!((m.ndcg - 0.5).abs() < 1e-9);
+        // No hit → 0.0.
+        let m = score_ranking("q", 10, &["/x.md"], &owned(&["/a.md"]));
+        assert_eq!(m.ndcg, 0.0);
+    }
+
+    #[test]
+    fn aggregate_includes_recall_and_ndcg() {
+        let per = [
+            score_ranking("q1", 10, &["/a.md"], &owned(&["/a.md"])), // recall 1, ndcg 1
+            score_ranking("q2", 10, &["/x.md", "/y.md", "/b.md"], &owned(&["/b.md"])), // recall 1, ndcg 0.5
+        ];
+        let s = aggregate(&per);
+        assert!((s.mean_recall - 1.0).abs() < 1e-9);
+        assert!((s.mean_ndcg - 0.75).abs() < 1e-9);
     }
 
     #[test]
