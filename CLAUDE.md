@@ -24,7 +24,30 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.66.0)
+## Current feature surface (v0.67.0)
+
+**Hardening, parity & performance (v0.67):** a defect/parity/perf release from three adversarial
+review sweeps — no single headline feature. **Security:** web `GET /api/packs/{name}/export` now
+runs `redact_secrets` (it was the one export surface that didn't). **Correctness:** cite budget-
+truncated chunks (no dangling `[N]`); `parse_reindex_interval` is char-boundary-safe (was a
+multibyte panic reachable via `--changed-since` / `?changed_since=` / `[scan] auto_reindex`);
+`indexa watch` now writes the `entries` row for newly-created files (were never summarized + pruned)
+AND recomputes the path hint on every upsert via `surface::classify` (a watch edit used to NULL
+`hint_cat`/`deep_policy` — that fix landed as a same-session regression catch); `cmd_update` clears
+the CLI-skew marker so the web banner unsticks; fingerprint `**` markers are rejected (not silently
+single-`*`). **Parity (MCP tool count stays 46 — optional params only):** `search`/`search_pack`
+emit chunk `#seq`; `export_pack` gained `changed_since`/`category`; `code_graph` gained `cycles`;
+`ask` shows per-answer impact + accepts `top_k`; `read_file` accepts a byte `offset` (paging past
+the 40 KB cap); web Insights gained `largest` + `languages`. **Config:** new `[retrieval]
+archive_segments` + `archive_penalty` (extend/disable the historical down-weighting; `0.0` disables).
+**Perf:** `tree_level` replaced ~4×C correlated subtree-LIKE subqueries with one set-based
+aggregation pass (proven behavior-identical by a `tree_level_reference` equivalence oracle test), and
+web `api_tree` reads on a fresh connection instead of holding the shared store mutex. **Redundancy:**
+XML escaping + `floor_char_boundary` consolidated into `indexa_core::text`. **Deps:** zip 8, kamadak-
+exif 0.6, notify 8 + debouncer 0.7, axum 0.8, setup-node 6 (openssl-free preserved). ⚠️ Process
+lessons this cycle → [[project-lore]] (Windows crates.io download flake = rerun, not a code bug;
+`gh run watch --exit-status` unreliable — confirm with `gh pr checks`; equivalence-oracle for risky
+SQL rewrites) + [[feedback-commit-signing]] (`--no-gpg-sign` on ALL commit-creating git ops).
 
 **Application & structure recognition (v0.66):** Indexa now understands *groups* of files in a
 recognizable layout, not just individual files — that a directory is a Rust crate, a Next.js app, a
