@@ -1,61 +1,185 @@
-/* ── Fonts ── */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+/* ============================================================================
+   Indexa web UI — design tokens, on the HARF design system.
 
-/* ── Theme tokens — dark (default) ── */
+   The brand foundation (palette, type, spacing, radii, motion) is the Harf
+   bilingual editorial system: a cool-grey scale anchored on the #939598 wordmark
+   grey, with the #A4CD39 brand green reserved as *punctuation* (the apostrophe,
+   status dots) — never UI state. Active/selected UI uses teal (--positive); the
+   only soft corner is 4px on buttons/inputs; the system runs on hairlines, not
+   shadows. Sharp by default. See the "Harf Design System" project.
+
+   Dark is Indexa's default (index.html ships <html data-theme="dark">). Theme-
+   sensitive tokens use CSS Color-5 light-dark() — one declaration, both themes —
+   and the data-theme attribute flips color-scheme so light-dark() resolves. The
+   01-state-theme-tabs.js toggle (data-theme on <html>, persisted) is unchanged.
+
+   Indexa's 19 CSS modules consume the legacy token names (--bg, --surface, --text,
+   --accent, --border, --radius, --font-*); the "compatibility aliases" block at the
+   end maps each onto a Harf token so every module re-skins by inheritance.
+============================================================================ */
+
+/* ── Webfonts — Geist (Latin) + Geist Mono (code), the Harf stack. One @import;
+   the spec discards any @import after another rule, so keep it first. (Indexa's
+   UI is English/LTR, so IBM Plex Sans Arabic is omitted.) ── */
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Geist+Mono:wght@400;500;600&display=swap');
+
 :root {
-  --bg: #0d1117;
-  --surface: #161b22;
-  --surface-2: #1c2128;
-  --surface-3: #262c36;
-  --border: #30363d;
-  --border-subtle: #21262d;
-  --text: #e6edf3;
-  --muted: #8b949e;
-  --accent: #58a6ff;
-  --accent-hover: #79b8ff;
-  /* Theme-aware tint of --accent (tracks the accent in both themes via the
-     deferred var() resolution) — used for selected/active control backgrounds. */
-  --accent-muted: color-mix(in srgb, var(--accent) 16%, transparent);
-  --green: #3fb950;
-  --red: #f85149;
-  --orange: #d29922;
-  --radius: 0.625rem;
-  --radius-sm: 0.375rem;
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
-  --shadow: 0 2px 6px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.3);
-  --shadow-lg: 0 8px 24px rgba(0,0,0,0.5), 0 2px 8px rgba(0,0,0,0.3);
-  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Fira Code', ui-monospace, monospace;
-  --sidebar-width: 260px;
-  /* Responsive breakpoints (WS4). CSS @media cannot read custom properties, so
-     the px literals in 13-responsive.css and the matchMedia() calls in
-     22-responsive.js mirror these — these tokens document the canonical values:
-     ≤ --bp-tablet collapses the sidebar to a drawer; ≤ --bp-mobile stacks panels. */
+  /* light-dark() needs a resolvable color-scheme; data-theme flips it below. */
+  color-scheme: light dark;
+
+  /* ── Brand — both colours come from the logo ─────────────────────────────
+     --harf-grey: the wordmark; the constant. NEVER body text.
+     --harf-green: the apostrophe; the accent. Punctuation only — never UI state,
+     never body text. Appears as a single mark per surface (<5% of a composition). */
+  --harf-grey:   #939598;
+  --harf-green:  #A4CD39;
+
+  /* ── Greyscale ramp — OKLCH hue 264, the wordmark grey anchors --grey-500 ── */
+  --grey-50:   #FAFAFA;
+  --grey-100:  #F2F2F3;
+  --grey-200:  #E4E4E6;
+  --grey-300:  #C8C8CB;
+  --grey-400:  #BBBBBE;
+  --grey-500:  var(--harf-grey);
+  --grey-600:  #6E7073;
+  --grey-700:  #4A4B4E;
+  --grey-800:  #2A2B2D;
+  --grey-900:  #1A1B1D;
+
+  /* ── Green ramp — hue ≈124°. Green is punctuation; the ramp is short. ── */
+  --green-50:   #F4FBE3;   /* wash: tint-pill ground, selection */
+  --green-100:  #E5F5BD;   /* focus halo (light) */
+  --green-500:  var(--harf-green);
+  --green-600:  #8FB72A;   /* accent-button hover */
+  --green-700:  #7AA01D;   /* press · focus ring · selection (dark) */
+  --green-800:  #5D7D14;   /* focus halo (dark) */
+  --green-900:  #4D6A0F;   /* the only green legible as text on paper (4.5:1) */
+
+  /* ── Status — tint / default / deep. Positive is TEAL (never collides with the
+     brand green); this is also the active/selected-UI colour. ── */
+  --positive-tint:  #DCEFE3;
+  --positive:       #2F8C5A;
+  --positive-deep:  #175A37;
+  --warning-tint:   #F8EED0;
+  --warning:        #D49A2A;
+  --warning-deep:   #8C6310;
+  --critical-tint:  #F5D9D2;
+  --critical:       #C7432B;
+  --critical-deep:  #82230F;
+  --info-tint:      #DEEAF2;
+  --info:           #3E78A8;
+  --info-deep:      #1B4368;
+
+  /* ── Accent roles — the only legal green jobs (green = punctuation) ── */
+  --accent-mark:      var(--harf-green);  /* apostrophe, status dots, underlines */
+  --accent-text:      var(--green-900);   /* the only legal green in a sentence (4.5:1) */
+  --accent-press-bg:  var(--green-700);   /* button :active background */
+  --accent-press-fg:  var(--paper);       /* label on pressed-green */
+  --on-green:         var(--grey-900);    /* THE only legal fg on a harf-green field
+                                             (10.3:1, both themes — green never flips) */
+
+  /* ── Surfaces · ink · rules — single-declaration via light-dark(L, D) ── */
+  --paper:        light-dark(#FFFFFF, #0F1011);
+  --paper-2:      light-dark(#FAFAFA, #16181A);
+  --paper-3:      light-dark(#F2F2F3, #1D1F22);
+  --paper-4:      light-dark(#EAEAEC, #25282B);
+  --rule:         light-dark(#E4E4E6, #2A2D31);   /* faint hairline (decorative) */
+  --rule-2:       light-dark(#9C9EA1, #3E4146);   /* control / panel boundary (WCAG 1.4.11) */
+  --rule-3:       light-dark(#C8C8CB, #34373B);   /* decorative third tier */
+  --rule-strong:  light-dark(#1A1B1D, #FFFFFF);   /* masthead, section breaks */
+
+  --ink-1:        light-dark(#1A1B1D, #F2F2F3);
+  --ink-2:        light-dark(#4A4B4E, #BBBBBE);
+  --ink-3:        light-dark(#646669, #939598);   /* AA on every paper surface */
+  --ink-4:        light-dark(#939598, #6E7073);
+  --ink-disabled: light-dark(#4A4B4E, #939598);
+
+  /* Shadows lift in dark mode; the system uses them sparingly. */
+  --shadow-2: light-dark(0 4px 16px -4px rgba(26,27,29,0.08),  0 4px 16px -4px rgba(0,0,0,0.5));
+  --shadow-3: light-dark(0 12px 32px -12px rgba(26,27,29,0.16), 0 12px 32px -12px rgba(0,0,0,0.7));
+
+  /* ── Type families. Geist serves display + body; --code is Geist Mono. ── */
+  --sans:     "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --code:     "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --display:  var(--sans);
+  --label:    var(--sans);   /* the tracked small-caps voice (tracking per-class) */
+
+  /* ── Spacing — strict √2 ladder; alternates ×3/2 and ×4/3, doubles every 2 ── */
+  --s-0: 0px;  --s-1: 4px;  --s-2: 8px;   --s-3: 12px;  --s-4: 16px;  --s-5: 24px;
+  --s-6: 32px; --s-7: 48px; --s-8: 64px;  --s-9: 96px;  --s-10: 128px;
+  --s-11: 192px; --s-12: 256px;
+
+  /* ── Type scale — major third (5/4), base 16px. Absolute px, root-size agnostic. ── */
+  --t-0: 10px; --t-0a: 12px; --t-1: 13px; --t-2: 16px; --t-3: 20px; --t-4: 25px;
+  --t-5: 31px; --t-6: 39px; --t-7: 49px; --t-8: 61px; --t-9: 76px; --t-10: 95px;
+  --t-11: 119px; --t-12: 149px; --t-13: 186px; --t-14: 233px;
+
+  /* ── Radii — sharp by default; one soft corner (4px) on buttons/inputs ── */
+  --r-0: 0; --r-1: 2px; --r-2: 4px; --r-pill: 999px;
+
+  /* ── Focus — one ring, theme-aware halo (consumed in 02-base.css) ── */
+  --focus-halo: light-dark(var(--green-100), var(--green-800));
+  --focus-ring: 0 0 0 2px var(--green-700), 0 0 0 6px var(--focus-halo);
+
+  /* ── Motion — ×2 ladder; three easings, each pinned to a use-case ── */
+  --ease-out: cubic-bezier(0.20, 0.80, 0.20, 1);   /* enter · default */
+  --ease-in:  cubic-bezier(0.40, 0.00, 0.80, 0.20); /* exit · dismiss */
+  --ease-std: cubic-bezier(0.30, 0.10, 0.20, 1);    /* in-out state move */
+  --dur-instant: 50ms; --dur-quick: 100ms; --dur-base: 200ms; --dur-slow: 400ms; --dur-page: 800ms;
+  --motion-state: var(--dur-base) var(--ease-out);
+
+  /* ── Overlays · z-index ── */
+  --scrim: rgba(26,27,29,0.40);     /* backdrop behind modals & drawers */
+  --veil:  rgba(255,255,255,0.40);  /* cover over a busy / loading control */
+  --z-base: 0; --z-raised: 1; --z-sticky: 10; --z-dropdown: 50;
+  --z-toast: 150; --z-overlay: 180; --z-drawer: 190; --z-modal: 200; --z-tooltip: 250;
+
+  /* ── Tracking · line-height ── */
+  --track-display: -0.022em; --track-h1: -0.018em; --track-h2: -0.014em;
+  --track-body: -0.005em; --track-label: 0.08em; --track-label-wide: 0.14em;
+  --track-label-tight: 0.04em;
+  --lh-display: 0.96;
+
+  /* Brand mark as an inline CSS data-URL — zero asset-path dependency. Consumed
+     by the .apos primitive and the "by Harf" sign-off. */
+  --apos-mask: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 84.96 141.6'%3E%3Cpath d='M8.49,141.6l-0.27,-28.76c10.16-0.98,18.37-3.12,26.59-9.05,8.22-5.95,12.33-11.39,12.33-25.19h-47.14V0h84.96v64.06c-0.37,23.75-6.4,42.22-18.09,55.39-11.7,13.16-34.63,20.55-58.38,22.15Z' fill='%23000'/%3E%3C/svg%3E");
+
+  /* ══ Indexa compatibility aliases — the 19 modules consume these names; each
+     maps onto a Harf token so the whole UI re-skins by inheritance. Stage-2
+     component work narrows specific uses (ink buttons, green-underline links,
+     sharp cards) beyond what a flat alias can express. ══ */
+  --bg:            var(--paper);
+  --surface:       var(--paper-2);
+  --surface-2:     var(--paper-3);
+  --surface-3:     var(--paper-4);
+  --border:        var(--rule-2);   /* visible panel/control boundary */
+  --border-subtle: var(--rule);     /* faint hairline */
+  --text:          var(--ink-1);
+  --muted:         var(--ink-3);
+  --accent:        var(--positive);       /* teal — active/selected UI (NOT brand green) */
+  --accent-hover:  var(--positive-deep);
+  --accent-muted:  color-mix(in srgb, var(--accent) 16%, transparent);
+  --green:         var(--positive);       /* success/done — teal */
+  --red:           var(--critical);
+  --orange:        var(--warning);
+  --radius:        var(--r-2);   /* 4px — the soft corner (Stage 2 sharpens cards to --r-0) */
+  --radius-sm:     var(--r-1);   /* 2px */
+  --shadow-sm:     light-dark(0 1px 2px rgba(0,0,0,0.07), 0 1px 2px rgba(0,0,0,0.3));
+  --shadow:        var(--shadow-2);
+  --shadow-lg:     var(--shadow-3);
+  --font-sans:     var(--sans);
+  --font-mono:     var(--code);
+
+  /* ── Layout (unchanged) ── */
+  --sidebar-width: 260px;   /* runtime-overwritten by 23-sidebar-resize.js */
+  /* Responsive breakpoints — CSS @media can't read custom props, so the px
+     literals in 13-responsive.css and 22-responsive.js mirror these. */
   --bp-tablet: 1024px;
   --bp-mobile: 768px;
   font-size: 14px;
 }
 
-/* ── Light theme ── */
-[data-theme="light"] {
-  --bg: #f6f8fa;
-  --surface: #ffffff;
-  --surface-2: #f0f2f5;
-  --surface-3: #e7eaee;
-  --border: #d0d7de;
-  --border-subtle: #e6eaef;
-  --text: #1f2328;
-  /* #656d76 fell to 4.35:1 on --surface-3 (#e7eaee) — below WCAG AA 4.5:1. #5a6370
-     measures 5.04:1 on surface-3 and ≥5.7:1 on --bg/--surface, fixing the one failing
-     light-theme pairing while improving all the others. */
-  --muted: #5a6370;
-  --accent: #0969da;
-  --accent-hover: #0550ae;
-  --green: #1a7f37;
-  --red: #d1242f;
-  --orange: #9a6700;
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.07);
-  --shadow: 0 2px 6px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.05);
-  --shadow-lg: 0 8px 24px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.06);
-}
-
+/* data-theme (set by 01-state-theme-tabs.js, default dark in index.html) flips
+   color-scheme so light-dark() resolves; no theme value → follows the OS. */
+:root[data-theme="dark"], :root.dark { color-scheme: dark; }
+:root[data-theme="light"]            { color-scheme: light; }
