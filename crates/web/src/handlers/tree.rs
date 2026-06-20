@@ -5,6 +5,8 @@ use axum::{
     Json,
 };
 
+use indexa_core::store::Store;
+
 use crate::dto::{err_json, PathQuery, TreeNodeResponse};
 use crate::AppState;
 
@@ -13,7 +15,16 @@ pub(crate) async fn api_tree(
     Query(params): Query<PathQuery>,
 ) -> Response {
     let path = params.path.as_deref().unwrap_or("");
-    let store = state.store.lock().await;
+    // Open a fresh, short-lived read connection instead of locking the shared
+    // store for the whole query — a slow tree expansion no longer serializes every
+    // other web request that needs the store (mirrors how the MCP tools open a
+    // per-call connection). `tree_level` is read-only.
+    let store = match Store::open(&state.db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"));
+        }
+    };
     match store.tree_level(path) {
         Ok(nodes) => Json(
             nodes

@@ -564,6 +564,109 @@ fn tree_level_rolls_up_subtree_coverage() {
     );
 }
 
+/// Safety net for the set-based `tree_level` rewrite (perf/tree-level): the new
+/// aggregating implementation MUST return output byte-for-byte identical to the
+/// preserved `tree_level_reference` correctness oracle (the original per-row
+/// correlated-subquery SQL). Seeds a RICH tree — multiple roots, several nesting
+/// levels, files at various depths, chunks under several files (incl. one at a
+/// child's own path to exercise the descendant-only chunk filter), and
+/// summary_queue dir rows in done / pending / in_flight states — then asserts
+/// full `Vec<TreeNode>` equality (via derived `PartialEq`) at the root level and
+/// at several non-root parents. If they ever diverge, this fails.
+#[test]
+fn tree_level_matches_reference_oracle() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            // Root 1: a deep, mixed subtree.
+            dummy_entry("/proj/alpha", EntryKind::Dir, 0),
+            dummy_entry("/proj/alpha/src", EntryKind::Dir, 0),
+            dummy_entry("/proj/alpha/src/core", EntryKind::Dir, 0),
+            dummy_entry("/proj/alpha/src/core/deep", EntryKind::Dir, 0),
+            dummy_entry("/proj/alpha/src/lib.rs", EntryKind::File, 120),
+            dummy_entry("/proj/alpha/src/core/mod.rs", EntryKind::File, 80),
+            dummy_entry("/proj/alpha/src/core/deep/util.rs", EntryKind::File, 40),
+            dummy_entry("/proj/alpha/docs", EntryKind::Dir, 0),
+            dummy_entry("/proj/alpha/docs/intro.md", EntryKind::File, 30),
+            dummy_entry("/proj/alpha/README.md", EntryKind::File, 15),
+            dummy_entry("/proj/alpha/empty", EntryKind::Dir, 0),
+            // Root 2: a second top-level root (exercises the `parent_path = ''` case
+            // where roots share no common ancestor).
+            dummy_entry("/proj/beta", EntryKind::Dir, 0),
+            dummy_entry("/proj/beta/main.rs", EntryKind::File, 200),
+            dummy_entry("/proj/beta/sub", EntryKind::Dir, 0),
+            dummy_entry("/proj/beta/sub/a.rs", EntryKind::File, 10),
+            dummy_entry("/proj/beta/sub/b.rs", EntryKind::File, 11),
+        ])
+        .unwrap();
+
+    // Chunks under several files at various depths. Includes a chunk whose entry_path
+    // is a DIRECTORY child's own path (`/proj/alpha/docs`) — the reference counts
+    // chunks via `LIKE e.path || '/%'` (descendants only), so this must NOT be
+    // counted toward `docs`'s chunk_count, only toward `/proj/alpha`'s.
+    store
+        .upsert_chunks(&[
+            dummy_chunk("/proj/alpha/src/lib.rs", 0, "fn lib one"),
+            dummy_chunk("/proj/alpha/src/lib.rs", 1, "fn lib two"),
+            dummy_chunk("/proj/alpha/src/core/mod.rs", 0, "fn mod core"),
+            dummy_chunk("/proj/alpha/src/core/deep/util.rs", 0, "fn deep util"),
+            dummy_chunk("/proj/alpha/docs/intro.md", 0, "intro text here"),
+            dummy_chunk("/proj/alpha/docs", 0, "chunk AT the dir path itself"),
+            dummy_chunk("/proj/alpha/README.md", 0, "readme top level"),
+            dummy_chunk("/proj/beta/main.rs", 0, "fn main beta"),
+            dummy_chunk("/proj/beta/sub/a.rs", 0, "fn a"),
+            dummy_chunk("/proj/beta/sub/b.rs", 0, "fn b"),
+        ])
+        .unwrap();
+
+    // Dir summary_queue rows across all three states.
+    store
+        .enqueue_summary_items(&[
+            ("/proj/alpha".to_owned(), "dir".to_owned(), 1),
+            ("/proj/alpha/src".to_owned(), "dir".to_owned(), 2),
+            ("/proj/alpha/src/core".to_owned(), "dir".to_owned(), 3),
+            ("/proj/alpha/src/core/deep".to_owned(), "dir".to_owned(), 4),
+            ("/proj/alpha/docs".to_owned(), "dir".to_owned(), 2),
+            ("/proj/alpha/empty".to_owned(), "dir".to_owned(), 2),
+            ("/proj/beta".to_owned(), "dir".to_owned(), 1),
+            ("/proj/beta/sub".to_owned(), "dir".to_owned(), 2),
+            // A FILE queue row — must never count toward any dir rollup (kind='dir' filter).
+            ("/proj/alpha/src/lib.rs".to_owned(), "file".to_owned(), 3),
+        ])
+        .unwrap();
+    store
+        .mark_queue_state("/proj/alpha/src", "done", None)
+        .unwrap();
+    store
+        .mark_queue_state("/proj/alpha/src/core", "done", None)
+        .unwrap();
+    store
+        .mark_queue_state("/proj/alpha/src/core/deep", "in_flight", None)
+        .unwrap();
+    store.mark_queue_state("/proj/beta", "done", None).unwrap();
+    // /proj/alpha, /proj/alpha/docs, /proj/alpha/empty, /proj/beta/sub stay 'pending'.
+
+    let assert_same = |p: &str| {
+        let got = store.tree_level(p).unwrap();
+        let want = store.tree_level_reference(p).unwrap();
+        assert_eq!(
+            got, want,
+            "tree_level({p:?}) diverged from tree_level_reference"
+        );
+    };
+
+    // Root level + several non-root parents at different depths.
+    assert_same("");
+    assert_same("/proj/alpha");
+    assert_same("/proj/alpha/src");
+    assert_same("/proj/alpha/src/core");
+    assert_same("/proj/alpha/docs");
+    assert_same("/proj/alpha/empty"); // no children → empty vec, both sides
+    assert_same("/proj/beta");
+    assert_same("/proj/beta/sub");
+    assert_same("/nonexistent"); // no children → empty vec
+}
+
 #[test]
 fn chunks_current_for_mtime_uses_fresh_mtime_not_stored() {
     let mut store = Store::open_in_memory().unwrap();

@@ -106,7 +106,7 @@ pub struct SummaryRecord {
     pub generated_at: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TreeNode {
     pub path: String,
     pub name: String,
