@@ -159,7 +159,8 @@ pub(crate) async fn cmd_watch(
                             kind: EntryKind::File,
                             size,
                             modified: meta.as_ref().and_then(|m| m.modified().ok()),
-                            hint: None,
+                            hint: indexa_core::surface::classify(path)
+                                .or_else(|| indexa_core::surface::classify_file_by_extension(path)),
                         };
                         if let Err(e) = store.upsert_entries(&[entry]) {
                             tracing::warn!("failed to upsert entry for {}: {e}", path.display());
