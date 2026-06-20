@@ -26,6 +26,20 @@ Verify with `ollama list`.
 
 ## Current feature surface (v0.67.0)
 
+**[Unreleased]** — merged to `main`, not yet in a release (full detail in `CHANGELOG.md`):
+- **`indexa deep --no-embed`** — FTS-only hermetic index (no Ollama, no embeddings; a later plain
+  `deep` self-heals the vectors via the `COUNT(*)=COUNT(embedding)` skip check). Powers a new
+  advisory CI job that runs `indexa eval` on Indexa's own `fixtures/self-golden.json` every PR.
+- **`indexa eval` gained recall@k + nDCG@k** and a **baseline regression gate** (`--baseline` /
+  `--max-regression`, epsilon-guarded) — retrieval changes are now eval-gated.
+- Answer **"confidence" → "retrieval coverage"** across CLI/web/MCP/docs (display-only; the
+  `--json`/MCP/SSE field stays named `confidence`).
+- **Web UI restyled onto the Harf design system** (`crates/web/assets/ui`): grey + green-as-
+  punctuation palette, **teal** active-states (green is never UI state), Geist fonts, sharp corners
+  + hairlines, ink primary buttons, `light-dark()` dark mode, no emoji, a footer "by Harf" mark.
+  `01-tokens.css` is now the Harf foundation (legacy `--bg`/`--surface`/`--accent`/… alias onto it);
+  brand source = the "Harf Design System" project via the `claude_design` MCP (`DesignSync` tool).
+
 **Hardening, parity & performance (v0.67):** a defect/parity/perf release from three adversarial
 review sweeps — no single headline feature. **Security:** web `GET /api/packs/{name}/export` now
 runs `redact_secrets` (it was the one export surface that didn't). **Correctness:** cite budget-
