@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Web UI is being restyled onto the Harf design system** (a bilingual editorial brand: cool-grey
+  scale + a single green apostrophe as punctuation, Geist type, √2 spacing, 5/4 type scale, sharp
+  corners + hairlines). **Stage 1 — the token foundation:** `01-tokens.css` is rewritten to the Harf
+  palette/type/spacing/radii/motion with `light-dark()` dark mode (the existing `data-theme` toggle
+  still drives it); the legacy token names alias onto Harf tokens, so the whole UI re-skins. Active/
+  selected UI is now teal (`--positive`); the brand green is reserved for marks. Fonts switch to Geist
+  + Geist Mono. Component sharpening, ink primary buttons, emoji→text-marks, and a "by Harf" sign-off
+  land in follow-up stages.
+
 ### Added
 
 - **`indexa deep --no-embed`** — an FTS-only deep pass: parse + chunk + index for sparse (BM25)
