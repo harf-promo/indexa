@@ -300,7 +300,7 @@ pub(crate) async fn cmd_ask(
             // web surface). v0.59: this replaced the old answer-text-only count, which slightly
             // undercounted served bytes (and so overstated savings) in the aggregate `status`.
             let served = served_bytes(&answer);
-            if let Err(e) = s.record_tool_usage("cli", "ask", served, counterfactual) {
+            if let Err(e) = s.record_tool_usage("cli", "ask", served, counterfactual, None) {
                 tracing::debug!("usage telemetry skipped: {e:#}");
             }
             Some(AnswerImpact::new(served, counterfactual))

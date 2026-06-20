@@ -12,9 +12,11 @@ fn tool_usage_record_and_weekly_summary() {
     assert!(empty.savings_line().is_none());
 
     store
-        .record_tool_usage("mcp", "search", 100, 4_000)
+        .record_tool_usage("mcp", "search", 100, 4_000, None)
         .unwrap();
-    store.record_tool_usage("cli", "ask", 50, 1_000).unwrap();
+    store
+        .record_tool_usage("cli", "ask", 50, 1_000, None)
+        .unwrap();
 
     let u = store.usage_summary(USAGE_WEEK_SECS).unwrap();
     assert_eq!(u.calls, 2);
@@ -30,8 +32,12 @@ fn tool_usage_record_and_weekly_summary() {
 #[test]
 fn usage_summary_window_excludes_old_rows_and_gc_removes_them() {
     let mut store = Store::open_in_memory().unwrap();
-    store.record_tool_usage("web", "ask", 10, 100).unwrap();
-    store.record_tool_usage("web", "ask", 20, 200).unwrap();
+    store
+        .record_tool_usage("web", "ask", 10, 100, None)
+        .unwrap();
+    store
+        .record_tool_usage("web", "ask", 20, 200, None)
+        .unwrap();
     // Age one row past the weekly window (8 days).
     store
         .db_connection()
@@ -69,4 +75,38 @@ fn counterfactual_dedups_paths_and_falls_back_to_summary_byte_size() {
         .counterfactual_bytes_for_paths(&["/p/a.rs", "/p/a.rs", "/p", "/nope.txt"])
         .unwrap();
     assert_eq!(total, 1_234 + 100);
+}
+
+#[test]
+fn session_usage_ledger_sums_per_session_and_ignores_stateless() {
+    let mut store = Store::open_in_memory().unwrap();
+    // Two conversational sessions + one stateless (None) call.
+    store
+        .record_tool_usage("web", "ask", 100, 1_000, Some("sess-1"))
+        .unwrap();
+    store
+        .record_tool_usage("web", "ask", 50, 800, Some("sess-1"))
+        .unwrap();
+    store
+        .record_tool_usage("web", "ask", 30, 500, Some("sess-2"))
+        .unwrap();
+    store
+        .record_tool_usage("cli", "ask", 25, 250, None)
+        .unwrap();
+
+    // Per-session ledger sums only that session's rows (all-time, not windowed).
+    let s1 = store.session_usage_summary("sess-1").unwrap();
+    assert_eq!(s1.calls, 2);
+    assert_eq!(s1.bytes_served, 150);
+    assert_eq!(s1.bytes_counterfactual, 1_800);
+
+    let s2 = store.session_usage_summary("sess-2").unwrap();
+    assert_eq!(s2.calls, 1);
+    assert_eq!(s2.bytes_counterfactual, 500);
+
+    // Unknown session → zero, never an error.
+    assert_eq!(store.session_usage_summary("nope").unwrap().calls, 0);
+
+    // Every call (incl. the stateless None one) still lands in the weekly aggregate.
+    assert_eq!(store.usage_summary(USAGE_WEEK_SECS).unwrap().calls, 4);
 }

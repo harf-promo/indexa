@@ -190,7 +190,11 @@ pub(crate) async fn api_ask(
     };
     match result {
         Ok(answer) => {
-            let impact = into_ask_impact(record_ask_usage(&state.db_path, &answer));
+            let impact = into_ask_impact(record_ask_usage(
+                &state.db_path,
+                &answer,
+                body.session_id.as_deref(),
+            ));
             // Persist this turn (best-effort) and echo the session id back.
             if let Some(id) = body.session_id.as_deref() {
                 append_turn_best_effort(&state.db_path, id, &body.question, &answer);
@@ -219,6 +223,7 @@ pub(crate) async fn api_ask(
 fn record_ask_usage(
     db_path: &std::path::Path,
     answer: &indexa_query::Answer,
+    session_id: Option<&str>,
 ) -> Option<AnswerImpact> {
     let mut s = Store::open(db_path)
         .map_err(|e| tracing::debug!("usage telemetry skipped: {e:#}"))
@@ -228,7 +233,9 @@ fn record_ask_usage(
     // Served = answer text + the citation lines actually delivered (shared `served_bytes`
     // accounting with the CLI surface); counting less would inflate the savings.
     let served = served_bytes(answer);
-    if let Err(e) = s.record_tool_usage("web", "ask", served, counterfactual) {
+    // Tag the row with the conversation session (when this ask is part of one) so the
+    // per-session savings ledger can sum it; stateless asks pass None.
+    if let Err(e) = s.record_tool_usage("web", "ask", served, counterfactual, session_id) {
         tracing::debug!("usage telemetry skipped: {e:#}");
     }
     Some(AnswerImpact::new(served, counterfactual))
@@ -390,7 +397,8 @@ pub(crate) async fn api_ask_stream(
 
         let terminal = match result {
             Ok(answer) => {
-                let impact = into_ask_impact(record_ask_usage(&db_path, &answer));
+                let impact =
+                    into_ask_impact(record_ask_usage(&db_path, &answer, session_id.as_deref()));
                 // Persist this turn (best-effort) and echo the session id on `done`.
                 if let Some(id) = session_id.as_deref() {
                     append_turn_best_effort(&db_path, id, &question, &answer);

@@ -87,16 +87,18 @@ impl Store {
         tool: &str,
         bytes_served: u64,
         bytes_counterfactual: u64,
+        session_id: Option<&str>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO tool_usage (surface, tool, bytes_served, bytes_counterfactual)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO tool_usage (surface, tool, bytes_served, bytes_counterfactual, session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             // i64 at the SQL boundary: rusqlite has no u64 ToSql/FromSql.
             params![
                 surface,
                 tool,
                 bytes_served as i64,
-                bytes_counterfactual as i64
+                bytes_counterfactual as i64,
+                session_id
             ],
         )?;
         if self.conn.last_insert_rowid() % 1000 == 0 {
@@ -144,6 +146,27 @@ impl Store {
                     COALESCE(SUM(bytes_counterfactual), 0)
                FROM tool_usage WHERE at >= unixepoch() - ?1",
             params![since_secs],
+            |r| {
+                Ok(UsageSummary {
+                    calls: r.get::<_, i64>(0)? as u64,
+                    bytes_served: r.get::<_, i64>(1)? as u64,
+                    bytes_counterfactual: r.get::<_, i64>(2)? as u64,
+                })
+            },
+        )?;
+        Ok(row)
+    }
+
+    /// Cumulative usage for one Conversational-Ask session (all time, not windowed) —
+    /// the per-session savings ledger. Sums only rows tagged with this `session_id`, so a
+    /// session can show how much it has saved versus serving whole files.
+    pub fn session_usage_summary(&self, session_id: &str) -> Result<UsageSummary> {
+        let row = self.conn.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(bytes_served), 0),
+                    COALESCE(SUM(bytes_counterfactual), 0)
+               FROM tool_usage WHERE session_id = ?1",
+            params![session_id],
             |r| {
                 Ok(UsageSummary {
                     calls: r.get::<_, i64>(0)? as u64,

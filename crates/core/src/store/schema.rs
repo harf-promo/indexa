@@ -266,9 +266,13 @@ impl Store {
                 tool                 TEXT NOT NULL,
                 bytes_served         INTEGER NOT NULL DEFAULT 0,
                 bytes_counterfactual INTEGER NOT NULL DEFAULT 0,
-                at                   INTEGER NOT NULL DEFAULT (unixepoch())
+                at                   INTEGER NOT NULL DEFAULT (unixepoch()),
+                -- Conversational-Ask session this call belonged to (NULL for stateless
+                -- calls). Lets a session show its own cumulative savings; see store::usage.
+                session_id           TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_tool_usage_at ON tool_usage(at);
+            CREATE INDEX IF NOT EXISTS idx_tool_usage_session ON tool_usage(session_id);
 
             -- Decision Ledger (v0.22): every uncertain judgment call becomes a row —
             -- one row = one question + its answer. The row fills in place on answer;
@@ -379,6 +383,20 @@ impl Store {
             if !present {
                 self.conn.execute_batch(ddl)?;
             }
+        }
+
+        // Migration: tool_usage.session_id (per-session savings ledger). Fresh DBs get it
+        // from the base DDL; older DBs add it here. Nullable — stateless (non-session) calls
+        // leave it NULL, so existing rows and non-ask tools are unaffected.
+        let has_usage_session_id: bool = self
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('tool_usage') WHERE name = 'session_id'")?
+            .exists([])?;
+        if !has_usage_session_id {
+            self.conn.execute_batch(
+                "ALTER TABLE tool_usage ADD COLUMN session_id TEXT;
+                 CREATE INDEX IF NOT EXISTS idx_tool_usage_session ON tool_usage(session_id);",
+            )?;
         }
 
         // Migration: give `chunks.id` AUTOINCREMENT on databases created before stable ids

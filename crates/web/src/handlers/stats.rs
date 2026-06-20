@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -57,6 +57,26 @@ pub(crate) async fn api_impact(State(state): State<AppState>) -> Response {
                 counterfactual: u.bytes_counterfactual,
             })
             .collect(),
+    })
+    .into_response()
+}
+
+/// `GET /api/session-impact/:session_id` — cumulative token savings for ONE Conversational-Ask
+/// session (all-time, not the weekly window). Lets a conversation show how much it has saved
+/// versus serving whole files. `by_tool` is empty (a session is all `ask`); same estimate caveat
+/// as `/api/impact`. Best-effort: an unknown/empty session reads as a zero dashboard, never a 500.
+pub(crate) async fn api_session_impact(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let store = state.store.lock().await;
+    let s = store.session_usage_summary(&session_id).unwrap_or_default();
+    Json(ImpactResponse {
+        calls: s.calls,
+        served: s.bytes_served,
+        counterfactual: s.bytes_counterfactual,
+        savings_line: s.savings_line(),
+        by_tool: Vec::new(),
     })
     .into_response()
 }
