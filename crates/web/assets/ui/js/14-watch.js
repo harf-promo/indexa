@@ -20,7 +20,7 @@ function updateWatchIcons() {
   document.querySelectorAll('.watch-toggle-btn').forEach(function(btn) {
     var path = btn.dataset.watchPath;
     var on = watchedPaths.has(path);
-    btn.textContent = on ? '👁' : '👁‍🗨';
+    btn.innerHTML = on ? ICO_EYE : ICO_EYE_OFF;
     btn.title = on ? 'Stop watching for changes' : 'Watch for changes (live re-embed on save)';
     btn.setAttribute('aria-label', on ? 'Stop watching' : 'Start watching');
     btn.classList.toggle('watch-on', on);

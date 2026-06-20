@@ -38,16 +38,16 @@ function openAddRoot() {  // eslint-disable-line no-unused-vars
 }
 
 /* Calm, STATIC per-row context-coverage glyph. Replaces the old per-row pending
-   strobe: instead of a pulsing ⏳ on every folder during a subtree build, each dir
-   shows where its subtree stands — ● built · ◐ partly built · ○ none · ✗ failed.
+   strobe: instead of a pulsing spinner on every folder during a subtree build, each dir
+   shows where its subtree stands — ● built · ◐ partly built · ○ none · ✕ failed.
    Files (total === 0) and un-rolled-up roots carry no glyph. No animation. */
 function coverageGlyph(node) {
   if (node.summary_state === 'failed') {
-    // ✗ is clickable: retries the failed summary job
+    // ✕ is clickable: retries the failed summary job
     return '<span class="cov-glyph cov-failed cov-retry" ' +
       'title="Summary failed — click to retry" ' +
       'role="button" tabindex="0" aria-label="Retry failed summary" ' +
-      'data-retry-path="' + escapeAttr(node.path) + '">✗</span>';
+      'data-retry-path="' + escapeAttr(node.path) + '">✕</span>';
   }
   const total = node.total || 0;
   if (total <= 0) return '';
@@ -58,7 +58,7 @@ function coverageGlyph(node) {
   if (covered > 0) {
     return '<span class="cov-glyph cov-partial" title="Partly built (' + covered + '/' + total + ')">◐</span>';
   }
-  return '<span class="cov-glyph cov-none" title="Not indexed yet — click ⚡ Index for search to index this folder">○</span>';
+  return '<span class="cov-glyph cov-none" title="Not indexed yet — use Index for search to index this folder">○</span>';
 }
 
 function buildTreeNode(node) {
@@ -67,7 +67,7 @@ function buildTreeNode(node) {
   wrap.dataset.path = node.path;
 
   const isDir = node.kind === 'dir';
-  const icon = isDir ? '📁' : '📄';
+  const icon = isDir ? ICO_FOLDER : ICO_FILE;
   // Stash the subtree coverage rollup so the summary header can show a "context: N%"
   // chip for this path without a second request (see coverageByPath / renderSummary).
   coverageByPath[node.path] = { covered: node.covered || 0, partial: node.partial || 0, total: node.total || 0 };
@@ -96,10 +96,10 @@ function buildTreeNode(node) {
     coverageCount +
     badge +
     '<span class="tree-row-actions">' +
-    '<button data-act="scan"      title="Re-scan"              aria-label="Re-scan">&#x21BB;</button>' +
-    '<button data-act="deep"      title="Index for search: parse and embed this folder so you can search and ask about its contents (the deep phase — scanning only lists files)" aria-label="Index for search">&#x26A1;</button>' +
-    '<button data-act="summarize" title="Summarize"            aria-label="Summarize">&#x1F4DD;</button>' +
-    '<button data-act="remove"    title="Remove from context"  aria-label="Remove from context">&#x1F5D1;</button>' +
+    '<button data-act="scan"      title="Re-scan"              aria-label="Re-scan">' + ICO_REFRESH + '</button>' +
+    '<button data-act="deep"      title="Index for search: parse and embed this folder so you can search and ask about its contents (the deep phase — scanning only lists files)" aria-label="Index for search">' + ICO_BOLT + '</button>' +
+    '<button data-act="summarize" title="Summarize"            aria-label="Summarize">' + ICO_PENCIL + '</button>' +
+    '<button data-act="remove"    title="Remove from context"  aria-label="Remove from context">' + ICO_TRASH + '</button>' +
     '</span>';
 
   // ARIA tree semantics + roving focus (WS6). Every row is a treeitem reachable by
@@ -181,7 +181,7 @@ function buildTreeNode(node) {
   return wrap;
 }
 
-/* Delegated handler: clicking a ✗ retry glyph calls /api/queue/retry for that path. */
+/* Delegated handler: clicking a ✕ retry glyph calls /api/queue/retry for that path. */
 (function() {
   var treeList = document.getElementById('tree-list');
   if (!treeList) return;
@@ -206,7 +206,7 @@ function buildTreeNode(node) {
 
   // Arrow-key navigation over the tree (WAI-ARIA tree pattern, WS6). Acts only when
   // a row itself holds focus (e.target is the row) so inner action buttons and the
-  // ✗ retry glyph keep their own key handling. ↑/↓ move between visible rows,
+  // ✕ retry glyph keep their own key handling. ↑/↓ move between visible rows,
   // →/← expand/collapse or step into/out of children, Enter/Space activates the row.
   function visibleRows() {
     return Array.prototype.filter.call(
@@ -281,7 +281,7 @@ async function initTree() {
         var eyeBtn = document.createElement('button');
         eyeBtn.className = 'watch-toggle-btn icon-btn sm';
         eyeBtn.dataset.watchPath = root.path;
-        eyeBtn.textContent = '👁‍🗨';
+        eyeBtn.innerHTML = ICO_EYE_OFF;
         eyeBtn.title = 'Watch for changes (live re-embed on save)';
         eyeBtn.setAttribute('aria-label', 'Start watching');
         eyeBtn.addEventListener('click', function(e) {

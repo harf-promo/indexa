@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Web UI is being restyled onto the Harf design system** (a bilingual editorial brand: cool-grey
+- **Web UI restyled onto the Harf design system** (a bilingual editorial brand: cool-grey
   scale + a single green apostrophe as punctuation, Geist type, √2 spacing, 5/4 type scale, sharp
   corners + hairlines). **Stage 1 — the token foundation:** `01-tokens.css` is rewritten to the Harf
   palette/type/spacing/radii/motion with `light-dark()` dark mode (the existing `data-theme` toggle
@@ -20,8 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inverts per theme) while teal stays for active/selected state; the focus ring is Harf's green ring;
   leftover GitHub-blue selection tints became the teal accent; floating layers regained their shadow (a
   `light-dark()`-wrapping bug from stage 1 that made every shadow resolve to `none` is fixed); and a
-  quiet "by Harf" sign-off (a leading green apostrophe stamp) sits in the footer. Emoji→text-mark
-  replacement is the remaining stage.
+  quiet "by Harf" sign-off (a leading green apostrophe stamp) sits in the footer. **Stage 3 — emoji →
+  marks:** the ~70 emoji across the UI are replaced with the system's vocabulary — mono status marks
+  (`✓` `✕` `⚠`) inline, and clean single-stroke inline SVG icons (currentColor) for the topbar/footer
+  buttons and the theme toggle. The UI now reads end-to-end as a Harf product in both light and dark.
 
 ### Added
 

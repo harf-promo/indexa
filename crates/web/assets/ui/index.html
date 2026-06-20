@@ -21,10 +21,10 @@
   <div class="app-topbar-actions">
     <span class="app-stats" id="stats" title="Files indexed and chunks — a chunk is a small searchable piece a file is split into, so AI can find the exact relevant part instead of re-reading the whole file.">Loading&#x2026;</span>
     <button class="icon-btn" id="cmd-palette-btn" onclick="openCmdPalette()" title="Command palette (&#x2318;K)" aria-label="Open command palette">&#x2318;K</button>
-    <button class="icon-btn" id="review-btn" onclick="switchTab('review')" title="Review &#x2014; questions needing your judgment" aria-label="Open review inbox">&#x2709; Review <span class="review-badge" id="review-badge" hidden></span></button>
-    <button class="icon-btn" id="settings-gear" onclick="switchTab('settings')" title="Settings" aria-label="Settings">&#x2699;</button>
-    <button class="icon-btn" id="sound-toggle" onclick="toggleSound()" title="Toggle sound notifications" aria-label="Toggle sound">&#x1F514;</button>
-    <button class="icon-btn" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" aria-label="Toggle theme">&#x1F317;</button>
+    <button class="icon-btn" id="review-btn" onclick="switchTab('review')" title="Review &#x2014; questions needing your judgment" aria-label="Open review inbox">Review <span class="review-badge" id="review-badge" hidden></span></button>
+    <button class="icon-btn" id="settings-gear" onclick="switchTab('settings')" title="Settings" aria-label="Settings"><svg class="ui-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg></button>
+    <button class="icon-btn" id="sound-toggle" onclick="toggleSound()" title="Toggle sound notifications" aria-label="Toggle sound"><svg class="ui-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg></button>
+    <button class="icon-btn" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" aria-label="Toggle theme"><svg class="ui-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></button>
   </div>
 </header>
 
@@ -37,7 +37,7 @@
         onclick="switchTab('jobs');setJobsFilter('failed')"
         title="Failed summaries — click to retry"
         aria-label="Failed summaries — open Activity to retry"></button>
-      <button class="icon-btn sm" onclick="reindexAll()" title="Rebuild context for all roots" aria-label="Rebuild context for all roots">&#x21BB;</button>
+      <button class="icon-btn sm" onclick="reindexAll()" title="Rebuild context for all roots" aria-label="Rebuild context for all roots"><svg class="ui-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg></button>
       <button class="icon-btn sm" onclick="openAddRoot()" title="Add root folder" aria-label="Add root folder">+</button>
     </div>
     <div class="tree-search">
@@ -49,7 +49,7 @@
       <span><span class="cov-glyph cov-full">&#x25CF;</span> built</span>
       <span><span class="cov-glyph cov-partial">&#x25D0;</span> partial</span>
       <span><span class="cov-glyph cov-none">&#x25CB;</span> none</span>
-      <span><span class="cov-glyph cov-failed">&#x2717;</span> failed</span>
+      <span><span class="cov-glyph cov-failed">&#x2715;</span> failed</span>
     </div>
     <div class="tree-list" id="tree-list" role="tree" aria-label="Indexed folders"></div>
   </aside>
@@ -97,7 +97,7 @@
             <div id="welcome-default">
               <h2>Select a file or folder to read its summary</h2>
               <p>Pick anything in the sidebar to read its summary — or <strong>Ask about it</strong> directly — then <strong>Export</strong> it to your AI tool. Switch to the <strong>Map</strong> for a coverage overview.<br><br>
-              Hover a folder for row actions: <strong>&#x21BB; scan</strong>, <strong>&#x26A1; index for search</strong>, or <strong>&#x1F4DD; summarize</strong>.</p>
+              Hover a folder for row actions: <strong><svg class="ui-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg> scan</strong>, <strong><svg class="ui-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 4 14 11 14 10 22 20 9 13 9 13 2"/></svg> index for search</strong>, or <strong><svg class="ui-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> summarize</strong>.</p>
             </div>
             <!-- First-run / empty-index guidance. Shown by onboarding.js when there are no
                  roots; self-dismisses once a folder is added (index becomes non-empty). -->
@@ -157,8 +157,8 @@
             <ul>
               <li><span class="cov-glyph cov-full">&#x25CF;</span> <strong>Built</strong> — summarized and searchable. Ask about it and you'll get good answers.</li>
               <li><span class="cov-glyph cov-partial">&#x25D0;</span> <strong>In progress</strong> — being indexed right now; refreshes to green when done.</li>
-              <li><span class="cov-glyph cov-none">&#x25CB;</span> <strong>Not built</strong> — not indexed yet. Hover the folder in the sidebar and click <strong>&#x26A1; Index for search</strong> to build it.</li>
-              <li><span class="cov-glyph cov-failed">&#x2717;</span> <strong>Failed</strong> — something went wrong; click the &#x2717; in the sidebar to retry.</li>
+              <li><span class="cov-glyph cov-none">&#x25CB;</span> <strong>Not built</strong> — not indexed yet. Hover the folder in the sidebar and click <strong><svg class="ui-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 4 14 11 14 10 22 20 9 13 9 13 2"/></svg> Index for search</strong> to build it.</li>
+              <li><span class="cov-glyph cov-failed">&#x2715;</span> <strong>Failed</strong> — something went wrong; click the &#x2715; in the sidebar to retry.</li>
             </ul>
             <p class="map-help-terms"><strong>The words:</strong> a <em>chunk</em> is a small searchable piece a file is split into (so AI can find the exact relevant bit, not re-read the whole file); a <em>summary</em> is a short AI-written description of a file or folder; <em>coverage</em> is the share of your folders that have summaries built. The <strong>Graph</strong> tab shows which files call into which.</p>
           </div>
@@ -257,7 +257,7 @@
             <option value="mistral:7b">
           </datalist>
           <button id="pull-btn" onclick="pullModel()">Pull</button>
-          <button class="btn-sm" id="refresh-catalog-btn" onclick="refreshCatalog()" title="Refresh the downloadable-model catalog">&#x21bb; Refresh</button>
+          <button class="btn-sm" id="refresh-catalog-btn" onclick="refreshCatalog()" title="Refresh the downloadable-model catalog"><svg class="ui-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg> Refresh</button>
         </div>
         <div id="pull-progress" class="pull-progress"></div>
         <p class="settings-note">Click <strong>Set file</strong> / <strong>Set dir</strong> on an installed model to assign it; changes apply on the next <code>indexa serve</code>. The endpoint can point at a remote Ollama. Editing requires <code>INDEXA_WEB_ALLOW_KEY_EDIT=1</code>.</p>
@@ -572,7 +572,7 @@
             <span class="jd-elapsed" id="jd-elapsed"></span>
             <div style="flex:1"></div>
             <button class="jd-cancel-btn" id="jd-cancel-btn" title="Cancel this job" aria-label="Cancel running job" style="display:none" onclick="cancelSelectedJob()">&#x25A0; Cancel</button>
-            <button class="jd-copy-btn" id="jd-copy-btn" title="Copy error report" aria-label="Copy error report" style="display:none" onclick="copyJobReport()">&#x1F4CB;</button>
+            <button class="jd-copy-btn" id="jd-copy-btn" title="Copy error report" aria-label="Copy error report" style="display:none" onclick="copyJobReport()"><svg class="ui-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="3" width="8" height="4" rx="1"/><path d="M16 5h2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2"/></svg></button>
             <button class="jd-dismiss-btn" id="jd-dismiss-btn" title="Dismiss this job" aria-label="Dismiss this job" onclick="dismissSelectedJob()">&#xd7;</button>
           </div>
 
@@ -591,7 +591,7 @@
               <span class="jd-live-label">Now</span>
               <span class="jd-live-file" id="jd-live-file"></span>
               <span class="jd-live-model" id="jd-live-model"></span>
-              <button class="jd-ai-toggle" id="jd-ai-toggle" title="Toggle AI output" onclick="toggleDetailAi()">&#x2728; AI output</button>
+              <button class="jd-ai-toggle" id="jd-ai-toggle" title="Toggle AI output" onclick="toggleDetailAi()">AI output</button>
             </div>
             <pre class="jd-ai-pre" id="jd-ai-pre" hidden></pre>
           </div>
@@ -643,7 +643,7 @@
 <!-- Engine status bar — always-on machine telemetry (CPU / RAM / memory pressure) -->
 <footer class="engine-bar" id="engine-bar" aria-label="Engine status">
   <span class="engine-state">
-    <span class="engine-gear" aria-hidden="true">&#x2699;</span>
+    <span class="engine-gear" aria-hidden="true"><svg class="ui-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg></span>
     <span class="engine-state-word" id="engine-state-word">Engine</span>
   </span>
   <span class="engine-metric" title="CPU usage">
@@ -664,7 +664,7 @@
     <span class="engine-val" id="engine-pressure-val">&#x2014;</span>
   </span>
   <button class="engine-release" id="engine-release-btn" onclick="releaseModels()" title="Unload Indexa's loaded local models to free their RAM. Not a system purge — it only releases Indexa's own models." aria-label="Release Indexa's loaded models">&#x21BA; Free models</button>
-  <button class="engine-release" id="engine-mem-btn" onclick="showMemoryConsumers()" title="Show the apps using the most RAM so you can decide what to quit. Read-only — Indexa never closes or purges anything." aria-label="Show what's using memory">&#x1F50D; What&#x2019;s using RAM</button>
+  <button class="engine-release" id="engine-mem-btn" onclick="showMemoryConsumers()" title="Show the apps using the most RAM so you can decide what to quit. Read-only — Indexa never closes or purges anything." aria-label="Show what's using memory"><svg class="ui-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> What&#x2019;s using RAM</button>
   <div class="engine-mem-popover" id="engine-mem-popover" role="dialog" aria-label="Top memory consumers" hidden></div>
   <!-- Live build progress — shown only while a job is running (fed from the job SSE the UI already opens) -->
   <span class="engine-job" id="engine-job" title="Current build" hidden>

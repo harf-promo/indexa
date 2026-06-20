@@ -84,7 +84,7 @@ document.addEventListener('DOMContentLoaded', function () {
           // (a web binary self-replace would corrupt the signed .app). Point the user at
           // the menu bar — both the app menu and the tray icon expose it.
           status.textContent = d.update_available
-            ? '⬆ Update v' + d.latest + ' is ready. In the menu bar, choose ' +
+            ? '↑ Update v' + d.latest + ' is ready. In the menu bar, choose ' +
               '“Indexa → Check for Updates…” to see what’s new and install it.'
             : '✓ You’re on the latest (v' + d.current + '). To check anytime, choose ' +
               '“Indexa → Check for Updates…” in the menu bar (or the Indexa tray icon).';

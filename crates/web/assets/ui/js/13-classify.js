@@ -1,6 +1,6 @@
 /* ── Smart label (classification) in summary view ──
    Appended to the summary panel when /api/classifications?path= returns a row.
-   Shows the auto-detected category with ✓ Confirm / ✗ Ignore actions.
+   Shows the auto-detected category with ✓ Confirm / ✕ Ignore actions.
    Called from showSummary() after rendering. */
 
 async function loadClassificationForPath(path) {
@@ -40,7 +40,7 @@ function renderClassificationChip(rec, path) {
     html += '<span class="classify-label">Smart label:</span>' +
       '<select class="classify-select" id="classify-cat-' + CSS.escape(path) + '" aria-label="Choose category">' + opts + '</select>' +
       '<button class="btn-sm classify-confirm-btn" onclick="confirmClassification(' + JSON.stringify(path) + ')">✓ Confirm</button>' +
-      '<button class="btn-sm classify-ignore-btn" onclick="ignoreClassification(' + JSON.stringify(path) + ')">✗ Ignore</button>';
+      '<button class="btn-sm classify-ignore-btn" onclick="ignoreClassification(' + JSON.stringify(path) + ')">✕ Ignore</button>';
   }
 
   html += '</div>';

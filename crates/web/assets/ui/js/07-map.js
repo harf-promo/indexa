@@ -47,7 +47,7 @@ async function loadMap() {
     const rows = [
       { label: '● Built',     value: d.built,         cls: 'cov-full',    desc: 'Folders with AI summaries' },
       { label: '◐ In progress', value: d.partial,     cls: 'cov-partial', desc: 'Queued for summarization' },
-      { label: '✗ Failed',    value: d.failed,         cls: 'cov-failed',  desc: 'Summarization failed' },
+      { label: '✕ Failed',    value: d.failed,         cls: 'cov-failed',  desc: 'Summarization failed' },
       { label: '○ Not built', value: d.none,           cls: 'cov-none',    desc: 'No context yet' },
     ];
     table.innerHTML =
@@ -143,7 +143,7 @@ function renderModelRow(m) {
   const isEmbed = m.role === 'embed';
   const norm = normModel(m.name);
   const fitCls = m.fits ? 'fit-ok' : 'fit-warn';
-  const fitTxt = m.fits ? '✅ fits' : '⚠ tight';
+  const fitTxt = m.fits ? '✓ fits' : '⚠ tight';
   const size = m.size_bytes > 0 ? fmtBytesGB(m.size_bytes) + (m.size_is_estimate ? ' est' : '') : '';
   const params = fmtParams(m.params_b);
   const meta = [size, params, (m.installed ? '' : m.vendor)].filter(Boolean).join(' · ');
@@ -245,7 +245,7 @@ async function pullModelNamed(name) {
     if (input) input.value = '';
     setTimeout(loadModels, 500);
   } catch(e) {
-    prog.textContent += '✗ Error: ' + e.message + '\n';
+    prog.textContent += '✕ Error: ' + e.message + '\n';
   }
   if (btn) btn.disabled = false;
 }
@@ -316,12 +316,12 @@ async function loadProviderStatus() {
     const active = document.getElementById('badge-claude-active');
     if (cli) cli.textContent = d.claude_cli_present
       ? ('✓ ' + (d.claude_cli_version ? 'v' + d.claude_cli_version : 'found'))
-      : '✗ not found';
+      : '✕ not found';
     if (auth) {
       if (d.claude_logged_in) {
         auth.textContent = '✓ ' + (d.claude_subscription ? d.claude_subscription + ' plan' : 'signed in');
       } else {
-        auth.textContent = d.claude_cli_present ? '✗ run: claude login' : '—';
+        auth.textContent = d.claude_cli_present ? '✕ run: claude login' : '—';
       }
     }
     if (active) active.textContent = d.describer_provider === 'claude-code'
