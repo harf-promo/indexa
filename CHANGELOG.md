@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.67.0] — 2026-06-20
+
 A hardening, parity, and performance pass — plus a dependency refresh. Found and verified through
 three adversarial review sweeps of the codebase.
 
