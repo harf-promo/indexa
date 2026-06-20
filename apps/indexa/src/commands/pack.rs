@@ -301,7 +301,7 @@ pub(crate) async fn cmd_pack_export(
     // XML: wrap all roots in a single <context> element for a self-contained file
     if is_xml {
         out_buf.push_str("<context pack=\"");
-        out_buf.push_str(&xml_escape(&name));
+        out_buf.push_str(&indexa_core::text::xml_escape_attr(&name));
         out_buf.push_str("\" generated=\"");
         out_buf.push_str(&now);
         out_buf.push_str("\">\n");
@@ -421,11 +421,4 @@ pub(crate) async fn cmd_pack_delete(name: String) -> Result<()> {
     store.delete_pack(&pack.id)?;
     println!("Deleted pack \"{name}\". (Indexed files are untouched.)");
     Ok(())
-}
-
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }

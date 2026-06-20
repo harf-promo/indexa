@@ -308,14 +308,9 @@ pub(crate) fn pack_context(
         if chars_used + chunk.len() > budget {
             let remaining = budget.saturating_sub(chars_used);
             if remaining > header.len() + 40 {
-                // Walk back to the nearest char boundary so we never slice mid-codepoint
-                // (slicing a String by a raw byte offset panics on any non-ASCII content:
-                // accented chars, CJK, emoji, em-dashes, etc.). `floor_char_boundary` is
-                // still nightly-only, so do it manually with is_char_boundary.
-                let mut safe_end = remaining.min(chunk.len());
-                while safe_end > 0 && !chunk.is_char_boundary(safe_end) {
-                    safe_end -= 1;
-                }
+                // Floor to a char boundary so we never slice mid-codepoint (a raw byte
+                // offset panics on multibyte content: accents, CJK, emoji, em-dashes).
+                let safe_end = indexa_core::text::floor_char_boundary(&chunk, remaining);
                 context.push_str(&chunk[..safe_end]);
                 // Signal to the synthesizer that this chunk was cut to fit the budget, so it
                 // doesn't treat the partial text as the whole file.
@@ -376,10 +371,7 @@ pub(crate) fn render_history_block(history: &[PriorTurn], budget: usize) -> Stri
             // Try to fit a truncated form of this (the oldest kept) turn, then stop.
             let remaining = budget.saturating_sub(used);
             if remaining > 80 {
-                let mut safe = remaining.min(turn.len());
-                while safe > 0 && !turn.is_char_boundary(safe) {
-                    safe -= 1;
-                }
+                let safe = indexa_core::text::floor_char_boundary(&turn, remaining);
                 turn.truncate(safe);
                 turn.push_str("…\n");
                 kept.push(turn);

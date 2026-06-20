@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use indexa_core::{config::HybridMode, store::Store};
 
-use crate::{mcp_err, ok_text, xml_escape_mcp, IndexaMcp};
+use crate::{mcp_err, ok_text, IndexaMcp};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetPackParams {
@@ -377,7 +377,7 @@ pub(crate) fn export_pack_body(
     let mut buf = String::new();
     if is_xml {
         buf.push_str("<context pack=\"");
-        buf.push_str(&xml_escape_mcp(name));
+        buf.push_str(&indexa_core::text::xml_escape_attr(name));
         buf.push_str("\" generated=\"");
         buf.push_str(&now);
         buf.push_str("\">\n");

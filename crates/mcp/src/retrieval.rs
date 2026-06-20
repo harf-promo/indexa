@@ -463,10 +463,7 @@ impl IndexaMcp {
         let bytes =
             std::fs::read(&requested).map_err(|e| mcp_err(format!("reading {path}: {e}")))?;
         let text = String::from_utf8_lossy(&bytes);
-        let mut safe_end = text.len().min(READ_FILE_CAP);
-        while safe_end > 0 && !text.is_char_boundary(safe_end) {
-            safe_end -= 1;
-        }
+        let safe_end = indexa_core::text::floor_char_boundary(&text, READ_FILE_CAP);
         let mut body = text[..safe_end].to_owned();
         if text.len() > safe_end {
             body.push_str("\n…[truncated]");
