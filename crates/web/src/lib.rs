@@ -282,6 +282,7 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/assets/app.js", get(serve_ui_js))
         .route("/api/stats", get(api_stats))
         .route("/api/impact", get(api_impact))
+        .route("/api/session-impact/{session_id}", get(api_session_impact))
         .route("/api/classifications", get(api_classifications_list))
         .route(
             "/api/classifications/confirm",
@@ -922,9 +923,15 @@ mod tests {
     async fn api_impact_reports_per_tool_breakdown_most_saving_first() {
         let mut store = Store::open_in_memory().unwrap();
         // counterfactual > served so there is savings to report; ask saves more than search.
-        store.record_tool_usage("web", "ask", 100, 4000).unwrap();
-        store.record_tool_usage("mcp", "search", 50, 2000).unwrap();
-        store.record_tool_usage("web", "ask", 100, 4000).unwrap();
+        store
+            .record_tool_usage("web", "ask", 100, 4000, None)
+            .unwrap();
+        store
+            .record_tool_usage("mcp", "search", 50, 2000, None)
+            .unwrap();
+        store
+            .record_tool_usage("web", "ask", 100, 4000, None)
+            .unwrap();
         let app = build_router(state_with(store), 7620);
         let (status, json) = get_json(app, "/api/impact").await;
         assert_eq!(status, StatusCode::OK);

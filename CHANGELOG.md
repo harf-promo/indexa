@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-session token-savings ledger.** Each Conversational-Ask session now persists its own
+  cumulative savings, exposed at `GET /api/session-impact/{session_id}` — so a conversation can show
+  how much it saved versus serving whole files (previously only the weekly `/api/impact` aggregate
+  existed). A migration-guarded nullable `session_id` column on `tool_usage` tags web `ask` rows with
+  their session; MCP/CLI calls stay session-less and still feed the weekly aggregate. Reuses the
+  existing `ask_sessions` infrastructure; the token figure is the same honest `bytes/4` estimate.
+
 ## [0.68.0] — 2026-06-20
 
 ### Changed
