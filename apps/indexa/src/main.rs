@@ -77,7 +77,19 @@ async fn main() -> Result<()> {
             dry_run,
             mode,
             contextual,
-        } => commands::cmd_deep(paths, embed_model, dry_run, mode, contextual, &cfg).await,
+            no_embed,
+        } => {
+            commands::cmd_deep(
+                paths,
+                embed_model,
+                dry_run,
+                mode,
+                contextual,
+                no_embed,
+                &cfg,
+            )
+            .await
+        }
         Commands::Map { depth } => commands::cmd_map(depth).await,
         Commands::Summarize {
             paths,

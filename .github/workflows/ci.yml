@@ -87,6 +87,46 @@ jobs:
           PORT: "7787"
         run: node scripts/web-smoke.mjs
 
+  # Retrieval-quality gate: index this very repo with `deep --no-embed` (FTS-only, so no
+  # embedder / no Ollama / no models pulled — fully hermetic) and score the EXACT
+  # production `retrieve()` ranking against a committed golden set via `indexa eval`.
+  # Catches regressions in chunking / parsing / tokenization / ranking that fmt/clippy/
+  # test cannot see. Golden probes are distinctive identifiers scored in sparse (BM25)
+  # mode; the floor is set well below the measured 1.00 hit rate to tolerate cross-run
+  # tie-order drift. Additive job — NOT in the branch-protection required-checks list.
+  eval:
+    name: retrieval eval (self-golden, hermetic)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build indexa (debug)
+        run: cargo build -p indexa
+
+      - name: Index this repo (FTS only — no embeddings, no Ollama)
+        run: |
+          ./target/debug/indexa scan .
+          ./target/debug/indexa deep . --no-embed
+
+      - name: Score retrieval against the self-golden set
+        run: |
+          ./target/debug/indexa eval fixtures/self-golden.json \
+            --mode sparse --top-k 10 --min-hit-rate 0.80
+
   # The Tauri desktop app is excluded from `cargo --workspace` (its webkit deps
   # aren't present on the Linux/Windows CI runners), so until now a `main.rs` break
   # only surfaced at release. This compiles it on every PR — a native arm64 build,

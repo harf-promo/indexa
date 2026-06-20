@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`indexa deep --no-embed`** — an FTS-only deep pass: parse + chunk + index for sparse (BM25)
+  search **without computing embeddings**. Skips the Ollama preflight and every model call
+  (embeddings, contextual blurbs, image captions, audio transcription, PDF OCR), so it runs fully
+  offline with no models pulled. The index serves `--mode sparse` search/`ask`; dense/hybrid
+  retrieval needs a later plain `deep` (which self-heals the vector-less chunks automatically). Makes
+  a retrieval-eval run hermetic, and is handy for a quick models-free index.
+- **Indexa now runs its own retrieval eval in CI.** A new advisory `retrieval eval (self-golden,
+  hermetic)` job indexes the checkout with `deep --no-embed` and scores the **exact production
+  `retrieve()` ranking** against a committed golden set ([`fixtures/self-golden.json`](fixtures/self-golden.json))
+  — catching chunking / parsing / tokenization / ranking regressions that fmt/clippy/test can't see.
+  Golden `expect_paths` now also accept repo-**relative** paths (boundary-suffix matched against the
+  stored absolute path), so a committed fixture is portable across checkouts and machines.
+
 ## [0.67.0] — 2026-06-20
 
 A hardening, parity, and performance pass — plus a dependency refresh. Found and verified through

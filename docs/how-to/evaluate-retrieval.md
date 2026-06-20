@@ -26,7 +26,10 @@ index: absolute, tilde allowed):
 }
 ```
 
-- `expect_paths` — a hit on **any** of them counts; list every acceptable file.
+- `expect_paths` — a hit on **any** of them counts; list every acceptable file. An **absolute**
+  path (tilde allowed) must match exactly. A **relative** path (no leading `/`) matches as a
+  path-boundary suffix of the stored absolute path — so a fixture committed to a repo (e.g.
+  `crates/query/src/eval.rs`) matches wherever the repo is checked out, on CI or any machine.
 - `k` *(optional)* — per-question cutoff; defaults to the run-level `--top-k` (10).
 
 ## Running it
@@ -58,8 +61,19 @@ hit  rank      rr   prec  question
 ```
 
 Exit code is 0 unless the aggregate hit rate drops below `--min-hit-rate` (default 0, i.e. report
-only). In CI: index the fixture repo (`indexa scan` + `indexa deep --embed-model` skipped — sparse
-needs no embeddings), then `indexa eval golden.json --min-hit-rate <baseline>`.
+only). In CI, index hermetically with **`indexa deep --no-embed`** — an FTS-only pass that skips the
+Ollama preflight and every model call, so it needs no models pulled and no network:
+
+```bash
+indexa scan .
+indexa deep . --no-embed                                   # FTS-only; no Ollama
+indexa eval fixtures/self-golden.json --mode sparse --min-hit-rate <baseline>
+```
+
+(Plain `indexa deep` requires a reachable embedder — `--no-embed` is what makes the gate hermetic;
+dense/hybrid retrieval needs a later embedded `deep`.) Indexa runs exactly this on itself: the
+`retrieval eval (self-golden, hermetic)` CI job scores [`fixtures/self-golden.json`](../../fixtures/self-golden.json)
+on every PR.
 
 Sparse mode scores BM25 keyword retrieval only — it tells you nothing about embedding quality.
 Use `--mode rrf` locally (with the same embedder the index was built with) when a change touches

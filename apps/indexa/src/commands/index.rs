@@ -33,6 +33,7 @@ pub(crate) async fn cmd_index(
         false,
         mode.clone(),
         contextual,
+        false, // `index` always embeds; `--no-embed` is a `deep`-only fast path
         cfg,
     )
     .await?;

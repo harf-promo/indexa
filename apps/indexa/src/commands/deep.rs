@@ -20,11 +20,14 @@ pub(crate) async fn cmd_deep(
     dry_run: bool,
     mode: String,
     contextual: bool,
+    no_embed: bool,
     cfg: &Config,
 ) -> Result<()> {
     // ── Preflight: confirm Ollama is up and required models are pulled ─────────
-    // Skip during dry-run (no actual model calls are made).
-    if !dry_run {
+    // Skip during dry-run (no actual model calls are made) and in `--no-embed`
+    // mode (FTS-only: no embeddings, no contextual/caption/transcribe/OCR calls,
+    // so no model needs to be reachable — this is what makes a CI run hermetic).
+    if !dry_run && !no_embed {
         preflight_ollama(cfg).await?;
     }
 
@@ -105,10 +108,16 @@ pub(crate) async fn cmd_deep(
     }
 
     let mut store = Store::open(&db_path)?;
-    let embedder = build_embedder(cfg, Some(&embed_model))?;
+    // `--no-embed` builds no embedder at all (FTS-only); a plain run builds it once.
+    let embedder = if no_embed {
+        None
+    } else {
+        Some(build_embedder(cfg, Some(&embed_model))?)
+    };
 
     // Effective contextual-retrieval flag: CLI --contextual OR config [describer] contextual_retrieval.
-    let use_contextual = contextual || cfg.describer.contextual_retrieval;
+    // Forced off under --no-embed — a situating blurb needs an LLM call.
+    let use_contextual = !no_embed && (contextual || cfg.describer.contextual_retrieval);
     // Build the contextual LLM once (re-used per file) when the feature is enabled.
     // Uses the same file-describer model and base URL — no extra model pull needed.
     let ctx_llm: Option<OllamaLlm> = if use_contextual {
@@ -126,7 +135,7 @@ pub(crate) async fn cmd_deep(
 
     // Optional image captioning (opt-in): a vision model adds a caption chunk per image.
     // Built once, gated on [parsers.image] caption; shares the describer's Ollama endpoint.
-    let captioner = if cfg.parsers.image.caption {
+    let captioner = if !no_embed && cfg.parsers.image.caption {
         let base = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
         Some(
             OllamaLlm::new(&base, cfg.parsers.image.caption_model())
@@ -137,20 +146,29 @@ pub(crate) async fn cmd_deep(
     };
     let caption_model = cfg.parsers.image.caption_model().to_owned();
     // Optional audio transcription (opt-in): a whisper.cpp-style CLI per audio file.
-    let transcribe = cfg.parsers.audio.transcribe;
+    // Disabled under --no-embed (the FTS-only path makes no model/tool calls).
+    let transcribe = !no_embed && cfg.parsers.audio.transcribe;
     let transcribe_binary = cfg.parsers.audio.transcribe_binary().to_owned();
     let transcribe_model = cfg.parsers.audio.model.clone();
     // Optional PDF OCR (opt-in): pdftoppm + tesseract for scanned PDFs with no text layer.
-    let ocr_enabled = cfg.parsers.pdf.ocr_enabled();
+    // Disabled under --no-embed (the FTS-only path makes no model/tool calls).
+    let ocr_enabled = !no_embed && cfg.parsers.pdf.ocr_enabled();
     let ocr_binary = cfg.parsers.pdf.ocr_binary().to_owned();
     let ocr_lang = cfg.parsers.pdf.ocr_lang.clone();
 
     for root in &roots {
-        println!(
-            "Deep-scanning {} with embed model '{}'",
-            root.display(),
-            embed_model
-        );
+        if no_embed {
+            println!(
+                "Deep-scanning {} (FTS only — no embeddings)",
+                root.display()
+            );
+        } else {
+            println!(
+                "Deep-scanning {} with embed model '{}'",
+                root.display(),
+                embed_model
+            );
+        }
         let entries = walk(root, &walk_cfg)?;
         let files: Vec<_> = entries
             .iter()
@@ -350,103 +368,117 @@ pub(crate) async fn cmd_deep(
                 .map(|c| format!("{:x}", Sha256::digest(c.text.as_bytes())))
                 .collect();
 
-            // Load the cached embedding map for this file (hash → Vec<f32>).
-            // Fail-open: if the lookup errors (e.g. first run, column missing), treat as empty.
-            let hash_cache = store
-                .cached_embeddings_by_hash(&path_str)
-                .unwrap_or_default();
+            // Resolve a per-chunk embedding vector (aligned to `extracted.chunks`).
+            // `--no-embed` stores every chunk text-only (vector = None) for sparse/FTS
+            // search; a later plain `deep` self-heals them (the skip-if-current check
+            // requires COUNT(*) = COUNT(embedding), so vector-less chunks aren't "current").
+            let all_embeddings: Vec<Option<Vec<f32>>> = if no_embed {
+                vec![None; extracted.chunks.len()]
+            } else {
+                // Load the cached embedding map for this file (hash → Vec<f32>).
+                // Fail-open: if the lookup errors (e.g. first run, column missing), treat as empty.
+                let hash_cache = store
+                    .cached_embeddings_by_hash(&path_str)
+                    .unwrap_or_default();
 
-            // Partition chunks into cache-hits (no embed needed) and misses (must embed).
-            // A hit requires BOTH a matching hash AND a stored non-NULL vector.
-            let mut cache_hits: Vec<Option<Vec<f32>>> = vec![None; extracted.chunks.len()];
-            let mut miss_indices: Vec<usize> = Vec::new();
-            for (i, hash) in chunk_hashes.iter().enumerate() {
-                if let Some(cached_vec) = hash_cache.get(hash) {
-                    cache_hits[i] = Some(cached_vec.clone());
-                } else {
-                    miss_indices.push(i);
+                // Partition chunks into cache-hits (no embed needed) and misses (must embed).
+                // A hit requires BOTH a matching hash AND a stored non-NULL vector.
+                let mut cache_hits: Vec<Option<Vec<f32>>> = vec![None; extracted.chunks.len()];
+                let mut miss_indices: Vec<usize> = Vec::new();
+                for (i, hash) in chunk_hashes.iter().enumerate() {
+                    if let Some(cached_vec) = hash_cache.get(hash) {
+                        cache_hits[i] = Some(cached_vec.clone());
+                    } else {
+                        miss_indices.push(i);
+                    }
                 }
-            }
 
-            // Build embed-text only for cache-miss chunks. With contextual retrieval
-            // enabled, enrich each miss chunk with a situating blurb before embedding.
-            let miss_raw_texts: Vec<&str> = miss_indices
-                .iter()
-                .map(|&i| extracted.chunks[i].text.as_str())
-                .collect();
-            let miss_embed_texts: Vec<String> = if !miss_raw_texts.is_empty() {
-                if let Some(ref llm) = ctx_llm {
-                    // Build doc context from the FULL file (all chunks), not just misses,
-                    // so the situating blurbs are grounded in the whole document.
-                    let all_raw: Vec<&str> =
-                        extracted.chunks.iter().map(|c| c.text.as_str()).collect();
-                    let doc_context = indexa_query::contextual::build_doc_context(&all_raw);
-                    let path_str_clone = path_str.clone();
-                    indexa_query::contextual::contextual_embed_texts(
-                        llm,
-                        &doc_context,
-                        &miss_raw_texts,
-                        None,
-                        &path_str,
-                        move |event| match event {
-                            ContextualEvent::BlurbFragment { .. } => {}
-                            ContextualEvent::BlurbFailed { error, .. } => {
-                                eprintln!("  ⚠  {path_str_clone}: context blurb failed: {error}");
-                            }
-                        },
+                // Build embed-text only for cache-miss chunks. With contextual retrieval
+                // enabled, enrich each miss chunk with a situating blurb before embedding.
+                let miss_raw_texts: Vec<&str> = miss_indices
+                    .iter()
+                    .map(|&i| extracted.chunks[i].text.as_str())
+                    .collect();
+                let miss_embed_texts: Vec<String> = if !miss_raw_texts.is_empty() {
+                    if let Some(ref llm) = ctx_llm {
+                        // Build doc context from the FULL file (all chunks), not just misses,
+                        // so the situating blurbs are grounded in the whole document.
+                        let all_raw: Vec<&str> =
+                            extracted.chunks.iter().map(|c| c.text.as_str()).collect();
+                        let doc_context = indexa_query::contextual::build_doc_context(&all_raw);
+                        let path_str_clone = path_str.clone();
+                        indexa_query::contextual::contextual_embed_texts(
+                            llm,
+                            &doc_context,
+                            &miss_raw_texts,
+                            None,
+                            &path_str,
+                            move |event| match event {
+                                ContextualEvent::BlurbFragment { .. } => {}
+                                ContextualEvent::BlurbFailed { error, .. } => {
+                                    eprintln!(
+                                        "  ⚠  {path_str_clone}: context blurb failed: {error}"
+                                    );
+                                }
+                            },
+                        )
+                        .await
+                    } else {
+                        miss_raw_texts.iter().map(|s| s.to_string()).collect()
+                    }
+                } else {
+                    Vec::new()
+                };
+
+                // Embed only the cache-miss chunks.
+                let miss_embed_refs: Vec<&str> =
+                    miss_embed_texts.iter().map(|s| s.as_str()).collect();
+                let mut miss_embeddings = if !miss_embed_refs.is_empty() {
+                    indexa_embed::embed_all(
+                        embedder
+                            .as_ref()
+                            .expect("embedder is built when !no_embed")
+                            .as_ref(),
+                        &miss_embed_refs,
+                        indexa_embed::EMBED_BATCH_SIZE,
                     )
                     .await
                 } else {
-                    miss_raw_texts.iter().map(|s| s.to_string()).collect()
+                    Vec::new()
+                };
+
+                // Drop embeddings whose dim ≠ the configured `[embedding] dim` (model/config
+                // mismatch) — they'd corrupt dense search; the chunk stays BM25-searchable.
+                let (dim_mismatch, sample_dim) =
+                    indexa_embed::enforce_embedding_dim(&mut miss_embeddings, cfg.embedding.dim);
+                if dim_mismatch > 0 {
+                    eprintln!(
+                        "  ⚠  {dim_mismatch} chunk(s) in {path_str} embedded at dim {} ≠ configured {} \
+                         — stored text-only; fix [embedding] model/dim and re-run deep.",
+                        sample_dim.unwrap_or(0),
+                        cfg.embedding.dim
+                    );
                 }
-            } else {
-                Vec::new()
-            };
-
-            // Embed only the cache-miss chunks.
-            let miss_embed_refs: Vec<&str> = miss_embed_texts.iter().map(|s| s.as_str()).collect();
-            let mut miss_embeddings = if !miss_embed_refs.is_empty() {
-                indexa_embed::embed_all(
-                    embedder.as_ref(),
-                    &miss_embed_refs,
-                    indexa_embed::EMBED_BATCH_SIZE,
-                )
-                .await
-            } else {
-                Vec::new()
-            };
-
-            // Drop embeddings whose dim ≠ the configured `[embedding] dim` (model/config
-            // mismatch) — they'd corrupt dense search; the chunk stays BM25-searchable.
-            let (dim_mismatch, sample_dim) =
-                indexa_embed::enforce_embedding_dim(&mut miss_embeddings, cfg.embedding.dim);
-            if dim_mismatch > 0 {
-                eprintln!(
-                    "  ⚠  {dim_mismatch} chunk(s) in {path_str} embedded at dim {} ≠ configured {} \
-                     — stored text-only; fix [embedding] model/dim and re-run deep.",
-                    sample_dim.unwrap_or(0),
-                    cfg.embedding.dim
-                );
-            }
-            let embed_failures = miss_embeddings.iter().filter(|e| e.is_none()).count();
-            if embed_failures > 0 && dim_mismatch == 0 {
-                eprintln!(
-                    "  ⚠  {embed_failures}/{} chunk(s) in {path_str} failed to embed (stored text-only).",
-                    miss_embeddings.len()
-                );
-            }
-
-            // Merge cache hits and fresh embeddings into one aligned vector.
-            let mut miss_iter = miss_embeddings.into_iter();
-            let mut all_embeddings: Vec<Option<Vec<f32>>> =
-                Vec::with_capacity(extracted.chunks.len());
-            for slot in cache_hits.iter_mut().take(extracted.chunks.len()) {
-                if slot.is_some() {
-                    all_embeddings.push(slot.take());
-                } else {
-                    all_embeddings.push(miss_iter.next().unwrap_or(None));
+                let embed_failures = miss_embeddings.iter().filter(|e| e.is_none()).count();
+                if embed_failures > 0 && dim_mismatch == 0 {
+                    eprintln!(
+                        "  ⚠  {embed_failures}/{} chunk(s) in {path_str} failed to embed (stored text-only).",
+                        miss_embeddings.len()
+                    );
                 }
-            }
+
+                // Merge cache hits and fresh embeddings into one aligned vector.
+                let mut miss_iter = miss_embeddings.into_iter();
+                let mut merged: Vec<Option<Vec<f32>>> = Vec::with_capacity(extracted.chunks.len());
+                for slot in cache_hits.iter_mut().take(extracted.chunks.len()) {
+                    if slot.is_some() {
+                        merged.push(slot.take());
+                    } else {
+                        merged.push(miss_iter.next().unwrap_or(None));
+                    }
+                }
+                merged
+            };
 
             let mut chunk_records = Vec::with_capacity(extracted.chunks.len());
             for ((chunk, embedding), hash) in extracted
@@ -462,7 +494,12 @@ pub(crate) async fn cmd_deep(
                     text: chunk.text.clone(),
                     language: chunk.language.clone(),
                     embedding,
-                    embed_model: Some(embed_model.clone()),
+                    // No model produced a vector in --no-embed mode → leave it NULL.
+                    embed_model: if no_embed {
+                        None
+                    } else {
+                        Some(embed_model.clone())
+                    },
                     content_hash: Some(hash),
                 });
             }
@@ -500,7 +537,11 @@ pub(crate) async fn cmd_deep(
         if skipped > 0 {
             println!("  skipped {skipped}/{} files (unchanged)", files.len());
         }
-        println!("  embedded {total_chunks} new chunks.");
+        if no_embed {
+            println!("  indexed {total_chunks} new chunks (FTS only, no embeddings).");
+        } else {
+            println!("  embedded {total_chunks} new chunks.");
+        }
     }
 
     // Enqueue summarization for non-Augment modes or always to populate the queue
