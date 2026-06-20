@@ -367,15 +367,79 @@ mod tests {
 
         // A file inside the indexed root is readable.
         assert!(mcp
-            .read_file_inner(inside.to_str().unwrap(), "read_file")
+            .read_file_inner(inside.to_str().unwrap(), 0, "read_file")
             .is_ok());
         // A file outside every indexed root is rejected (the security contract).
         let err = mcp
-            .read_file_inner(outside.to_str().unwrap(), "read_file")
+            .read_file_inner(outside.to_str().unwrap(), 0, "read_file")
             .unwrap_err();
         assert!(
             format!("{err:?}").contains("not within an indexed root"),
             "expected an indexed-root rejection, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_offset_pages_a_later_window() {
+        // A file inside an indexed root; reading from a byte offset returns a later slice
+        // prefixed with a "bytes before" marker (the paging contract past the 40 KB cap).
+        let root = tempfile::tempdir().unwrap();
+        let inside = root.path().join("inside.txt");
+        std::fs::write(&inside, "0123456789abcdef").unwrap();
+
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_entries(&[
+                    Entry {
+                        path: root.path().to_path_buf(),
+                        kind: EntryKind::Dir,
+                        size: 0,
+                        modified: None,
+                        hint: None,
+                    },
+                    Entry {
+                        path: inside.clone(),
+                        kind: EntryKind::File,
+                        size: 16,
+                        modified: None,
+                        hint: None,
+                    },
+                ])
+                .unwrap();
+        }
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let body = text_of(
+            mcp.read_file_inner(inside.to_str().unwrap(), 10, "read_file")
+                .unwrap(),
+        );
+        assert!(
+            body.contains("…[10 bytes before]"),
+            "offset read must note the bytes skipped, got: {body}"
+        );
+        assert!(
+            body.contains("abcdef"),
+            "offset read must include the later window, got: {body}"
+        );
+        assert!(
+            !body.contains("0123456789"),
+            "offset read must NOT include the skipped prefix, got: {body}"
         );
     }
 
@@ -679,6 +743,7 @@ mod tests {
             rerank: Some(false),
             rerank_backend: None,
             session_id: sid.map(str::to_owned),
+            top_k: None,
         };
 
         assert!(mcp
