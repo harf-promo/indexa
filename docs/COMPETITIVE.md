@@ -97,7 +97,7 @@ an LLM, with a **web-dashboard graph visualization** and export to wiki/Obsidian
 
 **Closed since this analysis began (all shipped):**
 
-- ✅ **Code-relationship graph (D1)** — imports + defined symbols across Rust/Python/JS/TS/Go/Java,
+- ✅ **Code-relationship graph (D1)** — imports + defined symbols across Rust/Python/JS/TS/Go/Java/C/C++,
   queryable over MCP (`dependencies`, `who_imports`).
 - ✅ **Local multimodal** — opt-in on-device image captioning and audio transcription; media is no
   longer metadata-only.

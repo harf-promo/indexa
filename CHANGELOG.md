@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existed). A migration-guarded nullable `session_id` column on `tool_usage` tags web `ask` rows with
   their session; MCP/CLI calls stay session-less and still feed the weekly aggregate. Reuses the
   existing `ask_sessions` infrastructure; the token figure is the same honest `bytes/4` estimate.
+- **C and C++ in the code graph.** `dependencies` / `who_imports` / `who_calls` / `blast_radius` /
+  `code_graph` now cover C and C++ (8 languages, up from 6). Calls resolve through `call_expression`
+  (including C++ method and `ns::`-qualified calls); imports through `#include` (`<system>` and
+  `"local"` headers); function definitions link cross-file. `#include` matching is lexical/loose, so
+  C/C++ leans on the labeled bare-name fallback tier more than the others (documented in
+  `docs/methodology.md`). Adds `tree-sitter-c` + `tree-sitter-cpp` (MIT, bundled-C via `cc` like the
+  other grammars — openssl-free preserved on host and aarch64-linux). (Track 2, retrieval intelligence.)
 
 ## [0.68.0] — 2026-06-20
 

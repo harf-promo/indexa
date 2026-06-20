@@ -95,6 +95,39 @@ impl CodeParser {
                     "enum_declaration",
                 ],
             }),
+            // `.h` defaults to C (pragmatic) — C++ headers still parse acceptably with
+            // the C grammar for chunking/defines, and the call/include graph survives.
+            "c" | "h" => Some(LanguageDef {
+                ts_lang: tree_sitter_c::LANGUAGE.into(),
+                name: "c",
+                top_level_kinds: &[
+                    "function_definition",
+                    "declaration",
+                    "struct_specifier",
+                    "enum_specifier",
+                    "union_specifier",
+                    "type_definition",
+                    "preproc_def",
+                    "preproc_function_def",
+                ],
+            }),
+            "cpp" | "cc" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" => Some(LanguageDef {
+                ts_lang: tree_sitter_cpp::LANGUAGE.into(),
+                name: "cpp",
+                top_level_kinds: &[
+                    "function_definition",
+                    "declaration",
+                    "class_specifier",
+                    "struct_specifier",
+                    "enum_specifier",
+                    "union_specifier",
+                    "namespace_definition",
+                    "template_declaration",
+                    "type_definition",
+                    "preproc_def",
+                    "preproc_function_def",
+                ],
+            }),
             _ => None,
         }
     }
@@ -139,6 +172,21 @@ impl CodeParser {
                 name: "java",
                 top_level_kinds: &["class_declaration", "interface_declaration"],
             }),
+            "text/x-c" | "text/x-csrc" => Some(LanguageDef {
+                ts_lang: tree_sitter_c::LANGUAGE.into(),
+                name: "c",
+                top_level_kinds: &["function_definition", "struct_specifier", "enum_specifier"],
+            }),
+            "text/x-c++" | "text/x-c++src" | "text/x-cpp" => Some(LanguageDef {
+                ts_lang: tree_sitter_cpp::LANGUAGE.into(),
+                name: "cpp",
+                top_level_kinds: &[
+                    "function_definition",
+                    "class_specifier",
+                    "struct_specifier",
+                    "namespace_definition",
+                ],
+            }),
             _ => None,
         }
     }
@@ -174,6 +222,16 @@ impl Parser for CodeParser {
             ("cts", Full),
             ("go", Full),
             ("java", Full),
+            ("c", Full),
+            ("h", Full),
+            ("cpp", Full),
+            ("cc", Full),
+            ("cxx", Full),
+            ("c++", Full),
+            ("hpp", Full),
+            ("hh", Full),
+            ("hxx", Full),
+            ("h++", Full),
         ]
     }
 
@@ -271,6 +329,7 @@ fn call_kinds_for(language: &str) -> &'static [&'static str] {
         "javascript" | "typescript" | "tsx" => &["call_expression"],
         "go" => &["call_expression"],
         "java" => &["method_invocation"],
+        "c" | "cpp" => &["call_expression"],
         _ => &[],
     }
 }
@@ -310,9 +369,12 @@ fn extract_calls(
 ///    `method_call_expression` (`name` is a direct identifier child) and Java
 ///    `method_invocation` (same).
 /// 2. If the first child is a qualified expression (`scoped_identifier`,
-///    `member_expression`, `attribute`, `field_expression`, `selector_expression`),
-///    return the last `identifier`/`property_identifier` inside it — strips the
-///    receiver and gives the bare method name.
+///    `member_expression`, `attribute`, `field_expression`, `selector_expression`,
+///    `qualified_identifier`), return the last `identifier`/`field_identifier`/
+///    `property_identifier` inside it — strips the receiver/namespace and gives the
+///    bare method name. Covers C++ `obj.f()` (`field_expression`, bare name in a
+///    `field_identifier`) and `ns::f()` (`qualified_identifier`, bare name in the
+///    rightmost `identifier`).
 fn call_callee(node: &Node, source: &str) -> Option<String> {
     const ID_KINDS: &[&str] = &["identifier", "field_identifier", "property_identifier"];
     const QUALIFIED_KINDS: &[&str] = &[
@@ -321,6 +383,7 @@ fn call_callee(node: &Node, source: &str) -> Option<String> {
         "attribute",
         "field_expression",
         "selector_expression",
+        "qualified_identifier",
     ];
 
     // Pass 1: direct identifier child
@@ -367,6 +430,7 @@ fn import_kinds_for(language: &str) -> &'static [&'static str] {
         "javascript" | "typescript" | "tsx" => &["import_statement"],
         "go" => &["import_spec"],
         "java" => &["import_declaration"],
+        "c" | "cpp" => &["preproc_include"],
         _ => &[],
     }
 }
@@ -424,10 +488,18 @@ fn extract_imports(node: Node, source: &str, path: &Path, kinds: &[&str], edges:
 }
 
 /// Resolve the imported module/path from an import node: prefer a string-literal module
-/// path (JS/TS `from "x"`, Go `import_spec "fmt"`), else the dotted/scoped name (Python
-/// `import a.b`, Rust `use a::b`, Java `import a.b`). Returns the primary target; grouped
-/// multi-name imports (e.g. Python `import a, b`) surface their first module in D1.
+/// path (JS/TS `from "x"`, Go `import_spec "fmt"`, C/C++ `#include "foo.h"`) or a C/C++
+/// `system_lib_string` (`#include <stdio.h>`, stripped of `<>`), else the dotted/scoped
+/// name (Python `import a.b`, Rust `use a::b`, Java `import a.b`). Returns the primary
+/// target; grouped multi-name imports (e.g. Python `import a, b`) surface their first
+/// module in D1.
 fn import_target(node: &Node, source: &str) -> Option<String> {
+    // C/C++ `#include <stdio.h>` — the header lives in a `system_lib_string` leaf whose
+    // text includes the angle brackets; strip them.
+    if let Some(s) = find_descendant(node, &["system_lib_string"]) {
+        let raw = &source[s.byte_range()];
+        return Some(raw.trim_matches(|c| c == '<' || c == '>').to_owned());
+    }
     const STRING_KINDS: &[&str] = &[
         "string",
         "string_literal",
@@ -517,15 +589,62 @@ fn extract_chunks(
 }
 
 /// Try to extract a meaningful name from a top-level AST node.
+///
+/// Most languages put the symbol name in a direct `identifier`/`name`/`type_identifier`
+/// child. C/C++ instead nest it inside a declarator chain
+/// (`function_definition → function_declarator → identifier`, possibly wrapped in
+/// `pointer_declarator`/`reference_declarator`/`parenthesized_declarator`), so we descend
+/// through the `declarator` field when no direct name child exists.
 fn symbol_name(node: &Node, source: &str) -> String {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         let k = child.kind();
-        if k == "identifier" || k == "name" || k == "type_identifier" {
+        if k == "identifier" || k == "name" || k == "type_identifier" || k == "field_identifier" {
             return source[child.byte_range()].to_owned();
         }
     }
+    // C/C++ declarator chain: follow `declarator` fields down to the inner name.
+    if let Some(name) = c_declarator_name(node, source) {
+        return name;
+    }
     node.kind().to_owned()
+}
+
+/// Follow a C/C++ declarator chain (`function_declarator`, `pointer_declarator`,
+/// `reference_declarator`, `parenthesized_declarator`, `init_declarator`, …) down to the
+/// innermost `identifier`/`field_identifier`/`type_identifier`/`qualified_identifier`,
+/// which is the declared symbol's bare name. Returns `None` when there is no declarator.
+fn c_declarator_name(node: &Node, source: &str) -> Option<String> {
+    const NAME_KINDS: &[&str] = &[
+        "identifier",
+        "field_identifier",
+        "type_identifier",
+        "qualified_identifier",
+    ];
+    let decl = node.child_by_field_name("declarator")?;
+    // The name is the first descendant name-kind node within the declarator subtree.
+    let name_node = if NAME_KINDS.contains(&decl.kind()) {
+        decl
+    } else {
+        find_descendant(&decl, NAME_KINDS)?
+    };
+    Some(name_text(&name_node, source))
+}
+
+/// Text of a name node, collapsing `qualified_identifier` (`A::B::f`) to its rightmost
+/// bare `identifier` (`f`). Other name kinds are returned verbatim.
+fn name_text(node: &Node, source: &str) -> String {
+    if node.kind() == "qualified_identifier" {
+        let mut c = node.walk();
+        if let Some(last) = node
+            .children(&mut c)
+            .filter(|n| n.kind() == "identifier")
+            .last()
+        {
+            return source[last.byte_range()].trim().to_owned();
+        }
+    }
+    source[node.byte_range()].trim().to_owned()
 }
 
 #[cfg(test)]
@@ -750,5 +869,115 @@ impl Greeter {
         assert!(calls.contains(&"parse"), "js calls: {calls:?}");
         assert!(calls.contains(&"render"), "js calls: {calls:?}");
         assert!(calls.contains(&"build"), "js calls: {calls:?}");
+    }
+
+    #[test]
+    fn code_parser_accepts_c_and_cpp_extensions() {
+        let parser = CodeParser;
+        for ext in ["c", "h"] {
+            assert!(
+                parser.accepts_path(Path::new(&format!("file.{ext}"))),
+                "should accept .{ext}"
+            );
+        }
+        for ext in ["cpp", "cc", "cxx", "c++", "hpp", "hh", "hxx", "h++"] {
+            assert!(
+                parser.accepts_path(Path::new(&format!("file.{ext}"))),
+                "should accept .{ext}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_c_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("main.c");
+        std::fs::write(
+            &p,
+            "#include <stdio.h>\nint add(int a, int b) { return a + b; }\nint main(void) { printf(\"%d\\n\", add(1, 2)); return 0; }\n",
+        )
+        .unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+        assert!(!ex.chunks.is_empty());
+        assert_eq!(ex.chunks[0].language.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn edges_calls_and_imports_c() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("app.c");
+        std::fs::write(
+            &p,
+            "#include <stdio.h>\n#include \"helper.h\"\n\
+             int run(void) {\n\
+             \x20   printf(\"hi\");\n\
+             \x20   parse(buf);\n\
+             \x20   return 0;\n\
+             }\n",
+        )
+        .unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+
+        let imports = imports_of(&ex);
+        // `<stdio.h>` → stripped of angle brackets; `"helper.h"` → stripped of quotes.
+        assert!(imports.contains(&"stdio.h"), "c imports: {imports:?}");
+        assert!(imports.contains(&"helper.h"), "c imports: {imports:?}");
+
+        let calls = calls_of(&ex);
+        assert!(calls.contains(&"printf"), "c calls: {calls:?}");
+        assert!(calls.contains(&"parse"), "c calls: {calls:?}");
+
+        // The function definition yields a `defines` edge (declarator-nested name).
+        let defines = defines_of(&ex);
+        assert!(defines.contains(&"run"), "c defines: {defines:?}");
+
+        assert!(ex.edges.iter().all(|e| e.from == p));
+    }
+
+    #[test]
+    fn parses_cpp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("main.cpp");
+        std::fs::write(
+            &p,
+            "#include <vector>\nclass Greeter { public: void greet(); };\nvoid Greeter::greet() {}\n",
+        )
+        .unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+        assert!(!ex.chunks.is_empty());
+        assert_eq!(ex.chunks[0].language.as_deref(), Some("cpp"));
+    }
+
+    #[test]
+    fn edges_calls_and_imports_cpp() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("app.cpp");
+        std::fs::write(
+            &p,
+            "#include <vector>\n#include \"foo.hpp\"\n\
+             int run() {\n\
+             \x20   Obj obj;\n\
+             \x20   obj.render();\n\
+             \x20   ns::build();\n\
+             \x20   compute();\n\
+             \x20   return 0;\n\
+             }\n",
+        )
+        .unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+
+        let imports = imports_of(&ex);
+        assert!(imports.contains(&"vector"), "cpp imports: {imports:?}");
+        assert!(imports.contains(&"foo.hpp"), "cpp imports: {imports:?}");
+
+        let calls = calls_of(&ex);
+        // Bare call.
+        assert!(calls.contains(&"compute"), "cpp calls: {calls:?}");
+        // Method call `obj.render()` → bare method name (field_expression).
+        assert!(calls.contains(&"render"), "cpp calls: {calls:?}");
+        // Qualified call `ns::build()` → rightmost name (qualified_identifier).
+        assert!(calls.contains(&"build"), "cpp calls: {calls:?}");
+
+        assert!(ex.edges.iter().all(|e| e.from == p));
     }
 }

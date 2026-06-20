@@ -337,7 +337,7 @@ macOS desktop build** (v0.20, `--target universal-apple-darwin`, `darwin-univers
 
 **MCP server:** **46 tools** (`crates/mcp/src/lib.rs`; incl. `list_supported_formats`). Code-graph tools: `dependencies` /
 `who_imports` / `who_calls` / `blast_radius` / `code_graph`. The call graph is bare-name matched
-(case-sensitive, 1-hop, 6 languages: Rust/Python/JS/TS/Go/Java — NOT C/C++) — caveats in `docs/methodology.md`; label honestly in any UI.
+(case-sensitive, 1-hop, 8 languages: Rust/Python/JS/TS/Go/Java/C/C++) — caveats in `docs/methodology.md`; label honestly in any UI.
 v0.28 added `query_config` (effective config, no secrets), `list_files_by_category` (classification
 category → files), `get_chunk_context` (a file's indexed chunks / neighbors of a search hit), plus
 `offset` pagination on `list_open_decisions`. **v0.64** added a separate Resources + Prompts surface
