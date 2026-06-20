@@ -47,6 +47,8 @@ fn qa_config_from(r: &RetrievalConfig, scope: Option<&str>) -> QaConfig {
         recency_days: r.recency_days,
         max_steps: r.agentic_max_steps,
         mmr_lambda: r.mmr_lambda,
+        archive_segments: r.archive_segments.clone(),
+        archive_penalty: r.archive_penalty,
         scope: scope
             .map(str::trim)
             .filter(|s| !s.is_empty())

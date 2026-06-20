@@ -117,6 +117,13 @@ pub struct QaConfig {
     /// `1.0` disables MMR (pure relevance). `0.5` = balanced (default).
     /// `0.0` = maximum diversity. Mirrors the `[retrieval] mmr_lambda` config field.
     pub mmr_lambda: f32,
+    /// Path segments that mark content as historical/superseded (v0.29). Hits under
+    /// such a path are down-weighted by `archive_penalty`. Empty = penalty disabled.
+    /// Mirrors the `[retrieval] archive_segments` config field.
+    pub archive_segments: Vec<String>,
+    /// Multiplicative archive down-weighting factor (v0.29). `0.0` disables the penalty.
+    /// Mirrors the `[retrieval] archive_penalty` config field.
+    pub archive_penalty: f64,
 }
 
 impl Default for QaConfig {
@@ -136,6 +143,8 @@ impl Default for QaConfig {
             recency_days: 90,
             max_steps: 3,
             mmr_lambda: 0.5,
+            archive_segments: indexa_core::config::default_archive_segments(),
+            archive_penalty: indexa_core::config::DEFAULT_ARCHIVE_PENALTY,
         }
     }
 }

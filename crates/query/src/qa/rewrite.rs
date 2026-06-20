@@ -59,33 +59,74 @@ fn rewrite_prompt(question: &str, history: &[PriorTurn]) -> String {
     )
 }
 
-/// Pull a usable one-line query out of the model's reply: take the first non-empty
-/// line, strip a leading `REWRITTEN:`/`Query:` label and surrounding markdown/quotes,
-/// and reject empty or prose-length output (→ caller falls back to the question).
+/// Leading labels the model may prefix the rewritten query with — stripped before use.
+const REWRITE_LABELS: [&str; 5] = [
+    "REWRITTEN:",
+    "Rewritten:",
+    "Query:",
+    "QUERY:",
+    "Rewritten query:",
+];
+
+/// Chatty preamble openers — a line starting with one of these is an introduction
+/// ("Sure, here's the query:", "Okay, the standalone question is …"), not the query
+/// itself, so it is skipped. Lowercased prefix match.
+const REWRITE_PREAMBLE_OPENERS: [&str; 8] = [
+    "sure",
+    "here",
+    "here's",
+    "okay",
+    "ok,",
+    "of course",
+    "the standalone",
+    "certainly",
+];
+
+/// Pull a usable one-line query out of the model's reply. Strips any `REWRITTEN:`/`Query:`
+/// label and surrounding markdown/quotes from each line, skips obvious chatty preamble lines
+/// (an intro that ends in `:` or opens with "Sure"/"Here"/"Okay"/…), and returns the first
+/// remaining query-like line. Rejects empty or prose-length output → the caller falls back to
+/// the original question (fail-open).
 fn clean_rewrite(reply: &str) -> Option<String> {
     for raw in reply.lines() {
-        let mut line = raw.trim();
-        for label in [
-            "REWRITTEN:",
-            "Rewritten:",
-            "Query:",
-            "QUERY:",
-            "Rewritten query:",
-        ] {
-            if let Some(rest) = line.strip_prefix(label) {
-                line = rest.trim();
-            }
-        }
-        let line = line.trim_matches(['"', '`', '*', ' ']).trim();
-        if line.is_empty() {
+        let Some(line) = clean_rewrite_line(raw) else {
+            continue;
+        };
+        if line.chars().count() > REWRITE_MAX_CHARS {
+            // This line is prose, not a query — keep scanning for a tighter one
+            // instead of failing the whole reply (the query often follows the preamble).
             continue;
         }
-        if line.chars().count() > REWRITE_MAX_CHARS {
-            return None; // not a query — the model wrote prose
-        }
-        return Some(line.to_owned());
+        return Some(line);
     }
     None
+}
+
+/// Normalize a single reply line into a candidate query, or `None` if it's empty,
+/// pure label, or a chatty preamble/introduction line (which precedes the real query).
+fn clean_rewrite_line(raw: &str) -> Option<String> {
+    let mut line = raw.trim();
+    for label in REWRITE_LABELS {
+        if let Some(rest) = line.strip_prefix(label) {
+            line = rest.trim();
+        }
+    }
+    let line = line.trim_matches(['"', '`', '*', ' ', '\t']).trim();
+    if line.is_empty() {
+        return None;
+    }
+    // An introductory line that announces the query (e.g. "Sure, here's the standalone
+    // query:") rather than being one. Two tells: it ends in a colon (introducing what
+    // follows) or it opens with a conversational filler word.
+    let lower = line.to_ascii_lowercase();
+    let is_preamble = line.ends_with(':')
+        || REWRITE_PREAMBLE_OPENERS
+            .iter()
+            .any(|p| lower.starts_with(p));
+    if is_preamble {
+        return None;
+    }
+    Some(line.to_owned())
 }
 
 fn truncate(s: &str, max: usize) -> &str {
@@ -109,10 +150,39 @@ mod tests {
             clean_rewrite("\"what is the archive penalty\"").as_deref(),
             Some("what is the archive penalty")
         );
-        // First non-empty line wins; reasoning preamble is skipped.
+        // First usable line wins; blank lines are skipped.
         assert_eq!(
-            clean_rewrite("\n  \nthe standalone query").as_deref(),
-            Some("the standalone query")
+            clean_rewrite("\n  \nhow does retrieval rank hits").as_deref(),
+            Some("how does retrieval rank hits")
+        );
+    }
+
+    #[test]
+    fn clean_rewrite_drops_chatty_preamble_and_keeps_the_query() {
+        // The model prefixed a conversational intro line; the real query follows it.
+        assert_eq!(
+            clean_rewrite("Sure, here's the standalone query:\nhow does MMR diversity work")
+                .as_deref(),
+            Some("how does MMR diversity work")
+        );
+        // A trailing-colon introducer on its own line is also skipped.
+        assert_eq!(
+            clean_rewrite("The standalone question is:\nwhat is the archive penalty").as_deref(),
+            Some("what is the archive penalty")
+        );
+        // An "Okay, …" opener line is skipped in favor of the following query.
+        assert_eq!(
+            clean_rewrite("Okay.\nwhere is path_is_historical defined").as_deref(),
+            Some("where is path_is_historical defined")
+        );
+    }
+
+    #[test]
+    fn clean_rewrite_passes_through_a_clean_query_unchanged() {
+        // A plain one-line rewrite with no preamble is returned verbatim.
+        assert_eq!(
+            clean_rewrite("how is the archive penalty configured").as_deref(),
+            Some("how is the archive penalty configured")
         );
     }
 

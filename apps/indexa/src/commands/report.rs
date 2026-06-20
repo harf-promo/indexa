@@ -54,6 +54,8 @@ pub(crate) async fn cmd_report(
         recency_days: cfg.retrieval.recency_days,
         max_steps: cfg.retrieval.agentic_max_steps,
         mmr_lambda: cfg.retrieval.mmr_lambda,
+        archive_segments: cfg.retrieval.archive_segments.clone(),
+        archive_penalty: cfg.retrieval.archive_penalty,
     };
 
     let mut answers: Vec<Answer> = Vec::with_capacity(qs.len());
