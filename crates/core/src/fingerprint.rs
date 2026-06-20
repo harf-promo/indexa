@@ -121,8 +121,10 @@ enum Marker {
 }
 
 /// Parse a marker string into a [`Marker`]. A `**` recursive glob is unsupported — it would make
-/// the evaluator super-linear — and is treated as a (non-matching) literal; the curated library
-/// never uses it. A trailing `/` (a "must be a dir" hint) is trimmed; v1 only tests existence.
+/// the evaluator super-linear — and matches nothing: a standalone `**` child glob is rejected in
+/// [`glob_match`], and a `**` inside a path becomes a literal `RelPath` that won't exist on disk.
+/// The curated library never uses it. A trailing `/` (a "must be a dir" hint) is trimmed; v1 only
+/// tests existence.
 fn parse_marker(s: &str) -> Marker {
     let s = s.trim_end_matches('/');
     if s.contains('/') {
@@ -140,6 +142,11 @@ fn parse_marker(s: &str) -> Marker {
 /// and dependency-free — the markers only ever need single-`*` patterns like `*.xcodeproj`, and
 /// keeping the matcher here means one identical semantics across the CLI and the seed generator.
 fn glob_match(pattern: &str, name: &str) -> bool {
+    // `**` (recursive glob) is unsupported: reject it (match nothing) rather than silently
+    // degenerating to single-`*` semantics, keeping the documented "** rejected" contract true.
+    if pattern.contains("**") {
+        return false;
+    }
     let pat: Vec<char> = pattern.chars().collect();
     let txt: Vec<char> = name.chars().collect();
     // Classic two-pointer wildcard match with backtracking on the last `*`.
@@ -367,6 +374,10 @@ mod tests {
         assert!(glob_match("a*b*c", "axxbyyc"));
         assert!(!glob_match("a*b", "axxc"));
         assert!(glob_match("Cargo.toml", "Cargo.toml")); // no wildcard = literal
+                                                         // `**` is rejected (matches nothing) — it must NOT degenerate to single-`*`.
+        assert!(!glob_match("**.rs", "foo.rs"));
+        assert!(!glob_match("**", "anything"));
+        assert!(!glob_match("a**b", "aXYb"));
     }
 
     #[test]
