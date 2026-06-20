@@ -393,6 +393,8 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/api/insights/duplicates", get(api_insights_duplicates))
         .route("/api/insights/stale", get(api_insights_stale))
         .route("/api/insights/diff", get(api_insights_diff))
+        .route("/api/insights/largest", get(api_insights_largest))
+        .route("/api/insights/languages", get(api_insights_languages))
         .with_state(state)
         // Pin the request-body cap explicitly. axum's built-in default is also 2 MB, but
         // stating it documents the limit and survives a future default change. Every
