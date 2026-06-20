@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   columns + run aggregates `mean_recall` / `mean_ndcg`, in the table and `--json`). `hit@k` only asks
   "any expected path?"; **recall@k** grades how many of them were retrieved, and **nDCG@k** catches a
   *ranking* regression (an expected hit sliding from #1 to #6) that hit-rate is blind to.
+- **`indexa eval` gained a baseline regression gate.** `--baseline <prev.json>` prints the per-metric
+  delta vs a saved run (a `vs baseline:` line); `--max-regression <d>` (default `0.0`) exits 1 if any
+  aggregate metric drops more than `d` below it. This turns the eval from an absolute floor into a
+  relative gate — a retrieval change can prove it didn't regress ("MRR 0.74 → 0.61" fails the build).
+  Float round-trip jitter is ignored, so an identical run never false-fails.
 
 ## [0.67.0] — 2026-06-20
 

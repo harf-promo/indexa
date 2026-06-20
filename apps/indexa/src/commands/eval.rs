@@ -2,9 +2,10 @@ use anyhow::{bail, Context, Result};
 use indexa_core::config::{Config, HybridMode};
 use indexa_core::store::Store;
 use indexa_query::{
-    aggregate, evaluate_question, EvalSummary, GoldenSet, QaConfig, QuestionMetrics,
+    aggregate, compare_to_baseline, evaluate_question, EvalSummary, GoldenSet, QaConfig,
+    QuestionMetrics,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::helpers::{build_embedder, require_index_db};
 
@@ -15,10 +16,18 @@ struct EvalJson<'a> {
     summary: &'a EvalSummary,
 }
 
+/// A regression baseline on disk: accepts a full `indexa eval --json` object (extra fields like
+/// `mode`/`questions` are ignored) or a bare summary object.
+#[derive(Deserialize)]
+struct BaselineFile {
+    summary: EvalSummary,
+}
+
 /// `indexa eval <golden.json>` — regression-test retrieval quality against golden
 /// questions. Retrieval only (the same `retrieve()` the ask pipeline uses): no LLM,
 /// no rerank, and in sparse mode (the default) no embedder — so a CI run is hermetic.
-/// Exits 1 when the aggregate hit rate falls below `--min-hit-rate`.
+/// Exits 1 when the aggregate hit rate falls below `--min-hit-rate`, or (with `--baseline`)
+/// when any aggregate metric regresses by more than `--max-regression`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn cmd_eval(
     golden: String,
@@ -27,10 +36,15 @@ pub(crate) async fn cmd_eval(
     scope: Option<String>,
     json: bool,
     min_hit_rate: f64,
+    baseline: Option<String>,
+    max_regression: f64,
     cfg: &Config,
 ) -> Result<()> {
     if !(0.0..=1.0).contains(&min_hit_rate) {
         bail!("--min-hit-rate must be between 0.0 and 1.0 (got {min_hit_rate})");
+    }
+    if max_regression < 0.0 {
+        bail!("--max-regression must be >= 0.0 (got {max_regression})");
     }
     let hybrid_mode = match mode.as_str() {
         "sparse" => HybridMode::Sparse,
@@ -143,12 +157,53 @@ pub(crate) async fn cmd_eval(
         );
     }
 
-    if summary.hit_rate < min_hit_rate {
+    // Optional baseline regression gate: load a saved run, print the per-metric deltas, and flag
+    // any aggregate that dropped by more than --max-regression.
+    let mut regressed = false;
+    if let Some(baseline_path) = &baseline {
+        let bpath = shellexpand::tilde(baseline_path).into_owned();
+        let braw = std::fs::read_to_string(&bpath)
+            .with_context(|| format!("cannot read baseline file {bpath}"))?;
+        // Accept a full `--json` object (with a `summary` field) or a bare summary object.
+        let base: EvalSummary = serde_json::from_str::<BaselineFile>(&braw)
+            .map(|b| b.summary)
+            .or_else(|_| serde_json::from_str::<EvalSummary>(&braw))
+            .with_context(|| {
+                format!(
+                    "cannot parse baseline {bpath} — expected an `indexa eval --json` output or a summary object"
+                )
+            })?;
+        let deltas = compare_to_baseline(&summary, &base, max_regression);
+        regressed = deltas.iter().any(|d| d.regressed);
+        if !json {
+            let line = deltas
+                .iter()
+                .map(|d| format!("{} {:+.3}", d.name, d.delta))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            println!("vs baseline: {line}");
+        }
         // stderr so --json stdout stays machine-parseable.
+        for d in deltas.iter().filter(|d| d.regressed) {
+            eprintln!(
+                "eval: {} regressed {:.3} → {:.3} (Δ{:+.3}, max allowed -{:.3})",
+                d.name, d.baseline, d.current, d.delta, max_regression
+            );
+        }
+    }
+
+    let mut fail = false;
+    if summary.hit_rate < min_hit_rate {
         eprintln!(
             "eval: hit rate {:.2} below --min-hit-rate {min_hit_rate:.2}",
             summary.hit_rate
         );
+        fail = true;
+    }
+    if regressed {
+        fail = true;
+    }
+    if fail {
         std::process::exit(1);
     }
     Ok(())

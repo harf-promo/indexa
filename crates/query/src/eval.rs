@@ -56,8 +56,9 @@ pub struct QuestionMetrics {
     pub ndcg: f64,
 }
 
-/// Aggregate over all questions in a run.
-#[derive(Debug, Clone, Serialize)]
+/// Aggregate over all questions in a run. `Deserialize` so a saved `--json` run can be
+/// loaded back as a regression baseline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalSummary {
     pub questions: usize,
     /// Fraction of questions with at least one expected path in their top k (hit@k).
@@ -186,6 +187,55 @@ pub fn aggregate(per_question: &[QuestionMetrics]) -> EvalSummary {
         mean_recall: per_question.iter().map(|m| m.recall).sum::<f64>() / nf,
         mean_ndcg: per_question.iter().map(|m| m.ndcg).sum::<f64>() / nf,
     }
+}
+
+/// One aggregate metric compared against a baseline run.
+#[derive(Debug, Clone, Serialize)]
+pub struct MetricDelta {
+    pub name: &'static str,
+    pub current: f64,
+    pub baseline: f64,
+    /// `current - baseline` (positive = improved).
+    pub delta: f64,
+    /// True when the drop exceeds the allowed tolerance (`delta < -max_regression`).
+    pub regressed: bool,
+}
+
+/// Float-comparison guard for the regression gate: a drop smaller than this is treated as
+/// noise (the baseline's f64 round-trips through JSON; summation order), never a regression.
+/// `eval` is deterministic run-to-run, and a real regression moves a metric by ≫ this (a single
+/// rank change shifts nDCG by ~1e-2), so this only absorbs sub-ULP serialize/parse jitter —
+/// without it an identical baseline spuriously "regresses" by ~1e-16.
+pub const REGRESSION_EPSILON: f64 = 1e-9;
+
+/// Compare a run's aggregates against a baseline run, one [`MetricDelta`] per metric.
+/// A metric `regressed` when it dropped by more than `max_regression` (so `0.0` = no drop
+/// allowed, modulo [`REGRESSION_EPSILON`]). Pure + order-stable so the CLI can both print the
+/// deltas and gate on them.
+pub fn compare_to_baseline(
+    current: &EvalSummary,
+    baseline: &EvalSummary,
+    max_regression: f64,
+) -> Vec<MetricDelta> {
+    [
+        ("hit_rate", current.hit_rate, baseline.hit_rate),
+        ("MRR", current.mrr, baseline.mrr),
+        ("recall", current.mean_recall, baseline.mean_recall),
+        ("nDCG", current.mean_ndcg, baseline.mean_ndcg),
+        ("precision", current.mean_precision, baseline.mean_precision),
+    ]
+    .into_iter()
+    .map(|(name, cur, base)| {
+        let delta = cur - base;
+        MetricDelta {
+            name,
+            current: cur,
+            baseline: base,
+            delta,
+            regressed: delta < -(max_regression + REGRESSION_EPSILON),
+        }
+    })
+    .collect()
 }
 
 #[cfg(test)]
@@ -345,6 +395,56 @@ mod tests {
         assert!((s.hit_rate - 2.0 / 3.0).abs() < 1e-9);
         assert!((s.mrr - (1.0 + 0.5 + 0.0) / 3.0).abs() < 1e-9);
         assert!((s.mean_precision - (1.0 + 0.5 + 0.0) / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compare_to_baseline_flags_only_real_regressions() {
+        let base = EvalSummary {
+            questions: 10,
+            hit_rate: 0.90,
+            mrr: 0.80,
+            mean_precision: 0.50,
+            mean_recall: 0.70,
+            mean_ndcg: 0.85,
+        };
+        // hit_rate drops 0.10, MRR improves, the rest unchanged.
+        let cur = EvalSummary {
+            hit_rate: 0.80,
+            mrr: 0.85,
+            ..base.clone()
+        };
+        // Zero tolerance: the 0.10 hit_rate drop regresses; the MRR improvement does not.
+        let deltas = compare_to_baseline(&cur, &base, 0.0);
+        let hit = deltas.iter().find(|d| d.name == "hit_rate").unwrap();
+        assert!(hit.regressed);
+        assert!((hit.delta + 0.10).abs() < 1e-9);
+        assert!(!deltas.iter().find(|d| d.name == "MRR").unwrap().regressed);
+        // A 0.10 tolerance absorbs the drop exactly at the boundary → nothing flagged.
+        let deltas = compare_to_baseline(&cur, &base, 0.10);
+        assert!(!deltas.iter().any(|d| d.regressed));
+    }
+
+    #[test]
+    fn compare_to_baseline_ignores_float_roundtrip_noise() {
+        // A sub-ULP drop (what an identical run shows after the baseline round-trips through
+        // JSON) must NOT be flagged at zero tolerance — only real regressions are.
+        let base = EvalSummary {
+            questions: 18,
+            hit_rate: 1.0,
+            mrr: 1.0,
+            mean_precision: 0.4,
+            mean_recall: 0.97,
+            mean_ndcg: 0.9736251154055859,
+        };
+        let cur = EvalSummary {
+            mean_ndcg: base.mean_ndcg - 1e-15,
+            ..base.clone()
+        };
+        let deltas = compare_to_baseline(&cur, &base, 0.0);
+        assert!(
+            !deltas.iter().any(|d| d.regressed),
+            "sub-epsilon jitter must not count as a regression"
+        );
     }
 
     #[test]

@@ -39,8 +39,27 @@ indexa eval golden.json                          # sparse (default) — hermetic
 indexa eval golden.json --mode rrf               # hybrid, needs the embedder used at index time
 indexa eval golden.json --scope ~/code/myrepo    # confine retrieval to one tree
 indexa eval golden.json --json | jq .summary     # machine output
-indexa eval golden.json --min-hit-rate 0.8       # exit 1 below 80% hit rate (the CI gate)
+indexa eval golden.json --min-hit-rate 0.8       # exit 1 below 80% hit rate (absolute floor)
 ```
+
+### Regression gate (compare against a baseline)
+
+`--min-hit-rate` is an *absolute* floor. To catch a *relative* slip — "this change dropped MRR
+0.74 → 0.61" — save a baseline run and compare against it. This is how a retrieval change (new
+chunker, reranker, ranking tweak) proves it didn't regress:
+
+```bash
+indexa eval golden.json --json > baseline.json        # snapshot the current quality
+# … make your retrieval change, rebuild …
+indexa eval golden.json --baseline baseline.json                    # print per-metric deltas
+indexa eval golden.json --baseline baseline.json --max-regression 0.02   # exit 1 if any metric drops > 0.02
+```
+
+`--baseline` prints a `vs baseline:` line with the signed delta for every aggregate metric; with
+`--max-regression <d>` (default `0.0` = no drop allowed) it exits 1 if hit_rate, MRR, recall, nDCG,
+or precision falls more than `d` below the baseline. The baseline file is either a full
+`indexa eval --json` output or a bare summary object. (Sub-noise jitter from the JSON round-trip is
+ignored — only real drops count.)
 
 ## The metrics
 
