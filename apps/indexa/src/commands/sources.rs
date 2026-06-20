@@ -15,6 +15,11 @@ use std::path::{Path, PathBuf};
 
 const UA: &str = concat!("indexa/", env!("CARGO_PKG_VERSION"));
 
+/// Hard cap on a fetched remote body (8 MB — generous for any single doc/issue, while a hostile
+/// or runaway page can't blow up memory). Streamed in `indexa_http_util::read_body_capped`, so an
+/// oversized body is rejected before it's fully resident.
+const MAX_FETCH_BYTES: usize = 8 * 1024 * 1024;
+
 /// Whether remote fetching is permitted (config flag OR per-run env override).
 pub(crate) fn remote_fetch_allowed(cfg: &SourcesConfig) -> bool {
     cfg.enabled || std::env::var("INDEXA_REMOTE_FETCH_ALLOW").as_deref() == Ok("1")
@@ -79,7 +84,10 @@ async fn fetch_github(gh: &GhRef, timeout: u64, retries: u32) -> Result<String> 
     if !resp.status().is_success() {
         anyhow::bail!("GitHub API returned HTTP {} for {api}", resp.status());
     }
-    let issue: serde_json::Value = resp.json().await.context("parsing GitHub issue JSON")?;
+    let issue_body =
+        indexa_http_util::read_body_capped(resp, MAX_FETCH_BYTES, "GitHub issue").await?;
+    let issue: serde_json::Value =
+        serde_json::from_str(&issue_body).context("parsing GitHub issue JSON")?;
     let title = issue["title"].as_str().unwrap_or("(untitled)");
     let state = issue["state"].as_str().unwrap_or("");
     let user = issue["user"]["login"].as_str().unwrap_or("");
@@ -93,7 +101,17 @@ async fn fetch_github(gh: &GhRef, timeout: u64, retries: u32) -> Result<String> 
     if let Some(curl) = issue["comments_url"].as_str() {
         if let Ok(cresp) = indexa_http_util::send_with_retry(|| get(curl), retries).await {
             if cresp.status().is_success() {
-                if let Ok(comments) = cresp.json::<Vec<serde_json::Value>>().await {
+                let parsed = match indexa_http_util::read_body_capped(
+                    cresp,
+                    MAX_FETCH_BYTES,
+                    "GitHub comments",
+                )
+                .await
+                {
+                    Ok(b) => serde_json::from_str::<Vec<serde_json::Value>>(&b).ok(),
+                    Err(_) => None,
+                };
+                if let Some(comments) = parsed {
                     if !comments.is_empty() {
                         md.push_str("\n## Comments\n");
                         for c in &comments {
@@ -119,7 +137,7 @@ async fn fetch_web(url: &str, timeout: u64, retries: u32) -> Result<String> {
     if !resp.status().is_success() {
         anyhow::bail!("HTTP {} fetching {url}", resp.status());
     }
-    let html = resp.text().await.context("reading response body")?;
+    let html = indexa_http_util::read_body_capped(resp, MAX_FETCH_BYTES, "web page").await?;
     // Drop <script>/<style> blocks first so their JS/CSS can't leak into the Markdown.
     let cleaned = strip_blocks(&strip_blocks(&html, "script"), "style");
     let md = htmd::convert(&cleaned).context("converting HTML to Markdown")?;

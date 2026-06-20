@@ -128,6 +128,51 @@ fn prune_removes_dangling_rows_but_keeps_entried() {
 }
 
 #[test]
+fn prune_removes_orphan_directory_apps_but_keeps_entried() {
+    // directory_apps follows the classifications lifecycle (re-derivable, no user decision), so the
+    // orphan sweep must clear a detected-app row whose dir has no `entries` row, while sparing one
+    // whose directory is still entried.
+    let mut store = Store::open_in_memory().unwrap();
+    // One entried directory with a detected app; one orphan directory with a detected app.
+    store
+        .upsert_entries(&[dummy_entry("/keep_dir", EntryKind::Dir, 0)])
+        .unwrap();
+    let app = |path: &str, kind: &str| DetectedApp {
+        path: path.to_owned(),
+        app_kind: kind.to_owned(),
+        app_name: "App".to_owned(),
+        family: "code".to_owned(),
+        specificity: 10,
+        is_primary: true,
+        markers_json: "[]".to_owned(),
+        source: "builtin".to_owned(),
+        detected_at: 0,
+    };
+    store
+        .replace_apps_for_dir("/keep_dir", &[app("/keep_dir", "rust_crate")])
+        .unwrap();
+    store
+        .replace_apps_for_dir("/orphan_dir", &[app("/orphan_dir", "go_module")])
+        .unwrap();
+
+    let before = store.count_orphans().unwrap();
+    assert_eq!(before.directory_apps, 1, "one orphan directory_apps row");
+
+    let removed = store.prune_orphans().unwrap();
+    assert_eq!(removed.directory_apps, 1, "the orphan app row is pruned");
+
+    // Orphan app gone; the entried directory's app survives.
+    assert_eq!(store.count_orphans().unwrap().directory_apps, 0);
+    assert!(
+        store.apps_for_dir("/orphan_dir").unwrap().is_empty(),
+        "orphan_dir's detected app must be swept"
+    );
+    let kept = store.apps_for_dir("/keep_dir").unwrap();
+    assert_eq!(kept.len(), 1, "keep_dir's detected app is preserved");
+    assert_eq!(kept[0].app_kind, "rust_crate");
+}
+
+#[test]
 fn prune_noops_on_entryless_index() {
     // `deep`/`summarize` without `scan` leaves chunks with zero entries — a legitimate,
     // intentional state. prune must NOT treat the whole index as orphaned and wipe it.
