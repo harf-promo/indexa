@@ -77,6 +77,44 @@
         "crates/core/src/decisions/detectors.rs",
         "crates/core/src/decisions/detectors/tests.rs"
       ]
+    },
+    {
+      "question": "where is the memory budget computed from available RAM",
+      "expect_paths": ["crates/core/src/resource.rs"]
+    },
+    {
+      "question": "how are secrets redacted before content is exported",
+      "expect_paths": ["crates/query/src/redact.rs"]
+    },
+    {
+      "question": "how is version skew between the desktop app and the CLI detected",
+      "expect_paths": ["crates/update/src/skew.rs"]
+    },
+    {
+      "question": "where is the per-answer served bytes impact computed",
+      "expect_paths": [
+        "crates/query/src/impact.rs",
+        "apps/indexa/src/commands/ask.rs"
+      ]
+    },
+    {
+      "question": "where is the answer confidence level assessed",
+      "expect_paths": [
+        "crates/query/src/qa/confidence.rs",
+        "apps/indexa/src/commands/ask.rs"
+      ]
+    },
+    {
+      "question": "how does deep indexing skip files whose chunks are already current",
+      "expect_paths": ["crates/core/src/store/chunks.rs"]
+    },
+    {
+      "question": "where are presentation slides and speaker notes parsed",
+      "expect_paths": ["crates/parsers/src/presentation.rs"]
+    },
+    {
+      "question": "how are remote url sources fetched and cached into a pack",
+      "expect_paths": ["apps/indexa/src/commands/sources.rs"]
     }
   ]
 }

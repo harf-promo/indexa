@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Sparse / keyword search now tokenizes the query instead of phrase-matching it whole.** The FTS5
+  MATCH was built by wrapping the entire query in quotes — one phrase — so a multi-word natural-
+  language question (`"how does the watcher reindex changed files"`) only matched a near-verbatim
+  adjacent run and returned almost nothing in `--mode sparse`. It now emits `"<whole query>" OR
+  "term1" OR "term2" …`: the exact phrase still scores highest (adjacency), while the individual
+  content terms (stopwords dropped) add recall, BM25-ranked. The same expression feeds the lexical
+  arm of the default hybrid (`rrf`) `ask`/`search`, so they gain the recall too. On Indexa's own
+  self-golden eval (sparse): hit-rate 0.69 → **1.00**, recall 0.67 → **0.98**, nDCG 0.67 → **0.85**
+  (the 18 existing keyword probes unchanged; 8 added natural-language questions go miss → hit). No
+  new dependency. *(Track 2, retrieval intelligence — PR #1.)*
+
 - **Web UI restyled onto the Harf design system** (a bilingual editorial brand: cool-grey
   scale + a single green apostrophe as punctuation, Geist type, √2 spacing, 5/4 type scale, sharp
   corners + hairlines). **Stage 1 — the token foundation:** `01-tokens.css` is rewritten to the Harf
