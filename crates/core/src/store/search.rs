@@ -33,6 +33,48 @@ pub(super) fn fts5_quote(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
+/// A tiny English stopword set — words that carry no retrieval signal but, left in
+/// the query, would dilute BM25 ranking with matches on ubiquitous words. Kept small
+/// and in-code (no dependency). English-only, which fits Indexa's mostly-English /
+/// code corpus; non-English content still matches via its content terms.
+const FTS_STOPWORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "could", "do", "does", "for", "from",
+    "how", "i", "in", "into", "is", "it", "its", "me", "my", "not", "of", "on", "or", "our",
+    "should", "that", "the", "this", "to", "was", "we", "what", "when", "where", "which", "who",
+    "why", "will", "with", "would", "you", "your",
+];
+
+/// Build the FTS5 MATCH expression for a raw user query.
+///
+/// Tokenizes on non-alphanumeric boundaries, lowercases, drops stopwords + 1-char
+/// tokens, quotes each remaining term, and emits `"<whole query>" OR "t1" OR "t2" …`:
+/// an exact-phrase hit (adjacent tokens) still scores highest via `bm25(chunks_fts)`,
+/// while the OR'd terms add recall for multi-word natural-language questions. This
+/// replaces wrapping the WHOLE query as a single FTS5 phrase, which only matched a
+/// near-verbatim adjacent token run — so a question like "how does the watcher
+/// reindex" returned almost nothing in sparse mode. A single content term needs no
+/// phrase; an all-stopword / punctuation-only query falls back to the phrase form so
+/// a query never silently degrades to "no results". The same expression feeds the
+/// lexical (BM25) arm of `rrf` too, so hybrid `ask`/`search` gain the recall as well.
+pub(super) fn build_fts_query(query: &str) -> String {
+    let terms: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_lowercase)
+        .filter(|t| t.chars().count() > 1 && !FTS_STOPWORDS.contains(&t.as_str()))
+        .map(|t| fts5_quote(&t))
+        .collect();
+    match terms.len() {
+        // No content terms survived (all stopwords / punctuation) — keep the old
+        // whole-query phrase behavior rather than emit an empty (error) MATCH.
+        0 => fts5_quote(query),
+        // A single content word: the phrase and the term are identical — skip the OR.
+        1 => terms.into_iter().next().unwrap(),
+        // Phrase (exact-adjacency boost) OR the individual terms (recall).
+        _ => format!("{} OR {}", fts5_quote(query), terms.join(" OR ")),
+    }
+}
+
 /// Escape `%` and `_` wildcards in a path prefix before appending `%` for LIKE matching.
 /// Must be used with `LIKE ?n ESCAPE '\'` in the SQL clause.
 pub(super) fn like_prefix(prefix: &str) -> String {
@@ -158,7 +200,7 @@ impl Store {
         let fts_candidates: Vec<(i64, String)> = match mode {
             HybridMode::Dense => Vec::new(),
             _ => {
-                let fts_query = fts5_quote(query_text);
+                let fts_query = build_fts_query(query_text);
                 let (sql, scope_param) = if let Some(s) = scope {
                     (
                         format!(
@@ -706,5 +748,59 @@ impl Store {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_fts_query, fts5_quote};
+
+    #[test]
+    fn build_fts_query_phrase_or_terms_for_multiword() {
+        // Stopwords (how/does/the) dropped; the whole-query phrase is kept for the
+        // exact-adjacency BM25 boost; the surviving content terms are OR'd for recall.
+        assert_eq!(
+            build_fts_query("How does the watcher reindex?"),
+            "\"How does the watcher reindex?\" OR \"watcher\" OR \"reindex\""
+        );
+    }
+
+    #[test]
+    fn build_fts_query_single_content_term_is_bare() {
+        // One content word → just the quoted term, no redundant phrase/OR.
+        assert_eq!(build_fts_query("sqlite"), "\"sqlite\"");
+        // Stopwords around a single content word collapse to that term.
+        assert_eq!(build_fts_query("what is sqlite"), "\"sqlite\"");
+    }
+
+    #[test]
+    fn build_fts_query_drops_stopwords_and_one_char_tokens() {
+        // "a" (stopword) + "x" (1-char) dropped; "redact" + "secrets" kept.
+        assert_eq!(
+            build_fts_query("redact a x secrets"),
+            "\"redact a x secrets\" OR \"redact\" OR \"secrets\""
+        );
+    }
+
+    #[test]
+    fn build_fts_query_all_stopwords_falls_back_to_phrase() {
+        // No content terms survive → fall back to the quoted phrase, never an empty MATCH.
+        assert_eq!(build_fts_query("how is it"), fts5_quote("how is it"));
+    }
+
+    #[test]
+    fn build_fts_query_punctuation_or_empty_falls_back() {
+        assert_eq!(build_fts_query("???"), fts5_quote("???"));
+        assert_eq!(build_fts_query(""), fts5_quote(""));
+    }
+
+    #[test]
+    fn build_fts_query_escapes_embedded_quotes() {
+        // An embedded `"` is a token boundary AND is doubled inside the phrase by
+        // fts5_quote, so the emitted MATCH stays syntactically valid.
+        assert_eq!(
+            build_fts_query("say \"hi\" now"),
+            "\"say \"\"hi\"\" now\" OR \"say\" OR \"hi\" OR \"now\""
+        );
     }
 }
