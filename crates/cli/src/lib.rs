@@ -141,6 +141,15 @@ pub enum Commands {
         /// Also enabled by `[describer] contextual_retrieval = true` in config.
         #[arg(long)]
         contextual: bool,
+
+        /// FTS-only: parse + chunk + index for sparse (BM25) search WITHOUT computing
+        /// embeddings. Skips the Ollama preflight and every model call (embeddings,
+        /// contextual blurbs, image captions, audio transcription, PDF OCR), so it runs
+        /// fully offline with no models pulled. The index serves `--mode sparse` search /
+        /// `ask`; dense/hybrid retrieval needs a later plain `deep`. Used by CI to score
+        /// retrieval hermetically; also handy for a quick models-free index.
+        #[arg(long)]
+        no_embed: bool,
     },
 
     /// Generate hierarchical context summaries for indexed files and directories.

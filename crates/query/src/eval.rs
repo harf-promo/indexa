@@ -76,16 +76,34 @@ pub fn evaluate_question(
     Ok(score_ranking(&q.question, k, &ranked, &q.expect_paths))
 }
 
+/// True if stored path `p` satisfies expected path `e`.
+///
+/// An **absolute** expect (`/…`) must match exactly — this preserves the original
+/// semantics, keeps absolute golden files deterministic, and is what the existing
+/// tilde-expanded `$HOME`-relative fixtures rely on. A **relative** expect (no
+/// leading `/`) matches as a path-boundary suffix of `p`, so a committed fixture
+/// can name `crates/query/src/eval.rs` and match wherever the repo is checked out
+/// (CI's `/home/runner/work/...`, any developer's clone) without hardcoding an
+/// absolute prefix. The boundary check (`/` before the suffix) stops `auth.rs`
+/// from matching `oauth.rs`. POSIX-separator oriented — the relative form is for
+/// portable POSIX fixtures, not Windows paths.
+fn path_matches(p: &str, e: &str) -> bool {
+    if e.starts_with('/') {
+        return e == p;
+    }
+    p == e || (p.len() > e.len() && p.ends_with(e) && p.as_bytes()[p.len() - e.len() - 1] == b'/')
+}
+
 /// Pure scoring of a ranked path list against the expected set — split from
-/// retrieval so the math is testable without a store. Paths match by exact
-/// string equality (the CLI normalizes tildes before calling).
+/// retrieval so the math is testable without a store. See [`path_matches`] for the
+/// exact-vs-suffix matching rule (absolute = exact, relative = boundary suffix).
 pub fn score_ranking(
     question: &str,
     k: usize,
     ranked_paths: &[&str],
     expect_paths: &[String],
 ) -> QuestionMetrics {
-    let is_expected = |p: &str| expect_paths.iter().any(|e| e == p);
+    let is_expected = |p: &str| expect_paths.iter().any(|e| path_matches(p, e));
     let top = &ranked_paths[..ranked_paths.len().min(k)];
     let first_hit_rank = top.iter().position(|p| is_expected(p)).map(|i| i + 1);
     let matched = top.iter().filter(|p| is_expected(p)).count();
@@ -178,6 +196,57 @@ mod tests {
         assert_eq!(m.reciprocal_rank, 0.0);
         assert_eq!(m.precision, 0.0);
         assert_eq!(m.retrieved, 0);
+    }
+
+    #[test]
+    fn path_matches_absolute_is_exact_only() {
+        // Absolute expects keep the original exact-equality semantics.
+        assert!(path_matches("/repo/src/auth.rs", "/repo/src/auth.rs"));
+        assert!(!path_matches(
+            "/home/x/repo/src/auth.rs",
+            "/repo/src/auth.rs"
+        ));
+        assert!(!path_matches("/repo/src/oauth.rs", "/repo/src/auth.rs"));
+    }
+
+    #[test]
+    fn path_matches_relative_is_boundary_suffix() {
+        // A relative expect matches any checkout location at a `/` boundary.
+        assert!(path_matches(
+            "/home/runner/work/indexa/indexa/crates/query/src/eval.rs",
+            "crates/query/src/eval.rs"
+        ));
+        assert!(path_matches(
+            "/Users/dev/indexa/crates/query/src/eval.rs",
+            "crates/query/src/eval.rs"
+        ));
+        // Equal-string relative match also holds.
+        assert!(path_matches("eval.rs", "eval.rs"));
+    }
+
+    #[test]
+    fn path_matches_relative_respects_path_boundary() {
+        // Must not match mid-segment: `auth.rs` is not a suffix of `oauth.rs`.
+        assert!(!path_matches("/repo/src/oauth.rs", "auth.rs"));
+        assert!(path_matches("/repo/src/auth.rs", "auth.rs"));
+        // A longer relative suffix still needs the `/` boundary.
+        assert!(!path_matches("/repo/notsrc/eval.rs", "src/eval.rs"));
+        assert!(path_matches("/repo/query/src/eval.rs", "src/eval.rs"));
+    }
+
+    #[test]
+    fn score_ranking_relative_expect_matches_absolute_hit() {
+        // End-to-end: a relative golden path scores a hit against an absolute
+        // stored path — the property the portable self-golden fixture relies on.
+        let m = score_ranking(
+            "q",
+            10,
+            &["/home/runner/work/indexa/indexa/crates/query/src/eval.rs"],
+            &owned(&["crates/query/src/eval.rs"]),
+        );
+        assert!(m.hit);
+        assert_eq!(m.first_hit_rank, Some(1));
+        assert_eq!(m.precision, 1.0);
     }
 
     #[test]

@@ -1,0 +1,82 @@
+{
+  "questions": [
+    {
+      "question": "redact secrets",
+      "expect_paths": ["crates/query/src/redact.rs"]
+    },
+    {
+      "question": "detect directory apps",
+      "expect_paths": ["crates/core/src/app_detect.rs"]
+    },
+    {
+      "question": "classify skew",
+      "expect_paths": ["crates/update/src/skew.rs"]
+    },
+    {
+      "question": "parse plist short version",
+      "expect_paths": ["crates/update/src/skew.rs"]
+    },
+    {
+      "question": "compute uncovered",
+      "expect_paths": ["crates/query/src/qa/confidence.rs"]
+    },
+    {
+      "question": "resolve search query",
+      "expect_paths": ["crates/query/src/qa/rewrite.rs"]
+    },
+    {
+      "question": "enforce embedding dim",
+      "expect_paths": ["crates/embed/src/lib.rs"]
+    },
+    {
+      "question": "floor char boundary",
+      "expect_paths": ["crates/core/src/text.rs"]
+    },
+    {
+      "question": "parse reindex interval",
+      "expect_paths": ["crates/core/src/config.rs"]
+    },
+    {
+      "question": "build export filter",
+      "expect_paths": ["crates/query/src/export.rs"]
+    },
+    {
+      "question": "apply archive penalty",
+      "expect_paths": ["crates/query/src/qa/retrieve.rs"]
+    },
+    {
+      "question": "caption image file",
+      "expect_paths": ["crates/llm/src/ollama.rs"]
+    },
+    {
+      "question": "ocr pdf",
+      "expect_paths": ["crates/parsers/src/pdf.rs"]
+    },
+    {
+      "question": "build doc context",
+      "expect_paths": ["crates/query/src/contextual.rs"]
+    },
+    {
+      "question": "split history budget",
+      "expect_paths": ["crates/query/src/qa/synthesize.rs"]
+    },
+    {
+      "question": "transcribe audio",
+      "expect_paths": ["crates/parsers/src/media.rs"]
+    },
+    {
+      "question": "primary app for dir",
+      "expect_paths": [
+        "crates/core/src/store/dir_apps.rs",
+        "crates/core/src/store/tests/dir_apps.rs"
+      ]
+    },
+    {
+      "question": "near dup same basenames",
+      "expect_paths": [
+        "crates/core/src/decisions/detectors.rs",
+        "crates/core/src/decisions/detectors/tests.rs"
+      ]
+    }
+  ]
+}
