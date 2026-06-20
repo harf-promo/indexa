@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A hardening, parity, and performance pass — plus a dependency refresh. Found and verified through
+three adversarial review sweeps of the codebase.
+
+### Security
+
+- **Context Pack export over the web no longer leaks secrets.** `GET /api/packs/{name}/export` was
+  the one export surface that served indexed content without the secret-redaction every other export
+  path applies; an API key that had slipped into a summary or chunk could be served verbatim. It now
+  redacts like the rest, with a regression test guarding it.
+
+### Added
+
+- **Sharper MCP/web/CLI parity.** `search`/`search_pack` now show each hit's chunk `#seq` (so an
+  agent can drill in with `get_chunk_context`); `export_pack` gained `changed_since`/`category`
+  slicing (matching CLI/web); `code_graph` can report dependency **cycles**; `ask` shows the
+  per-answer "retrieved-slice" impact to the agent (as the CLI and web already do); `ask` accepts a
+  `top_k` retrieval-breadth override on MCP and web; and `read_file` accepts a byte `offset` so an
+  agent can page past the 40 KB cap on large files.
+- **Web Insights gained the `largest` (bloat) and `languages` (breakdown) views** that the CLI and
+  MCP already had.
+- **Configurable archive down-weighting.** New `[retrieval] archive_segments` and `archive_penalty`
+  let you extend the historical-path list (e.g. `legacy/`, `attic/`, `backup/`) or disable the
+  penalty entirely (`archive_penalty = 0.0`) — fixing the case where a live working folder named
+  `old/` was silently down-ranked with no opt-out. Defaults reproduce the previous behavior.
+
+### Changed
+
+- **Dependency refresh:** `zip` 2→8, `kamadak-exif` 0.5→0.6, `notify` 6→8 + `notify-debouncer-full`
+  0.3→0.7, `axum` 0.7→0.8, and `actions/setup-node` 5→6. No behavior change; the tree stays
+  openssl-free.
+- **Faster tree browsing.** Expanding a directory previously ran several per-child subtree scans and
+  held the shared store lock for the whole query; it now uses one set-based aggregation pass and a
+  fresh read connection, so a big folder no longer stalls other requests. Behavior is unchanged
+  (proven by an equivalence test against the previous implementation).
+- **Conversational follow-ups are more robust** — the query-rewrite step no longer mistakes a chatty
+  model preamble ("Sure, here's the query:") for the actual search query.
+
+### Fixed
+
+- **`indexa watch` correctly indexes newly-created files.** A new file under a watched root used to
+  get its chunks indexed but no entry row, so it was never summarized and was silently dropped by the
+  next `prune`. It now gets a proper entry (and editing a file no longer wipes its classification).
+- **No more dangling `[N]` citations** in answers whose last source was trimmed to fit the budget —
+  the trimmed chunk is now cited like the rest.
+- **No panic on odd interval input.** `--changed-since`, the `?changed_since=` web param, and the
+  `[scan] auto_reindex` config no longer crash on a value ending in a multibyte character; they
+  reject it cleanly.
+- **The "update your CLI" banner clears once you do.** Running `indexa update` now clears the stale
+  CLI-version marker, so the web banner stops nagging about an already-applied fix.
+- **Honest readouts.** `prune` (CLI + MCP) now counts the app-detections it removes; the docs no
+  longer overstate the code graph as covering C/C++ (it's six languages: Rust, Python, JS, TS, Go,
+  Java).
+- **Remote-source fetches are size-capped** (8 MB) so a hostile or huge page can't exhaust memory.
+- Internal hardening: config files are tested to be `0600`, a flaky ANN-recall test was de-flaked,
+  unsupported `**` fingerprint markers are correctly rejected, and duplicated escaping / char-boundary
+  helpers were consolidated into one tested place.
+
 ## [0.66.0] — 2026-06-19
 
 Indexa now understands *groups* of files, not just individual ones — it recognizes when a directory
