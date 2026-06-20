@@ -287,6 +287,10 @@ pub(crate) async fn api_packs_export(
     } else {
         "text/plain; charset=utf-8"
     };
+    // Scan exported content for secrets before it leaves the machine over HTTP —
+    // same invariant the whole-tree export (api_export), MCP export_pack, and CLI
+    // `pack export` enforce. This pack route was the one surface that skipped it.
+    let (buf, _redacted) = indexa_query::redact::redact_secrets(&buf);
     ([(axum::http::header::CONTENT_TYPE, content_type)], buf).into_response()
 }
 

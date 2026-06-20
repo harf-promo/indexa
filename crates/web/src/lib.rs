@@ -802,6 +802,59 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
+    #[tokio::test]
+    async fn api_packs_export_redacts_secrets() {
+        // Regression guard: the pack export route must scrub secrets before content
+        // leaves the machine over HTTP — the same invariant the whole-tree export,
+        // MCP export_pack, and CLI `pack export` enforce. A summary carrying an AWS
+        // key must come back redacted, never verbatim.
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_summary(&indexa_core::store::SummaryRecord {
+                path: "/r/creds.txt".into(),
+                kind: "file".into(),
+                parent_path: Some("/r".into()),
+                depth: 2,
+                summary: "deploy config: aws_key = AKIAIOSFODNN7EXAMPLE".into(),
+                summary_l0: None,
+                embedding: None,
+                child_count: 0,
+                byte_size: 10,
+                model: "test".into(),
+                source_hash: "H1".into(),
+                generated_at: 1,
+            })
+            .unwrap();
+        let pack_id = store.create_pack("secrets", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, &["/r/creds.txt".to_owned()])
+            .unwrap();
+
+        let app = build_router(state_with(store), 7620);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/packs/secrets/export?format=md")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            !body.contains("AKIAIOSFODNN7EXAMPLE"),
+            "AWS key leaked through pack export: {body}"
+        );
+        assert!(
+            body.contains("[REDACTED-aws-key]"),
+            "expected redaction marker in pack export, got: {body}"
+        );
+    }
+
     // ── WS8 additions: ask scope/agentic/empty, export empty/depth, stats summaries,
     //    review batch, and the new /api/impact telemetry endpoint ────────────────────
 
