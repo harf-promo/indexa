@@ -424,6 +424,13 @@ impl IndexaMcp {
         if let Ok(mut store) = Store::open(&self.db_path) {
             let paths: Vec<&str> = answer.sources.iter().map(|s| s.path.as_str()).collect();
             let counterfactual = store.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
+            // Show the agent the same "retrieve the slice" win the CLI and web surfaces print —
+            // only when meaningful (cited files existed AND serving was smaller), never a
+            // misleading "0% saved". Appended before record_usage so the readout is counted too.
+            let imp = indexa_query::AnswerImpact::new(out.len() as u64, counterfactual);
+            if imp.is_meaningful() {
+                out.push_str(&format!("\nImpact: {}\n", imp.human()));
+            }
             record_usage(&mut store, "ask", out.len(), counterfactual);
             // Persist the turn (best-effort; never fails the answer).
             if let Some(id) = &session_id {

@@ -36,9 +36,13 @@ pub(crate) async fn cmd_prune(dry_run: bool) -> Result<()> {
 
     if dry_run {
         println!(
-            "Would prune {} orphaned chunk(s), {} stale queue row(s), {} summary(ies), and {} \
-classification(s) (no matching entry).",
-            counts.chunks, counts.queue, counts.summaries, counts.classifications
+            "Would prune {} orphaned chunk(s), {} stale queue row(s), {} summary(ies), {} \
+classification(s), and {} app detection(s) (no matching entry).",
+            counts.chunks,
+            counts.queue,
+            counts.summaries,
+            counts.classifications,
+            counts.directory_apps
         );
         println!(
             "Would GC {gc_candidates} resolved review question(s) (dismissed/expired > 365 days)."
@@ -57,9 +61,13 @@ symbol-ambiguity, asset/generated duplicates)."
     let gcd = store.gc_decisions(DECISION_GC_SECS)?;
     let dismissed = detectors::sweep_filtered_noise(&mut store, &review_cfg, false)?;
     println!(
-        "Pruned {} orphaned chunk(s), {} stale queue row(s), {} summary(ies), and {} \
-classification(s).",
-        removed.chunks, removed.queue, removed.summaries, removed.classifications
+        "Pruned {} orphaned chunk(s), {} stale queue row(s), {} summary(ies), {} \
+classification(s), and {} app detection(s).",
+        removed.chunks,
+        removed.queue,
+        removed.summaries,
+        removed.classifications,
+        removed.directory_apps
     );
     if dismissed > 0 {
         println!("Dismissed {dismissed} low-value review question(s) (idiom/asset noise).");
