@@ -53,7 +53,7 @@
 .icon-btn {
   background: none;
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-2); /* Harf: 4px soft corner — buttons/inputs only */
   color: var(--muted);
   cursor: pointer;
   font-family: inherit;
@@ -68,15 +68,17 @@
 }
 .icon-btn:hover { background: var(--surface-2); border-color: var(--border); color: var(--text); }
 .icon-btn.sm { padding: 2px 5px; font-size: 12px; }
-.icon-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
-.icon-btn.primary:hover { opacity: 0.88; }
+/* Harf: primary button = ink fill, paper text; hover darkens, press goes green. */
+.icon-btn.primary { background: var(--ink-1); border-color: transparent; color: var(--paper); font-weight: 600; }
+.icon-btn.primary:hover { background: var(--grey-800); opacity: 1; }
+.icon-btn.primary:active { background: var(--accent-press-bg); color: var(--accent-press-fg); }
 
 /* ── Tabs ── */
 .app-tabs { display: flex; gap: 2px; margin: 0 8px; }
 .tab {
   background: none;
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-2); /* Harf: tab is a button — 4px corner */
   color: var(--muted);
   padding: 5px 12px;
   font-family: var(--font-sans);

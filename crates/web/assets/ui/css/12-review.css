@@ -6,9 +6,10 @@
 .review-intro { font-size: 12px; color: var(--muted); margin: 0 0 12px; }
 .review-list { display: flex; flex-direction: column; gap: 10px; }
 .review-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 28px 0; }
+/* Harf: sharp card, hairline. (.reask keeps its teal priority stripe.) */
 .review-card {
-  background: var(--surface-2); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 10px 12px;
+  background: var(--surface-2); border: 1px solid var(--border-subtle);
+  border-radius: var(--r-0); padding: 10px 12px;
 }
 /* Re-asks (priority ≥ 100) contradict a prior user answer — accent stripe so
    they outrank fresh questions visually, matching their inbox sort order. */
@@ -47,7 +48,7 @@
 /* Topbar inbox count — mirrors .engine-activity-badge; `hidden` when 0. */
 .review-badge {
   display: inline-block; background: var(--accent); color: var(--bg);
-  border-radius: 8px; padding: 0 5px; font-size: 9px; font-weight: 700;
+  border-radius: var(--r-pill); padding: 0 5px; font-size: 9px; font-weight: 700; /* Harf: pill badge */
   vertical-align: middle;
 }
 
@@ -56,8 +57,9 @@
 .review-batch > summary { cursor: pointer; color: var(--muted); padding: 4px 0; }
 .review-batch-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-top: 6px; }
 .review-batch-field { display: flex; flex-direction: column; gap: 2px; font-size: 10px; color: var(--muted); }
+/* Harf: select control — 4px corner, control boundary. */
 .review-batch-field select, .review-batch-under {
-  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
-  color: var(--text); padding: 3px 6px; font-size: 12px;
+  background: var(--paper); border: 1px solid var(--rule-2); border-radius: var(--r-2);
+  color: var(--ink-1); padding: 3px 6px; font-size: 12px;
 }
 .review-batch-under { min-width: 150px; }

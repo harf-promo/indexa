@@ -94,9 +94,10 @@
   --ink-4:        light-dark(#939598, #6E7073);
   --ink-disabled: light-dark(#4A4B4E, #939598);
 
-  /* Shadows lift in dark mode; the system uses them sparingly. */
-  --shadow-2: light-dark(0 4px 16px -4px rgba(26,27,29,0.08),  0 4px 16px -4px rgba(0,0,0,0.5));
-  --shadow-3: light-dark(0 12px 32px -12px rgba(26,27,29,0.16), 0 12px 32px -12px rgba(0,0,0,0.7));
+  /* Shadows lift in dark mode; the system uses them sparingly. light-dark() must
+     wrap only the <color>, not the whole box-shadow value (it resolves to a color). */
+  --shadow-2: 0 4px 16px -4px light-dark(rgba(26,27,29,0.08), rgba(0,0,0,0.5));
+  --shadow-3: 0 12px 32px -12px light-dark(rgba(26,27,29,0.16), rgba(0,0,0,0.7));
 
   /* ── Type families. Geist serves display + body; --code is Geist Mono. ── */
   --sans:     "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -164,7 +165,7 @@
   --orange:        var(--warning);
   --radius:        var(--r-2);   /* 4px — the soft corner (Stage 2 sharpens cards to --r-0) */
   --radius-sm:     var(--r-1);   /* 2px */
-  --shadow-sm:     light-dark(0 1px 2px rgba(0,0,0,0.07), 0 1px 2px rgba(0,0,0,0.3));
+  --shadow-sm:     0 1px 2px light-dark(rgba(0,0,0,0.07), rgba(0,0,0,0.3));
   --shadow:        var(--shadow-2);
   --shadow-lg:     var(--shadow-3);
   --font-sans:     var(--sans);

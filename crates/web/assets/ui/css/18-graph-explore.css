@@ -2,10 +2,11 @@
 
 /* "What is this?" graph explainer — mirrors .map-help so it inherits theming. */
 .graph-help-btn { align-self: center; }
+/* Harf: sharp card, hairline. */
 .graph-help {
   background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-0);
   padding: 12px 16px;
   margin: 4px 0 12px;
   font-size: 13px;
@@ -18,6 +19,7 @@
 .graph-help-terms { color: var(--muted); margin-top: 10px; font-size: 12px; }
 
 /* Focus breadcrumb — shown only when a node is locked (clicked / Entered). */
+/* Harf: sharp bar, hairline. */
 .graph-focus-bar {
   display: flex;
   align-items: center;
@@ -26,8 +28,8 @@
   margin: 0 0 8px;
   padding: 6px 10px;
   background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-0);
   font-size: 12px;
 }
 .graph-focus-label { color: var(--text); }
