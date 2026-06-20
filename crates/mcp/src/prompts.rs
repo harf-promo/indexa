@@ -110,7 +110,7 @@ impl IndexaMcp {
                 let store = self.store()?;
                 // export_pack_body redacts; on a missing/empty pack it returns an error we surface
                 // as an explanatory message rather than failing the prompt fetch.
-                let body = match export_pack_body(&store, &name, "md", None, false) {
+                let body = match export_pack_body(&store, &name, "md", None, false, None, None) {
                     Ok(pack) => format!(
                         "Here is the Context Pack `{name}` (a curated bundle from the local index):\n\n\
                          {pack}\n\nUse this as the working context for what I ask next."

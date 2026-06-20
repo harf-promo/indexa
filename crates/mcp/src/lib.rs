@@ -533,6 +533,7 @@ mod tests {
                 scope: "/proj".into(),
                 limit: None,
                 strict: false,
+                cycles: false,
             }))
             .await
             .unwrap(),
