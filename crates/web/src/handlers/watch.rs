@@ -197,7 +197,7 @@ pub(crate) async fn api_watch_start(
                                 kind: EntryKind::File,
                                 size,
                                 modified: meta.as_ref().and_then(|m| m.modified().ok()),
-                                hint: None,
+                                hint: indexa_core::surface::classify(path).or_else(|| indexa_core::surface::classify_file_by_extension(path)),
                             };
                             if let Err(e) = store.upsert_entries(&[entry]) {
                                 tracing::warn!(path = %path.display(), error = %e, "watch: failed to upsert entry");
