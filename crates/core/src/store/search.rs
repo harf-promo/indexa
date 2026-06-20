@@ -283,7 +283,185 @@ impl Store {
     /// parent is not itself indexed) rather than entries with a literal empty
     /// parent — no row carries an empty `parent_path`, so the old `= ?1` form
     /// returned nothing for the first-load / `browse_tree("")` case.
+    ///
+    /// Performance: this is the web `api_tree` / MCP `browse_tree` hot path. The
+    /// reference (`tree_level_reference`, the `#[cfg(test)]` correctness oracle)
+    /// attached four O(subtree) prefix-`LIKE` correlated subqueries to *every*
+    /// child row — a dir with `C` children cost ~`4·C` full subtree scans. This
+    /// implementation instead fetches the children once, then runs ONE GROUP-free
+    /// streaming scan per subtree metric (`chunks`, `summary_queue` dir rows,
+    /// `entries` dir rows) scoped to `parent_path`'s subtree and buckets each row
+    /// to its owning child in Rust by longest-prefix match — total work
+    /// ~`O(children + subtree-rows)` instead of `O(children · subtree)`.
+    ///
+    /// The bucketing is provably equivalent to the reference: every direct child
+    /// of `parent_path` is mutually non-nested (no child's path is a prefix-at-a-
+    /// `/`-boundary of another's), so a subtree path `P` is owned by AT MOST ONE
+    /// child `c` — the unique one with `P == c.path` or `P` starting with
+    /// `c.path + "/"` — exactly the reference's `(q.path = c.path OR q.path LIKE
+    /// c.path || '/%')`. Filters are preserved byte-for-byte: `chunk_count`
+    /// counts descendants only (`LIKE c.path || '/%'`, NO self match, NO kind
+    /// filter); covered/partial count `summary_queue` rows with `kind='dir'` in
+    /// the `done` / (`pending`|`in_flight`) state sets, self-or-descendant;
+    /// `subtree_total` counts `entries` rows with `kind='dir'`, self-or-descendant;
+    /// `file_count` is the direct-child file count. Ordering (`kind DESC, path`)
+    /// and `TreeNode` field population match `row_to_tree_node`.
     pub fn tree_level(&self, parent_path: &str) -> Result<Vec<TreeNode>> {
+        use std::collections::HashMap;
+
+        // ── 1. Fetch the children of `parent_path` (same WHERE as the reference,
+        //        incl. the root case) + the two cheap per-row facts: the LEFT-JOINed
+        //        summary state and the direct-child file count. Both stay as small
+        //        correlated subqueries / joins — they are O(1)-ish per child, not
+        //        O(subtree), so they were never the bottleneck.
+        let mut stmt = self.conn.prepare(
+            "SELECT e.path, e.kind, e.size,
+                    (SELECT COUNT(*) FROM entries c
+                     WHERE c.parent_path = e.path AND c.kind = 'file') AS file_count,
+                    sq.state AS summary_state
+             FROM entries e
+             LEFT JOIN summary_queue sq ON sq.path = e.path
+             WHERE (?1 <> '' AND e.parent_path = ?1)
+                OR (?1 = '' AND e.kind = 'dir'
+                    AND NOT EXISTS (SELECT 1 FROM entries p WHERE p.path = e.parent_path))
+             ORDER BY e.kind DESC, e.path",
+        )?;
+        let mut nodes: Vec<TreeNode> = stmt
+            .query_map(params![parent_path], |r| {
+                let full_path: String = r.get(0)?;
+                let name = std::path::Path::new(&full_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| full_path.clone());
+                Ok(TreeNode {
+                    path: full_path,
+                    name,
+                    kind: r.get(1)?,
+                    byte_size: r.get::<_, i64>(2)?,
+                    file_count: r.get::<_, i64>(3).unwrap_or(0),
+                    chunk_count: 0,
+                    child_count: 0,
+                    summary_state: r.get(4)?,
+                    covered: 0,
+                    partial: 0,
+                    total: 0,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        if nodes.is_empty() {
+            return Ok(nodes);
+        }
+
+        // ── 2. Index children by path → position in `nodes` for O(1) bucket merge.
+        //        Keys are OWNED (cloned) so the maps don't borrow `nodes` — we mutate
+        //        `nodes[i]` while bucketing.
+        let child_paths: Vec<String> = nodes.iter().map(|n| n.path.clone()).collect();
+        let child_index: HashMap<String, usize> = child_paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.clone(), i))
+            .collect();
+
+        // The subtree to scan: `parent_path` and everything under it. For the root
+        // case (`parent_path == ""`) the children are top-level roots that share no
+        // common ancestor, so we scan the whole table and let bucketing drop rows
+        // that fall under no child (e.g. a root's un-indexed FS parent never appears).
+        let subtree_like = like_prefix(&format!("{parent_path}/"));
+
+        // Resolve a subtree path `P` to the index of the child it belongs to (the
+        // unique child `c` with `P == c.path` or `P` startswith `c.path + "/"`), or
+        // `None` if it sits under no fetched child. Children are mutually non-nested,
+        // so checking each candidate prefix is unambiguous.
+        let bucket_of = |p: &str| -> Option<usize> {
+            // Exact match (the `q.path = c.path` arm of the reference).
+            if let Some(&i) = child_index.get(p) {
+                return Some(i);
+            }
+            // Descendant match (the `q.path LIKE c.path || '/%'` arm): the owning
+            // child is the unique one whose path + '/' prefixes `p`.
+            for (i, c) in child_paths.iter().enumerate() {
+                if p.len() > c.len()
+                    && p.as_bytes()[c.len()] == b'/'
+                    && p.as_bytes()[..c.len()] == *c.as_bytes()
+                {
+                    return Some(i);
+                }
+            }
+            None
+        };
+
+        // ── 3a. chunk_count — ALL chunks under each child (descendants only:
+        //         `LIKE c.path || '/%'`, NO self, NO kind filter). The reference
+        //         scoped this with `entry_path LIKE e.path || '/%'`; here we scan the
+        //         parent subtree once and bucket. A chunk exactly AT a child's own
+        //         path (entry_path == c.path) is NOT a descendant and is excluded —
+        //         matching the reference, which had no `= e.path` arm for chunks.
+        {
+            let mut s = self
+                .conn
+                .prepare("SELECT entry_path FROM chunks WHERE entry_path LIKE ?1 ESCAPE '\\'")?;
+            let mut rows = s.query(params![subtree_like])?;
+            while let Some(row) = rows.next()? {
+                let p: String = row.get(0)?;
+                // Descendant-only: a chunk whose entry_path equals a child path
+                // belongs to no bucket (the reference required a '/%' suffix).
+                if child_index.contains_key(p.as_str()) {
+                    continue;
+                }
+                if let Some(i) = bucket_of(&p) {
+                    nodes[i].chunk_count += 1;
+                }
+            }
+        }
+
+        // ── 3b. subtree dir rollups from summary_queue (covered = done,
+        //         partial = pending|in_flight), self-or-descendant, kind='dir'.
+        {
+            let mut s = self.conn.prepare(
+                "SELECT path, state FROM summary_queue
+                 WHERE kind = 'dir'
+                   AND state IN ('done','pending','in_flight')
+                   AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
+            )?;
+            let mut rows = s.query(params![parent_path, subtree_like])?;
+            while let Some(row) = rows.next()? {
+                let p: String = row.get(0)?;
+                let state: String = row.get(1)?;
+                if let Some(i) = bucket_of(&p) {
+                    match state.as_str() {
+                        "done" => nodes[i].covered += 1,
+                        "pending" | "in_flight" => nodes[i].partial += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // ── 3c. subtree_total — entries dir rows, self-or-descendant, kind='dir'.
+        {
+            let mut s = self.conn.prepare(
+                "SELECT path FROM entries
+                 WHERE kind = 'dir' AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
+            )?;
+            let mut rows = s.query(params![parent_path, subtree_like])?;
+            while let Some(row) = rows.next()? {
+                let p: String = row.get(0)?;
+                if let Some(i) = bucket_of(&p) {
+                    nodes[i].total += 1;
+                }
+            }
+        }
+
+        Ok(nodes)
+    }
+
+    /// Byte-for-byte original of [`tree_level`], kept as the correctness oracle for
+    /// the set-based rewrite. The equivalence test asserts the new `tree_level`
+    /// returns output identical to this for the root level and several non-root
+    /// parents. DO NOT change its SQL.
+    #[cfg(test)]
+    pub(crate) fn tree_level_reference(&self, parent_path: &str) -> Result<Vec<TreeNode>> {
         let mut stmt = self.conn.prepare(
             "SELECT e.path, e.kind, e.size,
                     (SELECT COUNT(*) FROM entries c
