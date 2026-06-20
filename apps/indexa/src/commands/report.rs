@@ -137,12 +137,9 @@ fn render_report_md(answers: &[Answer], generated_at: &str) -> String {
 }
 
 fn render_report_xml(answers: &[Answer], generated_at: &str) -> String {
-    let esc = |s: &str| {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
-    };
+    // XML escaping centralized in indexa_core::text. The 4-char attribute escaper is used
+    // for both attributes and the <answer> text below — escaping `"` in text is harmless.
+    let esc = indexa_core::text::xml_escape_attr;
     let mut out = String::with_capacity(4096);
     out.push_str(&format!(
         "<report generated_at=\"{generated_at}\" queries=\"{}\">\n",

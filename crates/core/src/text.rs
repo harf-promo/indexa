@@ -35,9 +35,74 @@ pub fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Escape a string for an XML **attribute** value: `&`, `"`, `<`, `>` (the `&`
+/// replacement must run first). Single source of truth for the several pack/export
+/// surfaces (CLI, web, MCP) that emit the same `<context pack="…">` / `<file path="…">`
+/// XML, so a missed character can't drift between them.
+pub fn xml_escape_attr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Escape a string for XML **element text**: `&`, `<`, `>` (a literal `"` is legal in
+/// text content, so it is left intact — the deliberate attr/text distinction).
+pub fn xml_escape_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Largest byte index ≤ `byte` that is a UTF-8 char boundary of `s` (clamped to
+/// `s.len()`). A stable stand-in for the nightly-only `str::floor_char_boundary`,
+/// so byte-budget truncation (`&s[..floor_char_boundary(s, n)]`) never slices
+/// mid-codepoint — slicing a `str` at a raw byte offset panics on any multibyte
+/// content (accents, CJK, emoji, em-dashes).
+pub fn floor_char_boundary(s: &str, byte: usize) -> usize {
+    let mut b = byte.min(s.len());
+    while b > 0 && !s.is_char_boundary(b) {
+        b -= 1;
+    }
+    b
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xml_escape_attr_covers_all_four() {
+        assert_eq!(
+            xml_escape_attr(r#"a & b < c > d " e"#),
+            "a &amp; b &lt; c &gt; d &quot; e"
+        );
+    }
+
+    #[test]
+    fn xml_escape_text_leaves_quotes() {
+        // Text content keeps `"` (only `& < >` are special there).
+        assert_eq!(
+            xml_escape_text(r#"x < y > z & "q""#),
+            "x &lt; y &gt; z &amp; \"q\""
+        );
+    }
+
+    #[test]
+    fn floor_char_boundary_clamps_and_respects_codepoints() {
+        assert_eq!(floor_char_boundary("hello", 3), 3); // ASCII boundary
+        assert_eq!(floor_char_boundary("hello", 99), 5); // clamps to len
+        assert_eq!(floor_char_boundary("café", 0), 0); // zero
+        let s = "café";
+        assert_eq!(s.len(), 5); // precomposed é (U+00E9) is 2 bytes: c a f é = 5 bytes
+        assert_eq!(floor_char_boundary(s, 4), 3); // byte 4 is mid-é → walk back to 3
+        assert_eq!(floor_char_boundary(s, 5), 5); // byte 5 == len, already a boundary
+        assert!(s.is_char_boundary(floor_char_boundary(s, 4)));
+        // CJK: each char 3 bytes; byte 4 → walk back to 3.
+        let cjk = "日本語";
+        assert_eq!(floor_char_boundary(cjk, 4), 3);
+        assert!(cjk.is_char_boundary(floor_char_boundary(cjk, 4)));
+    }
 
     #[test]
     fn truncate_chars_short_string_unchanged() {

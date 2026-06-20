@@ -545,17 +545,15 @@ pub fn render_signatures(chunks: &[ChunkRecord], format: &str, keep_docs: bool) 
 
 // ── XML helpers ───────────────────────────────────────────────────────────────
 
+// XML escaping is centralized in `indexa_core::text` so the CLI/web/MCP export
+// surfaces (all emitting the same `<context …>` XML) can't drift. These keep the
+// local names + the deliberate attribute-vs-text distinction.
 fn xml_attr(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+    indexa_core::text::xml_escape_attr(s)
 }
 
 fn xml_text(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+    indexa_core::text::xml_escape_text(s)
 }
 
 fn json_str(s: &str) -> String {

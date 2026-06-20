@@ -256,13 +256,6 @@ fn parse_hybrid_mode(s: Option<&str>) -> HybridMode {
     }
 }
 
-fn xml_escape_mcp(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 /// True if `requested` lies within any of the (canonicalized) indexed `roots`.
 /// Uses component-wise [`Path::starts_with`], so the root `/home/u/proj` does NOT match
 /// `/home/u/proj-evil` (a plain string-prefix check would wrongly accept it).

@@ -233,7 +233,7 @@ pub(crate) async fn api_packs_export(
     let mut buf = String::new();
     if is_xml {
         buf.push_str("<context pack=\"");
-        buf.push_str(&xml_escape(&name));
+        buf.push_str(&indexa_core::text::xml_escape_attr(&name));
         buf.push_str("\" generated=\"");
         buf.push_str(&now);
         buf.push_str("\">\n");
@@ -416,11 +416,4 @@ pub(crate) async fn api_packs_search(
         .collect();
 
     Json(serde_json::json!({ "name": name, "query": query, "hits": hits })).into_response()
-}
-
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
