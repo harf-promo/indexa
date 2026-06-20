@@ -320,6 +320,15 @@ pub(crate) fn pack_context(
                 // Signal to the synthesizer that this chunk was cut to fit the budget, so it
                 // doesn't treat the partial text as the whole file.
                 context.push_str("\n…[chunk truncated to fit the context budget]\n\n");
+                // The truncated chunk keeps its full `[N]` header, so the model can still
+                // cite it — push a matching SourceCitation (mirroring the full-chunk path
+                // below) so `sources` always covers the highest [N] in the context and no
+                // citation dangles. Also keeps impact's served-bytes accounting honest.
+                sources.push(SourceCitation {
+                    path: hit.entry_path.clone(),
+                    heading: hit.heading.clone(),
+                    snippet: hit.text.chars().take(120).collect::<String>() + "...",
+                });
             }
             break;
         }
