@@ -92,6 +92,8 @@ impl IndexaMcp {
             recency_days: self.config.retrieval.recency_days,
             max_steps: self.config.retrieval.agentic_max_steps,
             mmr_lambda: self.config.retrieval.mmr_lambda,
+            archive_segments: self.config.retrieval.archive_segments.clone(),
+            archive_penalty: self.config.retrieval.archive_penalty,
         };
 
         let trace = indexa_query::explain_retrieval(

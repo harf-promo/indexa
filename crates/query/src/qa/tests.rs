@@ -108,14 +108,23 @@ fn is_code_intent_detects_code_questions_only() {
     assert!(!is_code_intent("summarize the quarterly results"));
 }
 
+/// The default historical-segment set (mirrors `indexa_core::config::default_archive_segments`),
+/// used by the archive-penalty tests below.
+fn default_segments() -> Vec<String> {
+    indexa_core::config::default_archive_segments()
+}
+
 #[test]
 fn path_is_historical_is_segment_bounded() {
-    assert!(path_is_historical("/p/docs/archive/known-issues.md"));
-    assert!(path_is_historical("/p/historical/x.md"));
-    assert!(path_is_historical("/p/Deprecated/y.rs")); // case-insensitive
-                                                       // Not a full segment → not historical (must not over-match).
-    assert!(!path_is_historical("/p/src/archived_data.rs"));
-    assert!(!path_is_historical("/p/src/threshold.rs"));
+    let seg = default_segments();
+    assert!(path_is_historical("/p/docs/archive/known-issues.md", &seg));
+    assert!(path_is_historical("/p/historical/x.md", &seg));
+    assert!(path_is_historical("/p/Deprecated/y.rs", &seg)); // case-insensitive
+                                                             // Not a full segment → not historical (must not over-match).
+    assert!(!path_is_historical("/p/src/archived_data.rs", &seg));
+    assert!(!path_is_historical("/p/src/threshold.rs", &seg));
+    // Empty segment list ⇒ nothing is historical (penalty disabled).
+    assert!(!path_is_historical("/p/docs/archive/x.md", &[]));
 }
 
 #[test]
@@ -125,7 +134,12 @@ fn archive_penalty_demotes_historical_below_current() {
         hit("/p/docs/archive/known-issues-v0.2.2.md", 1.0),
         hit("/p/CHANGELOG.md", 0.9),
     ];
-    apply_archive_penalty(&mut hits, None);
+    apply_archive_penalty(
+        &mut hits,
+        None,
+        &default_segments(),
+        indexa_core::config::DEFAULT_ARCHIVE_PENALTY,
+    );
     hits.sort_by(|a, b| b.rrf_score.partial_cmp(&a.rrf_score).unwrap());
     assert_eq!(
         hits[0].entry_path, "/p/CHANGELOG.md",
@@ -141,10 +155,46 @@ fn archive_penalty_demotes_historical_below_current() {
 fn archive_penalty_skipped_when_scoped_into_archive() {
     // If the user explicitly asks within the archive, don't penalize it.
     let mut hits = vec![hit("/p/docs/archive/old.md", 1.0)];
-    apply_archive_penalty(&mut hits, Some("/p/docs/archive"));
+    apply_archive_penalty(
+        &mut hits,
+        Some("/p/docs/archive"),
+        &default_segments(),
+        indexa_core::config::DEFAULT_ARCHIVE_PENALTY,
+    );
     assert_eq!(
         hits[0].rrf_score, 1.0,
         "scoped-into-archive query keeps full score"
+    );
+}
+
+#[test]
+fn archive_penalty_zero_disables_down_weighting() {
+    // penalty = 0.0 turns the feature off: a historical hit keeps its full score.
+    let mut hits = vec![hit("/p/docs/archive/old.md", 1.0)];
+    apply_archive_penalty(&mut hits, None, &default_segments(), 0.0);
+    assert_eq!(
+        hits[0].rrf_score, 1.0,
+        "penalty 0.0 must leave the historical hit's score unchanged"
+    );
+}
+
+#[test]
+fn archive_penalty_honors_custom_segments() {
+    // A user-added segment ("legacy") is penalized when present in the configured list…
+    let segments = vec!["legacy".to_owned()];
+    let mut hits = vec![hit("/p/legacy/old.md", 1.0)];
+    apply_archive_penalty(&mut hits, None, &segments, 0.15);
+    assert!(
+        hits[0].rrf_score < 0.2,
+        "custom 'legacy' segment must be penalized when configured"
+    );
+    // …but a path under the DEFAULT "archive" segment is untouched when it's not in the
+    // custom list (the list fully drives which segments count).
+    let mut other = vec![hit("/p/docs/archive/old.md", 1.0)];
+    apply_archive_penalty(&mut other, None, &segments, 0.15);
+    assert_eq!(
+        other[0].rrf_score, 1.0,
+        "a segment absent from the configured list is not penalized"
     );
 }
 

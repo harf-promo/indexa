@@ -210,6 +210,8 @@ pub(crate) async fn cmd_ask(
         recency_days: cfg.retrieval.recency_days,
         max_steps,
         mmr_lambda: cfg.retrieval.mmr_lambda,
+        archive_segments: cfg.retrieval.archive_segments.clone(),
+        archive_penalty: cfg.retrieval.archive_penalty,
     };
 
     // `store` is no longer needed by the query path — the pipeline opens its own

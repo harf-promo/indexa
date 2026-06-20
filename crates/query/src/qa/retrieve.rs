@@ -50,7 +50,12 @@ pub(crate) fn retrieve(
     // known-issues file under docs/archive/ claiming an ancient version) can't dominate
     // an answer about the current state. Multiplicative, not exclusion — such docs stay
     // findable when the query is explicitly scoped into the historical path.
-    apply_archive_penalty(&mut hits, cfg.scope.as_deref());
+    apply_archive_penalty(
+        &mut hits,
+        cfg.scope.as_deref(),
+        &cfg.archive_segments,
+        cfg.archive_penalty,
+    );
     // v0.39: when the question is about *implementation* ("which function implements…",
     // "the code that…", or it names a snake_case/CamelCase identifier), boost code-file
     // hits so the implementation outranks prose docs. Fixes the doc-bias where "how does X
@@ -111,13 +116,10 @@ pub(crate) fn retrieve(
     Ok(hits)
 }
 
-/// Full path segments that mark content as historical/superseded. Matched case-insensitively
-/// and segment-bounded (so `archive` matches `…/docs/archive/x` but not `archived_data.rs`).
-const HISTORICAL_SEGMENTS: [&str; 5] = ["archive", "archived", "historical", "deprecated", "old"];
-
-/// How hard to push historical hits down. 0.15 keeps them retrievable (and explicitly
-/// scopeable) but lets any current doc with a comparable raw score outrank them.
-const ARCHIVE_PENALTY: f64 = 0.15;
+// The historical-segment list and the penalty factor are configuration-driven
+// (`[retrieval] archive_segments` / `archive_penalty`, defaulting to the v0.29 built-ins
+// in `indexa_core::config`); they reach `retrieve()` via `QaConfig`. See
+// `path_is_historical` / `apply_archive_penalty` below.
 
 // ── Broad-question (project-overview) detection ───────────────────────────────
 
@@ -362,21 +364,43 @@ pub(crate) fn apply_code_intent_boost(hits: &mut [SearchHit], question: &str) {
     }
 }
 
-/// True if any `/`-segment of `path` is a historical marker (see `HISTORICAL_SEGMENTS`).
-pub(crate) fn path_is_historical(path: &str) -> bool {
-    path.split('/')
-        .any(|seg| HISTORICAL_SEGMENTS.contains(&seg.to_ascii_lowercase().as_str()))
+/// True if any `/`-segment of `path` matches (case-insensitively) one of `segments`,
+/// the configured historical markers. Empty `segments` ⇒ never historical.
+pub(crate) fn path_is_historical(path: &str, segments: &[String]) -> bool {
+    if segments.is_empty() {
+        return false;
+    }
+    path.split('/').any(|seg| {
+        let seg = seg.to_ascii_lowercase();
+        segments.iter().any(|m| m.eq_ignore_ascii_case(&seg))
+    })
 }
 
 /// Multiply down the score of hits under a historical path — unless the query is explicitly
 /// scoped *into* such a path, in which case the user is asking for the history, so leave it.
-pub(crate) fn apply_archive_penalty(hits: &mut [SearchHit], scope: Option<&str>) {
-    if scope.map(path_is_historical).unwrap_or(false) {
+/// A `penalty` of `0.0` (or an empty `segments` list) turns the feature off via config; a
+/// `penalty` of `1.0` is a multiplicative no-op (also skipped).
+pub(crate) fn apply_archive_penalty(
+    hits: &mut [SearchHit],
+    scope: Option<&str>,
+    segments: &[String],
+    penalty: f64,
+) {
+    // `0.0` penalty (the documented "disable" value) or an empty segment list turns the
+    // feature off; `1.0` is a multiplicative no-op. A non-positive penalty is also treated
+    // as disabled rather than zeroing/negating scores.
+    if segments.is_empty() || penalty <= 0.0 || penalty == 1.0 {
+        return;
+    }
+    if scope
+        .map(|s| path_is_historical(s, segments))
+        .unwrap_or(false)
+    {
         return;
     }
     for h in hits.iter_mut() {
-        if path_is_historical(&h.entry_path) {
-            h.rrf_score *= ARCHIVE_PENALTY;
+        if path_is_historical(&h.entry_path, segments) {
+            h.rrf_score *= penalty;
         }
     }
 }

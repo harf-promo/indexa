@@ -323,7 +323,29 @@ pub struct RetrievalConfig {
     ///
     /// TOML: `[retrieval] rerank_backend = "cross-encoder"`
     pub rerank_backend: String,
+    /// Path segments that mark content as historical/superseded (matched case-insensitively
+    /// and segment-bounded). Hits under such a path are down-weighted by `archive_penalty`
+    /// (v0.29). Extend it (`legacy`/`attic`/`backup`) to suit your tree, or set it to an empty
+    /// list to disable the archive penalty entirely.
+    pub archive_segments: Vec<String>,
+    /// Multiplicative penalty applied to hits whose path contains an `archive_segments`
+    /// segment (v0.29). The default `0.15` keeps such hits retrievable (and explicitly
+    /// scopeable) while letting current docs outrank them; `0.0` disables the penalty.
+    pub archive_penalty: f64,
 }
+
+/// Default historical/superseded path segments (the v0.29 built-in set). Matched
+/// case-insensitively and segment-bounded; drives [`RetrievalConfig::archive_segments`].
+pub fn default_archive_segments() -> Vec<String> {
+    ["archive", "archived", "historical", "deprecated", "old"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect()
+}
+
+/// Default archive down-weighting factor (the v0.29 built-in). Drives
+/// [`RetrievalConfig::archive_penalty`].
+pub const DEFAULT_ARCHIVE_PENALTY: f64 = 0.15;
 
 impl Default for RetrievalConfig {
     fn default() -> Self {
@@ -344,6 +366,8 @@ impl Default for RetrievalConfig {
             recency_days: 90,
             mmr_lambda: 0.5,
             rerank_backend: "llm".to_string(),
+            archive_segments: default_archive_segments(),
+            archive_penalty: DEFAULT_ARCHIVE_PENALTY,
         }
     }
 }
