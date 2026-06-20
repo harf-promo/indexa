@@ -51,7 +51,7 @@
 .engine-activity {
   background: none;
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-2); /* Harf: 4px button corner */
   color: var(--muted);
   cursor: pointer;
   font-family: var(--font-sans);
@@ -67,7 +67,7 @@
 .engine-release {
   background: none;
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-2); /* Harf: 4px button corner */
   color: var(--muted);
   cursor: pointer;
   font-family: var(--font-sans);
@@ -84,7 +84,7 @@
 .engine-savings .engine-val { color: var(--accent); }
 .engine-activity-badge {
   display: inline-block; background: var(--accent); color: var(--bg);
-  border-radius: 8px; padding: 0 5px; font-size: 9px; font-weight: 700;
+  border-radius: var(--r-pill); padding: 0 5px; font-size: 9px; font-weight: 700; /* Harf: pill badge */
   margin-left: 2px; vertical-align: middle;
 }
 
@@ -220,8 +220,8 @@
   padding: 12px 14px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  border-radius: var(--r-0); /* Harf: sharp popover */
+  box-shadow: var(--shadow-3); /* keep shadow — it floats */
   color: var(--text);
   font-size: 12px;
 }

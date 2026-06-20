@@ -15,8 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   palette/type/spacing/radii/motion with `light-dark()` dark mode (the existing `data-theme` toggle
   still drives it); the legacy token names alias onto Harf tokens, so the whole UI re-skins. Active/
   selected UI is now teal (`--positive`); the brand green is reserved for marks. Fonts switch to Geist
-  + Geist Mono. Component sharpening, ink primary buttons, emoji→text-marks, and a "by Harf" sign-off
-  land in follow-up stages.
+  + Geist Mono. **Stages 2 & 4 — components + brand:** cards/panels/modals are now sharp-cornered with
+  hairline borders (4px kept only on buttons/inputs); primary buttons use the ink fill (paper text,
+  inverts per theme) while teal stays for active/selected state; the focus ring is Harf's green ring;
+  leftover GitHub-blue selection tints became the teal accent; floating layers regained their shadow (a
+  `light-dark()`-wrapping bug from stage 1 that made every shadow resolve to `none` is fixed); and a
+  quiet "by Harf" sign-off (a leading green apostrophe stamp) sits in the footer. Emoji→text-mark
+  replacement is the remaining stage.
 
 ### Added
 

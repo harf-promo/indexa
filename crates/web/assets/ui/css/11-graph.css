@@ -13,12 +13,13 @@
   color: var(--muted);
 }
 
+/* Harf: select control — 4px corner, control boundary. */
 .graph-scope {
   font-size: 12px;
   background: var(--surface);
   color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  border: 1px solid var(--rule-2);
+  border-radius: var(--r-2);
   padding: 3px 8px;
   max-width: 360px;
 }
@@ -28,6 +29,7 @@
   color: var(--muted);
 }
 
+/* Harf: sharp canvas panel. */
 .graph-svg {
   display: block;
   width: 100%;
@@ -35,7 +37,7 @@
   min-height: 280px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-0);
   overflow: hidden;
 }
 
@@ -78,9 +80,10 @@
 }
 /* Keyboard focus ring (WS6): the default UA outline on an SVG <g> is unreliable,
    so draw the ring on the circle itself — mirrors the treemap-cell focus style. */
+/* Harf: green focus ring (SVG node can't take box-shadow — stroke the circle). */
 .graph-node:focus { outline: none; }
 .graph-node:focus-visible .graph-node-circle {
-  stroke: var(--accent);
+  stroke: var(--green-700);
   stroke-width: 2.5;
 }
 .graph-node.dim {
@@ -94,6 +97,7 @@
   user-select: none;
 }
 
+/* Harf: floating tooltip — sharp corners, keep the shadow. */
 .graph-tooltip {
   position: fixed;
   z-index: 100;
@@ -101,11 +105,11 @@
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-0);
   padding: 6px 10px;
   font-size: 12px;
   max-width: 360px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-3);
 }
 .graph-tooltip strong {
   color: var(--accent);

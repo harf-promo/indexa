@@ -15,16 +15,18 @@ body {
 code, kbd, pre, .mono { font-family: var(--font-mono); }
 
 /* ── Focus rings ── */
+/* Harf: the green focus ring — green outline + halo, one ring (no teal glow). */
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--green-700);
   outline-offset: 2px;
-  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 6px var(--focus-halo);
 }
 
 /* ── Scrollbars ── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+/* Harf: pill scrollbar thumb (a track handle, not a card). */
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--r-pill); }
 ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 
 /* ── Keyframes ── */
@@ -42,5 +44,35 @@ code, kbd, pre, .mono { font-family: var(--font-mono); }
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ── Brand: the Harf apostrophe ──
+   The mask-backed mark, consuming the inline --apos-mask token (zero asset path).
+   Always the brand green; never recoloured. */
+.apos {
+  display: inline-block;
+  width: calc(var(--apos-size, 0.74em) * 0.6);   /* the mark's true 84.96:141.6 ratio */
+  height: var(--apos-size, 0.74em);
+  background-color: var(--accent-mark);
+  -webkit-mask: var(--apos-mask) no-repeat center / contain;
+          mask: var(--apos-mask) no-repeat center / contain;
+  vertical-align: -0.04em;
+  flex-shrink: 0;
+}
+.apos-sm { --apos-size: 0.62em; }
+
+/* "by Harf" sign-off — a quiet brand bug in the footer. The apostrophe LEADS as a
+   standalone stamp; per the brand it must never trail a word as decoration. */
+.by-harf {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--label);
+  font-size: var(--t-0);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--ink-3);
+  white-space: nowrap;
+  user-select: none;
 }
 

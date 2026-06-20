@@ -15,13 +15,14 @@
 .update-overlay[hidden] {
   display: none;
 }
+/* Harf: modal card is a floating layer — sharp corners, keep the shadow. */
 .update-overlay-card {
   width: min(420px, calc(100vw - 48px));
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--r-0);
   padding: 20px 22px;
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-3);
 }
 .update-overlay-title {
   font-size: 15px;

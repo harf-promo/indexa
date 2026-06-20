@@ -5,21 +5,22 @@
 /* Tab badge — small dot on the Jobs tab when jobs are running */
 .tab-jobs-badge {
   display: inline-block; background: var(--accent); color: white;
-  border-radius: 8px; padding: 1px 5px; font-size: 9px; font-weight: 700;
+  border-radius: var(--r-pill); padding: 1px 5px; font-size: 9px; font-weight: 700; /* Harf: pill badge */
   margin-left: 3px; vertical-align: middle; line-height: 1.5;
 }
 
 /* Jobs mini pill — bottom-right ambient indicator */
+/* Harf: floating pill indicator — pill corner, keep the shadow (it floats). */
 .jobs-pill {
   position: fixed; bottom: 60px; right: 14px;
   display: flex; align-items: center; gap: 7px;
   background: var(--surface); border: 1px solid var(--border);
-  border-radius: 20px; padding: 6px 12px;
+  border-radius: var(--r-pill); padding: 6px 12px;
   font-size: 12px; color: var(--text); cursor: pointer;
-  box-shadow: var(--shadow); z-index: 50;
+  box-shadow: var(--shadow-2); z-index: 50;
   transition: background 100ms, box-shadow 100ms;
 }
-.jobs-pill:hover { background: var(--surface-2); box-shadow: var(--shadow-lg); }
+.jobs-pill:hover { background: var(--surface-2); box-shadow: var(--shadow-3); }
 .jobs-pill-dot {
   width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
 }
@@ -52,8 +53,9 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .jobs-filter-pills { display: flex; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; }
+/* Harf: pill filter (active state stays teal — it's an active-filter indicator). */
 .jobs-filter {
-  background: none; border: 1px solid var(--border); border-radius: 12px;
+  background: none; border: 1px solid var(--border); border-radius: var(--r-pill);
   padding: 2px 9px; font-size: 11px; color: var(--muted); cursor: pointer;
   transition: background 80ms, color 80ms, border-color 80ms;
 }
@@ -69,7 +71,7 @@
   transition: background 80ms, border-color 80ms;
 }
 .jobs-card:hover { background: var(--surface-2); }
-.jobs-card.selected { background: rgba(88,166,255,0.08); border-left-color: var(--accent); }
+.jobs-card.selected { background: color-mix(in srgb, var(--accent) 8%, transparent); border-left-color: var(--accent); }
 [data-theme="light"] .jobs-card.selected { background: rgba(9,105,218,0.06); }
 .jobs-card.running { border-left-color: var(--accent); }
 .jobs-card.failed { border-left-color: var(--red); }
@@ -110,28 +112,28 @@
 }
 .jd-kind-badge {
   font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px;
-  font-family: var(--font-mono); padding: 2px 7px; border-radius: 4px;
-  background: rgba(88,166,255,0.12); color: var(--accent);
+  font-family: var(--font-mono); padding: 2px 7px; border-radius: var(--r-pill); /* Harf: pill badge */
+  background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent);
 }
 .jd-kind-scan { background: rgba(63,185,80,0.12); color: var(--green); }
-.jd-kind-deep { background: rgba(88,166,255,0.12); color: var(--accent); }
+.jd-kind-deep { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
 .jd-kind-summarize { background: rgba(210,153,34,0.12); color: var(--orange); }
-.jd-kind-index { background: rgba(88,166,255,0.12); color: var(--accent); }
+.jd-kind-index { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
 .jd-path {
   flex: 1; font-size: 12px; color: var(--muted); font-family: var(--font-mono);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .jd-status-chip {
-  font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 600;
+  font-size: 11px; padding: 2px 8px; border-radius: var(--r-pill); font-weight: 600; /* Harf: pill status chip */
   background: var(--border); color: var(--muted);
 }
-.jd-status-chip.running { background: rgba(88,166,255,0.15); color: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+.jd-status-chip.running { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
 .jd-status-chip.done { background: rgba(63,185,80,0.15); color: var(--green); }
 .jd-status-chip.failed { background: rgba(248,81,73,0.15); color: var(--red); }
 .jd-elapsed { font-size: 11px; color: var(--muted); font-family: var(--font-mono); white-space: nowrap; }
 .jd-copy-btn, .jd-dismiss-btn {
   background: none; border: none; color: var(--muted); cursor: pointer;
-  font-size: 14px; padding: 2px 4px; border-radius: 4px; transition: color 100ms;
+  font-size: 14px; padding: 2px 4px; border-radius: var(--r-2); transition: color 100ms; /* Harf: 4px button corner */
 }
 .jd-copy-btn:hover { color: var(--text); }
 .jd-dismiss-btn:hover { color: var(--red); }
@@ -144,7 +146,7 @@
   cursor: pointer;
   font-size: 11px;
   padding: 2px 8px;
-  border-radius: 4px;
+  border-radius: var(--r-2); /* Harf: 4px button corner */
   transition: background 120ms, color 120ms;
   white-space: nowrap;
 }
@@ -163,9 +165,10 @@
 }
 
 /* Live AI section */
+/* Harf: sharp card, hairline. */
 .jd-live {
-  background: var(--surface-2); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 10px 12px;
+  background: var(--surface-2); border: 1px solid var(--border-subtle);
+  border-radius: var(--r-0); padding: 10px 12px;
 }
 .jd-live-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .jd-live-label {
@@ -178,17 +181,17 @@
 }
 .jd-live-model { font-size: 11px; color: var(--accent); font-family: var(--font-mono); white-space: nowrap; flex-shrink: 0; }
 .jd-ai-toggle {
-  background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: none; border: 1px solid var(--border); border-radius: var(--r-2);
   color: var(--muted); cursor: pointer; font-size: 11px; padding: 2px 8px;
   transition: background 80ms, color 80ms, border-color 80ms; flex-shrink: 0;
 }
 .jd-ai-toggle:hover, .jd-ai-toggle.active {
-  background: rgba(88,166,255,0.1); border-color: var(--accent); color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent); border-color: var(--accent); color: var(--accent);
 }
 .jd-ai-pre {
   font-size: 11px; font-family: var(--font-mono);
   background: var(--bg); border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm); padding: 8px 10px;
+  border-radius: var(--r-0); padding: 8px 10px; /* Harf: sharp log block */
   max-height: 200px; overflow-y: auto; white-space: pre-wrap;
   word-break: break-word; color: var(--text); margin-top: 8px;
   user-select: text;
@@ -201,9 +204,10 @@
 }
 
 /* Warnings section */
+/* Harf: sharp card, hairline. */
 .jd-warnings-section {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius); overflow: hidden;
+  background: var(--surface); border: 1px solid var(--border-subtle);
+  border-radius: var(--r-0); overflow: hidden;
 }
 .jd-warn-head {
   display: flex; align-items: center; gap: 8px; padding: 8px 12px;
@@ -212,16 +216,17 @@
 .jd-warn-title {
   font-size: 12px; font-weight: 600; color: var(--orange); flex-shrink: 0;
 }
+/* Harf: select/search controls — 4px corner, green focus ring. */
 .jd-warn-filter {
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); border: 1px solid var(--rule-2); border-radius: var(--r-2);
   color: var(--text); font-size: 11px; padding: 3px 6px; font-family: var(--font-sans);
 }
 .jd-warn-search {
-  flex: 1; min-width: 120px; background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius-sm); color: var(--text); font-size: 11px; padding: 3px 8px;
+  flex: 1; min-width: 120px; background: var(--surface); border: 1px solid var(--rule-2);
+  border-radius: var(--r-2); color: var(--text); font-size: 11px; padding: 3px 8px;
   outline: none;
 }
-.jd-warn-search:focus { border-color: var(--accent); }
+.jd-warn-search:focus { border-color: var(--ink-1); box-shadow: var(--focus-ring); }
 .jd-warn-list { max-height: 300px; overflow-y: auto; }
 .warn-row {
   padding: 6px 12px; border-bottom: 1px solid var(--border-subtle); cursor: pointer;
@@ -267,9 +272,10 @@
 }
 
 /* Failed error section */
+/* Harf: sharp error card. */
 .jd-error-section {
   background: rgba(248,81,73,0.06); border: 1px solid rgba(248,81,73,0.3);
-  border-radius: var(--radius); padding: 12px;
+  border-radius: var(--r-0); padding: 12px;
 }
 .jd-error-msg { font-size: 13px; color: var(--red); margin-bottom: 6px; word-break: break-word; }
 .jd-error-chain-item { font-size: 11px; color: var(--muted); padding: 2px 0; }
@@ -278,7 +284,7 @@
 .failed-retry-badge {
   font-size: 10px !important; font-weight: 600; padding: 2px 6px !important;
   color: var(--red) !important; border: 1px solid var(--red) !important;
-  border-radius: var(--radius-sm); background: none !important;
+  border-radius: var(--r-pill); background: none !important; /* Harf: pill badge */
   cursor: pointer; white-space: nowrap;
 }
 .failed-retry-badge:hover { background: color-mix(in srgb, var(--red) 12%, transparent) !important; }

@@ -7,30 +7,30 @@
 .summary-header { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
 .summary-title { font-size: 17px; font-weight: 600; color: var(--text); }
 .summary-meta { font-size: 12px; color: var(--muted); margin-bottom: 16px; }
+/* Harf: sharp card, hairline border, no shadow. */
 .summary-text {
   color: var(--text); line-height: 1.7; font-size: 14px; margin-bottom: 24px;
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 14px 16px;
-  box-shadow: var(--shadow-sm);
+  background: var(--surface); border: 1px solid var(--border-subtle);
+  border-radius: var(--r-0); padding: 14px 16px;
 }
 .summary-pending {
   color: var(--orange); font-style: italic; padding: 14px 16px;
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius);
+  background: var(--surface); border: 1px solid var(--border-subtle);
+  border-radius: var(--r-0);
 }
 .children-section h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 10px; font-weight: 600; }
+/* Harf: sharp card, hairline; hover tints the surface instead of lifting a shadow. */
 .child-item {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 10px 14px; margin-bottom: 6px;
-  cursor: pointer; transition: border-color 120ms, box-shadow 120ms;
-  box-shadow: var(--shadow-sm);
+  background: var(--surface); border: 1px solid var(--border-subtle);
+  border-radius: var(--r-0); padding: 10px 14px; margin-bottom: 6px;
+  cursor: pointer; transition: border-color 120ms, background 120ms;
 }
-.child-item:hover { border-color: var(--accent); box-shadow: var(--shadow); }
+.child-item:hover { border-color: var(--accent); background: var(--paper-2); }
 .child-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .child-name { font-size: 13px; font-weight: 500; color: var(--accent); }
 .child-summary { font-size: 12px; color: var(--muted); line-height: 1.5; }
 .enqueue-btn {
-  background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: none; border: 1px solid var(--border); border-radius: var(--r-2);
   color: var(--muted); padding: 5px 12px; font-family: var(--font-sans); font-size: 12px;
   cursor: pointer; margin-top: 8px; transition: border-color 120ms, color 120ms;
 }
@@ -56,26 +56,29 @@
   margin-top: 26px; display: flex; flex-direction: column;
   align-items: center; gap: 10px;
 }
+/* Harf: primary CTA = ink fill, paper text; hover darkens, press goes green. */
 .onboard-cta {
-  background: var(--accent); color: var(--bg); border: none;
-  border-radius: var(--radius); padding: 10px 22px;
+  background: var(--ink-1); color: var(--paper); border: 1px solid transparent;
+  border-radius: var(--r-2); padding: 10px 22px;
   font-family: var(--font-sans); font-size: 14px; font-weight: 600;
-  cursor: pointer; transition: opacity 120ms;
+  cursor: pointer; transition: background 120ms;
 }
-.onboard-cta:hover { opacity: 0.88; }
+.onboard-cta:hover { background: var(--grey-800); opacity: 1; }
+.onboard-cta:active { background: var(--accent-press-bg); color: var(--accent-press-fg); }
 .onboard-hint { color: var(--muted); font-size: 12.5px; }
 .onboard-hint code { color: var(--accent); font-family: var(--font-mono); font-size: 12px; }
 .msg { max-width: 800px; width: 100%; }
+/* Harf: sharp chat bubbles. The user bubble keeps the teal author fill (it's an
+   author identity colour, not a button); the assistant bubble is a hairline card. */
 .msg.user .bubble {
   background: var(--accent); color: var(--bg);
-  border-radius: 12px 12px 2px 12px; padding: 10px 14px;
+  border-radius: var(--r-0); padding: 10px 14px;
   display: inline-block; font-size: 14px; line-height: 1.5;
 }
 .msg.assistant .bubble {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 2px 12px 12px 12px; padding: 14px 16px;
+  background: var(--surface); border: 1px solid var(--border-subtle);
+  border-radius: var(--r-0); padding: 14px 16px;
   line-height: 1.7; font-size: 14px;
-  box-shadow: var(--shadow-sm);
 }
 /* Markdown elements rendered inside an assistant answer. */
 .msg.assistant .bubble h1, .msg.assistant .bubble h2,
@@ -87,12 +90,12 @@
 .msg.assistant .bubble code {
   font-family: var(--font-mono); font-size: 12px;
   background: var(--surface-2); border: 1px solid var(--border-subtle);
-  border-radius: 4px; padding: 1px 5px;
+  border-radius: var(--r-0); padding: 1px 5px; /* Harf: sharp inline code chip */
 }
 .msg.assistant .bubble pre.chat-code {
   font-family: var(--font-mono); font-size: 12px;
   background: var(--bg); border: 1px solid var(--border);
-  border-radius: var(--radius-sm); padding: 10px 12px; margin: 8px 0;
+  border-radius: var(--r-0); padding: 10px 12px; margin: 8px 0; /* Harf: sharp code block */
   overflow-x: auto; white-space: pre; line-height: 1.5;
 }
 .msg.user { align-self: flex-end; }
@@ -100,7 +103,7 @@
 .sources { margin-top: 12px; }
 .sources h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 8px; font-weight: 600; }
 .source-item {
-  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg); border: 1px solid var(--border-subtle); border-radius: var(--r-0); /* Harf: sharp list item */
   padding: 8px 12px; margin-bottom: 6px; font-size: 12px;
 }
 .source-item .path { color: var(--accent); font-weight: 500; font-family: var(--font-mono); font-size: 11px; }
@@ -111,21 +114,24 @@
   background: var(--surface); border-top: 1px solid var(--border);
   padding: 14px 20px; display: flex; gap: 10px; flex-shrink: 0;
 }
+/* Harf: text input — 4px corner, control boundary, green focus ring. */
 .input-bar input {
-  flex: 1; background: var(--bg); border: 1px solid var(--border);
-  border-radius: var(--radius); color: var(--text); padding: 9px 13px;
+  flex: 1; background: var(--paper); border: 1px solid var(--rule-2);
+  border-radius: var(--r-2); color: var(--ink-1); padding: 9px 13px;
   font-family: var(--font-sans); font-size: 14px; outline: none;
   transition: border-color 120ms;
 }
-.input-bar input:focus { border-color: var(--accent); }
-.input-bar input::placeholder { color: var(--muted); }
+.input-bar input:focus { border-color: var(--ink-1); box-shadow: var(--focus-ring); }
+.input-bar input::placeholder { color: var(--ink-4); }
+/* Harf: primary Ask button = ink fill, paper text; hover darkens, press goes green. */
 .input-bar button {
-  background: var(--accent); color: var(--bg); border: none;
-  border-radius: var(--radius); padding: 9px 20px;
+  background: var(--ink-1); color: var(--paper); border: 1px solid transparent;
+  border-radius: var(--r-2); padding: 9px 20px;
   font-family: var(--font-sans); font-size: 14px; font-weight: 600;
-  cursor: pointer; transition: opacity 120ms;
+  cursor: pointer; transition: background 120ms;
 }
-.input-bar button:hover { opacity: 0.88; }
+.input-bar button:hover { background: var(--grey-800); opacity: 1; }
+.input-bar button:active { background: var(--accent-press-bg); color: var(--accent-press-fg); }
 .input-bar button:disabled { opacity: 0.4; cursor: default; }
 .ask-agentic-toggle { flex-shrink: 0; white-space: nowrap; align-self: center; }
 
@@ -161,12 +167,13 @@
 .context-notice-x:hover { color: var(--text); }
 
 /* Saved searches: recall dropdown + save-star, both in the Ask bar. */
+/* Harf: select control — 4px corner, control boundary, green focus ring. */
 #saved-q {
-  flex: 0 1 180px; max-width: 180px; background: var(--bg); border: 1px solid var(--border);
-  border-radius: var(--radius); color: var(--text); padding: 9px 10px;
+  flex: 0 1 180px; max-width: 180px; background: var(--paper); border: 1px solid var(--rule-2);
+  border-radius: var(--r-2); color: var(--ink-1); padding: 9px 10px;
   font-family: var(--font-sans); font-size: 13px; outline: none; cursor: pointer;
 }
-#saved-q:focus { border-color: var(--accent); }
+#saved-q:focus { border-color: var(--ink-1); box-shadow: var(--focus-ring); }
 .input-bar button#save-q {
   background: var(--bg); color: var(--accent); border: 1px solid var(--border);
   padding: 9px 13px; font-size: 16px; line-height: 1;
@@ -181,7 +188,7 @@
 .ask-impact strong { color: var(--accent, var(--fg)); font-weight: 600; }
 .ask-step {
   font-size: 11px; color: var(--muted); background: var(--surface-2);
-  border: 1px solid var(--border-subtle, var(--border)); border-radius: 10px;
+  border: 1px solid var(--border-subtle, var(--border)); border-radius: var(--r-pill); /* Harf: pill chip */
   padding: 2px 9px; font-family: var(--font-mono);
 }
 
@@ -215,58 +222,66 @@
 .settings-section.collapsed > h2 { margin-bottom: 0; }
 .settings-section.collapsed > h2::before { transform: rotate(-90deg); }
 .settings-section.collapsed > *:not(h2) { display: none; }
-.settings-section > h2:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Harf: green focus ring (matches the global :focus-visible). */
+.settings-section > h2:focus-visible { outline: 2px solid var(--green-700); outline-offset: 2px; box-shadow: 0 0 0 6px var(--focus-halo); }
 .model-list { display: flex; flex-direction: column; gap: 6px; }
+/* Harf: sharp card, hairline, no shadow. */
 .model-row {
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); border: 1px solid var(--border-subtle); border-radius: var(--r-0);
   padding: 9px 13px; display: flex; align-items: center; gap: 10px; font-size: 13px;
-  box-shadow: var(--shadow-sm);
 }
 .model-name { flex: 1; color: var(--text); font-family: var(--font-mono); font-size: 12px; }
 .model-size { color: var(--muted); font-size: 12px; }
 .pull-row { display: flex; gap: 8px; margin-top: 10px; }
+/* Harf: text input — 4px corner, control boundary, green focus ring. */
 .pull-row input {
-  flex: 1; background: var(--bg); border: 1px solid var(--border);
-  border-radius: var(--radius); color: var(--text); padding: 7px 11px;
+  flex: 1; background: var(--paper); border: 1px solid var(--rule-2);
+  border-radius: var(--r-2); color: var(--ink-1); padding: 7px 11px;
   font-family: var(--font-sans); font-size: 13px; outline: none; transition: border-color 120ms;
 }
-.pull-row input:focus { border-color: var(--accent); }
-.pull-row input::placeholder { color: var(--muted); }
+.pull-row input:focus { border-color: var(--ink-1); box-shadow: var(--focus-ring); }
+.pull-row input::placeholder { color: var(--ink-4); }
+/* Harf: primary button = ink fill, paper text; hover darkens, press goes green. */
 .pull-row button {
-  background: var(--accent); color: var(--bg); border: none;
-  border-radius: var(--radius); padding: 7px 16px;
+  background: var(--ink-1); color: var(--paper); border: 1px solid transparent;
+  border-radius: var(--r-2); padding: 7px 16px;
   font-family: var(--font-sans); font-size: 13px; font-weight: 600;
-  cursor: pointer; white-space: nowrap; transition: opacity 120ms;
+  cursor: pointer; white-space: nowrap; transition: background 120ms;
 }
+.pull-row button:hover:not(:disabled) { background: var(--grey-800); }
+.pull-row button:active:not(:disabled) { background: var(--accent-press-bg); color: var(--accent-press-fg); }
 .pull-row button:disabled { opacity: 0.4; cursor: default; }
+/* Harf: sharp log panel, hairline. */
 .pull-progress {
   margin-top: 8px; font-size: 12px; color: var(--muted); white-space: pre-wrap;
-  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg); border: 1px solid var(--border-subtle); border-radius: var(--r-0);
   padding: 9px 12px; max-height: 130px; overflow-y: auto; display: none;
   font-family: var(--font-mono);
 }
 .key-rows { display: flex; flex-direction: column; gap: 10px; }
 .key-row { display: flex; align-items: center; gap: 10px; }
 .key-label { width: 90px; font-size: 13px; color: var(--muted); flex-shrink: 0; }
+/* Harf: text input — 4px corner, control boundary, green focus ring. */
 .key-input {
-  flex: 1; background: var(--bg); border: 1px solid var(--border);
-  border-radius: var(--radius); color: var(--text); padding: 6px 10px;
+  flex: 1; background: var(--paper); border: 1px solid var(--rule-2);
+  border-radius: var(--r-2); color: var(--ink-1); padding: 6px 10px;
   font-family: var(--font-mono); font-size: 12px; outline: none; transition: border-color 120ms;
 }
-.key-input:focus { border-color: var(--accent); }
+.key-input:focus { border-color: var(--ink-1); box-shadow: var(--focus-ring); }
 .key-input:disabled { opacity: 0.4; }
 .key-row .btn-sm {
-  background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: none; border: 1px solid var(--border); border-radius: var(--r-2);
   color: var(--muted); padding: 5px 10px; font-family: var(--font-sans);
   font-size: 12px; cursor: pointer; white-space: nowrap; transition: border-color 120ms, color 120ms;
 }
 .key-row .btn-sm:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .key-row .btn-sm:disabled { opacity: 0.4; cursor: default; }
 .key-set-badge { font-size: 11px; color: var(--green); flex-shrink: 0; font-weight: 500; }
+/* Harf: sharp notice card, hairline. */
 .key-gate-notice {
   font-size: 12px; color: var(--orange);
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 10px 13px; margin-bottom: 14px;
+  background: var(--surface); border: 1px solid var(--border-subtle);
+  border-radius: var(--r-0); padding: 10px 13px; margin-bottom: 14px;
 }
 .settings-note { font-size: 12px; color: var(--muted); margin-top: 10px; line-height: 1.6; }
 .settings-note code { color: var(--accent); font-family: var(--font-mono); font-size: 11px; }
@@ -290,14 +305,15 @@
 .model-row { flex-wrap: wrap; row-gap: 8px; }
 .model-row.avail { opacity: 0.9; }
 .model-row .model-name { flex: 1 0 100%; }
+/* Harf: pill chips. (.active-role stays teal — it's an active-state indicator.) */
 .role-chip {
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--muted);
-  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-pill);
   padding: 1px 6px; flex-shrink: 0;
 }
 .active-role {
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--accent);
-  border: 1px solid var(--accent); border-radius: var(--radius-sm); padding: 1px 6px; flex-shrink: 0;
+  border: 1px solid var(--accent); border-radius: var(--r-pill); padding: 1px 6px; flex-shrink: 0;
 }
 .model-meta { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .fit-badge { font-size: 11px; font-weight: 500; flex-shrink: 0; white-space: nowrap; }
@@ -308,7 +324,7 @@
 .vendor-flag { color: var(--orange); margin-left: 5px; cursor: help; }
 /* General small button (the key-row scoped copy stays; this covers model rows + pull-row Refresh). */
 .btn-sm {
-  background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: none; border: 1px solid var(--border); border-radius: var(--r-2);
   color: var(--muted); padding: 5px 10px; font-family: var(--font-sans); font-size: 12px;
   cursor: pointer; white-space: nowrap; transition: border-color 120ms, color 120ms;
 }
@@ -334,19 +350,22 @@
   margin-bottom: 12px; line-height: 1.5;
 }
 .summary-regen-btn { flex-shrink: 0; }
-/* Primary "Ask about this …" CTA — the bridge from a summary into a scoped Ask. */
-.summary-ask-btn { flex-shrink: 0; background: var(--accent); color: var(--bg); border-color: var(--accent); }
-.summary-ask-btn:hover:not(:disabled) { color: var(--bg); border-color: var(--accent); opacity: 0.9; }
+/* Primary "Ask about this …" CTA — the bridge from a summary into a scoped Ask.
+   Harf: ink fill, paper text; hover darkens, press goes green. */
+.summary-ask-btn { flex-shrink: 0; background: var(--ink-1); color: var(--paper); border-color: transparent; }
+.summary-ask-btn:hover:not(:disabled) { background: var(--grey-800); color: var(--paper); border-color: transparent; opacity: 1; }
+.summary-ask-btn:active:not(:disabled) { background: var(--accent-press-bg); color: var(--accent-press-fg); }
 /* "No summary yet" action row: Ask + Generate side by side. */
 .summary-noctx-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 /* ── Export dropdown ── */
 .export-menu-wrap { position: relative; flex-shrink: 0; }
+/* Harf: floating dropdown — sharp corners, but keep the shadow (it floats). */
 .export-menu {
   position: absolute; right: 0; top: calc(100% + 4px);
   background: var(--surface-3);
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-  box-shadow: var(--shadow); z-index: 50; min-width: 200px;
+  border: 1px solid var(--border); border-radius: var(--r-0);
+  box-shadow: var(--shadow-2); z-index: 50; min-width: 200px;
   display: flex; flex-direction: column; overflow: hidden;
 }
 .export-menu button {
@@ -359,26 +378,30 @@
 .export-menu button:hover { background: var(--surface-2); }
 .export-hint { font-size: 11px; color: var(--muted); margin-left: 4px; }
 .export-slice { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-top: 1px solid var(--border); }
-.export-slice-in { font-size: 11px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--fg); }
+/* Harf: text input — 4px corner. */
+.export-slice-in { font-size: 11px; padding: 3px 6px; border: 1px solid var(--rule-2); border-radius: var(--r-2); background: var(--surface); color: var(--fg); }
 
 /* ── Smart label (classification) chip ── */
+/* Harf: sharp card, hairline. */
 .classify-chip-wrap {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   margin-top: 12px; padding: 10px 14px;
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius); font-size: 12px;
+  background: var(--surface); border: 1px solid var(--border-subtle);
+  border-radius: var(--r-0); font-size: 12px;
 }
 .classify-label { color: var(--muted); }
+/* Harf: pill chip. */
 .classify-chip {
   display: inline-flex; align-items: center; gap: 4px;
-  padding: 2px 8px; border-radius: var(--radius-sm);
+  padding: 2px 8px; border-radius: var(--r-pill);
   font-size: 12px; font-weight: 500;
 }
 .classify-confirmed { background: color-mix(in srgb, var(--green) 15%, transparent); color: var(--green); }
 .classify-ignored   { background: var(--surface-2); color: var(--muted); }
+/* Harf: select control — 4px corner. */
 .classify-select {
-  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
-  color: var(--text); padding: 3px 8px; font-family: var(--font-sans); font-size: 12px;
+  background: var(--paper); border: 1px solid var(--rule-2); border-radius: var(--r-2);
+  color: var(--ink-1); padding: 3px 8px; font-family: var(--font-sans); font-size: 12px;
 }
 .classify-confirm-btn { color: var(--green) !important; border-color: var(--green) !important; }
 .classify-confirm-btn:hover { background: color-mix(in srgb, var(--green) 12%, transparent) !important; }
