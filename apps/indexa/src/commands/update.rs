@@ -9,6 +9,9 @@ pub(crate) async fn cmd_update(check_only: bool, yes: bool, pin: Option<String>)
 
     if !info.update_available && pin.is_none() {
         println!("Already up to date.");
+        // The terminal CLI is current, so clear any stale desktop-written skew marker —
+        // the web banner advises running `indexa update`, so running it must dismiss it.
+        clear_cli_skew_marker();
         if check_only {
             // exit 0 = current
             std::process::exit(0);
@@ -55,8 +58,22 @@ pub(crate) async fn cmd_update(check_only: bool, yes: bool, pin: Option<String>)
     let applied = indexa_update::apply(target_tag).await?;
     println!("  ✓ Updated to v{applied}.");
     println!("  Restart indexa to use the new version.");
+    // The CLI is now at latest, so any "your CLI is stale" skew marker is obsolete.
+    clear_cli_skew_marker();
 
     Ok(())
+}
+
+/// Clear the desktop-written CLI-skew warning marker (`<data_dir>/cli_skew_warning.json`).
+/// The web `/api/health` banner advises running `indexa update` to fix a stale terminal CLI;
+/// once that's done the CLI is current, so the marker is obsolete and must be cleared — its
+/// only other clearer is a later successful desktop auto-refresh, so without this the banner
+/// nags about an already-applied fix indefinitely. Fail-open; the desktop re-writes the marker
+/// on its next check if the desktop-resolved CLI is somehow still stale.
+fn clear_cli_skew_marker() {
+    if let Some(d) = indexa_core::config::default_data_dir() {
+        let _ = std::fs::remove_file(d.join(indexa_update::CLI_SKEW_MARKER_FILE));
+    }
 }
 
 /// Print the cumulative changelog for the versions gained by updating `from` → `to`
