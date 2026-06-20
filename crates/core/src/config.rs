@@ -135,13 +135,18 @@ pub fn parse_reindex_interval(s: &str) -> Option<u64> {
     if s.is_empty() || s.eq_ignore_ascii_case("off") || s == "0" {
         return None;
     }
-    let (num, unit) = s.split_at(s.len() - 1);
+    // Split off the last *char*, not the last byte: `split_at(len-1)` panics when the
+    // string ends in a multibyte char (e.g. "7°"), and `s` can be user-controlled
+    // (config TOML, `--changed-since`, the web `?changed_since=` query param) — this
+    // path must fail open / return a clean error, never panic.
+    let unit = s.chars().last()?;
+    let num = &s[..s.len() - unit.len_utf8()];
     let n: u64 = num.parse().ok()?;
     let mult = match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86_400,
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86_400,
         _ => return None,
     };
     n.checked_mul(mult).filter(|&v| v > 0)
@@ -784,6 +789,36 @@ mod tests {
         assert_eq!(parse_reindex_interval("7w"), None);
         assert_eq!(parse_reindex_interval("abc"), None);
         assert_eq!(parse_reindex_interval("d"), None);
+        // A multibyte trailing char must NOT panic (the old split_at(len-1) sliced a
+        // non-char-boundary byte); it returns None like any other invalid unit.
+        assert_eq!(parse_reindex_interval("7°"), None);
+        assert_eq!(parse_reindex_interval("10日"), None);
+        assert_eq!(parse_reindex_interval("°"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_writes_config_at_0600_and_tightens_existing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("indexa-cfg-test-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Fresh write must be 0600 — plaintext API keys live in this file.
+        save(&Config::default(), &path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "fresh config must be 0600, got {mode:o}");
+
+        // An existing world/group-readable file must be re-tightened to 0600 (the TOCTOU fix).
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        save(&Config::default(), &path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "existing config must re-tighten to 0600, got {mode:o}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
