@@ -190,7 +190,22 @@ async fn main() -> Result<()> {
             scope,
             json,
             min_hit_rate,
-        } => commands::cmd_eval(golden, mode, top_k, scope, json, min_hit_rate, &cfg).await,
+            baseline,
+            max_regression,
+        } => {
+            commands::cmd_eval(
+                golden,
+                mode,
+                top_k,
+                scope,
+                json,
+                min_hit_rate,
+                baseline,
+                max_regression,
+                &cfg,
+            )
+            .await
+        }
         Commands::Report {
             questions,
             saved,

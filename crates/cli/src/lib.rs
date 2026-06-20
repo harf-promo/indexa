@@ -328,6 +328,17 @@ pub enum Commands {
         /// Exit 1 when the aggregate hit rate falls below this fraction (0.0–1.0).
         #[arg(long, default_value_t = 0.0)]
         min_hit_rate: f64,
+
+        /// Compare this run against a saved baseline (an earlier `indexa eval --json` output, or a
+        /// bare summary object) and print the per-metric deltas. Pair with `--max-regression` to
+        /// fail the run on a drop. Save one with: `indexa eval golden.json --json > baseline.json`.
+        #[arg(long)]
+        baseline: Option<String>,
+
+        /// With `--baseline`: exit 1 if ANY aggregate metric (hit_rate/MRR/recall/nDCG/precision)
+        /// drops by more than this fraction vs the baseline. `0.0` (default) = no regression allowed.
+        #[arg(long, default_value_t = 0.0)]
+        max_regression: f64,
     },
 
     /// Run several questions and render one document (answers + cited sources + TOC).
@@ -1389,6 +1400,8 @@ mod tests {
                 scope,
                 json,
                 min_hit_rate,
+                baseline,
+                max_regression,
             } => {
                 assert_eq!(golden, "golden.json");
                 assert_eq!(mode, "sparse", "hermetic sparse is the default");
@@ -1396,6 +1409,8 @@ mod tests {
                 assert!(scope.is_none());
                 assert!(!json);
                 assert!((min_hit_rate - 0.8).abs() < 1e-9);
+                assert!(baseline.is_none());
+                assert_eq!(max_regression, 0.0);
             }
             _ => panic!("wrong command"),
         }
