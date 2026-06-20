@@ -228,7 +228,7 @@ function drawCell(svg, node, idx) {
 function showTreemapTooltip(e, node) {
   var tip = document.getElementById('treemap-tooltip');
   if (!tip) return;
-  var covLabel = { full: '● Built', partial: '◐ In progress', failed: '✗ Failed', none: '○ Not built' };
+  var covLabel = { full: '● Built', partial: '◐ In progress', failed: '✕ Failed', none: '○ Not built' };
   tip.innerHTML =
     '<strong>' + escapeHtml(node.name) + '</strong>' +
     '<span style="color:var(--muted)">' + escapeHtml(node.path) + '</span><br>' +

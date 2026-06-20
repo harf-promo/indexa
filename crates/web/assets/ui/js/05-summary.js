@@ -56,7 +56,7 @@ async function showSummary(path) {
         if (typeof fireJob === 'function') fireJob('summarize', path);
       });
     }
-    // Regenerate button: triggers a new summarize job just like the row 📝 action
+    // Regenerate button: triggers a new summarize job just like the row summarize action
     var regenBtn = view.querySelector('#regen-btn');
     if (regenBtn) {
       regenBtn.addEventListener('click', function() {
@@ -93,7 +93,7 @@ function renderNoPendingSummary(path) {
     '<div style="color:var(--muted);margin-bottom:12px">No summary yet for <strong>' + escapeHtml(name) + '</strong>. ' +
     'You can still ask about it — answers use its raw content.</div>' +
     '<div class="summary-noctx-actions">' +
-    '<button class="btn-sm summary-ask-btn" id="ask-cta-btn" title="Ask a question answered only from this file">&#x1F4AC; Ask about this file</button>' +
+    '<button class="btn-sm summary-ask-btn" id="ask-cta-btn" title="Ask a question answered only from this file">' + ICO_CHAT + ' Ask about this file</button>' +
     '<button class="enqueue-btn" id="enqueue-btn">Generate summary</button>' +
     '</div></div>';
 }
@@ -163,7 +163,10 @@ function fmtRelTime(unixSecs) {
 
 function renderSummary(d) {
   var name = d.path.split('/').pop() || d.path;
-  var icon = d.kind === 'dir' ? '📁' : '📄';
+  var iconInner = d.kind === 'dir'
+    ? '<path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'
+    : '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><polyline points="14 3 14 8 19 8"/>';
+  var icon = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + iconInner + '</svg>';
 
   var crumbHtml = '';
   if (d.crumbs && d.crumbs.length) {
@@ -178,7 +181,7 @@ function renderSummary(d) {
   if (d.children && d.children.length) {
     childrenHtml = '<div class="children-section"><h3>Contents (' + d.children.length + ')</h3>' +
       d.children.map(function(c) {
-        var cIcon = c.kind === 'dir' ? '📁' : '📄';
+        var cIcon = c.kind === 'dir' ? ICO_FOLDER : ICO_FILE;
         return '<div class="child-item" data-path="' + escapeAttr(c.path) + '">' +
           '<div class="child-row"><span>' + cIcon + '</span><span class="child-name">' + escapeHtml(c.name) + '</span></div>' +
           '<div class="child-summary">' + escapeHtml(c.summary) + '</div>' +
@@ -214,7 +217,7 @@ function renderSummary(d) {
   // then Regenerate + Export.
   var askLabel = d.kind === 'dir' ? 'Ask about this folder' : 'Ask about this file';
   var askCtaHtml = '<button class="btn-sm summary-ask-btn" id="ask-cta-btn" ' +
-    'title="Ask a question answered only from ' + escapeAttr(d.path) + '">&#x1F4AC; ' + escapeHtml(askLabel) + '</button>';
+    'title="Ask a question answered only from ' + escapeAttr(d.path) + '">' + ICO_CHAT + ' ' + escapeHtml(askLabel) + '</button>';
 
   var regenHtml = '<button class="btn-sm summary-regen-btn" id="regen-btn" ' +
     'title="Re-run AI summarization for this path" aria-label="Regenerate summary">↻ Regenerate</button>';

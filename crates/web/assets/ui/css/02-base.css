@@ -22,6 +22,17 @@ code, kbd, pre, .mono { font-family: var(--font-mono); }
   box-shadow: 0 0 0 6px var(--focus-halo);
 }
 
+/* ── Icon marks ──
+   Harf: single-stroke inline SVG icons (currentColor). One size/alignment rule so they
+   sit on the text baseline the way the old glyphs did. */
+.ui-ico {
+  width: 16px;
+  height: 16px;
+  display: inline-block;
+  vertical-align: -0.18em;
+  flex-shrink: 0;
+}
+
 /* ── Scrollbars ── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

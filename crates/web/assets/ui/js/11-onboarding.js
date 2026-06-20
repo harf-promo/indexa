@@ -51,8 +51,8 @@ function onContextReady(folderName) {
     '<p>Deep context for <strong>' + escapeHtml(folderName) + '</strong> is built.' +
     ' Try one of these:</p>' +
     '<div class="onboard-actions" style="flex-direction:column;align-items:flex-start;gap:8px">' +
-    '<button class="onboard-cta" onclick="switchTab(\'chat\');this.closest(\'#welcome-default\').innerHTML=\'\'" >💬 Ask a question about your files</button>' +
-    '<button class="btn-sm" onclick="doExport(\'\',\'xml\')" style="margin-left:0">⬇ Export context for your AI tool</button>' +
+    '<button class="onboard-cta" onclick="switchTab(\'chat\');this.closest(\'#welcome-default\').innerHTML=\'\'" >' + ICO_CHAT + ' Ask a question about your files</button>' +
+    '<button class="btn-sm" onclick="doExport(\'\',\'xml\')" style="margin-left:0">' + ICO_DOWNLOAD + ' Export context for your AI tool</button>' +
     '<button class="btn-sm" onclick="this.closest(\'#welcome-default\').innerHTML=\'\'" style="margin-left:0">Browse folders →</button>' +
     '</div>';
   // Auto-dismiss after 10 s (clear the completion copy, don't re-flash the full onboarding)

@@ -327,7 +327,7 @@ function _renderCardContent(card, jobId, j) {
   } else if (j.status === 'done') {
     statusText = '✓ ' + (j.summary || 'done');
   } else if (j.status === 'failed') {
-    statusText = '✗ failed';
+    statusText = '✕ failed';
   }
 
   card.innerHTML =

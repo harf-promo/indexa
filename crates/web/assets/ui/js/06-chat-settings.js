@@ -152,7 +152,7 @@ async function doAsk() {
       appendMsg('assistant',
         '<div class="ask-guidance">' +
         '<strong>No context built yet.</strong><br>' +
-        'Select a folder in the sidebar and click <strong>⚡ Index for search</strong> to index it first.<br>' +
+        'Select a folder in the sidebar and click <strong>' + ICO_BOLT + ' Index for search</strong> to index it first.<br>' +
         '<button class="btn-sm" style="margin-top:10px" onclick="switchTab(\'tree\')">Go to folders →</button>' +
         '</div>');
       return;
@@ -177,7 +177,7 @@ async function doAsk() {
   const renderSteps = function() {
     if (!steps.length) return '';
     return '<div class="ask-steps">' + steps.map(function(s) {
-      return '<span class="ask-step">&#x1F50D; ' + escapeHtml(s.query) + '</span>';
+      return '<span class="ask-step">' + ICO_SEARCH + ' ' + escapeHtml(s.query) + '</span>';
     }).join('') + '</div>';
   };
   // A muted "confidence: medium — 4 moderate matches" line under the answer. Empty until
@@ -457,7 +457,7 @@ async function refreshContextNotice() {
     if (s.chunks === 0) { el.hidden = true; return; } // empty index → onboarding handles it
     el.hidden = false;
     el.innerHTML =
-      '<span class="context-notice-msg">&#x1F4A1; <strong>Context not built yet.</strong> ' +
+      '<span class="context-notice-msg"><strong>Context not built yet.</strong> ' +
       'Answers fall back to raw file chunks' +
       (lastQueuePending ? ' &mdash; ' + lastQueuePending.toLocaleString() + ' file' +
         (lastQueuePending === 1 ? '' : 's') + ' queued' : '') +
