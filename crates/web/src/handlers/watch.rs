@@ -13,9 +13,11 @@ use axum::{
 };
 use indexa_core::{
     store::{ChunkRecord, Store},
+    walker::{Entry, EntryKind},
     watcher::{self, ChangeKind, WatcherConfig},
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicU64, atomic::Ordering, Arc};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -132,7 +134,8 @@ pub(crate) async fn api_watch_start(
                         }
                     }
                     ChangeKind::Upsert => {
-                        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                        let meta = std::fs::metadata(path).ok();
+                        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
                         let extracted = match indexa_parsers::registry::parse_guarded(
                             path,
                             size,
@@ -176,13 +179,29 @@ pub(crate) async fn api_watch_start(
                                     language: chunk.language.clone(),
                                     embedding,
                                     embed_model: Some(embed_model.clone()),
-                                    content_hash: None,
+                                    content_hash: Some(format!(
+                                        "{:x}",
+                                        Sha256::digest(chunk.text.as_bytes())
+                                    )),
                                 });
                             }
                             records
                         });
 
                         if let Ok(mut store) = Store::open(&db_path) {
+                            // A newly-created file has no `entries` row (only `scan` writes those),
+                            // so without this its chunks are orphans: never summarized and wiped by
+                            // the next `prune`. Idempotent upsert also refreshes size/mtime on edits.
+                            let entry = Entry {
+                                path: path.to_path_buf(),
+                                kind: EntryKind::File,
+                                size,
+                                modified: meta.as_ref().and_then(|m| m.modified().ok()),
+                                hint: None,
+                            };
+                            if let Err(e) = store.upsert_entries(&[entry]) {
+                                tracing::warn!(path = %path.display(), error = %e, "watch: failed to upsert entry");
+                            }
                             if store.upsert_chunks(&chunk_records).is_ok() {
                                 let s = path.to_string_lossy().into_owned();
                                 let depth = path_depth(&s);
