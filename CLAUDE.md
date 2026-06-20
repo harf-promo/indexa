@@ -24,9 +24,10 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.67.0)
+## Current feature surface (v0.68.0)
 
-**[Unreleased]** — merged to `main`, not yet in a release (full detail in `CHANGELOG.md`):
+**Trust, design & retrieval (v0.68):** the eval-instrumentation + Harf-restyle release (full detail
+in `CHANGELOG.md`):
 - **`indexa deep --no-embed`** — FTS-only hermetic index (no Ollama, no embeddings; a later plain
   `deep` self-heals the vectors via the `COUNT(*)=COUNT(embedding)` skip check). Powers a new
   advisory CI job that runs `indexa eval` on Indexa's own `fixtures/self-golden.json` every PR.
@@ -39,6 +40,10 @@ Verify with `ollama list`.
   + hairlines, ink primary buttons, `light-dark()` dark mode, no emoji, a footer "by Harf" mark.
   `01-tokens.css` is now the Harf foundation (legacy `--bg`/`--surface`/`--accent`/… alias onto it);
   brand source = the "Harf Design System" project via the `claude_design` MCP (`DesignSync` tool).
+- **Sparse/keyword search tokenizes the query** (`store/search.rs::build_fts_query`) instead of
+  phrase-matching it whole — `"phrase" OR "term1" OR "term2" …` (stopwords dropped, BM25 ranks), so
+  multi-word natural-language questions actually match in `--mode sparse` (self-golden hit-rate
+  0.69→1.00). Also feeds the lexical arm of hybrid `rrf`. (Track 2 retrieval intelligence, PR #1.)
 
 **Hardening, parity & performance (v0.67):** a defect/parity/perf release from three adversarial
 review sweeps — no single headline feature. **Security:** web `GET /api/packs/{name}/export` now
