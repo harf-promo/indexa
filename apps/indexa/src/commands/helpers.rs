@@ -469,8 +469,72 @@ pub(crate) fn format_unix_timestamp(ts: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_roots;
+    use super::{finalize_export, resolve_roots, ExportSink};
     use std::path::PathBuf;
+
+    /// Build a sink that writes to `output` with all extras off; tests flip individual fields.
+    fn sink_to(output: Option<String>) -> ExportSink {
+        ExportSink {
+            redact: false,
+            token_budget: None,
+            strict_budget: false,
+            clipboard: false,
+            output,
+        }
+    }
+
+    #[test]
+    fn finalize_export_strict_budget_bails_when_over() {
+        // ~tokens = chars/4 (approx_tokens); 400 chars ⇒ ~100 tokens, well over a budget of 1.
+        let content = "x".repeat(400);
+        let mut sink = sink_to(None);
+        sink.token_budget = Some(1);
+        sink.strict_budget = true;
+        let err = finalize_export(content, sink).unwrap_err();
+        assert!(
+            err.to_string().contains("over the --token-budget"),
+            "strict over-budget must be a hard error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn finalize_export_over_budget_without_strict_succeeds() {
+        // Same over-budget content, but without --strict-budget it only warns (to stderr) and
+        // still delivers — here to stdout.
+        let content = "x".repeat(400);
+        let mut sink = sink_to(None);
+        sink.token_budget = Some(1);
+        // strict_budget stays false
+        assert!(finalize_export(content, sink).is_ok());
+    }
+
+    #[test]
+    fn finalize_export_missing_parent_dir_bails() {
+        // Writing under a parent dir that doesn't exist must be a clear error, not a silent OS failure.
+        let pid = std::process::id();
+        let missing =
+            std::env::temp_dir().join(format!("indexa_no_such_dir_{pid}/export_{pid}.xml"));
+        let sink = sink_to(Some(missing.to_string_lossy().into_owned()));
+        let err = finalize_export("body".to_owned(), sink).unwrap_err();
+        assert!(
+            err.to_string().contains("does not exist"),
+            "missing-parent write must bail with a directory hint, got: {err}"
+        );
+    }
+
+    #[test]
+    fn finalize_export_within_budget_valid_path_writes_file() {
+        // The happy path: in-budget content to an existing dir actually lands on disk.
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("indexa_export_ok_{pid}.xml"));
+        let _ = std::fs::remove_file(&path);
+        let mut sink = sink_to(Some(path.to_string_lossy().into_owned()));
+        sink.token_budget = Some(10_000); // generous — content is tiny
+        finalize_export("<export>ok</export>".to_owned(), sink).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written, "<export>ok</export>");
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn resolve_roots_canonicalizes_existing_paths() {

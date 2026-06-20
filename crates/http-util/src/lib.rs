@@ -69,6 +69,39 @@ pub async fn send_with_retry(
     }
 }
 
+/// Read a response body into a `String`, refusing to buffer more than `max_bytes`. Streams the
+/// body chunk-by-chunk (no reqwest `stream` feature needed) and errors the moment the accumulated
+/// size would exceed the cap, so a hostile/runaway endpoint can never blow up memory by sending an
+/// arbitrarily large body. `what` names the source for the error/context message.
+pub async fn read_body_capped(
+    mut resp: reqwest::Response,
+    max_bytes: usize,
+    what: &str,
+) -> std::io::Result<String> {
+    use std::io::{Error, ErrorKind};
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let chunk = resp
+            .chunk()
+            .await
+            .map_err(|e| Error::other(format!("reading {what}: {e}")))?;
+        let Some(chunk) = chunk else { break };
+        if buf.len() + chunk.len() > max_bytes {
+            return Err(Error::other(format!(
+                "remote source {what} exceeded the {} MB limit — refusing to buffer it",
+                max_bytes / (1024 * 1024)
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    String::from_utf8(buf).map_err(|_| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("{what} was not valid UTF-8"),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
