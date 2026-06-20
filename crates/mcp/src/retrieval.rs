@@ -107,7 +107,7 @@ impl IndexaMcp {
     /// Returns matching chunks with their file path, heading, and a text snippet.
     /// Use `scope` to restrict to a subtree. For path-name browsing, prefer `browse_tree`.
     #[tool(
-        description = "Search indexed chunk content by keyword (BM25 + vector hybrid). Returns matching chunks with path, heading, and snippet — richer than path-name search. Optionally scope to a path prefix."
+        description = "Search indexed chunk content by keyword (BM25 + vector hybrid). Returns matching chunks with path, heading, and snippet — richer than path-name search. Each hit shows `#N`, the chunk seq — pass it to `get_chunk_context` to expand that chunk with its neighbors. Optionally scope to a path prefix."
     )]
     pub(crate) async fn search(
         &self,
@@ -149,7 +149,7 @@ impl IndexaMcp {
                     format!(" [{}]", h.heading)
                 };
                 let snippet: String = h.text.chars().take(120).collect();
-                format!("{}{}\n  {}", h.entry_path, heading, snippet)
+                format!("{}{} #{}\n  {}", h.entry_path, heading, h.seq, snippet)
             })
             .collect::<Vec<_>>()
             .join("\n\n");

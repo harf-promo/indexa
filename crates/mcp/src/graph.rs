@@ -63,6 +63,10 @@ pub struct CodeGraphParams {
     /// via same-dir or import matching. Default false (bare edges kept, labeled).
     #[serde(default)]
     pub strict: bool,
+    /// Report dependency cycles (Tarjan SCC over the call graph) instead of the edge/hub view —
+    /// answers "are there circular dependencies?". Default false.
+    #[serde(default)]
+    pub cycles: bool,
 }
 
 #[tool_router(router = router_graph, vis = "pub(crate)")]
@@ -305,7 +309,7 @@ impl IndexaMcp {
 
     /// File-to-file call graph for a scope (the v0.18 signature graph, as text).
     #[tool(
-        description = "Build the file-to-file call graph for files under a path scope: an edge 'A → B' means file A calls a function that file B defines. Each call is resolved against the symbol's definition sites (same-file → same-dir → import-matched); unresolvable calls fall back to bare-name matching and are labeled. Returns the heaviest edges (most shared symbols) as a 'caller → callee [weight]' list, the most central hub files by weighted PageRank (scored 0–100), plus node/edge/tier counts. Set `strict: true` to drop the bare-name fallback entirely. Languages: Rust, Python, JS, TS, Go, Java."
+        description = "Build the file-to-file call graph for files under a path scope: an edge 'A → B' means file A calls a function that file B defines. Each call is resolved against the symbol's definition sites (same-file → same-dir → import-matched); unresolvable calls fall back to bare-name matching and are labeled. Returns the heaviest edges (most shared symbols) as a 'caller → callee [weight]' list, the most central hub files by weighted PageRank (scored 0–100), plus node/edge/tier counts. Set `strict: true` to drop the bare-name fallback entirely, or `cycles: true` to report dependency cycles (circular call chains) instead of the edge/hub view. Languages: Rust, Python, JS, TS, Go, Java."
     )]
     pub(crate) async fn code_graph(
         &self,
@@ -315,9 +319,33 @@ impl IndexaMcp {
             scope,
             limit,
             strict,
+            cycles,
         } = params.0;
         let limit = limit.unwrap_or(200).min(2000);
         let store = self.store()?;
+
+        // Cycle report (Tarjan SCC over the call graph) — a sibling view answering "are there
+        // circular dependencies?", matching CLI `indexa graph --cycles`. find_cycles always
+        // traverses bare-name edges, so the bare-name caveat always applies here.
+        if cycles {
+            let found = store.find_cycles(&scope, limit.max(500)).map_err(mcp_err)?;
+            if found.is_empty() {
+                return Ok(ok_text(format!("No dependency cycles under '{scope}'. ✓")));
+            }
+            let mut out = format!(
+                "{} dependency cycle(s) under '{scope}' (heuristic call resolution — verify):\n",
+                found.len()
+            );
+            for (i, cycle) in found.iter().enumerate() {
+                out.push_str(&format!("\nCycle {} ({} files):\n", i + 1, cycle.len()));
+                for p in cycle {
+                    out.push_str(&format!("  {p}\n"));
+                }
+            }
+            out.push_str(&format!("\n⚠ {}", indexa_core::store::BARE_NAME_CAVEAT));
+            return Ok(ok_text(out));
+        }
+
         let scoped = store
             .code_graph_scoped(&scope, limit, strict)
             .map_err(mcp_err)?;

@@ -30,6 +30,14 @@ pub struct ExportPackParams {
     /// far fewer tokens for handing code structure to a model. Reads indexed chunks.
     #[serde(default)]
     pub signatures: Option<bool>,
+    /// Relational slice: keep only files modified within this window (e.g. `7d`, `12h`, `90m`,
+    /// `3600s`). Combine with `category` to intersect. Omit for no recency filter.
+    #[serde(default)]
+    pub changed_since: Option<String>,
+    /// Relational slice: keep only files in this classification category (e.g. `code`, `docs`).
+    /// Combine with `changed_since` to intersect. Omit for no category filter.
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -133,8 +141,9 @@ impl IndexaMcp {
     #[tool(
         description = "Export a Context Pack as a self-contained context file (XML by default, \
                        also Markdown or JSON). Each path in the pack is rendered with its \
-                       hierarchical summary tree. Ideal for giving an AI tool focused context \
-                       on a specific topic (e.g. 'Auth', 'Tax 2025', 'Client X')."
+                       hierarchical summary tree. Optionally slice with `changed_since` \
+                       (e.g. '7d') and/or `category` (e.g. 'code'). Ideal for giving an AI tool \
+                       focused context on a specific topic (e.g. 'Auth', 'Tax 2025', 'Client X')."
     )]
     pub(crate) async fn export_pack(
         &self,
@@ -145,6 +154,8 @@ impl IndexaMcp {
             format,
             depth,
             signatures,
+            changed_since,
+            category,
         } = params.0;
         let store = self.store()?;
         let buf = export_pack_body(
@@ -153,6 +164,8 @@ impl IndexaMcp {
             format.as_deref().unwrap_or("xml"),
             depth,
             signatures.unwrap_or(false),
+            changed_since.as_deref(),
+            category.as_deref(),
         )?;
         Ok(ok_text(buf))
     }
@@ -243,7 +256,8 @@ impl IndexaMcp {
     /// Search indexed content scoped to the paths in a Context Pack.
     #[tool(
         description = "Search chunk content restricted to the file/directory paths inside a \
-                       named Context Pack. Returns matching chunks with path, heading, and snippet. \
+                       named Context Pack. Returns matching chunks with path, heading, and snippet; \
+                       each hit shows `#N` (the chunk seq) to pass to `get_chunk_context`. \
                        Ideal for querying focused topic bundles (e.g. 'Auth', 'Tax 2025')."
     )]
     pub(crate) async fn search_pack(
@@ -309,7 +323,7 @@ impl IndexaMcp {
                     format!(" [{}]", h.heading)
                 };
                 let snippet: String = h.text.chars().take(120).collect();
-                format!("{}{}\n  {}", h.entry_path, heading, snippet)
+                format!("{}{} #{}\n  {}", h.entry_path, heading, h.seq, snippet)
             })
             .collect::<Vec<_>>()
             .join("\n\n");
@@ -329,17 +343,20 @@ pub(crate) fn export_pack_body(
     format: &str,
     depth: Option<usize>,
     signatures: bool,
+    changed_since: Option<&str>,
+    category: Option<&str>,
 ) -> Result<String, ErrorData> {
     use indexa_query::{
-        build_tree, redact::redact_secrets, render_json, render_markdown, render_signatures,
-        render_xml,
+        build_export_filter, build_tree, prune_tree, redact::redact_secrets, render_json,
+        render_markdown, render_signatures, render_xml,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let now = SystemTime::now()
+    let now_secs: i64 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_else(|_| "0".to_owned());
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let now = now_secs.to_string();
 
     let pack = store
         .pack_by_name(name)
@@ -351,6 +368,10 @@ pub(crate) fn export_pack_body(
             "pack \"{name}\" is empty — add paths first with: indexa pack add \"{name}\" <paths…>"
         )));
     }
+
+    // Relational slice (v0.58/v0.60): same filters as CLI `pack export` and web `/api/packs/:name/export`,
+    // shared via build_export_filter. `None` ⇒ export the whole pack (byte-identical to before).
+    let allow = build_export_filter(store, changed_since, category, now_secs).map_err(mcp_err)?;
 
     let is_xml = format != "md" && format != "markdown" && format != "json";
     let mut buf = String::new();
@@ -365,7 +386,10 @@ pub(crate) fn export_pack_body(
     let mut exported = 0usize;
     for root_path in &paths {
         if signatures {
-            let chunks = store.code_chunks_under(root_path, 0).map_err(mcp_err)?;
+            let mut chunks = store.code_chunks_under(root_path, 0).map_err(mcp_err)?;
+            if let Some(a) = &allow {
+                chunks.retain(|c| a.contains(&c.entry_path));
+            }
             if chunks.is_empty() {
                 continue;
             }
@@ -376,6 +400,14 @@ pub(crate) fn export_pack_body(
         }
         let tree = build_tree(store, root_path, depth).map_err(mcp_err)?;
         let Some(tree) = tree else { continue };
+        // Apply the relational slice; skip a path that matched nothing.
+        let tree = match &allow {
+            Some(a) => match prune_tree(tree, a) {
+                Some(t) => t,
+                None => continue,
+            },
+            None => tree,
+        };
         let rendered = match format {
             "md" | "markdown" => render_markdown(&tree),
             "json" => render_json(&tree),
@@ -390,12 +422,20 @@ pub(crate) fn export_pack_body(
     }
 
     if exported == 0 {
-        let hint = if signatures {
-            "have indexed code yet — run `indexa deep <path>` first"
+        let msg = if allow.is_some() {
+            format!(
+                "nothing in pack \"{name}\" matched the slice (changed_since / category) \
+                 — widen it or drop the filter"
+            )
         } else {
-            "have summaries yet — run `indexa summarize <path>` or `indexa index <path>` first"
+            let hint = if signatures {
+                "have indexed code yet — run `indexa deep <path>` first"
+            } else {
+                "have summaries yet — run `indexa summarize <path>` or `indexa index <path>` first"
+            };
+            format!("no paths in pack \"{name}\" {hint}")
         };
-        return Err(mcp_err(format!("no paths in pack \"{name}\" {hint}")));
+        return Err(mcp_err(msg));
     }
 
     // Never hand a model a secret that slipped into the indexed content.
