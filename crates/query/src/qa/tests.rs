@@ -34,6 +34,24 @@ fn pack_context_truncates_to_budget() {
     assert!(!sources.is_empty());
     // The over-budget chunk is cut and explicitly marked so the synthesizer knows.
     assert!(ctx.contains("truncated"));
+    // Regression: chunk 0 fits, chunk 1 is truncated but keeps its full `[2]` header,
+    // so the model can legitimately cite [2]. Every `[N]` header present in the context
+    // MUST have a matching SourceCitation, or the citation dangles (resolves to nothing
+    // in every surface that renders `sources` as [1..len]).
+    assert!(
+        ctx.contains("[2]"),
+        "truncated chunk should still carry its [2] header"
+    );
+    assert_eq!(
+        ctx.matches("] /doc").count(),
+        sources.len(),
+        "every numbered [N] header must have a matching source — no dangling citations"
+    );
+    assert_eq!(
+        sources.len(),
+        2,
+        "doc0 (full) + doc1 (truncated) are both cited"
+    );
 }
 
 #[test]
