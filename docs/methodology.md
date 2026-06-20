@@ -256,7 +256,7 @@ It is **off by default** because each hop adds an LLM "decide" call. The loop is
 The signature graph (v0.18) is a **file-to-file call graph**: an edge `A → B` means file `A` calls a symbol that file `B` defines, built from the `calls`/`defines`/`imports` edges extracted at `deep` time. It is deliberately lightweight, and the limits are honest ones:
 
 - **Name-based with scoped resolution, case-sensitive, 1-hop.** No type resolution, no overload disambiguation. Symbols defined in more than 25 files (common helpers like `new`/`get`) are dropped as noise.
-- **Six languages.** Rust, Python, JavaScript, TypeScript (and TSX), Go, Java — wherever the parser emits call/define edges. (C/C++ is *not* parsed for graph edges; those files fall back to plain text and produce none.)
+- **Eight languages.** Rust, Python, JavaScript, TypeScript (and TSX), Go, Java, C, and C++ — wherever the parser emits call/define edges. For C/C++, calls resolve through `call_expression` (including C++ method and `ns::`-qualified calls) and imports through `#include` (`<system>` and `"local"` headers); `#include` path matching is lexical/loose, so cross-file resolution falls back to the labeled bare-name tier more often than for the others.
 
 #### Scoped call resolution (v0.25)
 
