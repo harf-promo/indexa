@@ -421,7 +421,10 @@ impl IndexaMcp {
         // Retrieval-shape confidence (heuristic, from the hit pool — not calibrated).
         // Absent for the no-match short-circuit, whose message stands on its own.
         if let Some(c) = &answer.confidence {
-            out.push_str(&format!("\nConfidence: {} ({})\n", c.level, c.basis));
+            out.push_str(&format!(
+                "\nRetrieval coverage: {} ({})\n",
+                c.level, c.basis
+            ));
             // Heuristic coverage gap: question terms absent from every cited source.
             if let Some(gaps) = c.uncovered.as_ref().filter(|g| !g.is_empty()) {
                 out.push_str(&format!("Possibly uncovered: {}\n", gaps.join(", ")));
