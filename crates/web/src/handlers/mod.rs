@@ -45,7 +45,8 @@ pub(crate) use fs::api_fs_ls;
 pub(crate) use graph::api_graph;
 pub(crate) use health::api_health;
 pub(crate) use insights_handler::{
-    api_insights_diff, api_insights_duplicates, api_insights_stale, api_review_dismiss_evidence,
+    api_insights_diff, api_insights_duplicates, api_insights_languages, api_insights_largest,
+    api_insights_stale, api_review_dismiss_evidence,
 };
 pub(crate) use inspect::api_inspect;
 pub(crate) use jobs::{

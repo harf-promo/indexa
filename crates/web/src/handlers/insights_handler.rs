@@ -4,6 +4,8 @@
 //!   GET  /api/insights/duplicates?threshold=0.95&exact=false
 //!   GET  /api/insights/stale?days=365
 //!   GET  /api/insights/diff?days=7
+//!   GET  /api/insights/largest?limit=20
+//!   GET  /api/insights/languages
 //!   POST /api/review/dismiss-evidence  — "don't ask about this" from insights
 
 use axum::{
@@ -33,6 +35,11 @@ pub(crate) struct StaleQuery {
 #[derive(Deserialize)]
 pub(crate) struct DiffQuery {
     days: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct LargestQuery {
+    limit: Option<usize>,
 }
 
 pub(crate) async fn api_insights_duplicates(
@@ -126,6 +133,49 @@ pub(crate) async fn api_insights_diff(
             "modified_count": diff.modified_count,
         }))
         .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
+}
+
+pub(crate) async fn api_insights_largest(
+    State(state): State<AppState>,
+    Query(q): Query<LargestQuery>,
+) -> Response {
+    let limit = q.limit.unwrap_or(20).clamp(1, 500);
+    let store = state.store.lock().await;
+    match store.find_largest(limit) {
+        Ok(rows) => {
+            let items: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "path": e.path,
+                        "size": e.size,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({ "limit": limit, "entries": items })).into_response()
+        }
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
+}
+
+pub(crate) async fn api_insights_languages(State(state): State<AppState>) -> Response {
+    let store = state.store.lock().await;
+    match store.language_breakdown() {
+        Ok(rows) => {
+            let total: u64 = rows.iter().map(|l| l.chunks).sum();
+            let items: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|l| {
+                    serde_json::json!({
+                        "language": l.language,
+                        "chunks": l.chunks,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({ "total": total, "languages": items })).into_response()
+        }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
 }

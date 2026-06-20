@@ -429,6 +429,10 @@
           <button class="btn-sm" onclick="runInsights('diff')">Weekly diff</button>
           <label style="font-size:11px;color:var(--muted)">last
             <input type="number" id="insights-diff-days" min="1" step="1" value="7" style="width:50px;font-size:11px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:1px 4px" aria-label="Diff window in days"> days</label>
+          <button class="btn-sm" onclick="runInsights('largest')">Largest files</button>
+          <label style="font-size:11px;color:var(--muted)">top
+            <input type="number" id="insights-largest-limit" min="1" max="500" step="10" value="20" style="width:60px;font-size:11px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:1px 4px" aria-label="Number of largest files"></label>
+          <button class="btn-sm" onclick="runInsights('languages')">Languages</button>
         </div>
         <div id="insights-results" style="display:none;max-height:300px;overflow-y:auto;font-size:12px;background:var(--surface-2);border-radius:6px;padding:10px"></div>
       </div>

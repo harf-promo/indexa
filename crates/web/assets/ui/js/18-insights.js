@@ -11,12 +11,14 @@ function runInsights(kind) {  // eslint-disable-line no-unused-vars
   el.style.display = '';
   el.textContent = 'Running ' + kind + ' analysis…';
 
-  var staleDays = parseInt((document.getElementById('insights-stale-days') || {}).value, 10) || 365;
-  var diffDays  = parseInt((document.getElementById('insights-diff-days')  || {}).value, 10) || 7;
+  var staleDays = parseInt((document.getElementById('insights-stale-days')    || {}).value, 10) || 365;
+  var diffDays  = parseInt((document.getElementById('insights-diff-days')     || {}).value, 10) || 7;
+  var largeLim  = parseInt((document.getElementById('insights-largest-limit') || {}).value, 10) || 20;
   var url = '/api/insights/' + kind;
   if (kind === 'duplicates') url += '?threshold=0.90';
   if (kind === 'stale')      url += '?days=' + staleDays;
   if (kind === 'diff')       url += '?days=' + diffDays;
+  if (kind === 'largest')    url += '?limit=' + largeLim;
 
   fetch(url)
     .then(function (r) { return r.json(); })
@@ -69,7 +71,48 @@ function renderInsightsResult(kind, d, el) {
       + '</div><div style="margin-top:6px"><em>Modified (' + d.modified_count + '):</em>'
       + (modified.length === 0 ? ' <span style="color:var(--muted)">none</span>' : '<ul style="margin:2px 0 0 16px;padding:0">' + modified.map(function (p) { return '<li style="list-style:circle;color:var(--accent)">~ ' + escapeHtml(p) + '</li>'; }).join('') + '</ul>')
       + '</div>';
+  } else if (kind === 'largest') {
+    var rows = d.entries || [];
+    if (rows.length === 0) {
+      el.innerHTML = '<span style="color:var(--muted)">No indexed files found.</span>';
+      return;
+    }
+    el.innerHTML = '<strong>Largest ' + rows.length + ' indexed file(s) by on-disk size:</strong>'
+      + '<table style="width:100%;border-collapse:collapse;margin-top:6px">'
+      + rows.map(function (e) {
+        return '<tr style="border-top:1px solid var(--border)">'
+          + '<td style="padding:2px 6px;color:var(--muted);text-align:right;white-space:nowrap">' + escapeHtml(insightsBytes(e.size)) + '</td>'
+          + '<td style="padding:2px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(e.path) + '</td>'
+          + '</tr>';
+      }).join('')
+      + '</table>';
+  } else if (kind === 'languages') {
+    var langs = d.languages || [];
+    if (langs.length === 0) {
+      el.innerHTML = '<span style="color:var(--muted)">No language-tagged chunks yet. Run <code>indexa deep</code> on source files first.</span>';
+      return;
+    }
+    var total = d.total || 0;
+    el.innerHTML = '<strong>Language breakdown (' + total + ' chunks):</strong>'
+      + '<table style="width:100%;border-collapse:collapse;margin-top:6px">'
+      + langs.map(function (l) {
+        var pct = total > 0 ? (l.chunks / total * 100) : 0;
+        return '<tr style="border-top:1px solid var(--border)">'
+          + '<td style="padding:2px 6px;color:var(--muted);text-align:right;white-space:nowrap">' + pct.toFixed(1) + '%</td>'
+          + '<td style="padding:2px 6px">' + escapeHtml(l.language) + '</td>'
+          + '<td style="padding:2px 6px;text-align:right;color:var(--muted);white-space:nowrap">' + l.chunks + ' chunks</td>'
+          + '</tr>';
+      }).join('')
+      + '</table>';
   }
+}
+
+/* Binary byte size (matches the server's human_bytes: 1 decimal, KB/MB/GB). */
+function insightsBytes(n) {
+  if (n >= 1073741824) return (n / 1073741824).toFixed(1) + ' GB';
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+  if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+  return n + ' B';
 }
 
 /* "Don't ask about this" button markup. The index is the only interpolated
