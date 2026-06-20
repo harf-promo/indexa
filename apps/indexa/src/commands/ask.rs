@@ -376,7 +376,9 @@ pub(crate) async fn cmd_ask(
         } else {
             ""
         };
-        let line = format!("confidence: {} — {}{}", c.level, c.basis, hint);
+        // "Retrieval coverage" (not "confidence") — this is a heuristic read of the
+        // hit-pool shape, NOT a calibrated probability; the honest label says so.
+        let line = format!("retrieval coverage: {} — {}{}", c.level, c.basis, hint);
         if std::io::stdout().is_terminal() {
             println!("\n\x1b[2m{line}\x1b[0m");
         } else {

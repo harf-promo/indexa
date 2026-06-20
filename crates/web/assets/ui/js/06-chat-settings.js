@@ -189,7 +189,7 @@ async function doAsk() {
       ? '<div class="ask-uncovered" title="Question terms found in none of the cited sources — the answer may be partial.">may not cover: ' +
         escapeHtml(confidence.uncovered.join(', ')) + '</div>'
       : '';
-    return '<div class="ask-confidence">confidence: ' + escapeHtml(confidence.level) +
+    return '<div class="ask-confidence">retrieval coverage: ' + escapeHtml(confidence.level) +
       (confidence.basis ? ' — ' + escapeHtml(confidence.basis) : '') + '</div>' + gaps;
   };
   // Binary byte size (matches the server's human_bytes: 1 decimal, KB/MB/GB).

@@ -344,17 +344,19 @@ Monitor does — these are deliberately different numbers:
   models (`keep_alive=0` eviction). It is **not a system purge** — it cannot and does not touch
   other processes' memory, and the freed RAM appears only as Ollama actually evicts.
 
-## What `confidence` on an answer means
+## What `retrieval coverage` on an answer means
 
 `ask` labels each answer **high / medium / low** from the *retrieval evidence*, before synthesis:
 how many hits came back relative to the request, how strong the top fusion score is, whether
 keyword and semantic retrieval corroborate each other, and how steep the drop-off is. The basis
 is stated next to the label ("4 moderate matches").
 
-It is a **heuristic, not a calibrated probability** — "high" means the retrieval evidence is
-strong, not that the synthesized answer is 90% likely to be correct. The LLM can still
+It is deliberately called **retrieval coverage**, not "confidence" — it is a **heuristic read of
+the retrieval evidence, not a calibrated probability**. "high" means the retrieved sources cover
+the question well, not that the synthesized answer is 90% likely to be correct. The LLM can still
 mis-synthesize from good evidence (and the sources are always listed so you can check it).
-`ask --explain` prints the inputs behind the label.
+`ask --explain` prints the inputs behind the label. (The `--json` / MCP / SSE field stays named
+`confidence` for backward compatibility; only the human-facing label changed.)
 
 ## What's opt-in (not default)
 

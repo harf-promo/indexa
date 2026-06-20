@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   marks:** the ~70 emoji across the UI are replaced with the system's vocabulary — mono status marks
   (`✓` `✕` `⚠`) inline, and clean single-stroke inline SVG icons (currentColor) for the topbar/footer
   buttons and the theme toggle. The UI now reads end-to-end as a Harf product in both light and dark.
+- **Answer "confidence" is now labelled "retrieval coverage"** across CLI (`ask`), web, MCP, README, and
+  `docs/methodology.md`. It was always a heuristic read of the retrieval evidence — not a calibrated
+  probability — so the honest term is "retrieval coverage" (how well the cited sources cover the
+  question), not "confidence." Display-only: the `--json` / MCP / SSE field stays named `confidence`
+  for backward compatibility.
 
 ### Added
 

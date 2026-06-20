@@ -53,7 +53,7 @@ per-file importance weights. [1]
 Sources:
   [1] docs/config.md — Configuration Reference > Retrieval
   [2] crates/query/src/qa/retrieve.rs — retrieve
-confidence: medium — 12 moderate matches
+retrieval coverage: medium — 12 moderate matches
 
 impact: served 508 B vs 27.3 KB of source — 98% less to your AI tool
 ```
