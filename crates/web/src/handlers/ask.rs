@@ -26,15 +26,16 @@ use crate::AppState;
 /// means "whole index", so it's filtered out (an empty prefix would otherwise match nothing
 /// meaningful and only adds a no-op LIKE).
 fn qa_config(state: &AppState, body: &AskRequest) -> QaConfig {
-    qa_config_from(&state.config.retrieval, body.scope.as_deref())
+    qa_config_from(&state.config.retrieval, body.scope.as_deref(), body.top_k)
 }
 
 /// Pure field mapping from the server's [`RetrievalConfig`] + the request scope to a
 /// [`QaConfig`]. Split out of [`qa_config`] (which only adds the `AppState` lookup) so the
 /// mapping and the scope normalization are unit-testable without building a full `AppState`.
-fn qa_config_from(r: &RetrievalConfig, scope: Option<&str>) -> QaConfig {
+/// `top_k` overrides the server's retrieval breadth (capped at 100); `None` ⇒ the config default.
+fn qa_config_from(r: &RetrievalConfig, scope: Option<&str>, top_k: Option<usize>) -> QaConfig {
     QaConfig {
-        top_k: r.top_k,
+        top_k: top_k.map(|k| k.min(100)).unwrap_or(r.top_k),
         mode: r.hybrid.clone(),
         context_budget: r.context_budget,
         rrf_k: r.rrf_k as f32,
@@ -539,12 +540,14 @@ mod tests {
     fn qa_config_blank_scope_becomes_none() {
         let r = RetrievalConfig::default();
         // Empty string and whitespace both mean "whole index" → no scope filter.
-        assert!(qa_config_from(&r, None).scope.is_none());
-        assert!(qa_config_from(&r, Some("")).scope.is_none());
-        assert!(qa_config_from(&r, Some("   ")).scope.is_none());
+        assert!(qa_config_from(&r, None, None).scope.is_none());
+        assert!(qa_config_from(&r, Some(""), None).scope.is_none());
+        assert!(qa_config_from(&r, Some("   "), None).scope.is_none());
         // A real path is kept, trimmed of surrounding whitespace.
         assert_eq!(
-            qa_config_from(&r, Some("  /src/auth  ")).scope.as_deref(),
+            qa_config_from(&r, Some("  /src/auth  "), None)
+                .scope
+                .as_deref(),
             Some("/src/auth")
         );
     }
@@ -559,7 +562,7 @@ mod tests {
             mmr_lambda: 0.25,
             ..Default::default()
         };
-        let cfg = qa_config_from(&r, None);
+        let cfg = qa_config_from(&r, None, None);
         assert_eq!(cfg.top_k, 17);
         assert_eq!(cfg.context_budget, 1234);
         assert!(
@@ -568,5 +571,19 @@ mod tests {
         );
         assert_eq!(cfg.max_steps, 4, "agentic_max_steps maps to max_steps");
         assert_eq!(cfg.mmr_lambda, 0.25);
+    }
+
+    #[test]
+    fn qa_config_top_k_override_caps_and_falls_back() {
+        let r = RetrievalConfig {
+            top_k: 8,
+            ..Default::default()
+        };
+        // None ⇒ server default.
+        assert_eq!(qa_config_from(&r, None, None).top_k, 8);
+        // Explicit override wins.
+        assert_eq!(qa_config_from(&r, None, Some(25)).top_k, 25);
+        // Capped at 100.
+        assert_eq!(qa_config_from(&r, None, Some(9999)).top_k, 100);
     }
 }

@@ -52,6 +52,9 @@ pub struct GetSummaryParams {
 pub struct ReadFileParams {
     /// Absolute path of the file to read (raw content, truncated to ~40 KB).
     pub path: String,
+    /// byte offset to start reading from (for paging past the 40 KB cap); default 0
+    #[serde(default)]
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -99,6 +102,9 @@ pub struct AskParams {
     /// UUID) per conversation.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// retrieval breadth — chunks fetched before synthesis; default from server config
+    #[serde(default)]
+    pub top_k: Option<usize>,
 }
 
 #[tool_router(router = router_retrieval, vis = "pub(crate)")]
@@ -203,7 +209,7 @@ impl IndexaMcp {
         let tier = tier.as_deref().unwrap_or("l1").to_lowercase();
 
         if tier == "l2" {
-            return self.read_file_inner(&path, "get_summary");
+            return self.read_file_inner(&path, 0, "get_summary");
         }
 
         let mut store = self.store()?;
@@ -245,12 +251,14 @@ impl IndexaMcp {
     }
 
     /// Read raw file content (L2).
-    #[tool(description = "Read the raw text content of an indexed file (truncated to ~40 KB).")]
+    #[tool(
+        description = "Read the raw text content of an indexed file (truncated to ~40 KB). Pass `offset` (a byte offset) to page past the cap and read a later window of a large file."
+    )]
     pub(crate) async fn read_file(
         &self,
         params: Parameters<ReadFileParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.read_file_inner(&params.0.path, "read_file")
+        self.read_file_inner(&params.0.path, params.0.offset.unwrap_or(0), "read_file")
     }
 
     /// Return the indexed chunks of a file, optionally a window around one `seq`.
@@ -316,7 +324,7 @@ impl IndexaMcp {
 
     /// Answer a natural-language question against the index (grounded RAG).
     #[tool(
-        description = "Answer a natural-language question using the indexed context (hybrid retrieval + local LLM synthesis). Returns an answer with source paths. Set `agentic: true` for compositional questions — the model plans and refines the search across several hops before answering (a few extra model calls)."
+        description = "Answer a natural-language question using the indexed context (hybrid retrieval + local LLM synthesis). Returns an answer with source paths. Set `agentic: true` for compositional questions — the model plans and refines the search across several hops before answering (a few extra model calls). Optional `top_k` widens/narrows retrieval breadth."
     )]
     pub(crate) async fn ask(
         &self,
@@ -330,10 +338,13 @@ impl IndexaMcp {
             rerank,
             rerank_backend,
             session_id,
+            top_k,
         } = params.0;
         let agentic = agentic.unwrap_or(self.config.retrieval.agentic);
         let cfg = QaConfig {
-            top_k: self.config.retrieval.top_k,
+            top_k: top_k
+                .map(|k| k.min(100))
+                .unwrap_or(self.config.retrieval.top_k),
             mode: mode
                 .as_deref()
                 .map(|m| parse_hybrid_mode(Some(m)))
@@ -452,6 +463,7 @@ impl IndexaMcp {
     pub(crate) fn read_file_inner(
         &self,
         path: &str,
+        offset: usize,
         tool: &str,
     ) -> Result<CallToolResult, ErrorData> {
         let requested =
@@ -472,13 +484,21 @@ impl IndexaMcp {
         let bytes =
             std::fs::read(&requested).map_err(|e| mcp_err(format!("reading {path}: {e}")))?;
         let text = String::from_utf8_lossy(&bytes);
-        let safe_end = indexa_core::text::floor_char_boundary(&text, READ_FILE_CAP);
-        let mut body = text[..safe_end].to_owned();
-        if text.len() > safe_end {
+        // Page within the file: snap the requested offset DOWN to a char boundary, then serve a
+        // READ_FILE_CAP-wide window. `offset > 0` pages past the cap into a later slice.
+        let start = indexa_core::text::floor_char_boundary(&text, offset);
+        let end =
+            indexa_core::text::floor_char_boundary(&text, start.saturating_add(READ_FILE_CAP));
+        let mut body = String::new();
+        if start > 0 {
+            body.push_str(&format!("…[{start} bytes before]\n"));
+        }
+        body.push_str(&text[start..end]);
+        if end < text.len() {
             body.push_str("\n…[truncated]");
         }
 
-        // Counterfactual = the file's full on-disk size (vs. the served cap).
+        // Counterfactual = the file's full on-disk size (vs. the served window).
         record_usage(&mut store, tool, body.len(), bytes.len() as u64);
 
         Ok(ok_text(body))

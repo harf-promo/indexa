@@ -346,6 +346,10 @@ pub(crate) struct AskRequest {
     /// persists this turn. Omit ⇒ a stateless single-shot Ask (today's default).
     #[serde(default)]
     pub(crate) session_id: Option<String>,
+    /// Retrieval breadth — chunks fetched before synthesis. Omit ⇒ the server's
+    /// `[retrieval] top_k`. Mirrors `indexa ask --top_k` and MCP `ask {top_k}`.
+    #[serde(default)]
+    pub(crate) top_k: Option<usize>,
 }
 
 #[derive(Deserialize)]
