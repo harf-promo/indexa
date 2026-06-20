@@ -1267,7 +1267,7 @@ relaunching…"* and never came back). The Tauri menu-bar updater was never affe
   evidence (hit count, fusion-score strength, keyword+semantic corroboration, drop-off), with the
   basis stated: `confidence: medium — 4 moderate matches`. Shown in the CLI (+ `--json` fields,
   inputs under `--explain`), the web chat, and the MCP `ask` response. A heuristic, not a
-  calibrated probability — [documented](docs/methodology.md#what-confidence-on-an-answer-means).
+  calibrated probability — [documented](docs/methodology.md#what-retrieval-coverage-on-an-answer-means).
 - **`indexa status --deep` — the index health report.** Coverage at a glance: % files chunked,
   % chunks embedded (with an explicit "dense search can't see them" callout when short),
   summary coverage, summaries older than their file, queue depth, open review questions, and
