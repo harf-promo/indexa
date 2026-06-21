@@ -3,10 +3,10 @@ use anyhow::Result;
 use std::path::Path;
 use tree_sitter::Node;
 
-/// Maximum characters per code chunk.
-const MAX_CHUNK_CHARS: usize = 2000;
-/// Minimum characters — skip tiny nodes like single-line stubs.
-const MIN_CHUNK_CHARS: usize = 20;
+/// Maximum bytes per code chunk (compared against `&str::len()`, which is byte length, not chars).
+const MAX_CHUNK_BYTES: usize = 2000;
+/// Minimum bytes — skip tiny nodes like single-line stubs.
+const MIN_CHUNK_BYTES: usize = 20;
 
 pub struct CodeParser;
 
@@ -551,10 +551,10 @@ fn extract_chunks(
         let kind = child.kind();
         if kinds.contains(&kind) {
             let text = &source[child.byte_range()];
-            if text.len() < MIN_CHUNK_CHARS {
+            if text.len() < MIN_CHUNK_BYTES {
                 continue;
             }
-            if text.len() > MAX_CHUNK_CHARS {
+            if text.len() > MAX_CHUNK_BYTES {
                 let words: Vec<&str> = text.split_whitespace().collect();
                 let mut start = 0;
                 while start < words.len() {

@@ -201,8 +201,8 @@ impl IndexaMcp {
             .iter()
             .map(|w| {
                 format!(
-                    "[{}] {} → {} (weight: {:.2}, source: {})",
-                    w.target_kind, w.target, w.weight, w.weight, w.source
+                    "[{}] {} (weight: {:.2}, source: {})",
+                    w.target_kind, w.target, w.weight, w.source
                 )
             })
             .collect();

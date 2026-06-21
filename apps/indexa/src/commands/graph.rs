@@ -1,12 +1,7 @@
 use anyhow::Result;
 use indexa_core::store::{ResolutionTier, Store};
 
-use super::helpers::require_index_db;
-
-/// Resolve and expand a path, canonicalizing `~` prefixes.
-fn expand(p: &str) -> String {
-    shellexpand::tilde(p).into_owned()
-}
+use super::helpers::{expand, require_index_db};
 
 fn basename(path: &str) -> String {
     std::path::Path::new(path)

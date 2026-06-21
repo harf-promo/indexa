@@ -175,6 +175,8 @@ mod tests {
         std::env::remove_var("GOOGLE_API_KEY");
         let result = GoogleEmbedder::from_env(DEFAULT_MODEL, DEFAULT_DIM);
         assert!(result.is_err());
+        // `.err().unwrap()` (not `.unwrap_err()`) on purpose: GoogleEmbedder doesn't impl Debug,
+        // which `unwrap_err()` would require on the Ok type.
         let msg = result.err().unwrap().to_string();
         assert!(msg.contains("GOOGLE_API_KEY"), "unexpected error: {msg}");
     }
