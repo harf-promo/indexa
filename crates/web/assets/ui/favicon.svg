@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Indexa">
+  <!-- Indexa mark: the Harf green apostrophe (#A4CD39) on an ink ground, built from the
+       design system's own apostrophe glyph (the apos-mask path). Ink #1A1B1D, a faint
+       hairline inset (#2A2B2D), rounded-rect so it sits natively in the macOS Dock. -->
+  <rect x="0" y="0" width="1024" height="1024" rx="133" ry="133" fill="#1A1B1D"/>
+  <rect x="6" y="6" width="1012" height="1012" rx="128" ry="128" fill="none" stroke="#2A2B2D" stroke-width="4"/>
+  <g transform="translate(370.7,276.5) scale(3.3263)">
+    <path d="M8.49,141.6l-0.27,-28.76c10.16-0.98,18.37-3.12,26.59-9.05,8.22-5.95,12.33-11.39,12.33-25.19h-47.14V0h84.96v64.06c-0.37,23.75-6.4,42.22-18.09,55.39-11.7,13.16-34.63,20.55-58.38,22.15Z" fill="#A4CD39"/>
+  </g>
+</svg>

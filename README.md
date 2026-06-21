@@ -1,4 +1,6 @@
-# Indexa
+<p align="center">
+  <img src="docs/assets/logo.svg" alt="Indexa" width="260">
+</p>
 
 <p align="center">
   <img src="docs/assets/rollup-tree.svg" alt="Indexa writes a summary for every file, composes those into a summary for every folder, and rolls them up the directory tree into one whole-project synthesis — every node queryable at three tiers: L0 one-line abstract, L1 full summary, L2 raw content." width="100%">

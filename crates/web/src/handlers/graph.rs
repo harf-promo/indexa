@@ -33,9 +33,9 @@ pub(crate) struct GraphQuery {
     /// Default 1 (direct callers + callees only).
     #[serde(default)]
     depth: Option<usize>,
-    /// Knowledge-graph layers to overlay on the call graph (comma-separated). Currently only
-    /// `"semantic"` (meaning-similarity edges between the displayed files). Omit ⇒ call graph
-    /// only, byte-identical to before. Read-only, derived at request time.
+    /// Knowledge-graph layers to overlay on the call graph (comma-separated): `"semantic"`
+    /// (meaning-similarity edges) and/or `"category"` (files sharing a classification category).
+    /// Omit ⇒ call graph only, byte-identical to before. Read-only, derived at request time.
     #[serde(default)]
     layers: Option<String>,
     /// Cosine threshold for `semantic` edges (default 0.78). Higher ⇒ fewer, tighter edges.
@@ -221,6 +221,38 @@ pub(crate) async fn api_graph(
                 }
             }
 
+            // Optional knowledge-graph overlay: "category" edges group files the user classified
+            // into the same category (a deterministic star per category — not an O(n²) clique).
+            // Same fresh-connection + fail-open discipline as the semantic layer.
+            let want_category = q
+                .layers
+                .as_deref()
+                .map(|l| l.split(',').any(|x| x.trim() == "category"))
+                .unwrap_or(false);
+            let mut category_edges = 0usize;
+            if want_category {
+                let node_paths: Vec<String> = nodes.iter().map(|n| n.path.clone()).collect();
+                let max_nodes = q.sim_max_nodes.unwrap_or(300);
+                let db = state.db_path.clone();
+                let cat = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                    let store = indexa_core::store::Store::open(&db)?;
+                    store.category_file_edges(&node_paths, max_nodes)
+                })
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("category task panicked: {e}")));
+                if let Ok(cat) = cat {
+                    category_edges = cat.len();
+                    for (from, to) in cat {
+                        edges.push(EdgeDto {
+                            from,
+                            to,
+                            weight: 1,
+                            tier: "category".to_owned(),
+                        });
+                    }
+                }
+            }
+
             Json(serde_json::json!({
                 "scope": scope,
                 "nodes": nodes,
@@ -233,8 +265,9 @@ pub(crate) async fn api_graph(
                 // bare count here means "filtered out", which the UI must not report
                 // as "all scope-resolved". Echo the flag so it can word it honestly.
                 "strict": strict,
-                // Knowledge-graph overlay (additive; 0 / absent layer ⇒ call graph only).
+                // Knowledge-graph overlays (additive; 0 / absent layer ⇒ call graph only).
                 "semantic_edges": semantic_edges,
+                "category_edges": category_edges,
             }))
             .into_response()
         }

@@ -21,6 +21,7 @@ use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
 mod ann;
+mod category_edges;
 mod chunks;
 mod classify;
 mod decisions;

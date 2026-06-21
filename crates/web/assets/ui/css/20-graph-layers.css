@@ -23,6 +23,25 @@
   border-top-color: var(--info);
 }
 
+/* Category edges: a neutral grey "grouping" tint (a longer dash, never a UI-state colour) —
+   distinct from blue semantic + accent call edges. Re-assert .hl/.dim at 3-class specificity. */
+.graph-edge.tier-category {
+  stroke: var(--rule-2);
+  stroke-dasharray: 6 4;
+  opacity: 0.5;
+}
+.graph-edge.tier-category.hl {
+  stroke: var(--ink-2);
+  opacity: 1;
+}
+.graph-edge.tier-category.dim {
+  opacity: 0.08;
+}
+.glegend-edge-category {
+  border-top-style: dashed;
+  border-top-color: var(--rule-2);
+}
+
 /* Toolbar toggle. */
 .graph-layer-toggle {
   display: inline-flex;
