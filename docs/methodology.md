@@ -375,6 +375,15 @@ mis-synthesize from good evidence (and the sources are always listed so you can 
 | **Cloud embeddings** | Requires API key, costs money | `[embedding] provider = "openai"` |
 | **Cloud LLM** | Requires API key | `[describer] provider = "anthropic"` |
 
+All four media paths — OCR (poppler + Tesseract), audio transcription (whisper-cli), video-frame
+extraction (ffmpeg), and image captioning (an Ollama vision model) — have happy-path end-to-end
+tests gated behind `--ignored` (`crates/parsers/tests/multimodal_live.rs`,
+`crates/llm/tests/caption_live.rs`); run them with the external tools installed to verify the
+integrations on real media. **Vision-model note:** the default caption model `gemma3:4b` (a Gemma-3
+vision-language model) loads on a stock Ollama; some Ollama builds reject `llama3.2-vision`
+("unknown model architecture: `mllama`") — set `[parsers.image] model = "moondream"` (or keep the
+default) if you hit that.
+
 ---
 
 ## Near-duplicate detection accuracy

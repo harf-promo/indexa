@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Happy-path multimodal e2e tests (the first real-media coverage).** Image captioning, PDF OCR,
+  audio transcription, and video-frame extraction were all wired and gracefully degrading, but only
+  their *error* paths were tested. New `--ignored`-gated tests exercise the REAL external tools on
+  committed fixtures — `crates/parsers/tests/multimodal_live.rs` (OCR via tesseract+poppler,
+  transcription via whisper-cli, frames via ffmpeg) and `crates/llm/tests/caption_live.rs` (vision
+  captioning via Ollama). They skip cleanly when a tool/model is absent, so plain `cargo test` and CI
+  stay green; run them with the tools installed to confirm the integrations end-to-end. All four
+  paths verified live on this release. **Vision-model note:** the default caption model `gemma3:4b`
+  loads on a stock Ollama; some Ollama builds can't load `llama3.2-vision` ("unknown model
+  architecture: `mllama`") — use `[parsers.image] model = "moondream"` (or the default) if so.
+
 - **MCP/CLI/web "retrieval-only" Ask + synthesis-model transparency.** When another tool calls the
   Indexa MCP `ask`, the answer is synthesized by Indexa's **local** model (e.g. `ollama/gemma3:12b`),
   never the caller's model — and most other tools (`search`/`get_summary`/`read_file`/`export_pack`/…)
