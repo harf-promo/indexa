@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.71.0] — 2026-06-21
+
 ### Added
 
 - **Brand identity: a real logo + app icon (was a placeholder).** Indexa now has a mark built from

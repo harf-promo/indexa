@@ -24,7 +24,21 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.70.0)
+## Current feature surface (v0.71.0)
+
+**Brand identity + knowledge-graph depth (v0.71):**
+- **First real logo + app icon** (was a placeholder). The mark is the design system's own signature —
+  the **green Harf apostrophe `#A4CD39` on an ink ground** — authored once as `crates/web/assets/ui/
+  favicon.svg` and used everywhere: browser favicon (`GET /favicon.svg`, was absent), the full desktop
+  app-icon set (regenerated via `tauri icon` → `icon.icns`/`.ico`/PNGs/Store logos, so the installed
+  macOS app/Dock/tray show it; `tauri.conf.json bundle.icon` already referenced them, tray reuses
+  `default_window_icon`), the web header (apostrophe mark + grey "indexa" wordmark, replacing the
+  generic `⊡`), and a README lockup (`docs/assets/logo.svg`).
+- **"Same category" knowledge-graph layer** (Track 3 follow-up, `GET /api/graph?layers=category`,
+  default-off) — files sharing a confirmed classification category, grouped via a deterministic star
+  per category (O(n), `Store::category_file_edges`, fresh-conn, fail-open, no schema). Joins the v0.70
+  "Related by meaning" semantic layer (`?layers=semantic,category`); dashed-grey grouping edges; no
+  `layers` ⇒ byte-identical. (Pack-super-node layer + one-command multimodal-enable remain follow-ups.)
 
 **Local-context engine, sharpened (v0.70):** a four-feature release driven by the owner's questions
 about how the MCP serves other AI sessions, plus the remaining roadmap tracks (full detail in
