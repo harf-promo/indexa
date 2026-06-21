@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Map "Communities" view — clustering + hubs + surprising connections (`?layers=communities`,
+  default-off).** The biggest knowledge-graph UX gap: an opt-in overlay that groups files into
+  communities via **Louvain** (greedy modularity, `Store::detect_communities` in
+  `crates/core/src/store/communities.rs` — deterministic, dependency-free; Louvain over plain label
+  propagation so two cliques joined by a weak link don't collapse into one "monster community"),
+  tints nodes by community (≤6 low-saturation HSL tints scoped to the SVG data layer; the tail merges
+  to neutral grey — green/teal/info stay reserved for UI state), surfaces each community's **hub**
+  (highest-PageRank file), and highlights **bridge edges** that cross communities ("surprising
+  connections"). Computed server-side over the *structural* call graph (overlay edges don't shift
+  membership), inline + fail-open; the legend lists clusters by hub with an honest "approximate"
+  caveat. Default-off ⇒ the plain graph is byte-identical. (Verified live: 5 clusters + 29 bridges
+  on Indexa's own index.)
+
 - **"Same pack" knowledge-graph layer (`GET /api/graph?layers=pack`, default-off).** The third Map
   overlay after v0.70 "Related by meaning" (semantic) and v0.71 "Same category": files the user put
   in the same Context Pack are linked via a deterministic **star per pack** (O(n), not an O(n²)

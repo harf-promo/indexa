@@ -1,0 +1,43 @@
+/* 21-graph-communities.css — the Map's "Communities" overlay (Track 3, v0.72).
+   Node community tints are set INLINE on the SVG circles (data-driven, see 29-graph-communities.js)
+   — no rule names them here. This file styles only the brand-safe chrome: hub emphasis (neutral),
+   bridge "surprising connection" edges (neutral high-contrast — distinct from blue semantic), and
+   the legend swatch. Green stays punctuation; teal/info stay UI state. */
+
+/* Hub of a community: a neutral high-contrast ring so it reads as "the lead file" without a new hue. */
+.graph-hub .graph-node-circle {
+  stroke: var(--rule-strong);
+  stroke-width: 2;
+}
+
+/* Bridge edge (cross-community "surprising connection"): solid, thicker, high-contrast ink — emphasis
+   by weight, not by another tier colour (semantic owns blue). Re-assert .hl/.dim at 3-class
+   specificity so highlight/dim still win. */
+.graph-edge.graph-edge-bridge {
+  stroke: var(--ink-1);
+  stroke-dasharray: none;
+  opacity: 0.75;
+}
+.graph-edge.graph-edge-bridge.hl {
+  opacity: 1;
+}
+.graph-edge.graph-edge-bridge.dim {
+  opacity: 0.1;
+}
+
+/* Legend rule for the bridge edge (matches the solid ink "surprising connection" treatment). */
+.glegend-edge-bridge {
+  border-top-style: solid;
+  border-top-width: 2px;
+  border-top-color: var(--ink-1);
+}
+
+/* Legend swatch for a community (its inline background is set by JS = the community tint). */
+.glegend-swatch-community {
+  display: inline-block;
+  width: 0.7em;
+  height: 0.7em;
+  border-radius: var(--r-0);
+  vertical-align: -0.05em;
+  margin-right: 4px;
+}

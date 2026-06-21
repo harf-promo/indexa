@@ -45,6 +45,33 @@ function renderGraphLegend(d) {
       '<span class="glegend-item"><span class="glegend-edge glegend-edge-pack" aria-hidden="true"></span>Grouped in a pack</span>'
     );
   }
+  // Communities overlay: one swatch per coloured cluster (capped — the rest render neutral grey),
+  // led by its hub file, plus a "surprising connection" key when bridges exist.
+  var communityCaveat = false;
+  if (d && d.communities && d.communities.length) {
+    var cap = (typeof COMMUNITY_COLOR_CAP === 'number') ? COMMUNITY_COLOR_CAP : 6;
+    d.communities.slice(0, cap).forEach(function (cm, i) {
+      var swatch = (typeof communityTint === 'function') ? communityTint(i) : '#939598';
+      var hub = String(cm.hub_path || '').split('/').pop() || cm.hub_path || '';
+      items.push(
+        '<span class="glegend-item"><span class="glegend-swatch-community" style="background:'
+        + swatch + '" aria-hidden="true"></span>Cluster led by ' + escapeHtml(hub)
+        + ' (' + cm.size + ')</span>'
+      );
+    });
+    if (d.communities.length > cap) {
+      items.push(
+        '<span class="glegend-item"><span class="glegend-swatch-community" style="background:#939598" aria-hidden="true"></span>'
+        + (d.communities.length - cap) + ' more (grey)</span>'
+      );
+    }
+    if (d.bridge_edges > 0) {
+      items.push(
+        '<span class="glegend-item"><span class="glegend-edge glegend-edge-bridge" aria-hidden="true"></span>Surprising connection (links two clusters)</span>'
+      );
+    }
+    communityCaveat = true;
+  }
   el.innerHTML = items.join('');
   var bare = (d && d.bare_edges) || 0;
   var caveat = '';
@@ -58,6 +85,12 @@ function renderGraphLegend(d) {
     c.className = 'glegend-caveat';
     c.textContent = caveat;
     el.appendChild(c);
+  }
+  if (communityCaveat) {
+    var cc = document.createElement('p');
+    cc.className = 'glegend-caveat';
+    cc.textContent = 'Clusters are an approximate grouping from the call graph — heuristic, not authoritative.';
+    el.appendChild(cc);
   }
 }
 
