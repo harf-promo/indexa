@@ -9,14 +9,14 @@ use axum::{
 };
 use indexa_core::config::RetrievalConfig;
 use indexa_core::store::{AnnIndex, Store};
-use indexa_query::{served_bytes, AnswerChunk, AnswerImpact, PriorTurn, QaConfig};
+use indexa_query::{AnswerChunk, AnswerImpact, PriorTurn, QaConfig};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::dto::{
-    err_json, AskConfidence, AskImpact, AskRequest, AskResponse, AskSource, ExplainHit,
-    ExplainResponse, ExplainStage,
+    err_json, AskConfidence, AskRequest, AskResponse, AskSource, ExplainHit, ExplainResponse,
+    ExplainStage,
 };
 use crate::AppState;
 
@@ -190,11 +190,10 @@ pub(crate) async fn api_ask(
     };
     match result {
         Ok(answer) => {
-            let impact = into_ask_impact(record_ask_usage(
-                &state.db_path,
-                &answer,
-                body.session_id.as_deref(),
-            ));
+            // Only surface the readout when it's a real win (cited files existed and serving was
+            // smaller) — never a misleading "0% saved" badge.
+            let impact = record_ask_usage(&state.db_path, &answer, body.session_id.as_deref())
+                .filter(AnswerImpact::is_meaningful);
             // Persist this turn (best-effort) and echo the session id back.
             if let Some(id) = body.session_id.as_deref() {
                 append_turn_best_effort(&state.db_path, id, &body.question, &answer);
@@ -212,14 +211,12 @@ pub(crate) async fn api_ask(
     }
 }
 
-/// Best-effort token-savings telemetry for both ask handlers — a recording
-/// failure must never fail (or delay-fail) the user's answer. Opens its own
-/// short-lived connection: the buffered handler never locked the shared store,
-/// and the stream task outlives the request scope.
 /// Record best-effort token-savings telemetry AND return the per-answer impact so the handler
 /// can surface it to the user. A recording failure must never fail (or delay-fail) the answer,
 /// so a store-open error just yields `None`. Opens its own short-lived connection (the buffered
-/// handler never locked the shared store; the stream task outlives the request scope).
+/// handler never locked the shared store; the stream task outlives the request scope), then
+/// delegates the shared accounting (served bytes + counterfactual + usage row, tagged with the
+/// conversation `session_id`) to `indexa_query::record_ask_impact`.
 fn record_ask_usage(
     db_path: &std::path::Path,
     answer: &indexa_query::Answer,
@@ -228,17 +225,9 @@ fn record_ask_usage(
     let mut s = Store::open(db_path)
         .map_err(|e| tracing::debug!("usage telemetry skipped: {e:#}"))
         .ok()?;
-    let paths: Vec<&str> = answer.sources.iter().map(|x| x.path.as_str()).collect();
-    let counterfactual = s.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
-    // Served = answer text + the citation lines actually delivered (shared `served_bytes`
-    // accounting with the CLI surface); counting less would inflate the savings.
-    let served = served_bytes(answer);
-    // Tag the row with the conversation session (when this ask is part of one) so the
-    // per-session savings ledger can sum it; stateless asks pass None.
-    if let Err(e) = s.record_tool_usage("web", "ask", served, counterfactual, session_id) {
-        tracing::debug!("usage telemetry skipped: {e:#}");
-    }
-    Some(AnswerImpact::new(served, counterfactual))
+    Some(indexa_query::record_ask_impact(
+        &mut s, "web", answer, session_id,
+    ))
 }
 
 /// How many recent turns of a conversation to fold into the prompt. Small by design —
@@ -307,18 +296,6 @@ fn append_turn_best_effort(
         }
         Err(e) => tracing::debug!("append_turn skipped: {e:#}"),
     }
-}
-
-/// Map an [`AnswerImpact`] to the wire DTO, but only when it's worth showing (cited files
-/// existed and serving was actually smaller) — never a misleading "0% saved" badge.
-fn into_ask_impact(impact: Option<AnswerImpact>) -> Option<AskImpact> {
-    impact
-        .filter(AnswerImpact::is_meaningful)
-        .map(|i| AskImpact {
-            served_bytes: i.served_bytes,
-            counterfactual_bytes: i.counterfactual_bytes,
-            saved_percent: i.saved_percent(),
-        })
 }
 
 /// `POST /api/ask/stream` — same pipeline as [`api_ask`] but server-sent events: one
@@ -397,8 +374,8 @@ pub(crate) async fn api_ask_stream(
 
         let terminal = match result {
             Ok(answer) => {
-                let impact =
-                    into_ask_impact(record_ask_usage(&db_path, &answer, session_id.as_deref()));
+                let impact = record_ask_usage(&db_path, &answer, session_id.as_deref())
+                    .filter(AnswerImpact::is_meaningful);
                 // Persist this turn (best-effort) and echo the session id on `done`.
                 if let Some(id) = session_id.as_deref() {
                     append_turn_best_effort(&db_path, id, &question, &answer);
@@ -420,7 +397,7 @@ pub(crate) async fn api_ask_stream(
                         serde_json::json!({
                             "served_bytes": i.served_bytes,
                             "counterfactual_bytes": i.counterfactual_bytes,
-                            "saved_percent": i.saved_percent,
+                            "saved_percent": i.saved_percent(),
                         }),
                     );
                 }

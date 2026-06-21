@@ -1,7 +1,10 @@
 //! Per-answer "impact": how much smaller the served context was than the cited source files —
 //! the concrete, per-query proof of Indexa's "retrieve the slice, don't pack the repo" pitch.
 
+use indexa_core::store::Store;
 use indexa_core::text::human_bytes;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 
 use crate::qa::Answer;
 
@@ -55,6 +58,50 @@ impl AnswerImpact {
             self.saved_percent(),
         )
     }
+}
+
+/// Serializes to the wire shape every `ask` surface already emits:
+/// `{ "served_bytes", "counterfactual_bytes", "saved_percent" }` — the two stored fields plus
+/// the computed `saved_percent()`. This is the single source of truth for the JSON, replacing
+/// the per-surface DTOs (CLI `ImpactJson`, web `AskImpact`) that hand-copied these three fields.
+/// Field order is fixed (served, counterfactual, saved_percent) to match the prior DTOs byte-for-byte.
+impl Serialize for AnswerImpact {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut st = serializer.serialize_struct("AnswerImpact", 3)?;
+        st.serialize_field("served_bytes", &self.served_bytes)?;
+        st.serialize_field("counterfactual_bytes", &self.counterfactual_bytes)?;
+        st.serialize_field("saved_percent", &self.saved_percent())?;
+        st.end()
+    }
+}
+
+/// Record best-effort token-savings telemetry for an `ask` and return its [`AnswerImpact`].
+///
+/// Collapses the identical "cited paths → counterfactual size → record usage → impact" block the
+/// CLI and web `ask` surfaces both ran: `served` = [`served_bytes`] (answer text + delivered
+/// citations), the counterfactual is the cited files' full size, and the row is tagged with
+/// `surface` (`"cli"`/`"web"`) and an optional conversation `session_id`. A recording failure is
+/// logged and swallowed — telemetry must never fail the answer. The caller owns the `Store` open
+/// (each surface opens it differently and decides how to handle an open failure).
+///
+/// The MCP `ask` tool intentionally does **not** use this: it records its own fully-rendered
+/// response length as `served` (a different, equally valid measure — see [`served_bytes`]).
+pub fn record_ask_impact(
+    store: &mut Store,
+    surface: &str,
+    answer: &Answer,
+    session_id: Option<&str>,
+) -> AnswerImpact {
+    let paths: Vec<&str> = answer.sources.iter().map(|s| s.path.as_str()).collect();
+    let counterfactual = store.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
+    let served = served_bytes(answer);
+    if let Err(e) = store.record_tool_usage(surface, "ask", served, counterfactual, session_id) {
+        tracing::debug!("usage telemetry skipped: {e:#}");
+    }
+    AnswerImpact::new(served, counterfactual)
 }
 
 /// Bytes an [`Answer`] delivered: the answer text plus each citation's path, heading, and
@@ -121,6 +168,17 @@ mod tests {
         assert!(line.contains("4.2 KB"), "served: {line}");
         assert!(line.contains("1.8 MB"), "counterfactual: {line}");
         assert!(line.contains("% less"), "percent: {line}");
+    }
+
+    #[test]
+    fn serializes_to_the_three_field_wire_shape() {
+        // Locks the JSON the CLI `AnswerJson` + web `AskResponse`/SSE `done` all emit — field
+        // order and the computed `saved_percent` must stay byte-identical to the old DTOs.
+        let json = serde_json::to_string(&AnswerImpact::new(10, 1000)).unwrap();
+        assert_eq!(
+            json,
+            r#"{"served_bytes":10,"counterfactual_bytes":1000,"saved_percent":99}"#
+        );
     }
 
     #[test]
