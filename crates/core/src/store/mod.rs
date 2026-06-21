@@ -29,6 +29,7 @@ mod dir_apps;
 mod edges;
 mod entries;
 mod insights;
+mod pack_edges;
 mod packs;
 mod pagerank;
 mod prune;

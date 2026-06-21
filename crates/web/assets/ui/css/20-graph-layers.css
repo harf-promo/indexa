@@ -42,6 +42,25 @@
   border-top-color: var(--rule-2);
 }
 
+/* Pack edges: files in the same Context Pack — exact user curation, so a confident teal-accent
+   dotted line (tighter dash than semantic's 1 3). Re-assert .hl/.dim at 3-class specificity. */
+.graph-edge.tier-pack {
+  stroke: var(--accent);
+  stroke-dasharray: 2 2;
+  opacity: 0.55;
+}
+.graph-edge.tier-pack.hl {
+  stroke: var(--positive-deep);
+  opacity: 1;
+}
+.graph-edge.tier-pack.dim {
+  opacity: 0.08;
+}
+.glegend-edge-pack {
+  border-top-style: dotted;
+  border-top-color: var(--accent);
+}
+
 /* Toolbar toggle. */
 .graph-layer-toggle {
   display: inline-flex;

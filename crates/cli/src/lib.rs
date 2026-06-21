@@ -736,6 +736,21 @@ pub enum Commands {
         latency: bool,
     },
 
+    /// Report (and optionally enable) the multimodal parsers — image captioning, PDF OCR,
+    /// audio transcription, video frames. Detects the external tools + a vision model and
+    /// shows which `[parsers.*]` flags to set.
+    #[command(after_help = "Examples:
+  indexa multimodal            # readiness report
+  indexa multimodal --enable   # turn on every ready feature, then re-index")]
+    #[command(display_order = 51)]
+    Multimodal {
+        /// Turn on the `[parsers.*]` flags for every feature whose tools are installed
+        /// (writes config.toml via the safe load→save path; refuses if it can't parse the
+        /// existing config). Re-index afterward to apply.
+        #[arg(long)]
+        enable: bool,
+    },
+
     /// Detect software and project types in the index by file-pattern signatures.
     ///
     /// Reports things like Rust crates, Node/Next.js apps, Docker Compose stacks, and

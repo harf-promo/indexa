@@ -34,8 +34,9 @@ pub(crate) struct GraphQuery {
     #[serde(default)]
     depth: Option<usize>,
     /// Knowledge-graph layers to overlay on the call graph (comma-separated): `"semantic"`
-    /// (meaning-similarity edges) and/or `"category"` (files sharing a classification category).
-    /// Omit ⇒ call graph only, byte-identical to before. Read-only, derived at request time.
+    /// (meaning-similarity edges), `"category"` (files sharing a classification category), and/or
+    /// `"pack"` (files in the same Context Pack). Omit ⇒ call graph only, byte-identical to before.
+    /// Read-only, derived at request time.
     #[serde(default)]
     layers: Option<String>,
     /// Cosine threshold for `semantic` edges (default 0.78). Higher ⇒ fewer, tighter edges.
@@ -253,6 +254,37 @@ pub(crate) async fn api_graph(
                 }
             }
 
+            // Optional knowledge-graph overlay: "pack" edges group files the user put in the same
+            // Context Pack (a deterministic star per pack). Exact (user curation), not heuristic.
+            let want_pack = q
+                .layers
+                .as_deref()
+                .map(|l| l.split(',').any(|x| x.trim() == "pack"))
+                .unwrap_or(false);
+            let mut pack_edges = 0usize;
+            if want_pack {
+                let node_paths: Vec<String> = nodes.iter().map(|n| n.path.clone()).collect();
+                let max_nodes = q.sim_max_nodes.unwrap_or(300);
+                let db = state.db_path.clone();
+                let pck = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                    let store = indexa_core::store::Store::open(&db)?;
+                    store.pack_file_edges(&node_paths, max_nodes)
+                })
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("pack task panicked: {e}")));
+                if let Ok(pck) = pck {
+                    pack_edges = pck.len();
+                    for (from, to) in pck {
+                        edges.push(EdgeDto {
+                            from,
+                            to,
+                            weight: 1,
+                            tier: "pack".to_owned(),
+                        });
+                    }
+                }
+            }
+
             Json(serde_json::json!({
                 "scope": scope,
                 "nodes": nodes,
@@ -268,6 +300,7 @@ pub(crate) async fn api_graph(
                 // Knowledge-graph overlays (additive; 0 / absent layer ⇒ call graph only).
                 "semantic_edges": semantic_edges,
                 "category_edges": category_edges,
+                "pack_edges": pack_edges,
             }))
             .into_response()
         }

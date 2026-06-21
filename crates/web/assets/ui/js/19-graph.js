@@ -67,6 +67,7 @@ function fetchGraph(scope, focus, depth) {
   var layers = [];
   if (graphState.semanticLayer) layers.push('semantic');
   if (graphState.categoryLayer) layers.push('category');
+  if (graphState.packLayer) layers.push('pack');
   if (layers.length) url += '&layers=' + layers.join(',');
   fetch(url)
     .then(function (r) { return r.json(); })
