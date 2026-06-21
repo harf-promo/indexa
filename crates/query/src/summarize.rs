@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use indexa_core::{
     config::{DescriberConfig, SummaryMode},
+    pathutil::path_depth,
     store::{dir_source_hash, file_source_hash, QueueItem, Store, SummaryRecord},
 };
 use indexa_embed::Embedder;
@@ -617,12 +618,6 @@ pub async fn process_queue_item_with_passes(
             Ok(QueueOutcome::Failed)
         }
     }
-}
-
-/// Path's `/`-or-`\`-separator count — the same depth metric the queue sorts on
-/// (deepest first), so re-pended ancestors roll up after their children.
-fn path_depth(path: &str) -> i64 {
-    path.chars().filter(|&c| c == '/' || c == '\\').count() as i64
 }
 
 /// Enqueue everything under `root` that needs (re-)summarization. Returns the

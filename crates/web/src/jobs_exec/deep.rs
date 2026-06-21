@@ -8,12 +8,11 @@ use crate::jobs::{broadcast_only, push, JobEvent, JobHandle};
 use crate::AppState;
 use indexa_core::{
     resource::WatchdogState,
-    store::{ChunkRecord, EdgeRecord},
+    store::{chunk_content_hash, ChunkRecord, EdgeRecord},
     walker::EntryKind,
 };
 use indexa_llm::{Describer, OllamaLlm};
 use indexa_query::contextual::{build_doc_context, contextual_embed_texts, ContextualEvent};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 /// Standalone deep: walks, deep-indexes, then finalises the job as done.
@@ -419,7 +418,7 @@ pub(crate) async fn run_deep_phase(
                 let chunk_hashes: Vec<String> = extracted
                     .chunks
                     .iter()
-                    .map(|c| format!("{:x}", Sha256::digest(c.text.as_bytes())))
+                    .map(|c| chunk_content_hash(&c.text))
                     .collect();
 
                 // Load cached embeddings for this file (hash → Vec<f32>). Fail-open.

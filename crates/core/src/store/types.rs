@@ -1,5 +1,16 @@
 //! Public record types returned and consumed by the `Store` API.
 
+use sha2::{Digest, Sha256};
+
+/// SHA-256 hex digest of a chunk's raw source text — the embedding cache key
+/// stored in [`ChunkRecord::content_hash`]. Hash the ORIGINAL chunk text (never
+/// the enriched contextual-retrieval blurb) so the cache stays valid across
+/// contextual runs on the same source. Must match what `cached_embeddings_by_hash`
+/// looks up, so every producer goes through this one function.
+pub fn chunk_content_hash(text: &str) -> String {
+    format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
 #[derive(Debug, Clone)]
 pub struct ChunkRecord {
     pub entry_path: String,

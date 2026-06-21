@@ -12,13 +12,13 @@ use axum::{
     Json,
 };
 use indexa_core::{
-    store::{ChunkRecord, Store},
+    pathutil::{ancestor_dirs_to_root, path_depth},
+    store::{chunk_content_hash, ChunkRecord, Store},
     walker::{Entry, EntryKind},
     watcher::{self, ChangeKind, WatcherConfig},
 };
 use serde::Serialize;
-use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{atomic::AtomicU64, atomic::Ordering, Arc};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -179,10 +179,7 @@ pub(crate) async fn api_watch_start(
                                     language: chunk.language.clone(),
                                     embedding,
                                     embed_model: Some(embed_model.clone()),
-                                    content_hash: Some(format!(
-                                        "{:x}",
-                                        Sha256::digest(chunk.text.as_bytes())
-                                    )),
+                                    content_hash: Some(chunk_content_hash(&chunk.text)),
                                 });
                             }
                             records
@@ -272,29 +269,4 @@ pub(crate) async fn api_watch_stop(
             format!("no active watch session for '{path}'"),
         )
     }
-}
-
-// ── Helpers (mirror of cmd_watch) ───────────────────────────────────────────
-
-fn path_depth(path: &str) -> i64 {
-    path.chars().filter(|&c| c == '/' || c == '\\').count() as i64
-}
-
-fn ancestor_dirs_to_root(path: &Path, roots: &[PathBuf]) -> Vec<PathBuf> {
-    let Some(root) = roots.iter().find(|r| path.starts_with(r)) else {
-        return Vec::new();
-    };
-    let mut dirs = Vec::new();
-    let mut cur = path.parent();
-    while let Some(d) = cur {
-        if !d.starts_with(root) {
-            break;
-        }
-        dirs.push(d.to_path_buf());
-        if d == root.as_path() {
-            break;
-        }
-        cur = d.parent();
-    }
-    dirs
 }

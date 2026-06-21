@@ -2,12 +2,11 @@ use anyhow::Result;
 use indexa_core::{
     config::{Config, SummaryMode},
     resource::{detect_machine, estimate_eta, format_duration_pub},
-    store::{ChunkRecord, EdgeRecord, Store},
+    store::{chunk_content_hash, ChunkRecord, EdgeRecord, Store},
     walker::{walk, WalkConfig},
 };
 use indexa_llm::OllamaLlm;
 use indexa_query::{contextual::ContextualEvent, enqueue_subtree};
-use sha2::{Digest, Sha256};
 use std::io::{IsTerminal, Write};
 
 use super::helpers::{
@@ -365,7 +364,7 @@ pub(crate) async fn cmd_deep(
             let chunk_hashes: Vec<String> = extracted
                 .chunks
                 .iter()
-                .map(|c| format!("{:x}", Sha256::digest(c.text.as_bytes())))
+                .map(|c| chunk_content_hash(&c.text))
                 .collect();
 
             // Resolve a per-chunk embedding vector (aligned to `extracted.chunks`).
