@@ -324,8 +324,8 @@ overlap  = 100
 [retrieval]
 hybrid = "rrf"
 rrf_k  = 60
-top_k  = 10
-rerank = false
+top_k  = 12
+rerank = true
 
 [resource]
 profile = "balanced"   # conservative | balanced | performance
