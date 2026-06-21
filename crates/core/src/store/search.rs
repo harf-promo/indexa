@@ -405,10 +405,17 @@ impl Store {
             .map(|(i, p)| (p.clone(), i))
             .collect();
 
-        // The subtree to scan: `parent_path` and everything under it. For the root
-        // case (`parent_path == ""`) the children are top-level roots that share no
-        // common ancestor, so we scan the whole table and let bucketing drop rows
-        // that fall under no child (e.g. a root's un-indexed FS parent never appears).
+        // The subtree to scan: `parent_path` and everything under it, expressed as a
+        // `LIKE` prefix (`"<parent>/%"`). For the root case (`parent_path == ""`) this
+        // is `like_prefix("/")` = `"/%"`, i.e. "every path beginning with `/`". On POSIX
+        // that IS the whole table (absolute paths all start with `/`), and bucketing then
+        // drops rows under no fetched child (e.g. a root's un-indexed FS parent). NOTE:
+        // this — like the `b'/'` boundary check in `bucket_of` and every other prefix-LIKE
+        // path query in the store — assumes `/`-separated stored paths. Windows native
+        // paths (`C:\proj\…`, stored verbatim) don't start with `/` and don't use `/`
+        // boundaries, so their subtree rollups under-count. Fixing that uniformly is a
+        // storage-layer concern (normalize separators at index time), not a per-query
+        // patch; tracked separately, not addressed here.
         let subtree_like = like_prefix(&format!("{parent_path}/"));
 
         // Resolve a subtree path `P` to the index of the child it belongs to (the
