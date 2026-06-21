@@ -50,6 +50,7 @@ fn qa_config_from(r: &RetrievalConfig, scope: Option<&str>, top_k: Option<usize>
         mmr_lambda: r.mmr_lambda,
         archive_segments: r.archive_segments.clone(),
         archive_penalty: r.archive_penalty,
+        broad_per_file_cap: r.broad_per_file_cap,
         scope: scope
             .map(str::trim)
             .filter(|s| !s.is_empty())

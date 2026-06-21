@@ -124,6 +124,12 @@ pub struct QaConfig {
     /// Multiplicative archive down-weighting factor (v0.29). `0.0` disables the penalty.
     /// Mirrors the `[retrieval] archive_penalty` config field.
     pub archive_penalty: f64,
+    /// GraphRAG-lite (v0.69): on a **broad, unscoped** question, cap how many chunks one file may
+    /// contribute to the retrieved pool before other files get their turn, so one chunk-dense
+    /// file can't monopolise the packed context. `0` (default) disables it entirely. Only applied
+    /// when `is_broad_intent(question)` AND `scope.is_none()` — focused and scoped asks are
+    /// untouched. Mirrors the `[retrieval] broad_per_file_cap` config field.
+    pub broad_per_file_cap: usize,
 }
 
 impl Default for QaConfig {
@@ -145,6 +151,7 @@ impl Default for QaConfig {
             mmr_lambda: 0.5,
             archive_segments: indexa_core::config::default_archive_segments(),
             archive_penalty: indexa_core::config::DEFAULT_ARCHIVE_PENALTY,
+            broad_per_file_cap: 0,
         }
     }
 }

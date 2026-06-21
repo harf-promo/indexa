@@ -1,7 +1,7 @@
 use super::agentic::parse_followup;
 use super::mmr::apply_mmr;
 use super::retrieve::{
-    apply_archive_penalty, apply_code_intent_boost, common_ancestor, is_code_intent,
+    apply_archive_penalty, apply_code_intent_boost, cap_per_file, common_ancestor, is_code_intent,
     path_is_historical, truncate_on_boundary,
 };
 use super::synthesize::{
@@ -1179,4 +1179,87 @@ fn mmr_without_embeddings_preserves_relevance_order() {
     assert_eq!(result[0].chunk_id, 1);
     assert_eq!(result[1].chunk_id, 2);
     assert_eq!(result[2].chunk_id, 3);
+}
+
+// ── GraphRAG-lite: cap_per_file (v0.69) ────────────────────────────────────────
+// Distinct chunk_id per hit so order/permutation are observable; path picks the file bucket.
+fn fh(chunk_id: i64, path: &str) -> SearchHit {
+    SearchHit {
+        chunk_id,
+        entry_path: path.to_owned(),
+        seq: 0,
+        heading: String::new(),
+        text: String::new(),
+        rrf_score: 0.0,
+    }
+}
+
+#[test]
+fn cap_per_file_identity_when_cap_zero() {
+    let hits = vec![fh(0, "/a"), fh(1, "/a"), fh(2, "/b")];
+    let out = cap_per_file(hits.clone(), 0);
+    let ids: Vec<i64> = out.iter().map(|h| h.chunk_id).collect();
+    assert_eq!(ids, vec![0, 1, 2], "cap=0 must return the input untouched");
+}
+
+#[test]
+fn cap_per_file_identity_when_pool_not_larger_than_cap() {
+    let hits = vec![fh(0, "/a"), fh(1, "/a")];
+    let out = cap_per_file(hits, 5);
+    let ids: Vec<i64> = out.iter().map(|h| h.chunk_id).collect();
+    assert_eq!(ids, vec![0, 1], "hits.len() <= cap is a no-op");
+}
+
+#[test]
+fn cap_per_file_front_is_file_diverse_tail_keeps_overflow() {
+    // [A0,A1,A2,B0,B1] cap=2 → front takes 2/file in first-appearance order [A0,A1,B0,B1],
+    // overflow appended (not dropped): [A0,A1,B0,B1,A2].
+    let hits = vec![
+        fh(0, "/a"),
+        fh(1, "/a"),
+        fh(2, "/a"),
+        fh(3, "/b"),
+        fh(4, "/b"),
+    ];
+    let ids: Vec<i64> = cap_per_file(hits, 2).iter().map(|h| h.chunk_id).collect();
+    assert_eq!(ids, vec![0, 1, 3, 4, 2]);
+}
+
+#[test]
+fn cap_per_file_preserves_within_file_order() {
+    // cap=1: front [A0,B0], overflow tail [A1,A2] in arrival order → A's chunks stay 0,1,2 ordered.
+    let hits = vec![fh(0, "/a"), fh(1, "/a"), fh(2, "/a"), fh(3, "/b")];
+    let out = cap_per_file(hits, 1);
+    let a_ids: Vec<i64> = out
+        .iter()
+        .filter(|h| h.entry_path == "/a")
+        .map(|h| h.chunk_id)
+        .collect();
+    assert_eq!(a_ids, vec![0, 1, 2], "within-file order must be preserved");
+}
+
+#[test]
+fn cap_per_file_is_a_permutation_never_drops_a_hit() {
+    // The safety lock: the output is a permutation of the input — same length, same multiset of
+    // chunk_ids — for any cap. A mis-fired guard can only reorder, never lose a hit.
+    for cap in [0usize, 1, 2, 3, 10] {
+        let hits = vec![
+            fh(0, "/a"),
+            fh(1, "/b"),
+            fh(2, "/a"),
+            fh(3, "/c"),
+            fh(4, "/a"),
+            fh(5, "/b"),
+        ];
+        let n = hits.len();
+        let out = cap_per_file(hits, cap);
+        assert_eq!(out.len(), n, "cap={cap}: length must be preserved");
+        let mut got: Vec<i64> = out.iter().map(|h| h.chunk_id).collect();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            vec![0, 1, 2, 3, 4, 5],
+            "cap={cap}: id multiset must be preserved"
+        );
+    }
 }

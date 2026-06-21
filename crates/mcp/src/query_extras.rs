@@ -94,6 +94,7 @@ impl IndexaMcp {
             mmr_lambda: self.config.retrieval.mmr_lambda,
             archive_segments: self.config.retrieval.archive_segments.clone(),
             archive_penalty: self.config.retrieval.archive_penalty,
+            broad_per_file_cap: self.config.retrieval.broad_per_file_cap,
         };
 
         let trace = indexa_query::explain_retrieval(

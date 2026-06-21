@@ -332,6 +332,13 @@ pub struct RetrievalConfig {
     /// segment (v0.29). The default `0.15` keeps such hits retrievable (and explicitly
     /// scopeable) while letting current docs outrank them; `0.0` disables the penalty.
     pub archive_penalty: f64,
+    /// GraphRAG-lite (v0.69): on a **broad, unscoped** question, the max chunks one file may
+    /// contribute to the retrieved pool before other files get a turn — so one chunk-dense file
+    /// can't monopolise the answer's context, giving thematic questions balanced multi-file
+    /// coverage. `0` (default) disables it. Only applied when the question reads as broad/thematic
+    /// AND no `scope` is set; focused and scoped `ask`s are unaffected. A small value (2–3) is
+    /// typical. The reorder never drops a hit — it just defers a file's overflow chunks.
+    pub broad_per_file_cap: usize,
 }
 
 /// Default historical/superseded path segments (the v0.29 built-in set). Matched
@@ -368,6 +375,7 @@ impl Default for RetrievalConfig {
             rerank_backend: "llm".to_string(),
             archive_segments: default_archive_segments(),
             archive_penalty: DEFAULT_ARCHIVE_PENALTY,
+            broad_per_file_cap: 0,
         }
     }
 }

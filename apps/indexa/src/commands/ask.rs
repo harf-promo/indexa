@@ -205,6 +205,7 @@ pub(crate) async fn cmd_ask(
         mmr_lambda: cfg.retrieval.mmr_lambda,
         archive_segments: cfg.retrieval.archive_segments.clone(),
         archive_penalty: cfg.retrieval.archive_penalty,
+        broad_per_file_cap: cfg.retrieval.broad_per_file_cap,
     };
 
     // `store` is no longer needed by the query path — the pipeline opens its own
