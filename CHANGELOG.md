@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.69.1] — 2026-06-21
+
+### Fixed
+
+- **Critical: v0.69.0 could not open an existing (pre-v0.69) index.** The per-session-ledger
+  migration (#293) created `idx_tool_usage_session ON tool_usage(session_id)` in the base schema
+  block, which runs before the `ALTER TABLE … ADD COLUMN session_id` migration. On any index built
+  by v0.68 or earlier — where `tool_usage` already exists without that column — opening it failed
+  with `no such column: session_id`, so every CLI/web/MCP command aborted. The index is now created
+  (idempotently) only after the column is guaranteed to exist, migrating older indexes in place.
+  Fresh-DB tests didn't catch it (a new in-memory DB gets the column from the base `CREATE TABLE`);
+  a regression test now opens a simulated pre-v0.69 index. **Upgrade straight to v0.69.1.**
+
 ## [0.69.0] — 2026-06-21
 
 ### Added
