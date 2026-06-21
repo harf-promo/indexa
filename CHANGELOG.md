@@ -23,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/methodology.md`). Adds `tree-sitter-c` + `tree-sitter-cpp` (MIT, bundled-C via `cc` like the
   other grammars — openssl-free preserved on host and aarch64-linux). (Track 2, retrieval intelligence.)
 
+### Fixed
+
+- **`POST /api/keys` no longer wipes your config when it can't be parsed.** The handler loaded the
+  config with `unwrap_or_default()`, so a present-but-unparseable `config.toml` silently became a
+  fresh default that was then saved back — clobbering every setting and any already-stored API keys
+  just to add one. It now refuses (HTTP 500) to overwrite an unparseable config, matching the other
+  config-writing endpoints; a missing config still loads as default, so first-time key entry works.
+
 ### Documentation
 
 - **Trued-up retrieval & parser docs that had drifted from the code.** `docs/config.md` now shows
