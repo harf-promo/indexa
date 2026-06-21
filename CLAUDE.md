@@ -24,7 +24,23 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.71.0)
+## Current feature surface (v0.72.0)
+
+**Knowledge-graph depth + multimodal reach (v0.72):** three pending follow-ups, all additive/default-off.
+- **Map "Communities" view** (`GET /api/graph?layers=communities`) — the biggest KG UX gap, now done:
+  **Louvain** clustering (`Store::detect_communities`, `crates/core/src/store/communities.rs` —
+  deterministic, dependency-free; Louvain not LPA so a bridge between two cliques doesn't collapse into
+  one "monster community") tints nodes by community (≤6 low-sat HSL tints, SVG data layer only — the one
+  sanctioned categorical-colour exception), surfaces each community's **hub** (highest-PageRank file), and
+  marks cross-community **bridge** edges ("surprising connections"). Computed over the structural call
+  graph (overlay edges don't shift membership), inline + fail-open; "approximate" caveat in the legend.
+- **"Same pack" graph layer** (`?layers=pack`) — completes the Map overlay set (semantic + category +
+  pack), star-per-pack (`Store::pack_file_edges`), exact (user curation). Combine: `?layers=semantic,category,pack,communities`.
+- **`indexa multimodal [--enable]`** — readiness report (detects tesseract/pdftoppm, ffmpeg, whisper-cli +
+  an Ollama vision model) + safe one-command enable of the `[parsers.*]` flags via `config::load`→`save`
+  (refuses to clobber an unparseable config; honors `--config`). Same report is a new `indexa doctor` section.
+
+**Brand identity + knowledge-graph depth (v0.71):**
 
 **Brand identity + knowledge-graph depth (v0.71):**
 - **First real logo + app icon** (was a placeholder). The mark is the design system's own signature —
