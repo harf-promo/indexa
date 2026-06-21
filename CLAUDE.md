@@ -24,7 +24,26 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.68.0)
+## Current feature surface (v0.69.0)
+
+**Hardening, perf & batching (v0.69):** a fixes + dedup + perf release bundling the post-0.68
+`[Unreleased]` work, much of it from a 12-agent Workflow audit (full detail in `CHANGELOG.md`):
+- **Added:** per-session savings ledger (`GET /api/session-impact/{id}`; migration-guarded
+  `session_id` on `tool_usage`) · **C and C++ in the code graph** (8 languages; +tree-sitter-c/-cpp,
+  openssl-free preserved) · **batched cloud embedding** (OpenAI array-`input` / Google
+  `:batchEmbedContents`) that **fails open** to sequential on any error/count/dim/index mismatch —
+  a batch can never misalign or lose a file's vectors (live speedup is `#[ignore]`-test-gated).
+- **Fixed:** `POST /api/keys` no longer wipes the config (+ stored keys) when `config.toml` fails to
+  parse · both `text.rs` chunker stride loops `.max(1)`-guarded against an infinite loop on a
+  degenerate `size`/`overlap` config · secret redaction preserves the original `:`/`=` separator so
+  a redacted YAML/TOML config stays valid.
+- **Dedup/perf (internal, behavior-neutral):** `indexa_core::pathutil` (`path_depth`/
+  `ancestor_dirs_to_root`) + `store::chunk_content_hash`; `AnswerImpact: Serialize` (one wire shape,
+  drops the per-surface DTOs); `helpers::now_unix`/`expand`/`base_name`; `jobs_exec::throughput_eta`;
+  `paths_for_ids` + `reconcile_entries` batched SQL.
+- **Docs trued up:** USAGE.md (MCP **46** tools, real `[retrieval]` defaults), `config.md`,
+  `methodology.md`. ⚠️ Audit findings need re-verification — ~10% were false positives/traps (caught
+  before merge; see `MEMORY.md` / `memory/project_lore.md`). NO new runtime deps; openssl-free.
 
 **Trust, design & retrieval (v0.68):** the eval-instrumentation + Harf-restyle release (full detail
 in `CHANGELOG.md`):
