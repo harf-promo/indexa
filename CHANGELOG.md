@@ -24,6 +24,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (no distinct themes) and answers match the flat baseline — so it ships **default-off and unpromoted**
   per the pre-registered rule (don't ship a weak proxy on). It's a real lever for corpora where a broad
   query spans genuinely distinct topics. A/B harness: `cargo test -p indexa-query graphrag_ab -- --ignored`.
+- **Knowledge-graph upgrade: a "Related by meaning" layer on the Map (Track 3, opt-in, default-off).**
+  The Map's force-directed graph linked files that *call* each other; a new toggle overlays
+  **semantic edges** between files with *similar content* — a topic relationship the call graph
+  can't see — turning the call graph into a navigable knowledge graph. Edges are derived at request
+  time from `chunks.embedding` (per-file centroid → pairwise cosine ≥ threshold; **no schema, no
+  persistence**, re-derivable). Backend: `Store::semantic_file_edges` (`crates/core/src/store/semantic_edges.rs`,
+  reusing the `search.rs` cosine/blob/scan helpers) + `GET /api/graph?layers=semantic` (`sim_threshold`
+  default 0.78, `sim_max_nodes` default 300 bounds the O(n²) pass), computed on a **fresh connection**
+  off the shared mutex and **fail-open** (an error leaves the call graph intact). Frontend: a "Related
+  by meaning" toolbar checkbox (`js/28-graph-layers.js` + `css/20-graph-layers.css`, info-blue dotted
+  edges, distinct from call tiers; a legend row shown only when semantic edges exist). **Default-off:**
+  no `layers` param ⇒ the response and render are byte-identical to the call-graph-only view. Category-
+  and pack-membership layers are a documented follow-up.
+
 - **Happy-path multimodal e2e tests (the first real-media coverage).** Image captioning, PDF OCR,
   audio transcription, and video-frame extraction were all wired and gracefully degrading, but only
   their *error* paths were tested. New `--ignored`-gated tests exercise the REAL external tools on

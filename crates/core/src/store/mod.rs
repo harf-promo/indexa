@@ -35,6 +35,7 @@ mod queue;
 mod saved;
 mod schema;
 mod search;
+mod semantic_edges;
 mod sessions;
 mod summaries;
 mod types;
