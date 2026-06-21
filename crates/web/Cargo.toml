@@ -27,7 +27,6 @@ indexa-llm = { path = "../llm" }
 indexa-parsers = { path = "../parsers" }
 indexa-query = { path = "../query" }
 indexa-update = { path = "../update" }
-sha2 = { workspace = true }
 
 [dev-dependencies]
 # `tower::ServiceExt::oneshot` drives the real router in integration tests.

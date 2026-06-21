@@ -2737,7 +2737,6 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "sha2",
  "tokio",
  "tokio-stream",
  "tower-http 0.5.2",
