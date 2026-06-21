@@ -314,6 +314,10 @@ Each node carries a **weighted PageRank** score, computed over the *displayed* g
 
 Centrality drives node **size** in the Map graph view and the ranked "most central files" list in `indexa graph` and the `code_graph` MCP tool. Since v0.25 most edges are scope-resolved, but bare-tier edges still contribute, so it remains an **approximate** importance signal — useful for "what should I read first," not an authoritative dependency analysis. It does **not** feed search/QA ranking (that remains RRF + summary/importance-weight boosts); wiring centrality into retrieval is a possible future extension.
 
+### Communities (v0.72, opt-in)
+
+The Map's optional "Communities" view groups files via **Louvain local-moving** (one level of greedy modularity maximization) over the *displayed* call graph, then surfaces each community's **hub** (its highest-PageRank file) and marks **bridge** edges that cross two communities ("surprising connections"). Louvain is used over plain label propagation because LPA floods a single label across a bridge into one "monster community" on small graphs, whereas modularity keeps two cliques joined by a weak link as two communities. It's **deterministic** (fixed node order, sorted-neighbour visiting, strict-improvement moves), pure/dependency-free, and runs only over the structural call edges (semantic/category/pack overlay edges don't change community membership). Like centrality, communities are an **approximate** grouping of what's shown — labelled as such in the UI — not an authoritative module decomposition; the layer is default-off and fails open to the plain graph.
+
 ---
 
 ## What "tokens saved" means

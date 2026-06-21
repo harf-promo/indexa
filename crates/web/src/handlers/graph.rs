@@ -34,9 +34,10 @@ pub(crate) struct GraphQuery {
     #[serde(default)]
     depth: Option<usize>,
     /// Knowledge-graph layers to overlay on the call graph (comma-separated): `"semantic"`
-    /// (meaning-similarity edges), `"category"` (files sharing a classification category), and/or
-    /// `"pack"` (files in the same Context Pack). Omit ⇒ call graph only, byte-identical to before.
-    /// Read-only, derived at request time.
+    /// (meaning-similarity edges), `"category"` (files sharing a classification category),
+    /// `"pack"` (files in the same Context Pack), and/or `"communities"` (Louvain clustering of the
+    /// call graph — colours nodes by community, surfaces hubs + bridge edges). Omit ⇒ call graph
+    /// only, byte-identical to before. Read-only, derived at request time.
     #[serde(default)]
     layers: Option<String>,
     /// Cosine threshold for `semantic` edges (default 0.78). Higher ⇒ fewer, tighter edges.
@@ -99,6 +100,10 @@ struct NodeDto {
     in_degree: usize,
     /// Weighted PageRank centrality over the displayed subgraph (sums to ~1.0).
     pagerank: f64,
+    /// Community id (Louvain over the displayed call graph) when the `communities` layer is on;
+    /// omitted otherwise ⇒ byte-identical default response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    community: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -110,6 +115,10 @@ struct EdgeDto {
     /// (approximate name-only match). Lets the Map render scoped vs bare edges
     /// distinctly and apply the bare-name caveat only where it belongs.
     tier: String,
+    /// `true` when this (structural) edge crosses two communities — a "surprising connection".
+    /// Set only when the `communities` layer is on; omitted (false) otherwise.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    bridge: bool,
 }
 
 fn basename(path: &str) -> String {
@@ -163,7 +172,7 @@ pub(crate) async fn api_graph(
                 apply_focus(&mut sg, &focus, depth);
             }
             let g = sg.graph;
-            let nodes: Vec<NodeDto> = g
+            let mut nodes: Vec<NodeDto> = g
                 .nodes
                 .into_iter()
                 .map(|n| NodeDto {
@@ -172,6 +181,7 @@ pub(crate) async fn api_graph(
                     out_degree: n.out_degree,
                     in_degree: n.in_degree,
                     pagerank: n.pagerank,
+                    community: None,
                 })
                 .collect();
             // edge_tiers is parallel to edges (same order, same length).
@@ -183,6 +193,7 @@ pub(crate) async fn api_graph(
                     from: e.from,
                     to: e.to,
                     weight: e.weight,
+                    bridge: false,
                     tier: tier.as_str().to_owned(),
                 })
                 .collect();
@@ -217,6 +228,7 @@ pub(crate) async fn api_graph(
                             to,
                             weight: (sim * 10.0).round().max(1.0) as usize,
                             tier: "semantic".to_owned(),
+                            bridge: false,
                         });
                     }
                 }
@@ -249,6 +261,7 @@ pub(crate) async fn api_graph(
                             to,
                             weight: 1,
                             tier: "category".to_owned(),
+                            bridge: false,
                         });
                     }
                 }
@@ -280,8 +293,85 @@ pub(crate) async fn api_graph(
                             to,
                             weight: 1,
                             tier: "pack".to_owned(),
+                            bridge: false,
                         });
                     }
+                }
+            }
+
+            // Optional "communities" overlay: Louvain over the displayed STRUCTURAL call graph
+            // (excluding the semantic/category/pack overlay edges, so community membership is
+            // stable regardless of which overlays are on). Surfaces a hub per community and marks
+            // cross-community "bridge" edges. Computed inline (≤2000 nodes ⇒ sub-ms); fail-open.
+            let want_communities = q
+                .layers
+                .as_deref()
+                .map(|l| l.split(',').any(|x| x.trim() == "communities"))
+                .unwrap_or(false);
+            let mut communities_json: Vec<serde_json::Value> = Vec::new();
+            let mut bridge_edges = 0usize;
+            if want_communities {
+                // Owned keys so the map doesn't borrow `nodes` (which we mutate below).
+                let idx: std::collections::HashMap<String, usize> = nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.path.clone(), i))
+                    .collect();
+                let is_overlay = |t: &str| matches!(t, "semantic" | "category" | "pack");
+                let call_pairs: Vec<(usize, usize)> = edges
+                    .iter()
+                    .filter(|e| !is_overlay(&e.tier))
+                    .filter_map(|e| Some((*idx.get(e.from.as_str())?, *idx.get(e.to.as_str())?)))
+                    .collect();
+                let labels = indexa_core::store::detect_communities(nodes.len(), &call_pairs);
+                if !labels.is_empty() {
+                    for (i, nd) in nodes.iter_mut().enumerate() {
+                        nd.community = Some(labels[i]);
+                    }
+                    // Mark structural bridge edges (cross-community "surprising connections").
+                    for e in edges.iter_mut() {
+                        if is_overlay(&e.tier) {
+                            continue;
+                        }
+                        if let (Some(&a), Some(&b)) =
+                            (idx.get(e.from.as_str()), idx.get(e.to.as_str()))
+                        {
+                            if labels[a] != labels[b] {
+                                e.bridge = true;
+                                bridge_edges += 1;
+                            }
+                        }
+                    }
+                    // Per-community hub (max PageRank, smallest-path tie-break) + size.
+                    let k = labels.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+                    let mut hub: Vec<Option<usize>> = vec![None; k];
+                    let mut size = vec![0usize; k];
+                    for (i, &c) in labels.iter().enumerate() {
+                        size[c] += 1;
+                        hub[c] = Some(match hub[c] {
+                            None => i,
+                            Some(h) => {
+                                let better = nodes[i].pagerank > nodes[h].pagerank
+                                    || (nodes[i].pagerank == nodes[h].pagerank
+                                        && nodes[i].path < nodes[h].path);
+                                if better {
+                                    i
+                                } else {
+                                    h
+                                }
+                            }
+                        });
+                    }
+                    let mut comms: Vec<(usize, String, usize)> = (0..k)
+                        .filter_map(|c| hub[c].map(|h| (c, nodes[h].path.clone(), size[c])))
+                        .collect();
+                    comms.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+                    communities_json = comms
+                        .into_iter()
+                        .map(|(id, hub_path, sz)| {
+                            serde_json::json!({ "id": id, "hub_path": hub_path, "size": sz })
+                        })
+                        .collect();
                 }
             }
 
@@ -301,6 +391,9 @@ pub(crate) async fn api_graph(
                 "semantic_edges": semantic_edges,
                 "category_edges": category_edges,
                 "pack_edges": pack_edges,
+                // Community detection (empty/0 unless the `communities` layer is on).
+                "communities": communities_json,
+                "bridge_edges": bridge_edges,
             }))
             .into_response()
         }

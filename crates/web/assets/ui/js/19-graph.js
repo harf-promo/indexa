@@ -88,6 +88,14 @@ function renderGraph(d) {
 
   var nodes = d.nodes || [];
   var edges = d.edges || [];
+  // Communities overlay (opt-in): tint by community + emphasize hubs. `communityTint` lives in
+  // 29-graph-communities.js (same bundle scope); guard for load order.
+  var communityCount = (d.communities || []).length;
+  var communityHubs = {};
+  var communityRank = {}; // community id → size rank (0 = largest); `communities` is size-sorted
+  (d.communities || []).forEach(function (c, i) { communityHubs[c.hub_path] = true; communityRank[c.id] = i; });
+  var tintFn = (graphState.communitiesLayer && typeof communityTint === 'function')
+    ? communityTint : null;
   if (nodes.length === 0) {
     if (meta) meta.textContent = '';
     var t = document.createElementNS(GRAPH_NS, 'text');
@@ -146,7 +154,7 @@ function renderGraph(d) {
     return o;
   });
   var links = edges.map(function (e) {
-    return { source: byId[e.from], target: byId[e.to], weight: e.weight, tier: e.tier || 'bare' };
+    return { source: byId[e.from], target: byId[e.to], weight: e.weight, tier: e.tier || 'bare', bridge: !!e.bridge };
   }).filter(function (l) { return l.source && l.target; });
 
   // Adjacency for hover highlighting.
@@ -172,15 +180,16 @@ function renderGraph(d) {
     ln.setAttribute('x2', l.target.x); ln.setAttribute('y2', l.target.y);
     // Tier styling: scoped edges (same-file/import/same-dir) are solid; bare
     // name-only matches render dashed + muted so "approximate" reads visually.
-    ln.setAttribute('class', 'graph-edge tier-' + l.tier);
+    ln.setAttribute('class', 'graph-edge tier-' + l.tier + (l.bridge ? ' graph-edge-bridge' : ''));
     ln.setAttribute('stroke-width', Math.max(0.5, Math.min(4, l.weight * 0.6)));
     gEdges.appendChild(ln);
     return { el: ln, link: l };
   });
 
   var nodeEls = layout.map(function (o) {
+    var isHub = tintFn && communityHubs[o.id];
     var g = document.createElementNS(GRAPH_NS, 'g');
-    g.setAttribute('class', 'graph-node');
+    g.setAttribute('class', 'graph-node' + (isHub ? ' graph-hub' : ''));
     g.setAttribute('transform', 'translate(' + o.x + ',' + o.y + ')');
     var c = document.createElementNS(GRAPH_NS, 'circle');
     c.setAttribute('r', o.r);
@@ -188,14 +197,19 @@ function renderGraph(d) {
     // Fade peripheral nodes; central hubs render solid (keeps a 0.45 floor so
     // even leaf nodes stay visible).
     c.setAttribute('fill-opacity', (0.45 + 0.55 * o.prNorm).toFixed(2));
+    // Communities overlay: tint the circle by community (data-viz layer only; off ⇒ the CSS
+    // --accent fill stands, byte-identical render).
+    if (tintFn && o.node.community != null) {
+      c.setAttribute('fill', tintFn(communityRank[o.node.community], communityCount));
+    }
     g.appendChild(c);
-    // Label only for higher-degree nodes (keeps it readable); always on hover.
+    // Label only for higher-degree nodes (keeps it readable); always on hover, and always for hubs.
     var lbl = document.createElementNS(GRAPH_NS, 'text');
     lbl.setAttribute('class', 'graph-node-label');
     lbl.setAttribute('x', o.r + 3);
     lbl.setAttribute('y', 3);
     lbl.textContent = o.label;
-    if ((o.node.in_degree + o.node.out_degree) < 4) lbl.style.display = 'none';
+    if (!isHub && (o.node.in_degree + o.node.out_degree) < 4) lbl.style.display = 'none';
     g.appendChild(lbl);
     gNodes.appendChild(g);
 

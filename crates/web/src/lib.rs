@@ -119,6 +119,7 @@ pub(crate) const UI_CSS: &str = concat!(
     include_str!("../assets/ui/css/17-legible.css"),
     include_str!("../assets/ui/css/18-graph-explore.css"),
     include_str!("../assets/ui/css/20-graph-layers.css"),
+    include_str!("../assets/ui/css/21-graph-communities.css"),
     include_str!("../assets/ui/css/19-conversation.css"),
 );
 pub(crate) const UI_JS: &str = concat!(
@@ -150,6 +151,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/26-url-state.js"),
     include_str!("../assets/ui/js/27-health.js"),
     include_str!("../assets/ui/js/28-graph-layers.js"),
+    include_str!("../assets/ui/js/29-graph-communities.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
