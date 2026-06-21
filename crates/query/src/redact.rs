@@ -38,9 +38,11 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
         // OpenAI-style secret keys (sk-... / sk-proj-...).
         mk("openai-key", r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{20,}\b"),
         // Generic `api_key = "…"` / `secret: '…'` / `token=…` assignments (value redacted).
+        // Group 1 = key name, group 2 = the separator (`: ` / ` = ` / `=`) so it's preserved in
+        // the output — redacting a YAML/TOML config keeps it syntactically intact.
         mk(
             "assignment",
-            r#"(?i)\b(api[_-]?key|secret|token|password|passwd|access[_-]?key)\b\s*[:=]\s*['"]?[A-Za-z0-9_\-./+]{12,}['"]?"#,
+            r#"(?i)\b(api[_-]?key|secret|token|password|passwd|access[_-]?key)\b(\s*[:=]\s*)['"]?[A-Za-z0-9_\-./+]{12,}['"]?"#,
         ),
     ]
 });
@@ -61,8 +63,11 @@ pub fn redact_secrets(input: &str) -> (String, usize) {
             for caps in p.re.captures_iter(&out) {
                 let whole = caps.get(0).unwrap();
                 let keyname = caps.get(1).map(|m| m.as_str()).unwrap_or("key");
+                // Preserve the original separator (`: ` / ` = ` / `=`) so a redacted config
+                // keeps its source syntax instead of being normalized to ` = `.
+                let sep = caps.get(2).map(|m| m.as_str()).unwrap_or(" = ");
                 replaced.push_str(&out[last..whole.start()]);
-                replaced.push_str(&format!("{keyname} = [REDACTED-secret]"));
+                replaced.push_str(&format!("{keyname}{sep}[REDACTED-secret]"));
                 last = whole.end();
                 count += 1;
             }
@@ -126,5 +131,19 @@ This sentence is ordinary documentation and must survive.";
             "got: {out}"
         );
         assert!(!out.contains("hunter2supersecretvalue"));
+    }
+
+    #[test]
+    fn assignment_preserves_the_original_separator() {
+        // Colon separator (YAML-style) stays a colon, not normalized to ` = `, so a redacted
+        // config keeps its source syntax. The secret value is still removed.
+        let (out, n) = redact_secrets("api_key: verylongsecretvalue123");
+        assert_eq!(n, 1);
+        assert_eq!(out, "api_key: [REDACTED-secret]", "got: {out}");
+        assert!(!out.contains("verylongsecretvalue123"));
+
+        // No-space `=` stays tight.
+        let (out2, _) = redact_secrets("token=verylongsecretvalue123");
+        assert_eq!(out2, "token=[REDACTED-secret]", "got: {out2}");
     }
 }
