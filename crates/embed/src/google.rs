@@ -102,6 +102,19 @@ struct EmbedValues {
     values: Vec<f32>,
 }
 
+/// Batch request for the `:batchEmbedContents` endpoint — an array of per-text requests.
+#[derive(Serialize)]
+struct BatchEmbedRequest {
+    requests: Vec<EmbedRequest>,
+}
+
+/// `:batchEmbedContents` returns one `embeddings` entry per request, **in request order**
+/// (the documented contract — there is no index field), so `out[i]` ↔ `texts[i]`.
+#[derive(Deserialize)]
+struct BatchEmbedResponse {
+    embeddings: Vec<EmbedValues>,
+}
+
 // ── Trait impl ────────────────────────────────────────────────────────────────
 
 #[async_trait::async_trait]
@@ -145,6 +158,79 @@ impl Embedder for GoogleEmbedder {
             .context("parsing Google embedContent response")?;
 
         Ok(parsed.embedding.values)
+    }
+
+    /// One `:batchEmbedContents` round-trip for the whole sub-batch (the deep-phase speedup).
+    /// Mirrors the Ollama/OpenAI adapters: any failure — network, non-2xx, parse, or a
+    /// count/dim mismatch — **falls open** to sequential [`embed`](Self::embed), so a batch
+    /// can never corrupt or drop a file's embeddings (worst case: no speedup). Relies on the
+    /// documented request-order response contract (`out[i]` ↔ `texts[i]`).
+    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let model_path = format!("models/{}", self.model);
+        let url = format!("{}/v1beta/{}:batchEmbedContents", self.base_url, model_path);
+        let body = BatchEmbedRequest {
+            requests: texts
+                .iter()
+                .map(|t| EmbedRequest {
+                    model: model_path.clone(),
+                    content: EmbedContent {
+                        parts: vec![EmbedPart {
+                            text: t.to_string(),
+                        }],
+                    },
+                })
+                .collect(),
+        };
+        let attempt: Result<Vec<Vec<f32>>> = async {
+            let resp = crate::send_with_retry(
+                || {
+                    self.client
+                        .post(&url)
+                        .header("x-goog-api-key", &self.api_key)
+                        .json(&body)
+                },
+                2,
+            )
+            .await
+            .context("Google batchEmbedContents request failed")?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Google batchEmbedContents returned {status}: {body}");
+            }
+            let parsed: BatchEmbedResponse = resp
+                .json()
+                .await
+                .context("parsing Google batchEmbedContents response")?;
+            if parsed.embeddings.len() != texts.len() {
+                anyhow::bail!(
+                    "Google batch returned {} embeddings for {} inputs",
+                    parsed.embeddings.len(),
+                    texts.len()
+                );
+            }
+            let out: Vec<Vec<f32>> = parsed.embeddings.into_iter().map(|e| e.values).collect();
+            if out.iter().any(|v| v.len() != self.dim) {
+                anyhow::bail!("Google batch returned a wrong-dimension vector");
+            }
+            Ok(out)
+        }
+        .await;
+
+        match attempt {
+            Ok(embeddings) => Ok(embeddings),
+            Err(e) => {
+                tracing::debug!("Google batch embed failed ({e:#}); falling back to sequential");
+                let mut out = Vec::with_capacity(texts.len());
+                for t in texts {
+                    out.push(self.embed(t).await?);
+                }
+                Ok(out)
+            }
+        }
     }
 
     fn dim(&self) -> usize {
@@ -193,5 +279,24 @@ mod tests {
         let e = GoogleEmbedder::from_env(DEFAULT_MODEL, DEFAULT_DIM).unwrap();
         let v = e.embed("hello world").await.unwrap();
         assert_eq!(v.len(), DEFAULT_DIM);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires GOOGLE_API_KEY env var and network access"]
+    async fn live_embed_batch_matches_sequential() {
+        // Confirms the batchEmbedContents request + request-order contract against the real API:
+        // each batched vector must equal the sequential embed of the same text, in order.
+        let e = GoogleEmbedder::from_env(DEFAULT_MODEL, DEFAULT_DIM).unwrap();
+        let texts = ["alpha one", "beta two", "gamma three"];
+        let batched = e.embed_batch(&texts).await.unwrap();
+        assert_eq!(batched.len(), 3);
+        for (i, t) in texts.iter().enumerate() {
+            assert_eq!(batched[i].len(), DEFAULT_DIM);
+            let seq = e.embed(t).await.unwrap();
+            assert_eq!(
+                batched[i], seq,
+                "batch[{i}] must match sequential embed of {t:?}"
+            );
+        }
     }
 }

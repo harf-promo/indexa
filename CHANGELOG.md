@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   C/C++ leans on the labeled bare-name fallback tier more than the others (documented in
   `docs/methodology.md`). Adds `tree-sitter-c` + `tree-sitter-cpp` (MIT, bundled-C via `cc` like the
   other grammars — openssl-free preserved on host and aarch64-linux). (Track 2, retrieval intelligence.)
+- **Batched cloud embedding (OpenAI / Google).** When `[embedding] provider` is `openai` or
+  `google`, the deep phase now embeds each ~64-chunk group in **one** request (OpenAI array `input`;
+  Google `:batchEmbedContents`) instead of one HTTP round-trip per chunk — a large speedup for cloud
+  embedding on big indexes (the local Ollama adapter already batched). Both **fall open**: any error,
+  count/dimension mismatch, or — for OpenAI — a response whose `index` fields don't realign cleanly
+  drops back to per-chunk embedding, so a batch can never misalign or lose a file's vectors. The
+  realignment logic is unit-tested; the live round-trip is covered by `#[ignore]`d API tests.
 
 ### Fixed
 
