@@ -723,17 +723,31 @@ impl Store {
 
     /// Resolve `(id, entry_path)` for chunk ids in order, skipping ids no longer present
     /// (an ANN node can outlive its chunk row between rebuilds — dropping it is safe).
+    ///
+    /// One batched `IN (…)` query instead of N `query_row`s; results are re-ordered back to the
+    /// input `ids` order in Rust (SQLite `IN` returns no ordering guarantee). Behaviour matches the
+    /// old per-id loop exactly — same paths, same order, missing ids skipped, duplicate input ids
+    /// preserved. `ids` is the ANN result set, bounded by the retrieval limit, so it stays well
+    /// under SQLite's variable cap.
     fn paths_for_ids(&self, ids: &[i64]) -> Result<Vec<(i64, String)>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT entry_path FROM chunks WHERE id = ?1")?;
-        let mut out = Vec::with_capacity(ids.len());
-        for &id in ids {
-            if let Ok(path) = stmt.query_row(params![id], |r| r.get::<_, String>(0)) {
-                out.push((id, path));
-            }
+        if ids.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(out)
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!("SELECT id, entry_path FROM chunks WHERE id IN ({placeholders})");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut by_id: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (id, path) = row?;
+            by_id.insert(id, path);
+        }
+        Ok(ids
+            .iter()
+            .filter_map(|&id| by_id.get(&id).map(|p| (id, p.clone())))
+            .collect())
     }
 
     /// All `(chunk_id, embedding)` pairs with an embedding — the input to building an
