@@ -55,8 +55,9 @@ impl TextParser {
             if end == words.len() {
                 break;
             }
-            // step forward with overlap
-            start += self.chunk_size.saturating_sub(self.overlap);
+            // step forward with overlap; .max(1) so a config with overlap >= chunk_size can't
+            // produce a zero stride and spin the loop forever (matches org.rs's guard).
+            start += self.chunk_size.saturating_sub(self.overlap).max(1);
         }
         chunks
     }
@@ -247,7 +248,9 @@ pub(crate) fn chunk_markdown(path: &Path, markdown: &str, chunk_size: usize) -> 
                 if end == words.len() {
                     break;
                 }
-                start += chunk_size.saturating_sub(100); // 100-word overlap
+                // saturating + .max(1) so a chunk_size <= 100 can't yield a zero stride and
+                // spin the loop forever (matches org.rs's guard).
+                start += chunk_size.saturating_sub(100).max(1); // 100-word overlap
             }
         }
     }
@@ -377,5 +380,38 @@ mod tests {
         let ex = MarkdownParser::default().parse(&p).unwrap();
         assert!(ex.chunks.iter().all(|c| c.heading != "frontmatter"));
         assert!(ex.chunks[0].heading.contains("Title"));
+    }
+
+    #[test]
+    fn text_parser_terminates_when_overlap_ge_chunk_size() {
+        // Degenerate config: overlap (5) >= chunk_size (3). Without the `.max(1)` stride guard
+        // the fixed-window loop would advance by 0 and spin forever. Must terminate with a
+        // bounded number of chunks over a multi-window input.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("degenerate.txt");
+        let text = (0..30)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        std::fs::write(&p, &text).unwrap();
+        let ex = TextParser::new(3, 5).parse(&p).unwrap();
+        assert!(!ex.chunks.is_empty());
+        assert!(ex.chunks.len() <= 30, "got {} chunks", ex.chunks.len());
+    }
+
+    #[test]
+    fn markdown_parser_terminates_when_chunk_size_le_overlap() {
+        // The per-section word-splitter uses a fixed 100-word overlap; a chunk_size <= 100 would
+        // give a zero stride without the `.max(1)` guard. Must terminate over a >chunk_size body.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("degenerate.md");
+        let body = (0..40)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        std::fs::write(&p, format!("# H\n\n{body}")).unwrap();
+        let ex = MarkdownParser::new(2).parse(&p).unwrap();
+        assert!(!ex.chunks.is_empty());
+        assert!(ex.chunks.len() <= 60, "got {} chunks", ex.chunks.len());
     }
 }

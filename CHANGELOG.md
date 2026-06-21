@@ -30,6 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fresh default that was then saved back — clobbering every setting and any already-stored API keys
   just to add one. It now refuses (HTTP 500) to overwrite an unparseable config, matching the other
   config-writing endpoints; a missing config still loads as default, so first-time key entry works.
+- **Chunkers can't hang on a degenerate config.** The text fixed-window loop (stride =
+  `chunk_size − overlap`) and the markdown per-section splitter (stride = `chunk_size − 100`) could
+  advance by zero — and spin forever — when `overlap >= chunk_size` or `chunk_size <= 100`. Both now
+  `.max(1)` the stride (a no-op at the default `size = 800` / `overlap = 100`), matching the existing
+  guard in the org-mode chunker. Regression tests added.
+- **Secret redaction preserves the assignment separator.** `redact_secrets` rewrote every
+  `key: value` / `key=value` to `key = [REDACTED-secret]`, normalizing the separator; redacting a
+  YAML/TOML config therefore broke its syntax. It now keeps the original separator
+  (`api_key: [REDACTED-secret]`, `token=[REDACTED-secret]`), so the redacted artifact stays
+  syntactically intact. The secret value is still fully removed.
 
 ### Documentation
 
