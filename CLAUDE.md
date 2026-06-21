@@ -24,7 +24,32 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.69.0)
+## Current feature surface (v0.70.0)
+
+**Local-context engine, sharpened (v0.70):** a four-feature release driven by the owner's questions
+about how the MCP serves other AI sessions, plus the remaining roadmap tracks (full detail in
+`CHANGELOG.md`):
+- **MCP/CLI/web "retrieval-only" Ask + model transparency** — when another tool calls the Indexa MCP
+  `ask`, the answer is synthesized by Indexa's **local** model (e.g. `ollama/gemma3:12b`), never the
+  caller's; most other tools are pure retrieval. New `synthesize:false` (MCP) / `--no-synthesize`
+  (CLI) / `"synthesize":false` (web) returns the **packed context slice** (full pipeline: hybrid +
+  boosts + rerank + MMR + per-file cap + overview + coverage) for a stronger caller to answer with its
+  own model; synthesized answers report which local model produced them (`Answer.model`). Optional
+  param ⇒ MCP **tool count stays 46**; single-shot path byte-identical.
+- **Multimodal verified end-to-end** — image captioning, PDF OCR, audio transcription, video frames
+  were wired but only error-tested; added `#[ignore]`-gated happy-path e2e (`crates/parsers/tests/
+  multimodal_live.rs`, `crates/llm/tests/caption_live.rs`) on committed `fixtures/multimodal/`, all
+  four verified live. Default caption model `gemma3:4b` works on a stock Ollama; some builds reject
+  `llama3.2-vision` (`mllama` arch) — use `moondream`/the default.
+- **GraphRAG "Approach C"** (`[retrieval] graphrag_clusters`, default-off) — groups a broad answer's
+  hits into `=== THEME … ===` clusters (greedy cosine over MMR's embeddings; optional per-cluster LLM
+  theme via `graphrag_summarize`). Off path byte-identical; single global `[1..N]` citations; fails
+  open. Live A/B on Indexa's cohesive corpus ≈ flat (collapses to ~1 cluster) → ships unpromoted, a
+  lever for topic-diverse corpora.
+- **Knowledge-graph upgrade** (Track 3, `GET /api/graph?layers=semantic`, default-off) — overlays
+  meaning-similarity edges (per-file centroid → cosine ≥ 0.78, `Store::semantic_file_edges`, fresh
+  conn, fail-open, no schema) on the Map's call graph with a "Related by meaning" toggle. No `layers`
+  ⇒ byte-identical.
 
 **Hardening, perf & batching (v0.69):** a fixes + dedup + perf release bundling the post-0.68
 `[Unreleased]` work, much of it from a 12-agent Workflow audit (full detail in `CHANGELOG.md`):
