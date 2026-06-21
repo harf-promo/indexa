@@ -339,6 +339,34 @@ pub struct RetrievalConfig {
     /// AND no `scope` is set; focused and scoped `ask`s are unaffected. A small value (2–3) is
     /// typical. The reorder never drops a hit — it just defers a file's overflow chunks.
     pub broad_per_file_cap: usize,
+    /// GraphRAG "Approach C" (v0.70): on a **broad, unscoped** question, group the retrieved hits
+    /// into semantic clusters and hand the synthesizer topic-grouped context (with `graphrag_summarize`,
+    /// a one-line theme per cluster) for a more coherent multi-faceted answer. `false` (default) ⇒
+    /// today's flat packing, byte-identical. Only applied when the question reads as broad/thematic
+    /// AND no `scope` is set. Restructures only the synthesis context — retrieval ranking is untouched.
+    #[serde(default)]
+    pub graphrag_clusters: bool,
+    /// Max clusters when `graphrag_clusters` is on (also caps the per-cluster summarization calls).
+    #[serde(default = "default_graphrag_max_clusters")]
+    pub graphrag_max_clusters: usize,
+    /// Cosine-similarity threshold for joining a hit to an existing cluster (`graphrag_clusters`).
+    #[serde(default = "default_graphrag_cluster_sim")]
+    pub graphrag_cluster_sim: f32,
+    /// When `graphrag_clusters` is on, also summarize each multi-member cluster into a one-line theme
+    /// with one extra local LLM call (≤ `graphrag_max_clusters` calls; fail-open). Separate sub-flag
+    /// so clustering can be used without the added latency. `false` by default.
+    #[serde(default)]
+    pub graphrag_summarize: bool,
+}
+
+/// Default cluster cap for [`RetrievalConfig::graphrag_max_clusters`].
+fn default_graphrag_max_clusters() -> usize {
+    4
+}
+
+/// Default cosine threshold for [`RetrievalConfig::graphrag_cluster_sim`].
+fn default_graphrag_cluster_sim() -> f32 {
+    0.55
 }
 
 /// Default historical/superseded path segments (the v0.29 built-in set). Matched
@@ -376,6 +404,10 @@ impl Default for RetrievalConfig {
             archive_segments: default_archive_segments(),
             archive_penalty: DEFAULT_ARCHIVE_PENALTY,
             broad_per_file_cap: 0,
+            graphrag_clusters: false,
+            graphrag_max_clusters: default_graphrag_max_clusters(),
+            graphrag_cluster_sim: default_graphrag_cluster_sim(),
+            graphrag_summarize: false,
         }
     }
 }

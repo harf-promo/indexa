@@ -146,6 +146,10 @@ recency_days         = 90     # recency window in days (files older than this st
 archive_segments     = ["archive", "archived", "historical", "deprecated", "old"]  # path segments treated as historical
 archive_penalty      = 0.15   # multiplicative down-weight for hits under an archive segment (0.0 disables it)
 broad_per_file_cap   = 0      # 0 = off. >0 caps chunks-per-file for BROAD, unscoped questions only
+graphrag_clusters    = false  # GraphRAG "Approach C": group a broad answer's hits into THEME clusters
+graphrag_max_clusters = 4     # max clusters (also caps the per-cluster summary calls)
+graphrag_cluster_sim = 0.55   # cosine threshold to join a hit to a cluster (higher = more clusters)
+graphrag_summarize   = false  # also add a one-line LLM theme per cluster (extra calls; fail-open)
 ```
 
 > `broad_per_file_cap` (v0.69+) only acts on broad/thematic, **unscoped** questions — focused and
@@ -153,6 +157,13 @@ broad_per_file_cap   = 0      # 0 = off. >0 caps chunks-per-file for BROAD, unsc
 > monopolising a broad answer's context by reordering so other files get a turn (it never drops a
 > hit — overflow just lands later in the budget). Leave it `0` unless broad answers on your corpus
 > are dominated by one large file; on a file-diverse corpus there's nothing to balance.
+>
+> `graphrag_clusters` (v0.70+) likewise only acts on broad, **unscoped** questions: it groups the
+> retrieved hits into semantic clusters and presents them under `=== THEME … ===` headers so the
+> model can structure a multi-faceted answer (`graphrag_summarize` adds a one-line theme per cluster).
+> The off path is byte-identical to flat packing and it fails open. Like the per-file cap it's a no-op
+> on a topically-cohesive corpus (the hits collapse into one cluster) — enable it when a broad query
+> on your files genuinely spans distinct topics.
 
 > The summary-boost (`summary_weight`) only takes effect for dense/RRF modes and is off (0.0) by default.
 

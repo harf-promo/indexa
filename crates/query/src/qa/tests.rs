@@ -1,11 +1,13 @@
 use super::agentic::parse_followup;
+use super::cluster::{cluster_hits, Cluster};
 use super::mmr::apply_mmr;
 use super::retrieve::{
     apply_archive_penalty, apply_code_intent_boost, cap_per_file, common_ancestor, is_code_intent,
     path_is_historical, truncate_on_boundary,
 };
 use super::synthesize::{
-    build_prompt, pack_context, render_history_block, split_history_budget, trim_continuation,
+    build_prompt, build_prompt_clustered, pack_context, pack_context_clustered,
+    render_history_block, split_history_budget, trim_continuation,
 };
 use super::PriorTurn;
 use super::*;
@@ -1314,5 +1316,283 @@ fn cap_per_file_is_a_permutation_never_drops_a_hit() {
             vec![0, 1, 2, 3, 4, 5],
             "cap={cap}: id multiset must be preserved"
         );
+    }
+}
+
+// ── GraphRAG Approach C: clustering (v0.70) ────────────────────────────────
+
+/// A hit with a chunk_id + body text (for the packing tests).
+fn fht(chunk_id: i64, path: &str, text: &str) -> SearchHit {
+    SearchHit {
+        chunk_id,
+        entry_path: path.to_owned(),
+        seq: 0,
+        heading: String::new(),
+        text: text.to_owned(),
+        rrf_score: 1.0,
+    }
+}
+
+/// Build an embedding map from (chunk_id, vector) pairs.
+fn emb(pairs: &[(i64, Vec<f32>)]) -> HashMap<i64, Vec<f32>> {
+    pairs.iter().cloned().collect()
+}
+
+/// Flatten clusters back to the chunk_id multiset (for permutation checks).
+fn cluster_ids_sorted(clusters: &[Cluster]) -> Vec<i64> {
+    let mut ids: Vec<i64> = clusters
+        .iter()
+        .flat_map(|c| c.members.iter().map(|h| h.chunk_id))
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+#[test]
+fn cluster_hits_noop_when_disabled_or_no_embeddings() {
+    let hits = vec![fht(0, "/a", "x"), fht(1, "/b", "y")];
+    let map = emb(&[(0, vec![1.0, 0.0]), (1, vec![0.0, 1.0])]);
+    // max_clusters <= 1 ⇒ single cluster of all hits, in order.
+    let out = cluster_hits(hits.clone(), &map, 0.5, 1);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].members.len(), 2);
+    // No embeddings ⇒ single cluster (fail-open).
+    let out2 = cluster_hits(hits, &HashMap::new(), 0.5, 4);
+    assert_eq!(out2.len(), 1);
+    assert_eq!(out2[0].members.len(), 2);
+}
+
+#[test]
+fn cluster_hits_groups_similar_and_separates_dissimilar() {
+    // Two near-identical vectors + one orthogonal one → the pair clusters, the odd one splits.
+    let hits = vec![
+        fht(0, "/auth.rs", "login"),
+        fht(1, "/auth2.rs", "session"),
+        fht(2, "/render.rs", "draw"),
+    ];
+    let map = emb(&[
+        (0, vec![1.0, 0.0]),
+        (1, vec![0.99, 0.01]), // ~parallel to 0
+        (2, vec![0.0, 1.0]),   // orthogonal
+    ]);
+    let out = cluster_hits(hits, &map, 0.8, 4);
+    assert_eq!(
+        out.len(),
+        2,
+        "one cluster for the pair, one for the odd hit"
+    );
+    // The pair (0,1) lands together.
+    let pair = out
+        .iter()
+        .find(|c| c.members.iter().any(|h| h.chunk_id == 0))
+        .unwrap();
+    assert!(pair.members.iter().any(|h| h.chunk_id == 1));
+}
+
+#[test]
+fn cluster_hits_respects_max_clusters() {
+    // Four mutually-dissimilar vectors but a cap of 2 ⇒ never more than 2 clusters (all have
+    // embeddings, so no extra ungrouped bucket); the 3rd/4th force-join the nearest.
+    let hits = vec![
+        fht(0, "/a", "a"),
+        fht(1, "/b", "b"),
+        fht(2, "/c", "c"),
+        fht(3, "/d", "d"),
+    ];
+    let map = emb(&[
+        (0, vec![1.0, 0.0, 0.0, 0.0]),
+        (1, vec![0.0, 1.0, 0.0, 0.0]),
+        (2, vec![0.0, 0.0, 1.0, 0.0]),
+        (3, vec![0.0, 0.0, 0.0, 1.0]),
+    ]);
+    let out = cluster_hits(hits, &map, 0.9, 2);
+    assert!(
+        out.len() <= 2,
+        "must not exceed max_clusters, got {}",
+        out.len()
+    );
+    assert_eq!(cluster_ids_sorted(&out), vec![0, 1, 2, 3], "no hit dropped");
+}
+
+#[test]
+fn cluster_hits_is_a_permutation_including_missing_embeddings() {
+    // The safety lock: for any threshold/cap, the flattened clusters preserve the full chunk_id
+    // multiset — even when some hits have no embedding (they land in a trailing bucket).
+    let make = || {
+        vec![
+            fht(0, "/a", "a"),
+            fht(1, "/b", "b"),
+            fht(2, "/c", "c"),
+            fht(3, "/d", "d"),
+            fht(4, "/e", "e"),
+        ]
+    };
+    // chunk 2 + 4 deliberately have NO embedding.
+    let map = emb(&[
+        (0, vec![1.0, 0.0]),
+        (1, vec![0.9, 0.1]),
+        (3, vec![0.0, 1.0]),
+    ]);
+    for &thresh in &[0.0f32, 0.5, 0.95] {
+        for &cap in &[2usize, 3, 8] {
+            let out = cluster_hits(make(), &map, thresh, cap);
+            assert_eq!(
+                cluster_ids_sorted(&out),
+                vec![0, 1, 2, 3, 4],
+                "thresh={thresh} cap={cap}: every hit must survive exactly once"
+            );
+        }
+    }
+}
+
+#[test]
+fn cluster_hits_is_deterministic() {
+    let hits = vec![fht(0, "/a", "a"), fht(1, "/b", "b"), fht(2, "/c", "c")];
+    let map = emb(&[
+        (0, vec![1.0, 0.0]),
+        (1, vec![0.0, 1.0]),
+        (2, vec![0.95, 0.05]),
+    ]);
+    let a = cluster_hits(hits.clone(), &map, 0.7, 4);
+    let b = cluster_hits(hits, &map, 0.7, 4);
+    let shape = |cs: &[Cluster]| {
+        cs.iter()
+            .map(|c| c.members.iter().map(|h| h.chunk_id).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(shape(&a), shape(&b), "same input ⇒ same cluster membership");
+}
+
+#[test]
+fn pack_context_clustered_equals_flat_when_no_clusters() {
+    // The off-path byte-identity guard: clustered packing with NO clusters must equal the flat
+    // pack_context exactly (both with and without an overview block).
+    let hits = vec![
+        fht(0, "/a.rs", "alpha body"),
+        fht(1, "/b.rs", "beta body"),
+        fht(2, "/c.rs", "gamma body"),
+    ];
+    for overview in ["", "PROJECT OVERVIEW\nroot: a thing\n"] {
+        let (flat, fsrc) = pack_context(&hits, overview, 8000);
+        let (clus, csrc) = pack_context_clustered(&hits, overview, &[], 8000);
+        assert_eq!(
+            flat, clus,
+            "no-cluster packing must be byte-identical to flat"
+        );
+        assert_eq!(fsrc.len(), csrc.len());
+    }
+}
+
+#[test]
+fn pack_context_clustered_numbers_globally_and_has_no_dangling_citations() {
+    // Two clusters → a single global [1..N] counter spanning them, theme headers present, and
+    // exactly one SourceCitation per emitted [N] (no dangling citation across clusters).
+    let clusters = vec![
+        Cluster {
+            members: vec![fht(0, "/a.rs", "alpha"), fht(1, "/b.rs", "beta")],
+            summary: Some("auth".to_owned()),
+        },
+        Cluster {
+            members: vec![fht(2, "/c.rs", "gamma")],
+            summary: None,
+        },
+    ];
+    let (ctx, sources) = pack_context_clustered(&[], "", &clusters, 8000);
+    assert!(ctx.contains("=== THEME: auth ==="), "named theme header");
+    assert!(
+        ctx.contains("=== THEME 2 ==="),
+        "fallback numbered theme header"
+    );
+    assert!(ctx.contains("[1] /a.rs") && ctx.contains("[2] /b.rs") && ctx.contains("[3] /c.rs"));
+    assert_eq!(
+        ctx.matches("] /").count(),
+        sources.len(),
+        "every numbered [N] must have a matching source — no dangling citations"
+    );
+    assert_eq!(sources.len(), 3);
+}
+
+#[test]
+fn build_prompt_clustered_off_is_byte_identical_on_adds_theme_line() {
+    let flat = build_prompt("q", "ctx", "");
+    let off = build_prompt_clustered("q", "ctx", "", false);
+    assert_eq!(
+        flat, off,
+        "clustered=false must be byte-identical to build_prompt"
+    );
+    let on = build_prompt_clustered("q", "ctx", "", true);
+    assert_ne!(on, off);
+    assert!(
+        on.contains("THEME"),
+        "clustered prompt mentions theme grouping"
+    );
+}
+
+/// Live A/B harness for GraphRAG "Approach C" (v0.70). `#[ignore]`d — needs a real Ollama + a
+/// populated index. Run it to compare three arms on broad questions and decide whether to
+/// *promote* clustering (it ships default-off regardless, per the pre-registered rule):
+///
+/// ```bash
+/// # uses the macOS default index unless INDEXA_TEST_INDEX_DB is set
+/// cargo test -p indexa-query graphrag_ab -- --ignored --nocapture
+/// ```
+///
+/// Arms: A = flat (today); B = clustering-only; C = clustering + per-cluster summaries. Decision
+/// rule (pre-registered): ship default-off no matter what; promote B only if clearly better than A
+/// with no groundedness regression; promote C only if it clearly beats B at acceptable latency.
+#[tokio::test]
+#[ignore = "live A/B; needs Ollama + a populated index; run with --ignored --nocapture"]
+async fn graphrag_ab_broad_questions() {
+    let db = std::env::var("INDEXA_TEST_INDEX_DB")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join("Library/Application Support/dev.indexa.Indexa/index.db")
+        });
+    if !db.exists() {
+        eprintln!("SKIP: no index at {db:?} (set INDEXA_TEST_INDEX_DB)");
+        return;
+    }
+    let url = "http://localhost:11434";
+    let embedder = indexa_embed::OllamaEmbedder::new(url, "nomic-embed-text", 768);
+    let llm = indexa_llm::OllamaLlm::new(url, "gemma3:4b"); // faster; grouping is model-independent
+
+    let mk = |clusters: bool, summarize: bool| QaConfig {
+        graphrag_clusters: clusters,
+        graphrag_summarize: summarize,
+        ..QaConfig::default()
+    };
+    let questions = [
+        "what is this project about",
+        "what are the main components of indexa",
+    ];
+
+    for q in questions {
+        eprintln!("\n========== QUESTION: {q} ==========");
+        // Slice structure: flat vs clustered (cheap; no synthesis).
+        for (name, clusters) in [("A flat", false), ("B clustered", true)] {
+            if let Ok(a) =
+                super::answer_retrieval_only(&db, &embedder, &llm, q, &mk(clusters, false), None)
+                    .await
+            {
+                eprintln!(
+                    "[{name} slice] {} sources, {} theme headers, {} chars",
+                    a.sources.len(),
+                    a.answer.matches("=== THEME").count(),
+                    a.answer.len()
+                );
+            }
+        }
+        // Synthesized answers for all three arms.
+        for (name, c, s) in [
+            ("A answer (flat)", false, false),
+            ("B answer (clustered)", true, false),
+            ("C answer (clustered+summary)", true, true),
+        ] {
+            match super::answer(&db, &embedder, &llm, q, &mk(c, s)).await {
+                Ok(a) => eprintln!("\n[{name}]\n{}\n", a.answer.trim()),
+                Err(e) => eprintln!("[{name}] ERR: {e:#}"),
+            }
+        }
     }
 }

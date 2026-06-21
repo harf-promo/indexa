@@ -57,6 +57,10 @@ pub(crate) async fn cmd_report(
         archive_segments: cfg.retrieval.archive_segments.clone(),
         archive_penalty: cfg.retrieval.archive_penalty,
         broad_per_file_cap: cfg.retrieval.broad_per_file_cap,
+        graphrag_clusters: cfg.retrieval.graphrag_clusters,
+        graphrag_max_clusters: cfg.retrieval.graphrag_max_clusters,
+        graphrag_cluster_sim: cfg.retrieval.graphrag_cluster_sim,
+        graphrag_summarize: cfg.retrieval.graphrag_summarize,
     };
 
     let mut answers: Vec<Answer> = Vec::with_capacity(qs.len());
