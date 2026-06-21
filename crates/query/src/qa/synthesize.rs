@@ -12,10 +12,15 @@ use indexa_llm::Generator;
 
 use crate::rerank::{apply_rerank, CandleReranker, LlmReranker};
 
+use super::cluster::{cluster_hits, cluster_theme_prompt, Cluster};
 use super::confidence::confidence_for;
 use super::retrieve::{build_project_overview, is_broad_intent, retrieve};
 use super::rewrite::resolve_search_query;
 use super::{Answer, AnswerChunk, PriorTurn, QaConfig, SourceCitation};
+
+/// Per-cluster member text budget (chars) fed into the theme-summary prompt. Keeps the optional
+/// `graphrag_summarize` LLM calls cheap and bounded regardless of how large the cluster's chunks are.
+const CLUSTER_SUMMARY_INPUT_BUDGET: usize = 1200;
 
 /// Fraction of the context budget a conversation-history block may consume before it
 /// starts crowding out retrieved chunks. The block is trimmed oldest-first to fit.
@@ -67,13 +72,13 @@ pub async fn answer_with_ann_history(
     ann: Option<&AnnIndex>,
     history: &[PriorTurn],
 ) -> Result<Answer> {
-    let (hits, overview) =
+    let (hits, overview, clusters) =
         retrieve_and_rerank(db_path, embedder, llm, question, cfg, ann, history).await?;
     if hits.is_empty() {
         return Ok(no_match_answer(question));
     }
-    // Synthesize (no store access).
-    synthesize_from_hits(hits, overview, llm, question, cfg, history).await
+    // Synthesize (no store access). `clusters` is empty unless GraphRAG clustering applied.
+    synthesize_from_hits_clustered(hits, overview, clusters, llm, question, cfg, history).await
 }
 
 /// Streaming variant of [`answer`]: identical retrieve → rerank → synthesize pipeline, but
@@ -121,7 +126,7 @@ pub async fn answer_stream_with_ann_history(
     history: &[PriorTurn],
     on_chunk: &mut (dyn FnMut(AnswerChunk) + Send),
 ) -> Result<Answer> {
-    let (hits, overview) =
+    let (hits, overview, mut clusters) =
         retrieve_and_rerank(db_path, embedder, llm, question, cfg, ann, history).await?;
     if hits.is_empty() {
         let ans = no_match_answer(question);
@@ -130,14 +135,18 @@ pub async fn answer_stream_with_ann_history(
         return Ok(ans);
     }
 
+    // Optional per-cluster theme summaries (graphrag_summarize) — bounded, fail-open.
+    maybe_summarize_clusters(&mut clusters, llm, cfg).await;
+
     // Confidence is a property of the retrieval pool, fixed before synthesis.
     let confidence = confidence_for(&hits, cfg, question);
     let (history_block, chunk_budget) = split_history_budget(history, cfg.context_budget);
-    let (context, sources) = pack_context(&hits, &overview, chunk_budget);
+    let clustered = !clusters.is_empty();
+    let (context, sources) = pack_context_clustered(&hits, &overview, &clusters, chunk_budget);
     // Citations up front so the UI can render them before the first token.
     on_chunk(AnswerChunk::Sources(sources.clone()));
 
-    let prompt = build_prompt(question, &context, &history_block);
+    let prompt = build_prompt_clustered(question, &context, &history_block, clustered);
     let mut full = String::new();
     {
         let mut on_frag = |frag: String| {
@@ -189,7 +198,7 @@ pub async fn answer_retrieval_only_history(
     ann: Option<&AnnIndex>,
     history: &[PriorTurn],
 ) -> Result<Answer> {
-    let (hits, overview) =
+    let (hits, overview, mut clusters) =
         retrieve_and_rerank(db_path, embedder, llm, question, cfg, ann, history).await?;
     if hits.is_empty() {
         // No grounding to return — reuse the canned guidance, flagged as not synthesized so the
@@ -198,11 +207,14 @@ pub async fn answer_retrieval_only_history(
         a.synthesized = false;
         return Ok(a);
     }
+    // The slice should match what a synthesizer would see, including GraphRAG theme grouping.
+    maybe_summarize_clusters(&mut clusters, llm, cfg).await;
     let confidence = confidence_for(&hits, cfg, question);
     // Pack the slice exactly as the synthesizer would (overview + numbered chunks). The
     // conversation-history block is deliberately omitted: a self-synthesizing caller has its
     // own history; what they want from Indexa is the retrieved evidence.
-    let (context, sources) = pack_context(&hits, &overview, cfg.context_budget);
+    let (context, sources) =
+        pack_context_clustered(&hits, &overview, &clusters, cfg.context_budget);
     Ok(Answer {
         question: question.to_owned(),
         answer: context,
@@ -214,10 +226,12 @@ pub async fn answer_retrieval_only_history(
 }
 
 /// Embed → retrieve → optional rerank + project overview, shared by [`answer`] and
-/// [`answer_stream`]. Returns `(hits, overview)`. Empty hits ⇒ callers short-circuit.
+/// [`answer_stream`]. Returns `(hits, overview, clusters)`. Empty hits ⇒ callers short-circuit.
 /// The `&Store` is confined to a sync scope and dropped before any `.await`, so the
 /// returned future is `Send`. The `overview` is a pre-budgeted PROJECT OVERVIEW string
-/// (empty when no dir summaries exist or for specific questions).
+/// (empty when no dir summaries exist or for specific questions). `clusters` is empty unless
+/// GraphRAG clustering applied (broad, unscoped question + `graphrag_clusters`); when non-empty
+/// it is a regrouping (permutation) of `hits` used by the clustered packing.
 #[allow(clippy::too_many_arguments)]
 async fn retrieve_and_rerank(
     db_path: &Path,
@@ -227,7 +241,7 @@ async fn retrieve_and_rerank(
     cfg: &QaConfig,
     ann: Option<&AnnIndex>,
     history: &[PriorTurn],
-) -> Result<(Vec<SearchHit>, String)> {
+) -> Result<(Vec<SearchHit>, String, Vec<Cluster>)> {
     // 0. Conversational: resolve the follow-up into a standalone search query (history-gated,
     //    one extra LLM call, fail-open). The ORIGINAL question still drives the overview and
     //    the synthesis prompt — only retrieval (embed + FTS) sees the rewritten query.
@@ -239,8 +253,14 @@ async fn retrieve_and_rerank(
         _ => Some(embedder.embed(&search_query).await?),
     };
 
+    // GraphRAG clustering is gated like the per-file cap: only broad, unscoped questions, and only
+    // when enabled. Focused/scoped asks are byte-identical to today (clusters stays empty).
+    let want_clusters = cfg.graphrag_clusters && cfg.scope.is_none() && is_broad_intent(question);
+
     // 2. Retrieve + build project overview in a sync scope — `&Store` never crosses an await.
-    let (hits, overview) = {
+    //    Also fetch the chunk embeddings here (same open connection) when clustering wants them;
+    //    rerank only reorders hits, never changes chunk_ids, so the map stays valid afterward.
+    let (hits, overview, emb_map) = {
         let store = Store::open(db_path)?;
         let hits = retrieve(&store, &search_query, query_vec.as_deref(), cfg, ann)?;
         // Compute project-overview block while the store is still open.
@@ -252,13 +272,19 @@ async fn retrieve_and_rerank(
             300
         };
         let overview = build_project_overview(&store, &hits, cfg.scope.as_deref(), overview_budget);
-        (hits, overview)
+        let emb_map = if want_clusters && hits.len() >= 2 {
+            let ids: Vec<i64> = hits.iter().map(|h| h.chunk_id).collect();
+            store.embeddings_for_chunks(&ids).unwrap_or_default()
+        } else {
+            std::collections::HashMap::new()
+        };
+        (hits, overview, emb_map)
     };
 
     // 2b. No matches: with zero grounding the LLM would hallucinate a confident answer, so
     //     callers short-circuit to a "run indexa deep first" message (do not rerank).
     if hits.is_empty() {
-        return Ok((Vec::new(), String::new()));
+        return Ok((Vec::new(), String::new(), Vec::new()));
     }
 
     // 3. Optional cross-encoder rerank (fails open). Reaches every surface
@@ -272,7 +298,51 @@ async fn retrieve_and_rerank(
     } else {
         hits
     };
-    Ok((hits, overview))
+
+    // 4. GraphRAG clustering (post-rerank, reusing the pre-fetched embeddings). Empty unless
+    //    enabled — fails open to a single cluster inside `cluster_hits`, which the packer renders
+    //    identically to the flat path. We keep the flat `hits` too (for confidence + the slice).
+    let clusters = if !emb_map.is_empty() {
+        cluster_hits(
+            hits.clone(),
+            &emb_map,
+            cfg.graphrag_cluster_sim,
+            cfg.graphrag_max_clusters,
+        )
+    } else {
+        Vec::new()
+    };
+    Ok((hits, overview, clusters))
+}
+
+/// Optionally fill each multi-member cluster's `summary` with a one-line theme via a bounded local
+/// LLM call (`graphrag_summarize`). No-op when summarization is off, there are no real clusters
+/// (≤1), or a cluster has a single member. **Fail-open**: a failed/empty summary just stays `None`
+/// (the cluster still renders, without a theme line).
+async fn maybe_summarize_clusters(clusters: &mut [Cluster], llm: &dyn Generator, cfg: &QaConfig) {
+    if !cfg.graphrag_summarize || clusters.len() < 2 {
+        return;
+    }
+    for cluster in clusters.iter_mut() {
+        if cluster.members.len() < 2 {
+            continue; // a lone chunk is its own theme; skip the call
+        }
+        let mut joined = String::new();
+        for m in &cluster.members {
+            if joined.len() >= CLUSTER_SUMMARY_INPUT_BUDGET {
+                break;
+            }
+            let take = CLUSTER_SUMMARY_INPUT_BUDGET - joined.len();
+            joined.push_str(&m.text.chars().take(take).collect::<String>());
+            joined.push('\n');
+        }
+        if let Ok(theme) = llm.generate(&cluster_theme_prompt(&joined)).await {
+            let theme = theme.trim();
+            if !theme.is_empty() && theme.len() <= 120 {
+                cluster.summary = Some(theme.to_owned());
+            }
+        }
+    }
 }
 
 /// The shared no-match answer (identical across CLI, web, MCP). Deliberately carries
@@ -292,7 +362,8 @@ pub(crate) fn no_match_answer(question: &str) -> Answer {
 
 /// Synthesise an answer from pre-retrieved hits (no store access). Internal helper for
 /// [`answer`]; kept separate so the `&Store` borrow in `answer` never crosses an `.await`.
-/// `overview` is the pre-budgeted PROJECT OVERVIEW string (may be empty).
+/// `overview` is the pre-budgeted PROJECT OVERVIEW string (may be empty). Delegates with no
+/// clusters → flat packing (used by the agentic path, which doesn't cluster).
 pub(crate) async fn synthesize_from_hits(
     hits: Vec<SearchHit>,
     overview: String,
@@ -301,12 +372,31 @@ pub(crate) async fn synthesize_from_hits(
     cfg: &QaConfig,
     history: &[PriorTurn],
 ) -> Result<Answer> {
+    synthesize_from_hits_clustered(hits, overview, Vec::new(), llm, question, cfg, history).await
+}
+
+/// [`synthesize_from_hits`] with GraphRAG clusters. When `clusters` is empty (the default and the
+/// off path) the packing + prompt are **byte-identical** to the flat path. When non-empty, the
+/// context is topic-grouped (with per-cluster theme summaries if `graphrag_summarize` ran).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn synthesize_from_hits_clustered(
+    hits: Vec<SearchHit>,
+    overview: String,
+    mut clusters: Vec<Cluster>,
+    llm: &dyn Generator,
+    question: &str,
+    cfg: &QaConfig,
+    history: &[PriorTurn],
+) -> Result<Answer> {
+    // Optional per-cluster theme summaries (graphrag_summarize) — bounded, fail-open, no-op when off.
+    maybe_summarize_clusters(&mut clusters, llm, cfg).await;
     // Confidence is a property of the retrieval pool, fixed before synthesis
     // (rerank only reorders; assess_confidence sorts scores internally).
     let confidence = confidence_for(&hits, cfg, question);
     let (history_block, chunk_budget) = split_history_budget(history, cfg.context_budget);
-    let (context, sources) = pack_context(&hits, &overview, chunk_budget);
-    let prompt = build_prompt(question, &context, &history_block);
+    let clustered = !clusters.is_empty();
+    let (context, sources) = pack_context_clustered(&hits, &overview, &clusters, chunk_budget);
+    let prompt = build_prompt_clustered(question, &context, &history_block, clustered);
     let answer_text = llm.generate(&prompt).await?;
     Ok(Answer {
         question: question.to_owned(),
@@ -344,6 +434,74 @@ pub(crate) fn pack_context(
     overview: &str,
     budget: usize,
 ) -> (String, Vec<SourceCitation>) {
+    // Flat packing (today's behavior) = the clustered packer with no clusters.
+    pack_context_clustered(hits, overview, &[], budget)
+}
+
+/// Emit one hit as a numbered `[n]` chunk into `context`/`sources`, honoring the char `budget`.
+/// `*n` is the 1-based citation counter (incremented here). Returns `false` when the budget was
+/// reached (the caller must stop emitting). Mirrors the original flat loop exactly so the
+/// no-cluster path stays byte-identical: a partially-fitting chunk keeps its full `[n]` header and
+/// gets a matching `SourceCitation` (no dangling citation); a chunk too small to fit even the
+/// header is skipped without a citation.
+fn push_hit(
+    context: &mut String,
+    sources: &mut Vec<SourceCitation>,
+    chars_used: &mut usize,
+    n: &mut usize,
+    hit: &SearchHit,
+    budget: usize,
+) -> bool {
+    *n += 1;
+    let header = if hit.heading.is_empty() {
+        format!("[{}] {}\n", *n, hit.entry_path)
+    } else {
+        format!("[{}] {} — {}\n", *n, hit.entry_path, hit.heading)
+    };
+    let chunk = format!("{}{}\n\n", header, hit.text);
+
+    if *chars_used + chunk.len() > budget {
+        let remaining = budget.saturating_sub(*chars_used);
+        if remaining > header.len() + 40 {
+            // Floor to a char boundary so we never slice mid-codepoint (a raw byte
+            // offset panics on multibyte content: accents, CJK, emoji, em-dashes).
+            let safe_end = indexa_core::text::floor_char_boundary(&chunk, remaining);
+            context.push_str(&chunk[..safe_end]);
+            // Signal to the synthesizer that this chunk was cut to fit the budget, so it
+            // doesn't treat the partial text as the whole file.
+            context.push_str("\n…[chunk truncated to fit the context budget]\n\n");
+            // The truncated chunk keeps its full `[N]` header, so the model can still cite it —
+            // push a matching SourceCitation so `sources` always covers the highest [N] in the
+            // context and no citation dangles. Also keeps impact's served-bytes accounting honest.
+            sources.push(SourceCitation {
+                path: hit.entry_path.clone(),
+                heading: hit.heading.clone(),
+                snippet: hit.text.chars().take(120).collect::<String>() + "...",
+            });
+        }
+        return false;
+    }
+    *chars_used += chunk.len();
+    context.push_str(&chunk);
+    sources.push(SourceCitation {
+        path: hit.entry_path.clone(),
+        heading: hit.heading.clone(),
+        snippet: hit.text.chars().take(120).collect::<String>() + "...",
+    });
+    true
+}
+
+/// Pack retrieved context for the synthesis prompt. When `clusters` is empty this is **byte-for-byte
+/// identical** to the legacy flat packing (overview block + numbered `[1..N]` chunks in `hits`
+/// order). When non-empty (GraphRAG Approach C), the chunks are grouped under `=== THEME … ===`
+/// headers (background, not cited) with a single GLOBAL `[1..N]` counter spanning all clusters, so
+/// citations and `sources` stay 1:1 and the dangling-citation invariant holds across clusters.
+pub(crate) fn pack_context_clustered(
+    hits: &[SearchHit],
+    overview: &str,
+    clusters: &[Cluster],
+    budget: usize,
+) -> (String, Vec<SourceCitation>) {
     let mut context = String::new();
     let mut sources = Vec::new();
 
@@ -357,47 +515,49 @@ pub(crate) fn pack_context(
         context.push('\n');
     }
 
-    // Remaining budget for chunk citations.
     let mut chars_used = context.len();
+    let mut n = 0usize; // global 1-based citation counter
 
-    for (i, hit) in hits.iter().enumerate() {
-        let header = if hit.heading.is_empty() {
-            format!("[{}] {}\n", i + 1, hit.entry_path)
-        } else {
-            format!("[{}] {} — {}\n", i + 1, hit.entry_path, hit.heading)
-        };
-        let chunk = format!("{}{}\n\n", header, hit.text);
-
-        if chars_used + chunk.len() > budget {
-            let remaining = budget.saturating_sub(chars_used);
-            if remaining > header.len() + 40 {
-                // Floor to a char boundary so we never slice mid-codepoint (a raw byte
-                // offset panics on multibyte content: accents, CJK, emoji, em-dashes).
-                let safe_end = indexa_core::text::floor_char_boundary(&chunk, remaining);
-                context.push_str(&chunk[..safe_end]);
-                // Signal to the synthesizer that this chunk was cut to fit the budget, so it
-                // doesn't treat the partial text as the whole file.
-                context.push_str("\n…[chunk truncated to fit the context budget]\n\n");
-                // The truncated chunk keeps its full `[N]` header, so the model can still
-                // cite it — push a matching SourceCitation (mirroring the full-chunk path
-                // below) so `sources` always covers the highest [N] in the context and no
-                // citation dangles. Also keeps impact's served-bytes accounting honest.
-                sources.push(SourceCitation {
-                    path: hit.entry_path.clone(),
-                    heading: hit.heading.clone(),
-                    snippet: hit.text.chars().take(120).collect::<String>() + "...",
-                });
+    if clusters.is_empty() {
+        // Flat path (byte-identical to the original).
+        for hit in hits {
+            if !push_hit(
+                &mut context,
+                &mut sources,
+                &mut chars_used,
+                &mut n,
+                hit,
+                budget,
+            ) {
+                break;
             }
-            break;
         }
-        chars_used += chunk.len();
-        context.push_str(&chunk);
-
-        sources.push(SourceCitation {
-            path: hit.entry_path.clone(),
-            heading: hit.heading.clone(),
-            snippet: hit.text.chars().take(120).collect::<String>() + "...",
-        });
+    } else {
+        // Clustered path: a theme header (background) precedes each cluster's members.
+        'outer: for (ci, cluster) in clusters.iter().enumerate() {
+            let header = match &cluster.summary {
+                Some(s) => format!("=== THEME: {s} ===\n"),
+                None => format!("=== THEME {} ===\n", ci + 1),
+            };
+            // Stop if even the header can't fit (no room for any more content).
+            if chars_used + header.len() + 40 > budget {
+                break;
+            }
+            context.push_str(&header);
+            chars_used += header.len();
+            for hit in &cluster.members {
+                if !push_hit(
+                    &mut context,
+                    &mut sources,
+                    &mut chars_used,
+                    &mut n,
+                    hit,
+                    budget,
+                ) {
+                    break 'outer;
+                }
+            }
+        }
     }
 
     (context, sources)
@@ -457,11 +617,32 @@ pub(crate) fn render_history_block(history: &[PriorTurn], budget: usize) -> Stri
 
 /// `history_block` is the pre-rendered, budget-clamped `CONVERSATION SO FAR` text (empty
 /// for a single-shot Ask). It is inserted before CONTEXT and is background, not citable.
+/// Delegates to [`build_prompt_clustered`] with `clustered = false` (the flat path).
 pub(crate) fn build_prompt(question: &str, context: &str, history_block: &str) -> String {
+    build_prompt_clustered(question, context, history_block, false)
+}
+
+/// [`build_prompt`] with an optional GraphRAG theme guidance line. When `clustered = false` the
+/// output is **byte-identical** to the legacy prompt; when `true`, one extra sentence tells the
+/// model the context is grouped into `=== THEME … ===` sections so it can structure a multi-faceted
+/// answer (the theme lines are background — claims are still cited by `[number]`).
+pub(crate) fn build_prompt_clustered(
+    question: &str,
+    context: &str,
+    history_block: &str,
+    clustered: bool,
+) -> String {
     let convo = if history_block.is_empty() {
         String::new()
     } else {
         format!("{history_block}\n")
+    };
+    let theme_line = if clustered {
+        "The CONTEXT is grouped into \"=== THEME … ===\" sections, each a cluster of related \
+         excerpts (the theme line is background, not citable). Use the themes to structure a \
+         coherent, multi-faceted answer, and still cite specific claims by their [number].\n"
+    } else {
+        ""
     };
     format!(
         "You are a helpful assistant that answers questions about a user's files.\n\
@@ -470,6 +651,7 @@ pub(crate) fn build_prompt(question: &str, context: &str, history_block: &str) -
          the question is broad (e.g. \"what is this project about\", \"main themes\"). For specific \
          claims, cite the numbered excerpts by their [number]; the overview itself is background and \
          is not numbered.\n\
+         {theme_line}\
          A CONVERSATION SO FAR block may also appear: it is the earlier turns of this chat, for \
          resolving references like \"it\"/\"that\". Treat it as background only — never cite it, and \
          answer the latest QUESTION.\n\

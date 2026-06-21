@@ -374,6 +374,10 @@ impl IndexaMcp {
             archive_segments: self.config.retrieval.archive_segments.clone(),
             archive_penalty: self.config.retrieval.archive_penalty,
             broad_per_file_cap: self.config.retrieval.broad_per_file_cap,
+            graphrag_clusters: self.config.retrieval.graphrag_clusters,
+            graphrag_max_clusters: self.config.retrieval.graphrag_max_clusters,
+            graphrag_cluster_sim: self.config.retrieval.graphrag_cluster_sim,
+            graphrag_summarize: self.config.retrieval.graphrag_summarize,
         };
 
         // Conversational Ask: when a session id is given, load its recent turns (fail-open;

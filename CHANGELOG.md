@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **GraphRAG "Approach C" — topic-clustered synthesis context (`[retrieval] graphrag_clusters`,
+  opt-in, default-off).** On a **broad, unscoped** question, the retrieved hits are grouped into a
+  few semantic clusters (greedy cosine-threshold agglomeration over the chunk embeddings MMR already
+  fetches — no extra DB cost) and the synthesis prompt presents them under `=== THEME … ===` headers,
+  so the model can structure a coherent multi-faceted answer. A second sub-flag `graphrag_summarize`
+  adds a one-line LLM theme per cluster (≤ `graphrag_max_clusters` extra calls, fail-open). Tunables:
+  `graphrag_max_clusters` (4), `graphrag_cluster_sim` (0.55). **Safety:** the clustered packing is a
+  pure regrouping — citations keep a single global `[1..N]` counter (no dangling citation), the
+  off/no-cluster path is **byte-identical** to today (asserted by tests), and clustering **fails open**
+  to flat packing. Retrieval ranking is untouched, so the hermetic `indexa eval` is unaffected.
+  **Honest A/B (live, Ollama, on Indexa's own index):** like the per-file cap, broad-question hit
+  pools here are already topically cohesive, so at the default threshold they collapse into ~1 cluster
+  (no distinct themes) and answers match the flat baseline — so it ships **default-off and unpromoted**
+  per the pre-registered rule (don't ship a weak proxy on). It's a real lever for corpora where a broad
+  query spans genuinely distinct topics. A/B harness: `cargo test -p indexa-query graphrag_ab -- --ignored`.
 - **Happy-path multimodal e2e tests (the first real-media coverage).** Image captioning, PDF OCR,
   audio transcription, and video-frame extraction were all wired and gracefully degrading, but only
   their *error* paths were tested. New `--ignored`-gated tests exercise the REAL external tools on

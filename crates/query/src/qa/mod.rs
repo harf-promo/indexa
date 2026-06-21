@@ -17,6 +17,7 @@
 use indexa_core::config::HybridMode;
 
 mod agentic;
+mod cluster;
 mod confidence;
 mod explain;
 mod mmr;
@@ -141,6 +142,22 @@ pub struct QaConfig {
     /// when `is_broad_intent(question)` AND `scope.is_none()` — focused and scoped asks are
     /// untouched. Mirrors the `[retrieval] broad_per_file_cap` config field.
     pub broad_per_file_cap: usize,
+    /// GraphRAG "Approach C" (v0.70): on a **broad, unscoped** question, group the retrieved hits
+    /// into semantic clusters and present topic-grouped context to the synthesizer. `false`
+    /// (default) ⇒ today's flat packing, byte-identical. Only applied when `is_broad_intent` AND
+    /// `scope.is_none()`. Mirrors `[retrieval] graphrag_clusters`.
+    pub graphrag_clusters: bool,
+    /// Max clusters when `graphrag_clusters` is on (also caps the per-cluster summarization calls).
+    /// Mirrors `[retrieval] graphrag_max_clusters`.
+    pub graphrag_max_clusters: usize,
+    /// Cosine-similarity threshold for joining a hit to an existing cluster (`graphrag_clusters`).
+    /// Mirrors `[retrieval] graphrag_cluster_sim`.
+    pub graphrag_cluster_sim: f32,
+    /// When `graphrag_clusters` is on, also summarize each multi-member cluster into a one-line
+    /// theme with one extra local LLM call (≤ `graphrag_max_clusters` calls; fail-open). Separate
+    /// sub-flag so clustering can be used without the added latency. Mirrors
+    /// `[retrieval] graphrag_summarize`.
+    pub graphrag_summarize: bool,
 }
 
 impl Default for QaConfig {
@@ -163,6 +180,10 @@ impl Default for QaConfig {
             archive_segments: indexa_core::config::default_archive_segments(),
             archive_penalty: indexa_core::config::DEFAULT_ARCHIVE_PENALTY,
             broad_per_file_cap: 0,
+            graphrag_clusters: false,
+            graphrag_max_clusters: 4,
+            graphrag_cluster_sim: 0.55,
+            graphrag_summarize: false,
         }
     }
 }

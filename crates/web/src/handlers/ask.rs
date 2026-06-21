@@ -51,6 +51,10 @@ fn qa_config_from(r: &RetrievalConfig, scope: Option<&str>, top_k: Option<usize>
         archive_segments: r.archive_segments.clone(),
         archive_penalty: r.archive_penalty,
         broad_per_file_cap: r.broad_per_file_cap,
+        graphrag_clusters: r.graphrag_clusters,
+        graphrag_max_clusters: r.graphrag_max_clusters,
+        graphrag_cluster_sim: r.graphrag_cluster_sim,
+        graphrag_summarize: r.graphrag_summarize,
         scope: scope
             .map(str::trim)
             .filter(|s| !s.is_empty())
