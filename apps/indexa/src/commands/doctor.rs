@@ -170,6 +170,13 @@ pub(crate) async fn cmd_doctor(
     }
     println!();
 
+    // ── Multimodal readiness (shared with `indexa multimodal`) ──
+    // Reports which opt-in parsers (image caption, PDF OCR, audio transcribe, video frames) are
+    // ready (their external tools + a vision model installed) and how to enable each.
+    let _ = super::multimodal::multimodal_readiness(&cfg).await;
+    println!("  Run `indexa multimodal --enable` to turn on every ready feature.");
+    println!();
+
     // ── Optional model-latency probe (--latency) ──
     // Times a tiny embed + generate so a slow / overloaded / wrong-host Ollama is caught HERE,
     // not ten minutes into an index. It loads the models (unlike the checks above), so it's

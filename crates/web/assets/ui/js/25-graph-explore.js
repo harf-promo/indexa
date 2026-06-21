@@ -40,6 +40,11 @@ function renderGraphLegend(d) {
       '<span class="glegend-item"><span class="glegend-edge glegend-edge-category" aria-hidden="true"></span>Same category</span>'
     );
   }
+  if (d && d.pack_edges > 0) {
+    items.push(
+      '<span class="glegend-item"><span class="glegend-edge glegend-edge-pack" aria-hidden="true"></span>Grouped in a pack</span>'
+    );
+  }
   el.innerHTML = items.join('');
   var bare = (d && d.bare_edges) || 0;
   var caveat = '';

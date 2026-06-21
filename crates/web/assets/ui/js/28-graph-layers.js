@@ -23,3 +23,9 @@ function toggleCategoryLayer(on) {
   graphState.categoryLayer = !!on;
   refetchGraphView();
 }
+
+// eslint-disable-next-line no-unused-vars
+function togglePackLayer(on) {
+  graphState.packLayer = !!on;
+  refetchGraphView();
+}

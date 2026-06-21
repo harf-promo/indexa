@@ -55,12 +55,14 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let cfg = if let Some(path) = &cli.config {
-        let expanded = shellexpand::tilde(path).into_owned();
-        config::load(std::path::Path::new(&expanded))?
+    // Resolve the effective config path once (respecting --config) so commands that WRITE config
+    // (e.g. `multimodal --enable`) round-trip the same file they read.
+    let cfg_path = if let Some(path) = &cli.config {
+        std::path::PathBuf::from(shellexpand::tilde(path).into_owned())
     } else {
-        config::load_default()?
+        config::default_config_path()
     };
+    let cfg = config::load(&cfg_path)?;
 
     let result = match cli.command {
         Commands::Index {
@@ -357,6 +359,7 @@ async fn main() -> Result<()> {
             apply_ollama_env,
             latency,
         } => commands::cmd_doctor(profile, files, chunks, apply_ollama_env, latency).await,
+        Commands::Multimodal { enable } => commands::cmd_multimodal(enable, &cfg, &cfg_path).await,
         Commands::Fingerprint { paths } => commands::cmd_fingerprint(paths).await,
         Commands::Classify { paths, category } => {
             commands::cmd_classify(paths, category, &cfg).await

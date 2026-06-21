@@ -127,6 +127,17 @@ pub(crate) fn require_index_db() -> Result<Option<PathBuf>> {
     Ok(Some(db_path))
 }
 
+/// Whether an external binary is on PATH (probes `<bin> --version`). Used by the multimodal
+/// readiness checks (tesseract / pdftoppm / ffmpeg / whisper-cli). A missing binary ⇒ `false`,
+/// never an error. (Mirrors the `have()` probe in `crates/parsers/tests/multimodal_live.rs`.)
+pub(crate) fn have(bin: &str) -> bool {
+    std::process::Command::new(bin)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
+        .unwrap_or(false)
+}
+
 /// Quick Ollama readiness check. Returns `Ok(())` if Ollama is reachable and all
 /// required models are pulled. On failure, prints actionable guidance and returns `Err`.
 ///

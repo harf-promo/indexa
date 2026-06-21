@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **"Same pack" knowledge-graph layer (`GET /api/graph?layers=pack`, default-off).** The third Map
+  overlay after v0.70 "Related by meaning" (semantic) and v0.71 "Same category": files the user put
+  in the same Context Pack are linked via a deterministic **star per pack** (O(n), not an O(n²)
+  clique) — `Store::pack_file_edges` (`crates/core/src/store/pack_edges.rs`), fresh-connection,
+  fail-open, no schema. Exact (user curation), not heuristic. A "Same pack" toolbar toggle + legend
+  row; combine with the others (`?layers=semantic,category,pack`). No `layers` ⇒ byte-identical.
+- **`indexa multimodal` — one-command multimodal readiness + enable.** The multimodal parsers (image
+  captioning, PDF OCR, audio transcription, video-frame captioning) are fully built but opt-in;
+  `indexa multimodal` now reports which are **ready** on this machine (detects tesseract/pdftoppm,
+  ffmpeg, whisper-cli on PATH + a vision model in Ollama) and the exact `[parsers.*]` flag each needs,
+  and `indexa multimodal --enable` turns on every ready feature via the **safe** config round-trip
+  (`config::load` → mutate → `config::save`; refuses to overwrite an unparseable config — the v0.69
+  anti-wipe guard; written 0600). The same readiness report is now a section in `indexa doctor`.
+
 ## [0.71.0] — 2026-06-21
 
 ### Added
