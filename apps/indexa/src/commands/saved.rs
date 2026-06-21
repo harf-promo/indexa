@@ -85,6 +85,7 @@ pub(crate) async fn cmd_saved_run(name: String, json: bool, cfg: &Config) -> Res
         None,  // session_id: saved queries are stateless
         false, // continue_
         json,
+        false, // no_synthesize: saved queries synthesize normally
         cfg,
     )
     .await

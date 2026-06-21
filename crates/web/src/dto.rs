@@ -351,6 +351,11 @@ pub(crate) struct AskRequest {
     /// `[retrieval] top_k`. Mirrors `indexa ask --top_k` and MCP `ask {top_k}`.
     #[serde(default)]
     pub(crate) top_k: Option<usize>,
+    /// Synthesis control. `true`/omitted ⇒ the server synthesizes with its local model.
+    /// `false` ⇒ retrieval-only: return the packed context slice for the client to synthesize
+    /// itself. Mirrors `indexa ask --no-synthesize` and MCP `ask {synthesize}`.
+    #[serde(default)]
+    pub(crate) synthesize: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -463,6 +468,13 @@ pub(crate) struct AskResponse {
     /// for a stateless ask. Additive — clients tolerate it missing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) session_id: Option<String>,
+    /// `true` when `answer` was synthesized by the server's local model; `false` when it is the
+    /// raw retrieved slice (retrieval-only). Additive — clients/older servers tolerate it missing.
+    pub(crate) synthesized: bool,
+    /// The local model that synthesized `answer` (e.g. `"ollama/gemma3:12b"`), so a client knows
+    /// it was the server's model — not its own. Absent on the retrieval-only path. Additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model: Option<String>,
 }
 
 #[derive(Serialize)]

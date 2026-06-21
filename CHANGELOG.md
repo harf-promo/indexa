@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **MCP/CLI/web "retrieval-only" Ask + synthesis-model transparency.** When another tool calls the
+  Indexa MCP `ask`, the answer is synthesized by Indexa's **local** model (e.g. `ollama/gemma3:12b`),
+  never the caller's model — and most other tools (`search`/`get_summary`/`read_file`/`export_pack`/…)
+  are pure retrieval. Now `ask` accepts `synthesize: false` (MCP), `--no-synthesize` (CLI), and
+  `"synthesize": false` (web `POST /api/ask`): Indexa runs its **full retrieval pipeline** (hybrid +
+  boosts + rerank + MMR + per-file cap + project overview + coverage) and returns the **packed context
+  slice** for the caller to answer with its own — typically stronger — model, at no local-model cost.
+  Synthesized answers now also report which local model produced them (`Answer.model`, e.g.
+  `ollama/gemma3:12b`; CLI prints it, web/SSE echo it, the MCP tool appends it) so an agent knows the
+  answer is bounded by that model, not its own. Additive — the MCP **tool count stays 46** (optional
+  param), the single-shot synthesis path is byte-identical, and retrieval-only never persists a
+  conversation turn (a slice is not an answer). The MCP `ask` description + server instructions now
+  steer capable callers toward `synthesize: false`.
 - **Opt-in per-file cap for broad questions (`[retrieval] broad_per_file_cap`).** On a broad/thematic
   question with no `scope`, caps how many chunks one file may contribute to the retrieved pool before
   other files get a turn, so a single chunk-dense file can't monopolise the answer's context. It's a

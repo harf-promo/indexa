@@ -1,8 +1,8 @@
 use anyhow::Result;
 use indexa_core::{config::HybridMode, store::Store};
 use indexa_query::{
-    answer_agentic_history, answer_with_ann_history, explain_retrieval, Answer, AnswerImpact,
-    Confidence, PriorTurn, QaConfig, RetrievalTrace,
+    answer_agentic_history, answer_retrieval_only_history, answer_with_ann_history,
+    explain_retrieval, Answer, AnswerImpact, Confidence, PriorTurn, QaConfig, RetrievalTrace,
 };
 use serde::Serialize;
 
@@ -68,6 +68,13 @@ struct AnswerJson {
     /// Conversation id this turn was recorded under (Conversational Ask); absent when stateless.
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
+    /// `true` when `answer` was synthesized locally; `false` when it's the retrieved slice
+    /// (`--no-synthesize`).
+    synthesized: bool,
+    /// The local model that synthesized `answer` (e.g. `"ollama/gemma3:12b"`); absent on
+    /// `--no-synthesize`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
 }
 
 fn trace_to_json(trace: &RetrievalTrace) -> RetrievalJson {
@@ -139,6 +146,7 @@ pub(crate) async fn cmd_ask(
     session_id_flag: Option<String>,
     continue_: bool,
     json: bool,
+    no_synthesize: bool,
     cfg: &Config,
 ) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
@@ -160,6 +168,8 @@ pub(crate) async fn cmd_ask(
                     impact: None,
                     retrieval: None,
                     session_id: None,
+                    synthesized: true,
+                    model: None,
                 })?
             );
         } else {
@@ -242,7 +252,22 @@ pub(crate) async fn cmd_ask(
         None
     };
 
-    let answer = if agentic {
+    let mut answer = if no_synthesize {
+        if !json && !explain {
+            println!("Retrieving {chunk_count} indexed chunks (no synthesis)...\n");
+        }
+        // Retrieval-only: return the packed slice for the caller to synthesize. Ignores agentic.
+        answer_retrieval_only_history(
+            &db_path,
+            embedder.as_ref(),
+            llm.as_ref(),
+            &question,
+            &qa_cfg,
+            None,
+            &history,
+        )
+        .await?
+    } else if agentic {
         if !json {
             println!(
                 "Searching {chunk_count} indexed chunks (agentic, up to {max_steps} hops)...\n"
@@ -282,6 +307,12 @@ pub(crate) async fn cmd_ask(
         )
         .await?
     };
+    // Stamp the local synthesis model (transparency); left unset on the retrieval-only path.
+    // Honor the `--llm-model` override so the stamp names the model that ACTUALLY answered.
+    if answer.synthesized {
+        let model = llm_model_flag.as_deref().unwrap_or(&cfg.describer.model);
+        answer.model = Some(format!("{}/{}", cfg.describer.provider, model));
+    }
 
     // Best-effort token-savings telemetry + the per-answer impact readout — must never fail
     // the user's ask. (`store` was dropped above so the query path didn't hold two handles; a
@@ -304,10 +335,13 @@ pub(crate) async fn cmd_ask(
     let impact = impact.filter(AnswerImpact::is_meaningful);
 
     // Conversational Ask: persist this turn (best-effort) and remember it as the latest
-    // conversation so a later `--continue` resumes it.
+    // conversation so a later `--continue` resumes it. Skipped on `--no-synthesize` — a slice
+    // is not an answer, so storing it as a turn would poison the follow-up rewrite.
     if let Some(id) = session_id.as_deref() {
-        append_cli_turn(&db_path, id, &question, &answer);
-        write_last_session(id);
+        if answer.synthesized {
+            append_cli_turn(&db_path, id, &question, &answer);
+            write_last_session(id);
+        }
     }
 
     if json {
@@ -331,12 +365,22 @@ pub(crate) async fn cmd_ask(
             impact,
             retrieval: trace.as_ref().map(trace_to_json),
             session_id: session_id.clone(),
+            synthesized: answer.synthesized,
+            model: answer.model.clone(),
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
 
-    println!("Answer:\n{}\n", answer.answer);
+    if answer.synthesized {
+        println!("Answer:\n{}\n", answer.answer);
+    } else {
+        // Retrieval-only: this is the packed context slice, not an answer.
+        println!(
+            "Retrieved context (synthesize this with your own model):\n{}\n",
+            answer.answer
+        );
+    }
 
     if !answer.sources.is_empty() {
         println!("Sources:");
@@ -405,6 +449,25 @@ pub(crate) async fn cmd_ask(
             println!("\n\x1b[2m{line}\x1b[0m");
         } else {
             println!("\n{line}");
+        }
+    }
+
+    // Model transparency: which LOCAL model synthesized (or a note that none did).
+    {
+        use std::io::IsTerminal;
+        let line = match &answer.model {
+            Some(m) => format!("synthesized by local model: {m}"),
+            None if !answer.synthesized => {
+                "retrieval-only: no model used — synthesize the context above yourself".to_owned()
+            }
+            None => String::new(),
+        };
+        if !line.is_empty() {
+            if std::io::stdout().is_terminal() {
+                println!("\n\x1b[2m{line}\x1b[0m");
+            } else {
+                println!("\n{line}");
+            }
         }
     }
 

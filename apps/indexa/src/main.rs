@@ -296,6 +296,7 @@ async fn main() -> Result<()> {
             session_id,
             continue_,
             json,
+            no_synthesize,
         } => {
             commands::cmd_ask(
                 question,
@@ -311,6 +312,7 @@ async fn main() -> Result<()> {
                 session_id,
                 continue_,
                 json,
+                no_synthesize,
                 &cfg,
             )
             .await

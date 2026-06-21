@@ -504,6 +504,59 @@ async fn answer_empty_hits_short_circuits_without_calling_llm() {
 }
 
 #[tokio::test]
+async fn retrieval_only_returns_slice_without_synthesizing() {
+    let (_dir, path) = temp_index_with_chunk("rustacean ferris crab content about widgets");
+    let embed_calls = Arc::new(AtomicUsize::new(0));
+    let embedder = CountingEmbedder {
+        calls: embed_calls.clone(),
+    };
+    let gen_calls = Arc::new(AtomicUsize::new(0));
+    let llm = CountingGen {
+        calls: gen_calls.clone(),
+        reply: "SYNTHESIZED REPLY — MUST NOT APPEAR".to_owned(),
+    };
+    // Sparse mode skips the embedder; rerank off isolates the test from the LLM-rerank pass, so
+    // any generate() call would mean synthesis leaked in.
+    let cfg = QaConfig {
+        mode: HybridMode::Sparse,
+        rerank: false,
+        ..QaConfig::default()
+    };
+
+    let ans = answer_retrieval_only(&path, &embedder, &llm, "crab", &cfg, None)
+        .await
+        .unwrap();
+
+    assert!(!ans.synthesized, "retrieval-only flags synthesized = false");
+    assert!(
+        ans.model.is_none(),
+        "no synthesis model on the retrieval-only path"
+    );
+    assert_eq!(
+        gen_calls.load(Ordering::SeqCst),
+        0,
+        "retrieval-only must NOT call the LLM to synthesize"
+    );
+    assert_eq!(
+        embed_calls.load(Ordering::SeqCst),
+        0,
+        "sparse mode skips embedding"
+    );
+    assert!(
+        !ans.sources.is_empty(),
+        "the returned slice carries its citations"
+    );
+    assert!(
+        ans.answer.contains("crab") && ans.answer.contains("[1]"),
+        "answer holds the packed context slice (numbered chunk), not a synthesized reply"
+    );
+    assert!(
+        !ans.answer.contains("MUST NOT APPEAR"),
+        "the LLM reply must never appear in a retrieval-only result"
+    );
+}
+
+#[tokio::test]
 async fn answer_sparse_mode_skips_embedding() {
     let (_dir, path) = temp_index_with_chunk("rustacean ferris crab content");
     let embed_calls = Arc::new(AtomicUsize::new(0));

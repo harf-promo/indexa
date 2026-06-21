@@ -36,7 +36,8 @@ pub use explain::{explain_retrieval, RetrievalStage, RetrievalTrace};
 pub(crate) use retrieve::retrieve;
 pub use retrieve::{build_project_overview, is_broad_intent};
 pub use synthesize::{
-    answer, answer_stream, answer_stream_with_ann, answer_stream_with_ann_history, answer_with_ann,
+    answer, answer_retrieval_only, answer_retrieval_only_history, answer_stream,
+    answer_stream_with_ann, answer_stream_with_ann_history, answer_with_ann,
     answer_with_ann_history,
 };
 
@@ -54,12 +55,22 @@ pub struct PriorTurn {
 #[derive(Debug)]
 pub struct Answer {
     pub question: String,
+    /// The answer text when `synthesized`, or the **retrieved context slice** (the exact
+    /// pack the LLM would have seen) when `!synthesized` — see [`answer_retrieval_only`].
     pub answer: String,
     pub sources: Vec<SourceCitation>,
     /// Retrieval-shape confidence (see [`assess_confidence`]). `None` only for the
     /// zero-hit short-circuit — that message already says the index has nothing,
     /// so bolting a confidence label onto it would be noise.
     pub confidence: Option<ConfidenceReport>,
+    /// `true` (default) when `answer` was synthesized by the local LLM; `false` when this is
+    /// the raw retrieved slice from [`answer_retrieval_only`] (the caller synthesizes itself).
+    pub synthesized: bool,
+    /// Identifier of the model that synthesized `answer` (e.g. `"ollama/gemma3:12b"`), so a
+    /// caller knows it was Indexa's LOCAL model — not their own. `None` when not synthesized
+    /// or when the surface did not stamp it. The qa pipeline leaves this `None`; each surface
+    /// (CLI/web/MCP) stamps it from the effective `[describer]` config it already holds.
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
