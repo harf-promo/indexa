@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/methodology.md`). Adds `tree-sitter-c` + `tree-sitter-cpp` (MIT, bundled-C via `cc` like the
   other grammars — openssl-free preserved on host and aarch64-linux). (Track 2, retrieval intelligence.)
 
+### Documentation
+
+- **Trued-up retrieval & parser docs that had drifted from the code.** `docs/config.md` now shows
+  the real `[retrieval]` defaults (`top_k = 12`, `rerank = true`, `context_budget = 8000` — they
+  flipped in v0.44) and documents the previously-undocumented `rerank_backend`, `mmr_lambda`,
+  `recency_boost`/`recency_days`, and `archive_segments`/`archive_penalty` knobs. Image captioning,
+  audio transcription, and PDF OCR are documented as **opt-in and shipped** (with their real config
+  keys and external-tool requirements) instead of "(future) / not yet wired". `docs/methodology.md`
+  now describes re-ranking as on-by-default with the v0.43 cross-encoder backend as the opt-in
+  option (was "off by default, a future cross-encoder"), fixes the invalid `[parsers.pdf] backend =
+  "marker"` example to `"ocr"`, and adds a decision-log row for the v0.44 default flip. The
+  `indexa graph` empty-result hint now lists all eight code-graph languages (C/C++ were missing).
+
 ## [0.68.0] — 2026-06-20
 
 ### Changed

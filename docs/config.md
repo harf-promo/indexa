@@ -129,16 +129,22 @@ Controls how search results are ranked and how many are returned.
 [retrieval]
 hybrid               = "rrf"  # rrf | sparse | dense
 rrf_k                = 60     # RRF rank constant (higher = less weight to top ranks)
-top_k                = 8      # results to retrieve before reranking
-rerank               = false  # enable cross-encoder reranking (one extra local-model call; fails open)
+top_k                = 12     # results to retrieve before reranking
+rerank               = true   # rerank hits before synthesis (default on; reuses the generation model — no extra dep — and fails open)
+rerank_backend       = "llm"  # "llm" (listwise, no download) | "cross-encoder" (DeBERTa-v2 ~85 MB, downloaded on first use)
+mmr_lambda           = 0.5    # diversity vs relevance when re-ranking (1.0 = relevance only / MMR off; 0.0 = max diversity)
 summary_weight       = 0.0    # 0.0 disables the parent-summary boost; >0 blends folder-summary similarity into ranking
 summary_depth_alpha  = 0.15   # depth-boost coefficient for summary-aware retrieval
-context_budget       = 4000   # max characters of retrieved context packed into the answer prompt
+context_budget       = 8000   # max characters of retrieved context packed into the answer prompt
 use_weights          = true   # apply per-file/dir/category importance weights as a multiplicative boost
 ann                  = false  # use an in-memory HNSW index for dense retrieval (vs brute-force cosine)
 ann_min_chunks       = 50000  # only build/use the ANN index above this chunk count
 agentic              = false  # default `ask` to the agentic multi-hop loop (per-call: --agentic / MCP agentic)
 agentic_max_steps    = 3      # max retrieval hops in agentic mode (clamped 1..=5)
+recency_boost        = false  # boost recently-modified files (mtime-based; off so it never silently re-ranks)
+recency_days         = 90     # recency window in days (files older than this stay neutral when recency_boost is on)
+archive_segments     = ["archive", "archived", "historical", "deprecated", "old"]  # path segments treated as historical
+archive_penalty      = 0.15   # multiplicative down-weight for hits under an archive segment (0.0 disables it)
 ```
 
 > The summary-boost (`summary_weight`) only takes effect for dense/RRF modes and is off (0.0) by default.
@@ -165,14 +171,14 @@ rankings and confirm a change did what you expected.
 
 | Symptom | Knob | Try |
 |---|---|---|
-| Answers miss relevant files that clearly exist | `top_k` | raise 8 → 12–20 (more candidates reach synthesis; costs a little context budget) |
+| Answers miss relevant files that clearly exist | `top_k` | raise 12 → 16–20 (more candidates reach synthesis; costs a little context budget) |
 | Answer cites too much noise / drifts off-topic | `top_k`, `context_budget` | lower `top_k` to 5–6; trim `context_budget` so only the strongest hits are packed |
 | Exact keyword/identifier matches rank too low | `hybrid` | try `sparse`, or lower `rrf_k` (e.g. 30) to weight top ranks more heavily |
 | Conceptual/paraphrased questions miss | `hybrid` | ensure `rrf` or `dense`, and that the folder was deep-indexed (embeddings exist) |
 | Want folder-level topical relevance to count | `summary_weight` | raise from 0.0 to ~0.2–0.4 (dense/RRF only; blends parent-summary similarity) |
 | One important dir keeps getting buried | `use_weights` + `indexa weight set` | boost that file/dir/category instead of globally re-tuning |
 | Compositional question (needs several facts) | — | use `--agentic` per call rather than changing defaults |
-| Long answers truncate context | `context_budget` | raise from 4000 (more chars packed into the prompt; watch the model's context window) |
+| Long answers truncate context | `context_budget` | raise from 8000 (more chars packed into the prompt; watch the model's context window) |
 
 `rrf_k` is the RRF rank constant: **higher** = ranks contribute more evenly (flatter), **lower** =
 the very top hits dominate. The industry default of 60 rarely needs changing.
@@ -242,15 +248,33 @@ Fine-tune how specific file types are handled.
 
 ```toml
 [parsers.image]
-caption = false  # set true to enable vision-model captioning (future)
+caption = false       # set true to caption images with a local vision model (opt-in)
+model   = "gemma3:4b" # vision model to caption with (default: reuses the gemma3 summary model — no extra download)
 
 [parsers.audio]
-transcribe = false  # set true to enable whisper.cpp transcription (future)
+transcribe = false    # set true to transcribe audio via a whisper.cpp-style CLI (opt-in)
+binary     = "whisper-cli"  # transcription binary on PATH (external tool)
+model      = ""       # optional whisper model path passed to the binary
+
+[parsers.video]
+caption = false       # set true to caption sampled video frames with a local vision model (opt-in)
+model   = "gemma3:4b" # vision model (default: gemma3 summary model)
+
+[parsers.pdf]
+backend    = "text"   # "text" = pdf-extract text layer only | "ocr" = also OCR scanned/image-only pages
+ocr_binary = "tesseract"  # OCR engine when backend = "ocr" (external tool)
+ocr_lang   = "eng"    # optional tesseract language hint, e.g. "eng" or "eng+ara"
 ```
 
-> **PDF:** text extraction currently uses the pure-Rust [`pdf-extract`](https://crates.io/crates/pdf-extract)
-> crate (no native dependency). OCR for scanned / image-only PDFs is planned but not yet wired, so
-> image-only PDFs currently yield little or no text.
+> Captioning, transcription, and PDF OCR are all **opt-in and fail open** — when a model or external
+> tool is missing, the file falls back to its text/empty result rather than erroring. They reuse the
+> local models you already pulled (`gemma3` for vision) or shell out to external CLIs you install
+> (`whisper-cli`, `tesseract` + `pdftoppm`/poppler), so nothing is auto-downloaded.
+
+> **PDF:** text extraction uses the pure-Rust [`pdf-extract`](https://crates.io/crates/pdf-extract)
+> crate (no native dependency) by default. Scanned / image-only PDFs have no text layer, so they
+> yield little or no text under `backend = "text"`; set `backend = "ocr"` (and install poppler +
+> tesseract) to recognise them.
 
 ---
 

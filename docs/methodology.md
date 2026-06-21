@@ -191,15 +191,20 @@ score(d) = 1/(k + rank_sparse(d)) + 1/(k + rank_dense(d))
 
 with the default `k=60` (matches Elasticsearch, Weaviate, Vespa defaults). RRF needs no score calibration across the two systems and is robust across query types.
 
-### Re-ranking (opt-in)
+### Re-ranking (on by default since v0.44)
 
-A dedicated cross-encoder (e.g. BGE-reranker-v2-m3) would add 100–500ms per query and require a
-second model — overkill for the default `top_k=8`, so it is **off by default**. When `rerank = true`,
-Indexa instead runs a lightweight **listwise re-ranker that reuses the local generation model** in a
-single extra call (no second model, no new native dependency). It **fails open**: any model error,
-empty, or unparseable output falls back to the original retrieval order, so re-ranking can never make
-`ask` worse. A future ONNX/`fastembed` cross-encoder can slot in behind the same `CrossEncoder` trait
-via a Cargo feature.
+Re-ranking the `top_k` (default 12) hits before synthesis is **on by default** (`[retrieval] rerank
+= true`), with two selectable backends (`rerank_backend`):
+
+- **`"llm"` (default)** — a lightweight **listwise re-ranker that reuses the local generation model**
+  in a single extra call. No second model, no download, no new native dependency.
+- **`"cross-encoder"` (opt-in, shipped v0.43)** — a pointwise DeBERTa-v2 cross-encoder
+  (`mixedbread-ai/mxbai-rerank-xsmall-v1`, ~85 MB, Apache-2.0, CPU-only) downloaded from HuggingFace
+  on first use and cached at `~/.cache/huggingface/hub/`. Higher quality at ~100–500 ms/query and a
+  one-time download — hence opt-in. Falls back to `"llm"` if the model can't be loaded.
+
+Both **fail open**: any model error, empty, or unparseable output falls back to the original
+retrieval order, so re-ranking can never make `ask` worse.
 
 ### Scoping a query (file-aware Ask)
 
@@ -364,8 +369,8 @@ mis-synthesize from good evidence (and the sources are always listed so you can 
 |---|---|---|
 | **Whisper transcription** (audio) | Requires a ~150MB model + compute | `[parsers.audio] transcribe = true` |
 | **Vision captioning** (images) | Requires a vision model | `[parsers.image] caption = true` |
-| **OCR** (scanned PDFs) | Requires Marker or Tesseract CLI | `[parsers.pdf] backend = "marker"` |
-| **Re-ranking** | Adds one extra local-model call per query (fails open) | `[retrieval] rerank = true` |
+| **OCR** (scanned PDFs) | Requires poppler (`pdftoppm`) + Tesseract CLI | `[parsers.pdf] backend = "ocr"` |
+| **Cross-encoder re-ranking** | Downloads a ~85 MB DeBERTa-v2 model on first use | `[retrieval] rerank_backend = "cross-encoder"` (base `rerank` is on by default) |
 | **Contextual retrieval** | LLM call per chunk at index time (expensive) | `[describer] contextual_retrieval = true` |
 | **Cloud embeddings** | Requires API key, costs money | `[embedding] provider = "openai"` |
 | **Cloud LLM** | Requires API key | `[describer] provider = "anthropic"` |
@@ -401,6 +406,7 @@ Changes to defaults are recorded here with rationale.
 | 2025-05 | Vector storage: SQLite f32 blobs | Zero ops, single file, adequate for <300K vectors |
 | 2025-05 | Fusion: RRF k=60 | Parameter-free, matches industry defaults, robust |
 | 2025-05 | No re-ranker by default | Latency cost > recall benefit at top_k=8 |
+| 2026-06-16 | Re-ranking now **on** by default (`rerank_backend = "llm"`); `top_k` 8 → 12 | The listwise LLM re-ranker reuses the already-loaded generation model (no second model, no download) and fails open, so the latency cost is one extra call for a measurable recall gain; the v0.43 cross-encoder backend stays opt-in (~85 MB download) |
 | 2026-05-28 | Default describer: `gemma2:9b` (was `qwen2.5:14b`) | Google, Apache-2.0; user preference for non-Chinese-company defaults |
 | 2026-05-28 | Default describer upgraded: `gemma3:12b` / `gemma3:4b` (was `gemma2:9b` / `gemma2:2b`) | Gemma 3 (March 2025) outperforms Gemma 2 at same parameter count; available on Ollama |
 | 2026-05-28 | Added `google` embedding provider | Google `text-embedding-004` matches nomic-embed-text dim (768), state-of-the-art quality |
