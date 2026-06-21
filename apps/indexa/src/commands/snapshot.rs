@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use indexa_core::store::{EdgeRecord, Store, SummaryRecord};
 use serde::{Deserialize, Serialize};
 
-use super::helpers::require_index_db;
+use super::helpers::{now_unix, require_index_db};
 
 /// Snapshot format version. Import refuses anything it doesn't recognize (forward-safe).
 const SNAPSHOT_VERSION: u32 = 1;
@@ -178,12 +178,4 @@ pub(crate) async fn cmd_snapshot_import(path: String) -> Result<()> {
         snap.weights.len()
     );
     Ok(())
-}
-
-fn now_unix() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }

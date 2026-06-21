@@ -19,6 +19,16 @@ pub fn approx_tokens(s: &str) -> usize {
     s.chars().count().div_ceil(4)
 }
 
+/// The final path component (file/dir name), falling back to the whole path when it has no
+/// trailing component. Shared by the XML/Markdown/graph renderers so the extraction stays
+/// identical across them.
+fn base_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_owned())
+}
+
 /// One node in the in-memory export tree.
 pub struct ExportNode {
     pub record: SummaryRecord,
@@ -183,10 +193,7 @@ fn render_xml_node(node: &ExportNode, out: &mut String, indent: usize) {
     } else {
         "file"
     };
-    let path_name = Path::new(&node.record.path)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| node.record.path.clone());
+    let path_name = base_name(&node.record.path);
     out.push_str(&format!(
         r#"{pad}<{tag} path="{}" name="{}" depth="{}">"#,
         xml_attr(&node.record.path),
@@ -231,10 +238,7 @@ pub fn render_markdown(node: &ExportNode) -> String {
 
 fn render_md_node(node: &ExportNode, out: &mut String, level: usize) {
     let prefix = "#".repeat(level.min(6));
-    let name = Path::new(&node.record.path)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| node.record.path.clone());
+    let name = base_name(&node.record.path);
     let icon = if node.record.kind == "dir" {
         "📁"
     } else {
@@ -356,12 +360,6 @@ pub fn render_graph(graph: &CodeGraph, format: &str) -> String {
     if graph.edges.is_empty() {
         return String::new();
     }
-    let base = |p: &str| {
-        Path::new(p)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| p.to_owned())
-    };
     match format {
         "md" | "markdown" => {
             let mut out = String::from("\n## Call graph\n\n");
@@ -371,8 +369,8 @@ pub fn render_graph(graph: &CodeGraph, format: &str) -> String {
             for e in &graph.edges {
                 out.push_str(&format!(
                     "- {} → {} [{}]\n",
-                    base(&e.from),
-                    base(&e.to),
+                    base_name(&e.from),
+                    base_name(&e.to),
                     e.weight
                 ));
             }

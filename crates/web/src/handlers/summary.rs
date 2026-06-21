@@ -4,6 +4,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use indexa_core::pathutil::path_depth;
 
 use crate::dto::{
     err_json, file_name_of, require_path, BreadcrumbResponse, PathQuery, SummaryChildResponse,
@@ -80,7 +81,7 @@ pub(crate) async fn api_summarize_enqueue(
         Ok(p) => p,
         Err(resp) => return resp,
     };
-    let depth = path.chars().filter(|&c| c == '/' || c == '\\').count() as i64;
+    let depth = path_depth(&path);
     let kind = if std::path::Path::new(&path).is_dir() {
         "dir"
     } else {

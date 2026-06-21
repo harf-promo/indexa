@@ -8,21 +8,8 @@ use indexa_query::{
 };
 
 use super::helpers::{
-    build_embedder, finalize_export, index_db_path, require_index_db, ExportSink,
+    build_embedder, expand, finalize_export, index_db_path, now_unix, require_index_db, ExportSink,
 };
-
-/// Resolve and expand a path, canonicalizing `~` prefixes.
-fn expand(p: &str) -> String {
-    shellexpand::tilde(p).into_owned()
-}
-
-fn now_str() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_else(|_| "0".to_owned())
-}
 
 pub(crate) async fn cmd_pack_create(
     name: String,
@@ -285,10 +272,10 @@ pub(crate) async fn cmd_pack_export(
         bail!("Pack \"{name}\" has no paths. Add paths first with `indexa pack add`.");
     }
 
-    let now = now_str();
     // Relational slice (v0.60): same `--changed-since` / `--category` filters as `indexa export`,
     // shared via `build_export_filter`. `None` ⇒ export the whole pack.
-    let now_secs: i64 = now.parse().unwrap_or(0);
+    let now_secs = now_unix();
+    let now = now_secs.to_string(); // string form for the <context generated="…"> attribute
     let allow = build_export_filter(
         &store,
         changed_since.as_deref(),

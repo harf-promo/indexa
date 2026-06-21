@@ -440,6 +440,23 @@ pub(crate) fn format_size(bytes: u64) -> String {
     }
 }
 
+/// Current Unix time in whole seconds (fails open to 0 before the epoch / on a clock error).
+/// Single source for the timestamps several commands stamp into snapshots, packs, and reports
+/// (was duplicated as `now_str`/`chrono_now`/`now_unix`/`now_secs`). Use `.to_string()` where a
+/// string is needed.
+pub(crate) fn now_unix() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Expand a leading `~` in a user-supplied path. Shared by the commands that take path args.
+pub(crate) fn expand(p: &str) -> String {
+    shellexpand::tilde(p).into_owned()
+}
+
 /// Format a Unix timestamp (seconds since epoch) as a human-readable UTC datetime
 /// like `2026-05-29 14:32 UTC`. Uses Howard Hinnant's civil-date algorithm so we
 /// avoid pulling in `chrono` just for this one display string.

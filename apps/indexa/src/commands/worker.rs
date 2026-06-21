@@ -7,18 +7,11 @@ use indexa_embed::OllamaEmbedder;
 use std::sync::Arc;
 
 use super::cmd_index;
-use super::helpers::{require_index_db, select_summary_models};
+use super::helpers::{now_unix, require_index_db, select_summary_models};
 
 /// Default re-index interval when `--auto-reindex` is passed but `[scan] auto_reindex`
 /// is `off`/unset — a week is a sane "keep it fresh" cadence without being aggressive.
 const DEFAULT_REINDEX_SECS: u64 = 7 * 86_400;
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
 
 /// Indexed roots whose newest deep-indexed content is older than `interval_secs`.
 /// Roots that have never been deep-indexed (no chunks) are skipped — auto-reindex
@@ -48,7 +41,7 @@ async fn run_auto_reindex(db_path: &std::path::Path, cfg: &Config) -> Result<()>
     });
     let stale = {
         let store = Store::open(db_path)?;
-        stale_roots(&store, interval, now_secs())?
+        stale_roots(&store, interval, now_unix())?
     };
     if stale.is_empty() {
         println!("auto-reindex: all indexed roots are current (interval {interval}s). Nothing to refresh.");

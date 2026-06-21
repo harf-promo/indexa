@@ -3,7 +3,7 @@ use indexa_core::config::Config;
 use indexa_core::store::Store;
 use indexa_query::{answer, Answer, QaConfig};
 
-use super::helpers::{build_embedder, build_llm, require_index_db};
+use super::helpers::{build_embedder, build_llm, now_unix, require_index_db};
 
 /// `indexa report` — run several questions and render one document (Markdown or XML)
 /// with a table of contents, each answer, and its cited sources. An "onboarding /
@@ -65,7 +65,7 @@ pub(crate) async fn cmd_report(
         answers.push(a);
     }
 
-    let now = chrono_now();
+    let now = now_unix().to_string();
     let doc = if format == "xml" {
         render_report_xml(&answers, &now)
     } else {
@@ -79,14 +79,6 @@ pub(crate) async fn cmd_report(
         print!("{doc}");
     }
     Ok(())
-}
-
-fn chrono_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_else(|_| "0".to_owned())
 }
 
 fn slug(s: &str) -> String {
