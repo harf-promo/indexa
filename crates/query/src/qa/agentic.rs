@@ -149,6 +149,8 @@ pub async fn answer_agentic_stream_history(
         answer: full.trim().to_owned(),
         sources,
         confidence,
+        synthesized: true,
+        model: None,
     })
 }
 

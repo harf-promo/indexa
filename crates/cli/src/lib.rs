@@ -544,6 +544,12 @@ pub enum Commands {
         /// Emit the answer (and `--explain` trace, if set) as JSON for scripting.
         #[arg(long)]
         json: bool,
+
+        /// Retrieval-only: skip local synthesis and print the packed context slice (the same
+        /// hybrid + rerank + overview pipeline `ask` uses) for you to answer with your own model.
+        /// The token-saving alternative to a weaker local answer. Ignores --agentic.
+        #[arg(long = "no-synthesize", conflicts_with = "explain")]
+        no_synthesize: bool,
     },
 
     /// Search indexed content and print ranked hits — no LLM synthesis (that's `ask`).

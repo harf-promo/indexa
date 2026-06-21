@@ -179,6 +179,8 @@ mod tests {
                 snippet: "…".to_owned(),
             }],
             confidence: None,
+            synthesized: true,
+            model: None,
         }]
     }
 

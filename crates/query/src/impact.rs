@@ -136,6 +136,8 @@ mod tests {
                 })
                 .collect(),
             confidence: None,
+            synthesized: true,
+            model: None,
         }
     }
 

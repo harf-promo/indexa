@@ -151,6 +151,65 @@ pub async fn answer_stream_with_ann_history(
         answer: full.trim().to_owned(),
         sources,
         confidence,
+        synthesized: true,
+        model: None,
+    })
+}
+
+/// Run the full retrieve → rerank pipeline and return the **packed context slice** WITHOUT
+/// the final LLM synthesis. The returned [`Answer`] carries the retrieved slice in `answer`
+/// (the exact pack the synthesizer would have seen: PROJECT OVERVIEW + numbered `[N]` chunks),
+/// the matching `sources`, the retrieval-coverage `confidence`, and `synthesized = false`.
+///
+/// This exposes Indexa's full retrieval intelligence (hybrid, boosts, rerank, MMR, per-file cap,
+/// overview, coverage) as a context provider, so a **stronger caller** (e.g. a cloud model over
+/// MCP) can synthesize the answer with its own model instead of paying for — and being capped
+/// by — the local generation model. `history = &[]` ⇒ no follow-up rewrite.
+pub async fn answer_retrieval_only(
+    db_path: &Path,
+    embedder: &dyn Embedder,
+    llm: &dyn Generator,
+    question: &str,
+    cfg: &QaConfig,
+    ann: Option<&AnnIndex>,
+) -> Result<Answer> {
+    answer_retrieval_only_history(db_path, embedder, llm, question, cfg, ann, &[]).await
+}
+
+/// [`answer_retrieval_only`] with prior conversation turns (Conversational Ask): the follow-up
+/// is rewritten into a standalone search query before retrieval (history-gated, fail-open).
+/// `history = &[]` ⇒ identical to [`answer_retrieval_only`].
+#[allow(clippy::too_many_arguments)]
+pub async fn answer_retrieval_only_history(
+    db_path: &Path,
+    embedder: &dyn Embedder,
+    llm: &dyn Generator,
+    question: &str,
+    cfg: &QaConfig,
+    ann: Option<&AnnIndex>,
+    history: &[PriorTurn],
+) -> Result<Answer> {
+    let (hits, overview) =
+        retrieve_and_rerank(db_path, embedder, llm, question, cfg, ann, history).await?;
+    if hits.is_empty() {
+        // No grounding to return — reuse the canned guidance, flagged as not synthesized so the
+        // caller doesn't mistake it for a context slice.
+        let mut a = no_match_answer(question);
+        a.synthesized = false;
+        return Ok(a);
+    }
+    let confidence = confidence_for(&hits, cfg, question);
+    // Pack the slice exactly as the synthesizer would (overview + numbered chunks). The
+    // conversation-history block is deliberately omitted: a self-synthesizing caller has its
+    // own history; what they want from Indexa is the retrieved evidence.
+    let (context, sources) = pack_context(&hits, &overview, cfg.context_budget);
+    Ok(Answer {
+        question: question.to_owned(),
+        answer: context,
+        sources,
+        confidence,
+        synthesized: false,
+        model: None,
     })
 }
 
@@ -226,6 +285,8 @@ pub(crate) fn no_match_answer(question: &str) -> Answer {
             .to_owned(),
         sources: Vec::new(),
         confidence: None,
+        synthesized: true,
+        model: None,
     }
 }
 
@@ -253,6 +314,8 @@ pub(crate) async fn synthesize_from_hits(
         answer: trim_continuation(&answer_text),
         sources,
         confidence,
+        synthesized: true,
+        model: None,
     })
 }
 

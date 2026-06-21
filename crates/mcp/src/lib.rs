@@ -164,6 +164,10 @@ impl ServerHandler for IndexaMcp {
              Navigate with `browse_tree` and `search`; call `get_summary` with tier=l0 (one-line \
              abstract) to scan cheaply, then drill to l1 (full summary) or l2 (raw content). \
              Use `read_file` for raw text; `ask` for grounded RAG answers (supports scope + mode). \
+             NOTE: `ask` synthesizes with Indexa's LOCAL model (e.g. ollama/gemma3:12b), not your \
+             model — so if you are a strong model, call `ask` with `synthesize: false` to get the \
+             retrieved context slice and write the answer yourself (better, and no local-model cost), \
+             or compose `search`/`get_chunk_context`/`export_pack` for raw context. \
              Use `trigger_index` to index new or changed files. \
              Context Packs: `list_packs`/`get_pack`/`create_pack`/`add_pack_paths`/\
 `remove_pack_paths`/`delete_pack`/`export_pack`/`search_pack` — \
@@ -747,6 +751,7 @@ mod tests {
             rerank_backend: None,
             session_id: sid.map(str::to_owned),
             top_k: None,
+            synthesize: None,
         };
 
         assert!(mcp

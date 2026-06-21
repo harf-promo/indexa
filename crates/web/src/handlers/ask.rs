@@ -166,7 +166,20 @@ pub(crate) async fn api_ask(
     // round-trips. Empty-hit short-circuit lives inside it. Agentic mode runs the
     // bounded plan→search→refine loop first (progress isn't surfaced on this buffered
     // endpoint — the SSE endpoint streams the per-hop steps).
-    let result = if agentic {
+    let synthesize = body.synthesize.unwrap_or(true);
+    let result = if !synthesize {
+        // Retrieval-only: return the packed slice for the client to synthesize itself.
+        indexa_query::answer_retrieval_only_history(
+            &state.db_path,
+            state.embedder.as_ref(),
+            state.llm.as_ref(),
+            &body.question,
+            &qa_cfg,
+            ann.as_deref(),
+            &history,
+        )
+        .await
+    } else if agentic {
         indexa_query::answer_agentic_history(
             &state.db_path,
             state.embedder.as_ref(),
@@ -190,14 +203,24 @@ pub(crate) async fn api_ask(
         .await
     };
     match result {
-        Ok(answer) => {
+        Ok(mut answer) => {
+            // Stamp the local synthesis model (transparency); left unset on retrieval-only.
+            if answer.synthesized {
+                answer.model = Some(format!(
+                    "{}/{}",
+                    state.config.describer.provider, state.config.describer.model
+                ));
+            }
             // Only surface the readout when it's a real win (cited files existed and serving was
             // smaller) — never a misleading "0% saved" badge.
             let impact = record_ask_usage(&state.db_path, &answer, body.session_id.as_deref())
                 .filter(AnswerImpact::is_meaningful);
-            // Persist this turn (best-effort) and echo the session id back.
+            // Persist this turn (best-effort) and echo the session id back. Skip on the
+            // retrieval-only path — the slice is not an answer and would poison history.
             if let Some(id) = body.session_id.as_deref() {
-                append_turn_best_effort(&state.db_path, id, &body.question, &answer);
+                if answer.synthesized {
+                    append_turn_best_effort(&state.db_path, id, &body.question, &answer);
+                }
             }
             Json(AskResponse {
                 confidence: into_ask_confidence(answer.confidence.as_ref()),
@@ -205,6 +228,8 @@ pub(crate) async fn api_ask(
                 sources: answer.sources.into_iter().map(into_ask_source).collect(),
                 impact,
                 session_id: body.session_id,
+                synthesized: answer.synthesized,
+                model: answer.model,
             })
             .into_response()
         }
@@ -322,6 +347,13 @@ pub(crate) async fn api_ask_stream(
     let llm = state.llm.clone();
     let question = body.question;
     let session_id = body.session_id;
+    let synthesize = body.synthesize.unwrap_or(true);
+    // The local synthesis model id, captured for the transparency stamp (the task can't borrow
+    // `state`). Used only when `synthesize` (left unset on the retrieval-only path).
+    let model_id = format!(
+        "{}/{}",
+        state.config.describer.provider, state.config.describer.model
+    );
     // Conversational Ask: recent turns folded into the prompt (empty for a stateless ask).
     let history = load_history(&db_path, session_id.as_deref(), qa_cfg.scope.as_deref());
 
@@ -347,7 +379,28 @@ pub(crate) async fn api_ask_stream(
 
         // Agentic mode streams per-hop `step` events (from the plan→search→refine loop)
         // before the synthesized answer; one-shot mode goes straight to sources+fragments.
-        let result = if agentic {
+        // Retrieval-only has nothing to stream: emit the citations, then the slice as a single
+        // fragment, so the client renders identically to a one-shot answer.
+        let result = if !synthesize {
+            match indexa_query::answer_retrieval_only_history(
+                &db_path,
+                embedder.as_ref(),
+                llm.as_ref(),
+                &question,
+                &qa_cfg,
+                ann.as_deref(),
+                &history,
+            )
+            .await
+            {
+                Ok(ans) => {
+                    on_chunk(AnswerChunk::Sources(ans.sources.clone()));
+                    on_chunk(AnswerChunk::Fragment(ans.answer.clone()));
+                    Ok(ans)
+                }
+                Err(e) => Err(e),
+            }
+        } else if agentic {
             indexa_query::answer_agentic_stream_history(
                 &db_path,
                 embedder.as_ref(),
@@ -374,18 +427,29 @@ pub(crate) async fn api_ask_stream(
         };
 
         let terminal = match result {
-            Ok(answer) => {
+            Ok(mut answer) => {
+                // Stamp the local synthesis model (transparency); left unset on retrieval-only.
+                if answer.synthesized {
+                    answer.model = Some(model_id);
+                }
                 let impact = record_ask_usage(&db_path, &answer, session_id.as_deref())
                     .filter(AnswerImpact::is_meaningful);
-                // Persist this turn (best-effort) and echo the session id on `done`.
+                // Persist this turn (best-effort) and echo the session id on `done`. Skip on the
+                // retrieval-only path — the slice is not an answer and would poison history.
                 if let Some(id) = session_id.as_deref() {
-                    append_turn_best_effort(&db_path, id, &question, &answer);
+                    if answer.synthesized {
+                        append_turn_best_effort(&db_path, id, &question, &answer);
+                    }
                 }
                 // Confidence + impact ride the terminal `done` event (both belong to the whole
                 // answer). Additive: each absent on the no-match path and on older servers, so
                 // clients must tolerate either field missing.
                 let mut done = serde_json::Map::new();
                 done.insert("type".into(), serde_json::json!("done"));
+                done.insert("synthesized".into(), serde_json::json!(answer.synthesized));
+                if let Some(m) = &answer.model {
+                    done.insert("model".into(), serde_json::json!(m));
+                }
                 if let Some(c) = into_ask_confidence(answer.confidence.as_ref()) {
                     done.insert(
                         "confidence".into(),

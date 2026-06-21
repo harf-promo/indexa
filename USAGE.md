@@ -138,7 +138,7 @@ Global flag (all commands): `--config <PATH>` overrides the default config locat
 | `describe <path>` | — | Print a node's summary + ancestor breadcrumb chain + children. |
 | `worker` | `--concurrency N` (2) | Background daemon draining the summary queue. |
 | `export [paths…]` | `--format <xml\|md\|json>`, `--depth N`, `--output FILE`, `--changed-since <7d\|12h\|90m>`, `--category <cat>` | Render the summary tree as AI-ready context (XML is primary). Slice it with `--changed-since` (recency) and/or `--category` to export just the relevant part. |
-| `ask <question>` | `--scope PATH`, `--top-k N`, `--sparse-only`, `--dense-only`, `--embed-model`, `--llm-model` | Hybrid retrieval + LLM-synthesized answer with sources. |
+| `ask <question>` | `--scope PATH`, `--top-k N`, `--sparse-only`, `--dense-only`, `--embed-model`, `--llm-model`, `--no-synthesize` | Hybrid retrieval + LLM-synthesized answer with sources. `--no-synthesize` skips local synthesis and prints the retrieved context slice for you to answer with your own model (also `ask {synthesize:false}` over MCP). |
 | `watch [paths…]` | `--embed-model` | Keep context current via filesystem events. |
 | `serve` | `--port N` (7620), `--embed-model`, `--llm-model` | Local web UI. |
 | `mcp` | — | Run the MCP stdio server for AI agents (see §7). `mcp install [--client …]` registers Indexa with your AI clients (auto-detects when no `--client`). |

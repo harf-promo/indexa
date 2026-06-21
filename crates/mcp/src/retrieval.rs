@@ -105,6 +105,13 @@ pub struct AskParams {
     /// retrieval breadth — chunks fetched before synthesis; default from server config
     #[serde(default)]
     pub top_k: Option<usize>,
+    /// Synthesis control. `true` (default) → Indexa synthesizes the answer with its **local**
+    /// model (e.g. `ollama/gemma3:12b`) — NOT your model. `false` → "retrieval-only": Indexa
+    /// runs its full retrieval pipeline (hybrid + boosts + rerank + MMR + per-file cap + project
+    /// overview + coverage) and returns the **packed context slice** for YOU to answer with your
+    /// own (stronger) model. Prefer `false` when you are a capable model and want the best answer.
+    #[serde(default)]
+    pub synthesize: Option<bool>,
 }
 
 #[tool_router(router = router_retrieval, vis = "pub(crate)")]
@@ -324,7 +331,7 @@ impl IndexaMcp {
 
     /// Answer a natural-language question against the index (grounded RAG).
     #[tool(
-        description = "Answer a natural-language question using the indexed context (hybrid retrieval + local LLM synthesis). Returns an answer with source paths. Set `agentic: true` for compositional questions — the model plans and refines the search across several hops before answering (a few extra model calls). Optional `top_k` widens/narrows retrieval breadth."
+        description = "Answer a natural-language question using the indexed context (hybrid retrieval + LOCAL LLM synthesis — e.g. ollama/gemma3:12b, NOT your model). Returns an answer with source paths. **If you are a capable model, prefer `synthesize: false`**: Indexa then runs the same retrieval pipeline but returns the packed context SLICE for YOU to answer with your own (stronger) model — better answers, and no local-model cost. Set `agentic: true` for compositional questions (a few extra model calls; ignored when `synthesize: false`). Optional `top_k` widens/narrows retrieval breadth."
     )]
     pub(crate) async fn ask(
         &self,
@@ -339,7 +346,9 @@ impl IndexaMcp {
             rerank_backend,
             session_id,
             top_k,
+            synthesize,
         } = params.0;
+        let synthesize = synthesize.unwrap_or(true);
         let agentic = agentic.unwrap_or(self.config.retrieval.agentic);
         let cfg = QaConfig {
             top_k: top_k
@@ -378,7 +387,22 @@ impl IndexaMcp {
         // adds a bounded plan→search→refine loop before synthesis and records the queries it
         // ran so the agent can see how the answer was gathered.
         let mut steps: Vec<String> = Vec::new();
-        let answer = if agentic {
+        let mut answer = if !synthesize {
+            // Retrieval-only: run the full pipeline but return the packed context SLICE for the
+            // caller to synthesize with its own model. Agentic planning is a synthesis concern, so
+            // it does not apply here — a single retrieval pass produces the slice.
+            indexa_query::answer_retrieval_only_history(
+                &self.db_path,
+                self.embedder.as_ref(),
+                self.llm.as_ref(),
+                &question,
+                &cfg,
+                None,
+                &history,
+            )
+            .await
+            .map_err(mcp_err)?
+        } else if agentic {
             indexa_query::answer_agentic_history(
                 &self.db_path,
                 self.embedder.as_ref(),
@@ -403,10 +427,28 @@ impl IndexaMcp {
             .await
             .map_err(mcp_err)?
         };
+        // Stamp the LOCAL synthesis model so the calling agent knows it was Indexa's model, not
+        // its own (transparency). Left unset on the retrieval-only path (nothing synthesized).
+        if answer.synthesized {
+            answer.model = Some(format!(
+                "{}/{}",
+                self.config.describer.provider, self.config.describer.model
+            ));
+        }
 
         // Clone for the decorated tool output; the original `answer` is kept whole so the
         // persisted turn stores the clean answer text (without the Sources/Confidence footer).
-        let mut out = answer.answer.clone();
+        // Retrieval-only: lead with a header so the caller knows this is evidence to synthesize,
+        // not a finished answer.
+        let mut out = if answer.synthesized {
+            answer.answer.clone()
+        } else {
+            format!(
+                "RETRIEVED CONTEXT (Indexa did not generate an answer — synthesize this with your \
+                 own model, citing the [N] excerpts):\n\n{}",
+                answer.answer
+            )
+        };
         if !answer.sources.is_empty() {
             out.push_str("\n\nSources:\n");
             for s in &answer.sources {
@@ -431,6 +473,18 @@ impl IndexaMcp {
                 out.push_str(&format!("Possibly uncovered: {}\n", gaps.join(", ")));
             }
         }
+        // Model transparency: when Indexa synthesized, say which LOCAL model did it so the agent
+        // knows the answer is bounded by that model — not its own. Retrieval-only gets a nudge.
+        match &answer.model {
+            Some(m) => out.push_str(&format!(
+                "\nAnswered by Indexa's local model: {m} (not your model). For a stronger answer, \
+                 re-ask with synthesize:false and synthesize the returned context yourself.\n"
+            )),
+            None if !answer.synthesized => out.push_str(
+                "\n(Retrieval-only: no local model was used — the answer quality is now yours.)\n",
+            ),
+            None => {}
+        }
         // Conversational Ask: tell the agent which id to reuse to continue the conversation.
         if let Some(id) = &session_id {
             out.push_str(&format!(
@@ -449,8 +503,10 @@ impl IndexaMcp {
                 out.push_str(&format!("\nImpact: {}\n", imp.human()));
             }
             record_usage(&mut store, "ask", out.len(), counterfactual);
-            // Persist the turn (best-effort; never fails the answer).
-            if let Some(id) = &session_id {
+            // Persist the turn (best-effort; never fails the answer). Only for synthesized
+            // answers — a retrieval-only slice is not an answer, so storing it as one would
+            // poison the conversation history the follow-up rewrite reads.
+            if let (Some(id), true) = (&session_id, answer.synthesized) {
                 append_session_turn(&mut store, id, &question, &answer);
             }
         }
