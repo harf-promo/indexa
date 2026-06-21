@@ -113,7 +113,71 @@ pub(crate) fn retrieve(
             }
         }
     }
+
+    // v0.69 (GraphRAG-lite): on a BROAD, UNSCOPED question, stop one chunk-dense file from
+    // monopolising the packed context so balanced multi-file coverage reaches synthesis.
+    // Strictly gated so focused / scoped / single-file asks stay byte-identical: only
+    // broad-intent AND no scope AND a pool larger than the cap. `cap_per_file` is a pure
+    // permutation (it never drops a hit — overflow goes to the tail that `pack_context` already
+    // truncates), so the worst case is a reorder, never data loss. Code-intent broad questions
+    // keep a looser cap, mirroring the MMR ≥0.8 code clamp (one file's implementation depth must
+    // survive). Default `broad_per_file_cap = 0` ⇒ this whole block is a no-op everywhere.
+    if cfg.broad_per_file_cap > 0
+        && is_broad_intent(question)
+        && cfg.scope.is_none()
+        && hits.len() > cfg.broad_per_file_cap
+    {
+        let cap = if is_code_intent(question) {
+            cfg.broad_per_file_cap.saturating_add(2)
+        } else {
+            cfg.broad_per_file_cap
+        };
+        hits = cap_per_file(hits, cap);
+    }
     Ok(hits)
+}
+
+/// Reorder so no single `entry_path` contributes more than `cap` chunks before every other file
+/// has had its turn — a stable round-robin-by-file reflatten that PRESERVES the incoming
+/// (MMR/rerank) order within each file's bucket.
+///
+/// Pure + total: it's a **permutation** (`output.len() == input.len()` always). `cap == 0` or
+/// `cap >= hits.len()` returns the input untouched. Excess same-file chunks are appended AFTER
+/// the capped, file-diverse front rather than dropped — so nothing leaves the pool; the budget
+/// just reaches the overflow last (and `pack_context` truncates the tail exactly as today). That
+/// makes the pass strictly safe: even a mis-fired guard can only reorder within an
+/// already-truncated budget, never lose a hit.
+pub(crate) fn cap_per_file(hits: Vec<SearchHit>, cap: usize) -> Vec<SearchHit> {
+    if cap == 0 || hits.len() <= cap {
+        return hits;
+    }
+    use std::collections::HashMap;
+    // Bucket by file in arrival (MMR/rerank) order, preserving within-file order.
+    let mut buckets: Vec<Vec<SearchHit>> = Vec::new();
+    let mut idx: HashMap<String, usize> = HashMap::new();
+    for h in hits {
+        let i = *idx.entry(h.entry_path.clone()).or_insert_with(|| {
+            buckets.push(Vec::new());
+            buckets.len() - 1
+        });
+        buckets[i].push(h);
+    }
+    // Front: up to `cap` per file, files in first-appearance order (= MMR/rerank order of each
+    // file's best chunk). Tail: the overflow, same order — kept, not dropped.
+    let mut front = Vec::new();
+    let mut tail = Vec::new();
+    for chunks in buckets {
+        let mut it = chunks.into_iter();
+        for _ in 0..cap {
+            match it.next() {
+                Some(h) => front.push(h),
+                None => break,
+            }
+        }
+        tail.extend(it);
+    }
+    front.extend(tail);
+    front
 }
 
 // The historical-segment list and the penalty factor are configuration-driven

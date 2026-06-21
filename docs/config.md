@@ -145,7 +145,14 @@ recency_boost        = false  # boost recently-modified files (mtime-based; off 
 recency_days         = 90     # recency window in days (files older than this stay neutral when recency_boost is on)
 archive_segments     = ["archive", "archived", "historical", "deprecated", "old"]  # path segments treated as historical
 archive_penalty      = 0.15   # multiplicative down-weight for hits under an archive segment (0.0 disables it)
+broad_per_file_cap   = 0      # 0 = off. >0 caps chunks-per-file for BROAD, unscoped questions only
 ```
+
+> `broad_per_file_cap` (v0.69+) only acts on broad/thematic, **unscoped** questions — focused and
+> `--scope`d asks are never affected. When set (e.g. `2`), it stops a single chunk-dense file from
+> monopolising a broad answer's context by reordering so other files get a turn (it never drops a
+> hit — overflow just lands later in the budget). Leave it `0` unless broad answers on your corpus
+> are dominated by one large file; on a file-diverse corpus there's nothing to balance.
 
 > The summary-boost (`summary_weight`) only takes effect for dense/RRF modes and is off (0.0) by default.
 

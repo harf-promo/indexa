@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in per-file cap for broad questions (`[retrieval] broad_per_file_cap`).** On a broad/thematic
+  question with no `scope`, caps how many chunks one file may contribute to the retrieved pool before
+  other files get a turn, so a single chunk-dense file can't monopolise the answer's context. It's a
+  pure reorder that never drops a hit (overflow just moves to the budget tail). **Default `0` (off);**
+  focused and scoped `ask`s are unaffected by construction. Honest note: on a file-diverse corpus
+  (e.g. Indexa's own code, where a live A/B showed broad-question retrieval already spreads ~1 chunk
+  per file) there's nothing to balance, so it's a no-op there — it exists for corpora where one large
+  file dominates retrieval. The deeper thematic-synthesis "GraphRAG" (cluster → per-cluster summarise
+  → combine) remains future work.
+
 ## [0.69.1] — 2026-06-21
 
 ### Fixed
