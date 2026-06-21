@@ -44,21 +44,36 @@ pub(super) fn delete_chunks_under_prefix(
     )
 }
 
-/// Delete all artifacts (chunks, FTS, summaries, entry) for one exact path.
-/// Returns the number of `entries` rows removed (0 or 1). Used by
-/// `reconcile_entries` to expunge a single ghost row.
-fn delete_path_artifacts_exact(tx: &Transaction, path: &str) -> rusqlite::Result<usize> {
-    tx.execute(
-        "DELETE FROM chunks_fts WHERE entry_path = ?1",
-        params![path],
-    )?;
-    tx.execute("DELETE FROM chunks WHERE entry_path = ?1", params![path])?;
-    tx.execute("DELETE FROM edges WHERE from_path = ?1", params![path])?;
-    tx.execute("DELETE FROM summaries WHERE path = ?1", params![path])?;
-    tx.execute("DELETE FROM summary_queue WHERE path = ?1", params![path])?;
-    tx.execute("DELETE FROM classifications WHERE path = ?1", params![path])?;
-    tx.execute("DELETE FROM directory_apps WHERE path = ?1", params![path])?;
-    tx.execute("DELETE FROM entries WHERE path = ?1", params![path])
+/// Hard-delete every artifact (chunks + FTS + edges + summaries + queue + classification +
+/// dir-apps + the entry itself) for an EXACT set of paths, returning the number of `entries`
+/// rows removed. Batched `IN (…)` per table, chunked under SQLite's bound-variable cap so an
+/// arbitrarily large ghost set stays safe. The child tables have no FK `ON DELETE CASCADE`
+/// (see `store::schema`), so this is the manual-integrity cleanup path used by `reconcile_entries`.
+fn delete_path_artifacts_exact(tx: &Transaction, paths: &[String]) -> rusqlite::Result<usize> {
+    let mut removed = 0usize;
+    for batch in paths.chunks(800) {
+        let ph = vec!["?"; batch.len()].join(",");
+        // (table, scoping column) — `edges` keys on `from_path`, the rest on `path`/`entry_path`.
+        for (table, col) in [
+            ("chunks_fts", "entry_path"),
+            ("chunks", "entry_path"),
+            ("edges", "from_path"),
+            ("summaries", "path"),
+            ("summary_queue", "path"),
+            ("classifications", "path"),
+            ("directory_apps", "path"),
+        ] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE {col} IN ({ph})"),
+                rusqlite::params_from_iter(batch.iter()),
+            )?;
+        }
+        removed += tx.execute(
+            &format!("DELETE FROM entries WHERE path IN ({ph})"),
+            rusqlite::params_from_iter(batch.iter()),
+        )?;
+    }
+    Ok(removed)
 }
 
 impl Store {
@@ -206,10 +221,7 @@ impl Store {
         }
 
         let tx = self.conn.transaction()?;
-        let mut removed = 0usize;
-        for path in &ghosts {
-            removed += delete_path_artifacts_exact(&tx, path)?;
-        }
+        let removed = delete_path_artifacts_exact(&tx, &ghosts)?;
         tx.commit()?;
         Ok(removed)
     }

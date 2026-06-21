@@ -40,6 +40,30 @@ fn delete_subtree_leaves_no_orphans() {
 }
 
 #[test]
+fn reconcile_entries_batch_removes_ghosts_leaves_no_orphans() {
+    // reconcile_entries expunges every indexed path under the root that's absent from the live
+    // set (files removed on disk since the last scan), via batched IN(...) deletes. Locks: each
+    // ghost's artifacts fully cleared across every child table, the still-live path untouched,
+    // and the returned count = number of ghost `entries` rows.
+    let mut store = Store::open_in_memory().unwrap();
+    seed_full_entry(&mut store, "/proj/a.rs");
+    seed_full_entry(&mut store, "/proj/b.rs");
+    seed_full_entry(&mut store, "/proj/c.rs");
+
+    let live: std::collections::HashSet<String> = ["/proj/a.rs".to_owned()].into_iter().collect();
+    let removed = store.reconcile_entries("/proj", &live).unwrap();
+    assert_eq!(removed, 2, "b.rs + c.rs are ghosts");
+
+    assert_eq!(orphan_rows_for(&store, "/proj/b.rs"), 0);
+    assert_eq!(orphan_rows_for(&store, "/proj/c.rs"), 0);
+    assert!(
+        orphan_rows_for(&store, "/proj/a.rs") >= 6,
+        "the live file must survive intact"
+    );
+    assert_eq!(store.entry_count().unwrap(), 1);
+}
+
+#[test]
 fn importance_weights_persist_across_entry_delete() {
     // Documented design: weights are NOT cleared with the entry (unlike classifications).
     let mut store = Store::open_in_memory().unwrap();
