@@ -33,6 +33,17 @@ pub(crate) struct GraphQuery {
     /// Default 1 (direct callers + callees only).
     #[serde(default)]
     depth: Option<usize>,
+    /// Knowledge-graph layers to overlay on the call graph (comma-separated). Currently only
+    /// `"semantic"` (meaning-similarity edges between the displayed files). Omit ⇒ call graph
+    /// only, byte-identical to before. Read-only, derived at request time.
+    #[serde(default)]
+    layers: Option<String>,
+    /// Cosine threshold for `semantic` edges (default 0.78). Higher ⇒ fewer, tighter edges.
+    #[serde(default)]
+    sim_threshold: Option<f32>,
+    /// Skip the O(n²) semantic pass when the displayed node count exceeds this (default 300).
+    #[serde(default)]
+    sim_max_nodes: Option<usize>,
 }
 
 /// Keep only `focus` plus the nodes within `depth` undirected hops of it, dropping
@@ -163,7 +174,7 @@ pub(crate) async fn api_graph(
                 })
                 .collect();
             // edge_tiers is parallel to edges (same order, same length).
-            let edges: Vec<EdgeDto> = g
+            let mut edges: Vec<EdgeDto> = g
                 .edges
                 .into_iter()
                 .zip(sg.edge_tiers.iter())
@@ -175,6 +186,41 @@ pub(crate) async fn api_graph(
                 })
                 .collect();
             let bare_edges = sg.edge_tiers.iter().filter(|t| t.is_bare()).count();
+
+            // Optional knowledge-graph overlay: meaning-similarity ("semantic") edges between the
+            // displayed files. Computed on a FRESH connection inside spawn_blocking (never the
+            // shared mutex) and **fail-open** — any error leaves the call graph untouched.
+            let want_semantic = q
+                .layers
+                .as_deref()
+                .map(|l| l.split(',').any(|x| x.trim() == "semantic"))
+                .unwrap_or(false);
+            let mut semantic_edges = 0usize;
+            if want_semantic {
+                let node_paths: Vec<String> = nodes.iter().map(|n| n.path.clone()).collect();
+                let threshold = q.sim_threshold.unwrap_or(0.78);
+                let max_nodes = q.sim_max_nodes.unwrap_or(300);
+                let db = state.db_path.clone();
+                let scope_c = scope.clone();
+                let sem = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                    let store = indexa_core::store::Store::open(&db)?;
+                    store.semantic_file_edges(&scope_c, &node_paths, threshold, max_nodes)
+                })
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("semantic task panicked: {e}")));
+                if let Ok(sem) = sem {
+                    semantic_edges = sem.len();
+                    for (from, to, sim) in sem {
+                        edges.push(EdgeDto {
+                            from,
+                            to,
+                            weight: (sim * 10.0).round().max(1.0) as usize,
+                            tier: "semantic".to_owned(),
+                        });
+                    }
+                }
+            }
+
             Json(serde_json::json!({
                 "scope": scope,
                 "nodes": nodes,
@@ -187,6 +233,8 @@ pub(crate) async fn api_graph(
                 // bare count here means "filtered out", which the UI must not report
                 // as "all scope-resolved". Echo the flag so it can word it honestly.
                 "strict": strict,
+                // Knowledge-graph overlay (additive; 0 / absent layer ⇒ call graph only).
+                "semantic_edges": semantic_edges,
             }))
             .into_response()
         }

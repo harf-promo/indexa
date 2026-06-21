@@ -1,0 +1,35 @@
+/* 20-graph-layers.css — knowledge-graph overlay (semantic edges), Track 3 v0.70.
+   "Related by meaning" edges get a distinct hue (info-blue, never a UI-state colour) and a dotted
+   `1 3` dash (different from bare's `3 3`) so they read apart from call edges. The `.hl`/`.dim`
+   rules are re-asserted at 3-class specificity so highlight/dim still win over the per-tier opacity
+   (the generic `.graph-edge.hl/.dim` in 11-graph.css are only 2-class and load earlier). */
+
+.graph-edge.tier-semantic {
+  stroke: var(--info);
+  stroke-dasharray: 1 3;
+  opacity: 0.4;
+}
+.graph-edge.tier-semantic.hl {
+  stroke: var(--info-deep);
+  opacity: 1;
+}
+.graph-edge.tier-semantic.dim {
+  opacity: 0.08;
+}
+
+/* Legend swatch for the semantic edge (dotted info-blue rule). */
+.glegend-edge-semantic {
+  border-top-style: dotted;
+  border-top-color: var(--info);
+}
+
+/* Toolbar toggle. */
+.graph-layer-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  font-size: 0.85em;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
