@@ -651,23 +651,7 @@ pub(crate) async fn run_deep_phase(
         }
         samples.push_back((now, done));
 
-        let (rate, eta) = if samples.len() >= 2 {
-            let (oldest_t, oldest_done) = samples.front().unwrap();
-            let elapsed = oldest_t.elapsed().as_secs_f64();
-            let r = if elapsed > 0.0 {
-                (done - oldest_done) as f64 / elapsed
-            } else {
-                0.0
-            };
-            let e = if r > 0.0 {
-                (n_files - done) as f64 / r
-            } else {
-                0.0
-            };
-            (Some(r), Some(e))
-        } else {
-            (None, None)
-        };
+        let (rate, eta) = super::throughput_eta(&samples, done, n_files);
 
         push(
             handle,

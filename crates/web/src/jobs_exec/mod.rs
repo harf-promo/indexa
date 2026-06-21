@@ -22,6 +22,36 @@ use deep::run_deep_phase;
 pub(crate) use deep::run_deep_phase_standalone;
 use watchdog::run_watchdog_check;
 
+/// Sliding-window throughput (items/sec) and ETA (sec) from a window of `(time, cumulative)`
+/// progress samples. The caller owns the window (trim to the last few seconds + push the latest
+/// sample) and passes the latest cumulative `current` plus the `total` target. Both outputs are
+/// `None` until there are ≥2 samples (no rate from a single point). `total.saturating_sub(current)`
+/// guards a `current` that briefly exceeds `total` (a pending count can drift as items go
+/// in-flight); when `current <= total` it's an ordinary subtraction. Shared by the deep + summarize
+/// phases, which computed this identically.
+pub(crate) fn throughput_eta(
+    samples: &std::collections::VecDeque<(std::time::Instant, u64)>,
+    current: u64,
+    total: u64,
+) -> (Option<f64>, Option<f64>) {
+    if samples.len() < 2 {
+        return (None, None);
+    }
+    let (oldest_t, oldest_done) = samples.front().unwrap();
+    let elapsed = oldest_t.elapsed().as_secs_f64();
+    let rate = if elapsed > 0.0 {
+        (current - oldest_done) as f64 / elapsed
+    } else {
+        0.0
+    };
+    let eta = if rate > 0.0 {
+        total.saturating_sub(current) as f64 / rate
+    } else {
+        0.0
+    };
+    (Some(rate), Some(eta))
+}
+
 // ── Job runner ────────────────────────────────────────────────────────────────
 
 /// Schedule removal of a job from the registry after 60 s. Allows refreshed
@@ -460,25 +490,7 @@ pub(crate) async fn run_summarize_phase(
         }
         samples.push_back((now, processed));
 
-        let (rate, eta) = if samples.len() >= 2 {
-            let (oldest_t, oldest_done) = samples.front().unwrap();
-            let elapsed = oldest_t.elapsed().as_secs_f64();
-            let r = if elapsed > 0.0 {
-                (processed - oldest_done) as f64 / elapsed
-            } else {
-                0.0
-            };
-            // saturating_sub guards against processed > enqueued (the pending count
-            // can drift if items went in-flight between snapshot and processing).
-            let e = if r > 0.0 {
-                (enqueued as u64).saturating_sub(processed) as f64 / r
-            } else {
-                0.0
-            };
-            (Some(r), Some(e))
-        } else {
-            (None, None)
-        };
+        let (rate, eta) = throughput_eta(&samples, processed, enqueued as u64);
 
         let note = Some(format!("{:.1}s · {}", llm_secs, cfg.file_model));
         push(
@@ -501,4 +513,27 @@ pub(crate) async fn run_summarize_phase(
         },
     );
     handle.set_status(JobStatus::Done);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::throughput_eta;
+    use std::collections::VecDeque;
+    use std::time::Instant;
+
+    #[test]
+    fn throughput_eta_needs_two_samples_and_eta_never_underflows() {
+        let mut s: VecDeque<(Instant, u64)> = VecDeque::new();
+        // Fewer than two samples → no rate/ETA yet.
+        assert_eq!(throughput_eta(&s, 0, 100), (None, None));
+        s.push_back((Instant::now(), 0));
+        assert_eq!(throughput_eta(&s, 5, 100), (None, None));
+
+        // Two samples → Some. Even when `current` exceeds `total` (a pending count drifting as
+        // items go in-flight), the saturating remainder keeps ETA non-negative — never a panic.
+        s.push_back((Instant::now(), 200));
+        let (rate, eta) = throughput_eta(&s, 200, 100);
+        assert!(rate.is_some());
+        assert!(eta.unwrap() >= 0.0);
+    }
 }
