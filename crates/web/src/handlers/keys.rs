@@ -31,7 +31,20 @@ pub(crate) async fn api_keys_set(
     }
 
     let cfg_path = config::default_config_path();
-    let mut cfg = config::load(&cfg_path).unwrap_or_default();
+    // A parse error must NOT silently fall back to a default config — saving that would
+    // OVERWRITE the user's config.toml (wiping every other setting AND existing API keys).
+    // A missing file still loads as default (config::load returns Ok(default)), so first-time
+    // key entry works; only a present-but-unparseable config is refused. Mirrors the
+    // api_config_* handlers (handlers/config.rs).
+    let mut cfg = match config::load(&cfg_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("config exists but failed to parse; refusing to overwrite it: {e:#}"),
+            )
+        }
+    };
 
     let key_val = if body.key.is_empty() {
         None
