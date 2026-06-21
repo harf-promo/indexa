@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Indexa</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Geist+Mono:wght@400;500;600&display=swap">
@@ -15,7 +16,7 @@
 <!-- Topbar -->
 <header class="app-topbar">
   <button class="icon-btn sidebar-toggle" id="sidebar-toggle" onclick="toggleSidebar()" aria-label="Show folders" aria-expanded="false" aria-controls="tree-pane" title="Folders">&#x2630;</button>
-  <h1 class="app-logo">&#x2B21; Indexa</h1>
+  <h1 class="app-logo"><span class="apos" aria-hidden="true"></span>indexa</h1>
   <span class="app-version" id="app-version"></span>
   <span class="app-tagline">the local context engine for AI</span>
   <div class="app-topbar-actions">
@@ -186,6 +187,7 @@
               <select id="graph-scope" class="graph-scope" aria-label="Graph scope root" onchange="loadGraph(this.value)"></select>
               <button id="graph-help-btn" class="btn-sm graph-help-btn" onclick="toggleGraphHelp()" aria-expanded="false" aria-controls="graph-help" title="What is this?">&#x24D8; What is this?</button>
               <label class="graph-layer-toggle"><input type="checkbox" id="graph-semantic-toggle" onchange="toggleSemanticLayer(this.checked)"> Related by meaning</label>
+              <label class="graph-layer-toggle"><input type="checkbox" id="graph-category-toggle" onchange="toggleCategoryLayer(this.checked)"> Same category</label>
               <span class="graph-meta" id="graph-meta"></span>
             </div>
             <!-- Plain-language explainer for the graph (mirrors #map-help). -->

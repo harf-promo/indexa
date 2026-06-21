@@ -92,6 +92,9 @@ pub(crate) struct AnnCache {
 
 pub(crate) const UI_HTML: &str = include_str!("../assets/ui/index.html");
 
+/// The Indexa mark (green Harf apostrophe on an ink ground) served as the browser favicon.
+pub(crate) const FAVICON_SVG: &str = include_str!("../assets/ui/favicon.svg");
+
 // app.css and app.js are split into ordered source fragments for maintainability
 // and reassembled here at compile time. The concat! order below is the canonical
 // on-disk order (zero-padded prefixes); the served bytes are byte-identical to the
@@ -282,6 +285,7 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/", get(serve_ui))
         .route("/assets/app.css", get(serve_ui_css))
         .route("/assets/app.js", get(serve_ui_js))
+        .route("/favicon.svg", get(serve_favicon))
         .route("/api/stats", get(api_stats))
         .route("/api/impact", get(api_impact))
         .route("/api/session-impact/{session_id}", get(api_session_impact))

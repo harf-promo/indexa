@@ -62,9 +62,12 @@ function fetchGraph(scope, focus, depth) {
   }
   var url = '/api/graph?limit=300' + (scope ? '&scope=' + encodeURIComponent(scope) : '');
   if (focus) url += '&focus=' + encodeURIComponent(focus) + '&depth=' + (depth || 1);
-  // Knowledge-graph overlay: request meaning-similarity edges when the toggle is on (default off
-  // ⇒ no param ⇒ call graph only, byte-identical request).
-  if (graphState.semanticLayer) url += '&layers=semantic';
+  // Knowledge-graph overlays: request the enabled layers (default none ⇒ no param ⇒ call graph
+  // only, byte-identical request).
+  var layers = [];
+  if (graphState.semanticLayer) layers.push('semantic');
+  if (graphState.categoryLayer) layers.push('category');
+  if (layers.length) url += '&layers=' + layers.join(',');
   fetch(url)
     .then(function (r) { return r.json(); })
     .then(function (d) {

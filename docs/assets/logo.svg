@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 140" role="img" aria-label="Indexa">
+  <!-- Indexa logo lockup: the mark (Harf green apostrophe on ink) + the grey wordmark.
+       Built from the design system's apostrophe glyph; grey #939598 wordmark, green #A4CD39
+       as the only accent (brand: green-as-punctuation). -->
+  <g>
+    <rect x="14" y="22" width="96" height="96" rx="14" ry="14" fill="#1A1B1D"/>
+    <g transform="translate(48.7,46) scale(0.3107)">
+      <path d="M8.49,141.6l-0.27,-28.76c10.16-0.98,18.37-3.12,26.59-9.05,8.22-5.95,12.33-11.39,12.33-25.19h-47.14V0h84.96v64.06c-0.37,23.75-6.4,42.22-18.09,55.39-11.7,13.16-34.63,20.55-58.38,22.15Z" fill="#A4CD39"/>
+    </g>
+  </g>
+  <text x="132" y="92" font-family="Geist, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="64" font-weight="600" letter-spacing="-1" fill="#939598">indexa</text>
+</svg>

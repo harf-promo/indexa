@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Brand identity: a real logo + app icon (was a placeholder).** Indexa now has a mark built from
+  the design system's own signature — the **green Harf apostrophe `#A4CD39` on an ink ground** (sharp,
+  rounded-rect for the Dock). A single `crates/web/assets/ui/favicon.svg` is the source of truth:
+  served as the browser **favicon** (`GET /favicon.svg`, was absent), regenerated into the full
+  desktop **app-icon set** via `tauri icon` (so the installed macOS app, Dock, and tray show it
+  instead of a blank placeholder — `icon.icns`/`.ico`/PNGs/Store logos), and shipped as a README
+  lockup (`docs/assets/logo.svg`). The web header drops the generic `⊡` glyph for the apostrophe mark
+  + a grey **"indexa"** wordmark (green-as-punctuation, matching the "by Harf" footer).
+- **Knowledge-graph "Same category" layer (Track 3, `GET /api/graph?layers=category`, default-off).**
+  A second opt-in Map overlay beside the v0.70 "Related by meaning" layer: files the user classified
+  into the same category are grouped via a deterministic **star per category** (O(n), not an O(n²)
+  clique) — `Store::category_file_edges` (`crates/core/src/store/category_edges.rs`), computed on a
+  fresh connection, fail-open, no schema. Dashed-grey "grouping" edges (never a UI-state colour), a
+  "Same category" toolbar toggle + legend row shown only when present. Combine with `semantic`
+  (`?layers=semantic,category`). No `layers` ⇒ byte-identical to the call-graph view.
+
 ## [0.70.0] — 2026-06-21
 
 ### Added

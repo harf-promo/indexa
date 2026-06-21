@@ -11,11 +11,18 @@
   z-index: 10;
 }
 .app-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 16px;
-  font-weight: 700;
-  color: var(--accent);
-  letter-spacing: -0.3px;
+  font-weight: 600;
+  /* Wordmark in the Harf grey; the green apostrophe is the only accent (brand: green-as-punctuation). */
+  color: var(--harf-grey);
+  letter-spacing: -0.2px;
   white-space: nowrap;
+}
+.app-logo .apos {
+  --apos-size: 0.86em;
 }
 .app-version {
   font-size: 11px;

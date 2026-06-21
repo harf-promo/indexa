@@ -3,7 +3,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::{UI_CSS, UI_HTML, UI_JS};
+use crate::{FAVICON_SVG, UI_CSS, UI_HTML, UI_JS};
 
 pub(crate) async fn serve_ui() -> Response {
     (
@@ -34,6 +34,14 @@ pub(crate) async fn serve_ui_js() -> Response {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         UI_JS,
+    )
+        .into_response()
+}
+
+pub(crate) async fn serve_favicon() -> Response {
+    (
+        [(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")],
+        FAVICON_SVG,
     )
         .into_response()
 }

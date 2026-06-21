@@ -29,10 +29,15 @@ function renderGraphLegend(d) {
     '<span class="glegend-item"><span class="glegend-edge glegend-edge-scope" aria-hidden="true"></span>Same folder / same file</span>',
     '<span class="glegend-item"><span class="glegend-edge glegend-edge-bare" aria-hidden="true"></span>Approximate — matched by name only</span>',
   ];
-  // Knowledge-graph overlay: only show the "related by meaning" key when semantic edges are present.
+  // Knowledge-graph overlays: show each key only when that layer's edges are present.
   if (d && d.semantic_edges > 0) {
     items.push(
       '<span class="glegend-item"><span class="glegend-edge glegend-edge-semantic" aria-hidden="true"></span>Related by meaning (approximate)</span>'
+    );
+  }
+  if (d && d.category_edges > 0) {
+    items.push(
+      '<span class="glegend-item"><span class="glegend-edge glegend-edge-category" aria-hidden="true"></span>Same category</span>'
     );
   }
   el.innerHTML = items.join('');
