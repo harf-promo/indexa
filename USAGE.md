@@ -178,11 +178,12 @@ overlap = 100                # word overlap between fixed chunks
 [retrieval]
 hybrid = "rrf"               # rrf (fuse sparse+dense) | sparse | dense
 rrf_k = 60                   # RRF constant
-top_k = 8                    # passages fed to the answer
-rerank = false               # optional cross-encoder reorder pass (fails open)
+top_k = 12                   # passages retrieved before reranking
+rerank = true                # rerank before synthesis (default on; reuses the gen model, fails open)
+rerank_backend = "llm"       # "llm" (listwise, no download) | "cross-encoder" (~85 MB DeBERTa-v2)
 summary_weight = 0.0         # >0 boosts chunks under summary-matched dirs
 summary_depth_alpha = 0.15   # shallower summaries get a broader-context boost
-context_budget = 4000        # max chars packed into the answer prompt
+context_budget = 8000        # max chars packed into the answer prompt
 
 [describer]
 provider = "ollama"          # ollama | openai | anthropic | llamacpp
@@ -302,7 +303,7 @@ Add it to **Claude Desktop** (`claude_desktop_config.json`) — or any MCP clien
 }
 ```
 
-**42 tools** are exposed (see [docs/how-to/live-retrieval-over-mcp.md](docs/how-to/live-retrieval-over-mcp.md)
+**46 tools** are exposed (see [docs/how-to/live-retrieval-over-mcp.md](docs/how-to/live-retrieval-over-mcp.md)
 for the full table). The ones you'll reach for most: `search` (content search), `browse_tree` (one
 directory level), `get_summary` (`tier` = l0 one-liner / l1 full+children / l2 file content —
 progressive disclosure), `get_chunk_context` (a file's indexed chunks, or the neighbors of a search

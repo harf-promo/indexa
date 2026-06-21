@@ -71,7 +71,7 @@ pub trait Describer: Send + Sync {
         "unspecified"
     }
 
-    /// One-sentence file description from a content sample.
+    /// 1–2 sentence file description from a content sample.
     /// `previous_summary` is the prior draft on a refinement pass (None on first pass).
     async fn describe(
         &self,

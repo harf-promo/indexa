@@ -2667,8 +2667,6 @@ dependencies = [
  "serde_json",
  "tar",
  "tempfile",
- "thiserror 2.0.18",
- "tracing",
  "tree-sitter",
  "tree-sitter-c",
  "tree-sitter-cpp",

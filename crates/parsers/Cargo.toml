@@ -9,8 +9,6 @@ repository.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
 # Markdown parsing
 pulldown-cmark = "0.13"
 # Mime type detection

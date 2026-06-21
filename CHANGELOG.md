@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   option (was "off by default, a future cross-encoder"), fixes the invalid `[parsers.pdf] backend =
   "marker"` example to `"ocr"`, and adds a decision-log row for the v0.44 default flip. The
   `indexa graph` empty-result hint now lists all eight code-graph languages (C/C++ were missing).
+- **Synced the remaining stale docs surfaced by a full-codebase audit.** `USAGE.md` now states the
+  MCP server exposes **46 tools** (was "42") and shows the real `[retrieval]` defaults (`top_k = 12`,
+  `rerank = true` + `rerank_backend`, `context_budget = 8000`); the `docs/config.md` "Full example"
+  retrieval block was corrected to match; the `Describer::describe` trait doc now says "1–2 sentence"
+  (matching the prompt templates) instead of "One-sentence". Also dropped two unused dependencies
+  (`thiserror`, `tracing`) from `crates/parsers/Cargo.toml` (kept at the workspace level for the
+  crates that do use them).
 
 ## [0.68.0] — 2026-06-20
 
