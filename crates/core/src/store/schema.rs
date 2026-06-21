@@ -272,7 +272,11 @@ impl Store {
                 session_id           TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_tool_usage_at ON tool_usage(at);
-            CREATE INDEX IF NOT EXISTS idx_tool_usage_session ON tool_usage(session_id);
+            -- NOTE: the idx_tool_usage_session index is intentionally NOT created here. On a
+            -- pre-v0.69 index the CREATE TABLE above is a no-op (the table already exists without a
+            -- session_id column), so creating an index on session_id in this base block would fail
+            -- (no such column) before the ALTER migration below adds it. The migration creates the
+            -- index idempotently AFTER ensuring the column exists -- fresh and upgraded DBs alike.
 
             -- Decision Ledger (v0.22): every uncertain judgment call becomes a row —
             -- one row = one question + its answer. The row fills in place on answer;
@@ -393,11 +397,17 @@ impl Store {
             .prepare("SELECT 1 FROM pragma_table_info('tool_usage') WHERE name = 'session_id'")?
             .exists([])?;
         if !has_usage_session_id {
-            self.conn.execute_batch(
-                "ALTER TABLE tool_usage ADD COLUMN session_id TEXT;
-                 CREATE INDEX IF NOT EXISTS idx_tool_usage_session ON tool_usage(session_id);",
-            )?;
+            self.conn
+                .execute_batch("ALTER TABLE tool_usage ADD COLUMN session_id TEXT;")?;
         }
+        // Create the session index HERE (not in the base DDL) so it runs only after the column is
+        // guaranteed to exist — on a fresh DB (column from the base CREATE TABLE) and on an
+        // upgraded DB (column just added by the ALTER above). Idempotent, so it's a no-op once
+        // present. Putting it in the base DDL broke opening any pre-v0.69 index with
+        // "no such column: session_id" (the CREATE TABLE IF NOT EXISTS skipped the new column).
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_tool_usage_session ON tool_usage(session_id);",
+        )?;
 
         // Migration: give `chunks.id` AUTOINCREMENT on databases created before stable ids
         // (a bare rowid is reused after a delete, which would mis-attribute ANN results to a

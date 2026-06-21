@@ -110,3 +110,59 @@ fn session_usage_ledger_sums_per_session_and_ignores_stateless() {
     // Every call (incl. the stateless None one) still lands in the weekly aggregate.
     assert_eq!(store.usage_summary(USAGE_WEEK_SECS).unwrap().calls, 4);
 }
+
+#[test]
+fn opens_pre_v069_index_missing_tool_usage_session_id() {
+    // Regression: v0.69 added tool_usage.session_id (#293). Opening a PRE-v0.69 index — whose
+    // tool_usage table predates the column — must migrate in place. This used to fail with
+    // "no such column: session_id" because the base-DDL `CREATE INDEX … (session_id)` ran on the
+    // already-existing table before the ALTER added the column (CI never caught it: fresh
+    // in-memory DBs get the column straight from the base CREATE TABLE).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pre_v069.db");
+    {
+        // Minimal pre-v0.69 tool_usage (no session_id) + a pre-existing row.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tool_usage (
+                 id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                 surface              TEXT NOT NULL,
+                 tool                 TEXT NOT NULL,
+                 bytes_served         INTEGER NOT NULL DEFAULT 0,
+                 bytes_counterfactual INTEGER NOT NULL DEFAULT 0,
+                 at                   INTEGER NOT NULL DEFAULT (unixepoch())
+             );
+             INSERT INTO tool_usage (surface, tool, bytes_served, bytes_counterfactual)
+                 VALUES ('cli', 'ask', 10, 1000);",
+        )
+        .unwrap();
+    }
+
+    // The bug reproduced here: Store::open must MIGRATE cleanly, not error.
+    let store = Store::open(&path).expect("v0.69 must open & migrate a pre-v0.69 index");
+
+    // session_id column was added …
+    let has_col: bool = store
+        .db_connection()
+        .prepare("SELECT 1 FROM pragma_table_info('tool_usage') WHERE name = 'session_id'")
+        .unwrap()
+        .exists([])
+        .unwrap();
+    assert!(has_col, "migration must add tool_usage.session_id");
+
+    // … its index exists …
+    let has_idx: bool = store
+        .db_connection()
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_tool_usage_session'")
+        .unwrap()
+        .exists([])
+        .unwrap();
+    assert!(has_idx, "migration must create idx_tool_usage_session");
+
+    // … and the pre-existing usage row survived (the ledger still aggregates it).
+    assert_eq!(
+        store.usage_summary(USAGE_WEEK_SECS).unwrap().calls,
+        1,
+        "the existing pre-migration usage row must be preserved"
+    );
+}
