@@ -49,7 +49,9 @@ pub(crate) async fn cmd_graph(
         let radius = store.blast_radius_resolved(&symbol, limit.max(200), strict, depth)?;
         if radius.files.is_empty() {
             println!("No blast radius found for \"{symbol}\".");
-            println!("Run `indexa deep <path>` on source files first (Rust/Python/JS/TS/Go/Java).");
+            println!(
+                "Run `indexa deep <path>` on source files first (Rust/Python/JS/TS/Go/Java/C/C++)."
+            );
             return Ok(());
         }
         println!(
@@ -112,7 +114,9 @@ pub(crate) async fn cmd_graph(
                 "(strict mode — only scope-resolved edges (same-dir/import). Try without --strict.)"
             );
         }
-        println!("Run `indexa deep {path}` on source files first (Rust/Python/JS/TS/Go/Java).");
+        println!(
+            "Run `indexa deep {path}` on source files first (Rust/Python/JS/TS/Go/Java/C/C++)."
+        );
         return Ok(());
     }
 
