@@ -18,7 +18,7 @@ pub use export::{
     approx_tokens, build_export_filter, build_tree, prune_tree, render_graph, render_json,
     render_markdown, render_signatures, render_weights, render_xml,
 };
-pub use impact::{served_bytes, AnswerImpact};
+pub use impact::{record_ask_impact, served_bytes, AnswerImpact};
 pub use indexa_core::config::HybridMode;
 pub use qa::{
     answer, answer_agentic, answer_agentic_history, answer_agentic_stream,

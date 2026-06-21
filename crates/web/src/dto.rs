@@ -7,6 +7,7 @@ use axum::{
     Json,
 };
 use indexa_core::resource::{assess, compute_budget, CpuSample, MachineSpec, MemSample, Pressure};
+use indexa_query::AnswerImpact;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -454,9 +455,10 @@ pub(crate) struct AskResponse {
     pub(crate) confidence: Option<AskConfidence>,
     /// Per-answer token/byte savings vs. pasting the cited files whole; absent when there's
     /// nothing meaningful to show (no-match, or serving wasn't smaller). Additive — clients
-    /// and older servers tolerate it missing.
+    /// and older servers tolerate it missing. Serializes as
+    /// `{ served_bytes, counterfactual_bytes, saved_percent }` (see `AnswerImpact`'s `Serialize`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) impact: Option<AskImpact>,
+    pub(crate) impact: Option<AnswerImpact>,
     /// Echo of the conversation id this turn was recorded under (Conversational Ask); absent
     /// for a stateless ask. Additive — clients tolerate it missing.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -471,14 +473,6 @@ pub(crate) struct AskConfidence {
     /// absent when nothing was missing. Additive — clients tolerate it missing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) uncovered: Option<Vec<String>>,
-}
-
-/// The "retrieve the slice" win, made concrete per answer (see `indexa_query::AnswerImpact`).
-#[derive(Serialize)]
-pub(crate) struct AskImpact {
-    pub(crate) served_bytes: u64,
-    pub(crate) counterfactual_bytes: u64,
-    pub(crate) saved_percent: u8,
 }
 
 #[derive(Serialize)]

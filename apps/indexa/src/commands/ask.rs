@@ -1,8 +1,8 @@
 use anyhow::Result;
 use indexa_core::{config::HybridMode, store::Store};
 use indexa_query::{
-    answer_agentic_history, answer_with_ann_history, explain_retrieval, served_bytes, Answer,
-    AnswerImpact, Confidence, PriorTurn, QaConfig, RetrievalTrace,
+    answer_agentic_history, answer_with_ann_history, explain_retrieval, Answer, AnswerImpact,
+    Confidence, PriorTurn, QaConfig, RetrievalTrace,
 };
 use serde::Serialize;
 
@@ -53,13 +53,6 @@ struct ConfidenceJson {
 }
 
 #[derive(Serialize)]
-struct ImpactJson {
-    served_bytes: u64,
-    counterfactual_bytes: u64,
-    saved_percent: u8,
-}
-
-#[derive(Serialize)]
 struct AnswerJson {
     question: String,
     answer: String,
@@ -69,7 +62,7 @@ struct AnswerJson {
     confidence: Option<ConfidenceJson>,
     /// Per-answer byte savings vs. the cited files whole; absent when nothing to show.
     #[serde(skip_serializing_if = "Option::is_none")]
-    impact: Option<ImpactJson>,
+    impact: Option<AnswerImpact>,
     #[serde(skip_serializing_if = "Option::is_none")]
     retrieval: Option<RetrievalJson>,
     /// Conversation id this turn was recorded under (Conversational Ask); absent when stateless.
@@ -292,19 +285,14 @@ pub(crate) async fn cmd_ask(
     // Best-effort token-savings telemetry + the per-answer impact readout — must never fail
     // the user's ask. (`store` was dropped above so the query path didn't hold two handles; a
     // fresh open here is the same cost every other command pays.)
+    // `record_ask_impact` does the shared work (cited paths → counterfactual → record usage →
+    // impact); it's the same served accounting the web surface uses. (`store` was dropped above so
+    // the query path didn't hold two handles; a fresh open here is the same cost every other
+    // command pays.)
     let impact: Option<AnswerImpact> = match Store::open(&db_path) {
-        Ok(mut s) => {
-            let paths: Vec<&str> = answer.sources.iter().map(|x| x.path.as_str()).collect();
-            let counterfactual = s.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
-            // Served = answer + delivered citations (shared `served_bytes`, consistent with the
-            // web surface). v0.59: this replaced the old answer-text-only count, which slightly
-            // undercounted served bytes (and so overstated savings) in the aggregate `status`.
-            let served = served_bytes(&answer);
-            if let Err(e) = s.record_tool_usage("cli", "ask", served, counterfactual, None) {
-                tracing::debug!("usage telemetry skipped: {e:#}");
-            }
-            Some(AnswerImpact::new(served, counterfactual))
-        }
+        Ok(mut s) => Some(indexa_query::record_ask_impact(
+            &mut s, "cli", &answer, None,
+        )),
         Err(e) => {
             tracing::debug!("usage telemetry skipped: {e:#}");
             None
@@ -339,11 +327,7 @@ pub(crate) async fn cmd_ask(
                 basis: c.basis.clone(),
                 uncovered: c.uncovered.clone(),
             }),
-            impact: impact.map(|i| ImpactJson {
-                served_bytes: i.served_bytes,
-                counterfactual_bytes: i.counterfactual_bytes,
-                saved_percent: i.saved_percent(),
-            }),
+            impact,
             retrieval: trace.as_ref().map(trace_to_json),
             session_id: session_id.clone(),
         };
