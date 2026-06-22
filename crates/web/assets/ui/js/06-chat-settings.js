@@ -195,6 +195,7 @@ async function doAsk() {
 
   qInput.value = '';
   sendBtn.disabled = true;
+  sendBtn.textContent = 'Asking…';
   switchTab('chat');
 
   appendMsg('user', escapeHtml(q));
@@ -352,6 +353,7 @@ async function doAsk() {
   }
 
   sendBtn.disabled = false;
+  sendBtn.textContent = 'Ask';
   qInput.focus();
   chat.scrollTop = chat.scrollHeight;
 }
@@ -428,6 +430,8 @@ async function savePasses() {
   const first = parseInt(document.getElementById('passes-first').value, 10);
   const refresh = parseInt(document.getElementById('passes-refresh').value, 10);
   const status = document.getElementById('passes-status');
+  const btn = document.querySelector('button[onclick="savePasses()"]');
+  if (btn) btn.disabled = true;
   try {
     const r = await fetch('/api/config/passes', {
       method: 'POST',
@@ -442,6 +446,8 @@ async function savePasses() {
   } catch(e) {
     status.style.color = 'var(--red)';
     status.textContent = 'Error: ' + e.message;
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -458,6 +464,8 @@ async function saveResource() {
   const profile = document.getElementById('resource-profile').value;
   const headroom = parseFloat(document.getElementById('resource-headroom').value) || 0;
   const status = document.getElementById('resource-status');
+  const btn = document.querySelector('button[onclick="saveResource()"]');
+  if (btn) btn.disabled = true;
   try {
     const r = await fetch('/api/config/resource', {
       method: 'POST',
@@ -472,6 +480,8 @@ async function saveResource() {
   } catch(e) {
     status.style.color = 'var(--red)';
     status.textContent = 'Error: ' + e.message;
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 

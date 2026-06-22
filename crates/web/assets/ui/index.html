@@ -73,6 +73,8 @@
         <button class="btn-sm export-menu-btn toolbar-export-btn"
           title="Export context as XML, Markdown, or JSON — paste into Claude, Cursor, or any AI tool"
           aria-label="Export context"
+          aria-haspopup="menu"
+          aria-expanded="false"
           onclick="toggleExportMenu(this)">Export &#x2193;</button>
         <div class="export-menu" hidden>
           <button onclick="doExport(selectedPath||'','xml')">XML <span class="export-hint">for Claude / Cursor</span></button>
@@ -187,10 +189,10 @@
               <label for="graph-scope" class="graph-scope-label">Scope</label>
               <select id="graph-scope" class="graph-scope" aria-label="Graph scope root" onchange="loadGraph(this.value)"></select>
               <button id="graph-help-btn" class="btn-sm graph-help-btn" onclick="toggleGraphHelp()" aria-expanded="false" aria-controls="graph-help" title="What is this?">&#x24D8; What is this?</button>
-              <label class="graph-layer-toggle"><input type="checkbox" id="graph-semantic-toggle" onchange="toggleSemanticLayer(this.checked)"> Related by meaning</label>
-              <label class="graph-layer-toggle"><input type="checkbox" id="graph-category-toggle" onchange="toggleCategoryLayer(this.checked)"> Same category</label>
-              <label class="graph-layer-toggle"><input type="checkbox" id="graph-pack-toggle" onchange="togglePackLayer(this.checked)"> Same pack</label>
-              <label class="graph-layer-toggle"><input type="checkbox" id="graph-communities-toggle" onchange="toggleCommunitiesLayer(this.checked)"> Communities</label>
+              <label class="graph-layer-toggle" title="Link files that are semantically similar (embedding cosine ≥ 0.78)"><input type="checkbox" id="graph-semantic-toggle" onchange="toggleSemanticLayer(this.checked)"> Related by meaning</label>
+              <label class="graph-layer-toggle" title="Link files that share a confirmed classification category"><input type="checkbox" id="graph-category-toggle" onchange="toggleCategoryLayer(this.checked)"> Same category</label>
+              <label class="graph-layer-toggle" title="Link files that belong to the same Context Pack"><input type="checkbox" id="graph-pack-toggle" onchange="togglePackLayer(this.checked)"> Same pack</label>
+              <label class="graph-layer-toggle" title="Cluster densely-connected files (Louvain community detection)"><input type="checkbox" id="graph-communities-toggle" onchange="toggleCommunitiesLayer(this.checked)"> Communities</label>
               <span class="graph-meta" id="graph-meta"></span>
             </div>
             <!-- Plain-language explainer for the graph (mirrors #map-help). -->

@@ -29,6 +29,25 @@ async function fireJob(kind, path) {
 // but was never defined (clicking threw a ReferenceError) — define it here next to fireJob.
 // There's no server-side directory picker, so the absolute path is entered directly; the same
 // path works with `indexa scan <path>` in a terminal (shown in the button hint).
+// Trigger an index job for every currently-indexed root. Called from the sidebar
+// refresh button and 27-health.js "Re-index now" banner.
+async function reindexAll() {  // eslint-disable-line no-unused-vars
+  var btn = document.querySelector('.app-sidebar button[onclick="reindexAll()"]');
+  if (btn) btn.disabled = true;
+  try {
+    var r = await fetch('/api/roots');
+    if (!r.ok) { if (typeof toast === 'function') toast('Could not fetch roots', 'error'); return; }
+    var roots = await r.json();
+    for (var i = 0; i < roots.length; i++) {
+      if (typeof fireJob === 'function') await fireJob('index', roots[i].path);
+    }
+  } catch(e) {
+    if (typeof toast === 'function') toast('Reindex error: ' + e.message, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function openAddRoot() {  // eslint-disable-line no-unused-vars
   var path = window.prompt('Folder to index (absolute path):', '');
   if (path === null) return; // cancelled

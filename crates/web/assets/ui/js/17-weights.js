@@ -8,7 +8,10 @@ function loadWeights() {  // eslint-disable-line no-unused-vars
   fetch('/api/weights')
     .then(function (r) { return r.json(); })
     .then(renderWeightsList)
-    .catch(function () {});
+    .catch(function () {
+      var el = document.getElementById('weights-list');
+      if (el) el.innerHTML = '<span style="color:var(--muted);font-size:12px">Couldn\'t load — is the server running?</span>';
+    });
 }
 
 function renderWeightsList(weights) {
@@ -26,7 +29,7 @@ function renderWeightsList(weights) {
         + '<td style="padding:3px 6px;color:var(--muted)">' + escapeHtml(w.target_kind) + '</td>'
         + '<td style="padding:3px 6px;text-align:right;color:' + color + '">' + w.weight.toFixed(2) + '</td>'
         + '<td style="padding:3px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:250px" title="' + escapeHtml(w.target) + '">' + escapeHtml(w.target) + '</td>'
-        + '<td style="padding:3px 6px"><button class="btn-sm btn-danger" style="font-size:10px;padding:1px 6px" onclick="deleteWeight(' + JSON.stringify(w.target_kind) + ',' + JSON.stringify(w.target) + ')">✕</button></td>'
+        + '<td style="padding:3px 6px"><button class="btn-sm btn-danger" style="font-size:10px;padding:1px 6px" title="Delete weight" aria-label="Delete weight" onclick="deleteWeight(' + JSON.stringify(w.target_kind) + ',' + JSON.stringify(w.target) + ')">✕</button></td>'
         + '</tr>';
     }).join('')
     + '</table>';
@@ -37,11 +40,13 @@ function setWeight() {  // eslint-disable-line no-unused-vars
   var targetEl = document.getElementById('weight-target');
   var valueEl  = document.getElementById('weight-value');
   var statusEl = document.getElementById('weight-status');
+  var btn = document.querySelector('button[onclick="setWeight()"]');
   var kind   = kindEl   ? kindEl.value   : 'file';
   var target = targetEl ? targetEl.value.trim() : '';
   var weight = valueEl  ? parseFloat(valueEl.value) : 1.0;
   if (!target) { if (statusEl) statusEl.textContent = 'Enter a path or category.'; return; }
   if (isNaN(weight) || weight < 0) { if (statusEl) statusEl.textContent = 'Weight must be ≥ 0.'; return; }
+  if (btn) btn.disabled = true;
   fetch('/api/weights', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -54,7 +59,8 @@ function setWeight() {  // eslint-disable-line no-unused-vars
       if (targetEl) targetEl.value = '';
       loadWeights();
     })
-    .catch(function (e) { if (statusEl) statusEl.textContent = 'Error: ' + e.message; });
+    .catch(function (e) { if (statusEl) statusEl.textContent = 'Error: ' + e.message; })
+    .finally(function () { if (btn) btn.disabled = false; });
 }
 
 function deleteWeight(kind, target) {  // eslint-disable-line no-unused-vars

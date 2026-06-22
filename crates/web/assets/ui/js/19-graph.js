@@ -77,6 +77,18 @@ function fetchGraph(scope, focus, depth) {
     })
     .catch(function (e) {
       if (meta) meta.textContent = 'Error: ' + e.message;
+      if (svg) {
+        clearSvg(svg);
+        var errTxt = document.createElementNS(GRAPH_NS, 'text');
+        errTxt.setAttribute('x', '50%');
+        errTxt.setAttribute('y', '50%');
+        errTxt.setAttribute('text-anchor', 'middle');
+        errTxt.setAttribute('dominant-baseline', 'middle');
+        errTxt.setAttribute('fill', 'var(--muted)');
+        errTxt.setAttribute('font-size', '13');
+        errTxt.textContent = 'Graph failed to load — is the server running?';
+        svg.appendChild(errTxt);
+      }
     });
 }
 

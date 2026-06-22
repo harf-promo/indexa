@@ -303,7 +303,10 @@ async function loadKeys() {
     document.getElementById('badge-openai').textContent = d.openai_set ? '✓ set' : '';
     document.getElementById('badge-anthropic').textContent = d.anthropic_set ? '✓ set' : '';
     document.getElementById('badge-google').textContent = d.google_set ? '✓ set' : '';
-  } catch(_) {}
+  } catch(_) {
+    const notice = document.getElementById('key-gate-notice');
+    if (notice) { notice.style.display = 'block'; notice.textContent = 'Couldn\'t load — is the server running?'; }
+  }
 }
 
 async function loadProviderStatus() {
@@ -395,6 +398,8 @@ async function loadFeatures() {
 
 async function saveFeatures() {
   var status = document.getElementById('features-status');
+  var btn = document.querySelector('button[onclick="saveFeatures()"]');
+  if (btn) btn.disabled = true;
   var body = {
     ann:              document.getElementById('feat-ann')?.checked,
     ann_min_chunks:   parseInt(document.getElementById('feat-ann-min-chunks')?.value, 10) || 50000,
@@ -423,5 +428,7 @@ async function saveFeatures() {
     if (d.caption_warning && typeof toast === 'function') toast(d.caption_warning, 'warn');
   } catch(e) {
     if (status) { status.style.color = 'var(--red)'; status.textContent = 'Error: ' + e.message; }
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
