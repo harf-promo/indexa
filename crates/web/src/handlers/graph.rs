@@ -128,6 +128,47 @@ fn basename(path: &str) -> String {
         .unwrap_or_else(|| path.to_owned())
 }
 
+/// Compute one knowledge-graph overlay layer (semantic / category / pack) when `layers` requests
+/// `name`. The `fetch` closure opens its OWN fresh `Store` and returns `(from, to, weight)` triples;
+/// it runs inside `spawn_blocking` (never the shared mutex) and the whole layer is **fail-open** —
+/// any error (or the layer not being requested) yields no edges, leaving the call graph untouched.
+/// Returns `(count, edges)` tagged `tier = name`. Single source of truth for the per-layer pattern
+/// so a future layer can't silently skip the fresh-conn / fail-open / cost-guard discipline.
+async fn overlay_layer<F>(
+    layers: Option<&str>,
+    name: &'static str,
+    fetch: F,
+) -> (usize, Vec<EdgeDto>)
+where
+    F: FnOnce() -> anyhow::Result<Vec<(String, String, usize)>> + Send + 'static,
+{
+    let want = layers
+        .map(|l| l.split(',').any(|x| x.trim() == name))
+        .unwrap_or(false);
+    if !want {
+        return (0, Vec::new());
+    }
+    let res = tokio::task::spawn_blocking(fetch)
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("{name} task panicked: {e}")));
+    match res {
+        Ok(triples) => {
+            let dtos: Vec<EdgeDto> = triples
+                .into_iter()
+                .map(|(from, to, weight)| EdgeDto {
+                    from,
+                    to,
+                    weight,
+                    tier: name.to_owned(),
+                    bridge: false,
+                })
+                .collect();
+            (dtos.len(), dtos)
+        }
+        Err(_) => (0, Vec::new()),
+    }
+}
+
 pub(crate) async fn api_graph(
     State(state): State<AppState>,
     Query(q): Query<GraphQuery>,
@@ -199,105 +240,72 @@ pub(crate) async fn api_graph(
                 .collect();
             let bare_edges = sg.edge_tiers.iter().filter(|t| t.is_bare()).count();
 
-            // Optional knowledge-graph overlay: meaning-similarity ("semantic") edges between the
-            // displayed files. Computed on a FRESH connection inside spawn_blocking (never the
-            // shared mutex) and **fail-open** — any error leaves the call graph untouched.
-            let want_semantic = q
-                .layers
-                .as_deref()
-                .map(|l| l.split(',').any(|x| x.trim() == "semantic"))
+            // Optional knowledge-graph overlays (semantic / category / pack): each adds file→file
+            // edges of its tier, computed on a fresh connection + fail-open via `overlay_layer`.
+            // `node_paths` is built once (only when an edge layer is requested) and shared.
+            let layers = q.layers.as_deref();
+            let edge_layer_wanted = layers
+                .map(|l| {
+                    l.split(',')
+                        .any(|x| matches!(x.trim(), "semantic" | "category" | "pack"))
+                })
                 .unwrap_or(false);
-            let mut semantic_edges = 0usize;
-            if want_semantic {
-                let node_paths: Vec<String> = nodes.iter().map(|n| n.path.clone()).collect();
-                let threshold = q.sim_threshold.unwrap_or(0.78);
-                let max_nodes = q.sim_max_nodes.unwrap_or(300);
+            let node_paths: Vec<String> = if edge_layer_wanted {
+                nodes.iter().map(|n| n.path.clone()).collect()
+            } else {
+                Vec::new()
+            };
+            let max_nodes = q.sim_max_nodes.unwrap_or(300);
+
+            // Semantic: meaning-similarity edges (cosine over chunk centroids); weight from similarity.
+            let (semantic_edges, sem) = {
                 let db = state.db_path.clone();
                 let scope_c = scope.clone();
-                let sem = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                let np = node_paths.clone();
+                let threshold = q.sim_threshold.unwrap_or(0.78);
+                overlay_layer(layers, "semantic", move || {
                     let store = indexa_core::store::Store::open(&db)?;
-                    store.semantic_file_edges(&scope_c, &node_paths, threshold, max_nodes)
+                    Ok(store
+                        .semantic_file_edges(&scope_c, &np, threshold, max_nodes)?
+                        .into_iter()
+                        .map(|(f, t, sim)| (f, t, (sim * 10.0).round().max(1.0) as usize))
+                        .collect())
                 })
                 .await
-                .unwrap_or_else(|e| Err(anyhow::anyhow!("semantic task panicked: {e}")));
-                if let Ok(sem) = sem {
-                    semantic_edges = sem.len();
-                    for (from, to, sim) in sem {
-                        edges.push(EdgeDto {
-                            from,
-                            to,
-                            weight: (sim * 10.0).round().max(1.0) as usize,
-                            tier: "semantic".to_owned(),
-                            bridge: false,
-                        });
-                    }
-                }
-            }
+            };
+            edges.extend(sem);
 
-            // Optional knowledge-graph overlay: "category" edges group files the user classified
-            // into the same category (a deterministic star per category — not an O(n²) clique).
-            // Same fresh-connection + fail-open discipline as the semantic layer.
-            let want_category = q
-                .layers
-                .as_deref()
-                .map(|l| l.split(',').any(|x| x.trim() == "category"))
-                .unwrap_or(false);
-            let mut category_edges = 0usize;
-            if want_category {
-                let node_paths: Vec<String> = nodes.iter().map(|n| n.path.clone()).collect();
-                let max_nodes = q.sim_max_nodes.unwrap_or(300);
+            // Category: files sharing a confirmed classification (deterministic star per category).
+            let (category_edges, cat) = {
                 let db = state.db_path.clone();
-                let cat = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                let np = node_paths.clone();
+                overlay_layer(layers, "category", move || {
                     let store = indexa_core::store::Store::open(&db)?;
-                    store.category_file_edges(&node_paths, max_nodes)
+                    Ok(store
+                        .category_file_edges(&np, max_nodes)?
+                        .into_iter()
+                        .map(|(f, t)| (f, t, 1))
+                        .collect())
                 })
                 .await
-                .unwrap_or_else(|e| Err(anyhow::anyhow!("category task panicked: {e}")));
-                if let Ok(cat) = cat {
-                    category_edges = cat.len();
-                    for (from, to) in cat {
-                        edges.push(EdgeDto {
-                            from,
-                            to,
-                            weight: 1,
-                            tier: "category".to_owned(),
-                            bridge: false,
-                        });
-                    }
-                }
-            }
+            };
+            edges.extend(cat);
 
-            // Optional knowledge-graph overlay: "pack" edges group files the user put in the same
-            // Context Pack (a deterministic star per pack). Exact (user curation), not heuristic.
-            let want_pack = q
-                .layers
-                .as_deref()
-                .map(|l| l.split(',').any(|x| x.trim() == "pack"))
-                .unwrap_or(false);
-            let mut pack_edges = 0usize;
-            if want_pack {
-                let node_paths: Vec<String> = nodes.iter().map(|n| n.path.clone()).collect();
-                let max_nodes = q.sim_max_nodes.unwrap_or(300);
+            // Pack: files in the same Context Pack (exact user curation; star per pack).
+            let (pack_edges, pck) = {
                 let db = state.db_path.clone();
-                let pck = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                let np = node_paths.clone();
+                overlay_layer(layers, "pack", move || {
                     let store = indexa_core::store::Store::open(&db)?;
-                    store.pack_file_edges(&node_paths, max_nodes)
+                    Ok(store
+                        .pack_file_edges(&np, max_nodes)?
+                        .into_iter()
+                        .map(|(f, t)| (f, t, 1))
+                        .collect())
                 })
                 .await
-                .unwrap_or_else(|e| Err(anyhow::anyhow!("pack task panicked: {e}")));
-                if let Ok(pck) = pck {
-                    pack_edges = pck.len();
-                    for (from, to) in pck {
-                        edges.push(EdgeDto {
-                            from,
-                            to,
-                            weight: 1,
-                            tier: "pack".to_owned(),
-                            bridge: false,
-                        });
-                    }
-                }
-            }
+            };
+            edges.extend(pck);
 
             // Optional "communities" overlay: Louvain over the displayed STRUCTURAL call graph
             // (excluding the semantic/category/pack overlay edges, so community membership is

@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.72.0] — 2026-06-22
+### Added
+
+- **Running per-conversation savings in the chat.** The core pitch ("Indexa serves a slice, not
+  whole files — saving paid tokens") was shown per-answer + in the Settings impact panel; now a quiet
+  strip below the chat thread shows the **conversation's running total** ("This conversation: served
+  X vs Y of source — N% less, across M answers"), refreshed after each turn from the authoritative
+  `GET /api/session-impact/{id}` ledger. Read-only, fail-open (hides on any error / no meaningful
+  saving), cleared on "＋ New". No backend or MCP change.
+
+### Changed
+
+- **Internal: graph overlay layers de-duplicated.** The semantic/category/pack overlay blocks in
+  `crates/web/src/handlers/graph.rs` (near-identical want-flag → fresh-conn `spawn_blocking` →
+  fail-open → `EdgeDto` pattern) now share one `overlay_layer` helper — single source of truth for the
+  fresh-connection + fail-open + cost-guard discipline, so a future layer can't silently skip it.
+  Behavior-identical (verified: `?layers=semantic|category|pack|communities` + combined + no-layers
+  all unchanged).
 
 ### Added
 

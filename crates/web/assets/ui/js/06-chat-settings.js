@@ -32,7 +32,41 @@ function newConversation() {  // eslint-disable-line no-unused-vars
     '<div class="welcome"><h2>Ask your local context</h2>' +
     '<p>New conversation. Ask a question about your files in plain language — ' +
     'follow-ups remember what you just asked.</p></div>';
+  var si = document.getElementById('ask-session-impact');
+  if (si) { si.hidden = true; si.innerHTML = ''; }
   if (qInput) qInput.focus();
+}
+
+// After each answered turn, refresh the conversation-level RUNNING savings badge from the
+// authoritative per-session ledger (`GET /api/session-impact/{id}`) — making the core pitch
+// ("Indexa serves a slice, not whole files") visible as it accumulates across the conversation.
+// Read-only + fail-open: any error, an unmeaningful total (served not smaller), or no calls yet
+// just hides the badge.
+function updateSessionImpact() {
+  var el = document.getElementById('ask-session-impact');
+  if (!el || !askSessionId) return;
+  var fmt = function (n) {
+    if (n >= 1073741824) return (n / 1073741824).toFixed(1) + ' GB';
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+    return n + ' B';
+  };
+  fetch('/api/session-impact/' + encodeURIComponent(askSessionId))
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (d) {
+      if (!d || !d.counterfactual || d.served >= d.counterfactual || (d.calls || 0) < 1) {
+        el.hidden = true;
+        return;
+      }
+      var pct = Math.min(99, Math.round((1 - d.served / d.counterfactual) * 100));
+      el.hidden = false;
+      el.innerHTML =
+        '\u{1F4C9} This conversation: served <strong>' + escapeHtml(fmt(d.served)) +
+        '</strong> vs <strong>' + escapeHtml(fmt(d.counterfactual)) + '</strong> of source — <strong>' +
+        pct + '% less</strong> to your AI tool, across ' + d.calls +
+        (d.calls === 1 ? ' answer' : ' answers');
+    })
+    .catch(function () { el.hidden = true; });
 }
 
 function renderAskScopeChip() {
@@ -246,6 +280,8 @@ async function doAsk() {
       if (ev.confidence) confidence = ev.confidence;
       if (ev.impact) impact = ev.impact;
       if (ev.confidence || ev.impact) repaint();
+      // Refresh the conversation-level running savings badge from the per-session ledger.
+      updateSessionImpact();
     }
     else if (ev.type === 'error') { throw new Error(ev.message || 'Generation failed'); }
     // 'done' is terminal; the loop ends when the stream closes.
