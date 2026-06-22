@@ -94,7 +94,7 @@ function renderNoPendingSummary(path) {
     'You can still ask about it — answers use its raw content.</div>' +
     '<div class="summary-noctx-actions">' +
     '<button class="btn-sm summary-ask-btn" id="ask-cta-btn" title="Ask a question answered only from this file">' + ICO_CHAT + ' Ask about this file</button>' +
-    '<button class="enqueue-btn" id="enqueue-btn">Generate summary</button>' +
+    '<button class="enqueue-btn" id="enqueue-btn" title="Queue an AI summary for this file">Generate summary</button>' +
     '</div></div>';
 }
 
@@ -282,6 +282,11 @@ function doExport(path, format) {
     document.querySelectorAll('.export-menu').forEach(function(m) { m.hidden = true; });
     return;
   }
+  // Brief disabled state on all export buttons to prevent double-clicks and give visual feedback.
+  var exportBtns = document.querySelectorAll('.export-menu-btn, .export-menu button');
+  exportBtns.forEach(function(b) { b.disabled = true; });
+  setTimeout(function() { exportBtns.forEach(function(b) { b.disabled = false; }); }, 800);
+
   var url = '/api/export?format=' + encodeURIComponent(format) + '&path=' + encodeURIComponent(path);
   // Optional relational slice (v0.60): append the filters when the user filled them in.
   var since = (document.getElementById('export-since') || {}).value;

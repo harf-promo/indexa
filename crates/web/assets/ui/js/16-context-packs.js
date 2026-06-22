@@ -15,7 +15,10 @@ function loadPacks() {  // eslint-disable-line no-unused-vars
   fetch('/api/packs')
     .then(function (r) { return r.json(); })
     .then(renderPackList)
-    .catch(function () { /* silently ignore — drawer may open before server ready */ });
+    .catch(function () {
+      var list = document.getElementById('packs-list');
+      if (list) list.innerHTML = '<span style="color:var(--muted);font-size:12px">Couldn\'t load — is the server running?</span>';
+    });
 }
 
 function renderPackList(packs) {
@@ -45,8 +48,10 @@ function createPack() {  // eslint-disable-line no-unused-vars
   var nameEl   = document.getElementById('pack-new-name');
   var descEl   = document.getElementById('pack-new-desc');
   var statusEl = document.getElementById('pack-create-status');
+  var btn = document.querySelector('button[onclick="createPack()"]');
   var name = (nameEl ? nameEl.value : '').trim();
   if (!name) { if (statusEl) statusEl.textContent = 'Pack name is required.'; return; }
+  if (btn) btn.disabled = true;
   fetch('/api/packs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -63,7 +68,8 @@ function createPack() {  // eslint-disable-line no-unused-vars
       if (statusEl) statusEl.textContent = '';
       loadPacks();
     })
-    .catch(function (e) { if (statusEl) statusEl.textContent = 'Error: ' + e.message; });
+    .catch(function (e) { if (statusEl) statusEl.textContent = 'Error: ' + e.message; })
+    .finally(function () { if (btn) btn.disabled = false; });
 }
 
 function deletePack(name) {  // eslint-disable-line no-unused-vars
@@ -101,7 +107,7 @@ function refreshPackEditorPaths(name) {
       container.innerHTML = paths.map(function (p) {
         return '<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;gap:4px">'
           + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" title="' + escapeHtml(p) + '">' + escapeHtml(p) + '</span>'
-          + '<button class="btn-sm btn-danger" style="font-size:10px;padding:1px 6px;flex-shrink:0" onclick="removePackPath(' + JSON.stringify(p) + ')">✕</button>'
+          + '<button class="btn-sm btn-danger" style="font-size:10px;padding:1px 6px;flex-shrink:0" title="Remove path" aria-label="Remove path" onclick="removePackPath(' + JSON.stringify(p) + ')">✕</button>'
           + '</div>';
       }).join('');
     })
@@ -112,8 +118,10 @@ function addPackPath() {  // eslint-disable-line no-unused-vars
   if (!_currentPackName) return;
   var input    = document.getElementById('pack-add-path');
   var statusEl = document.getElementById('pack-path-status');
+  var btn = document.querySelector('button[onclick="addPackPath()"]');
   var path = (input ? input.value : '').trim();
   if (!path) return;
+  if (btn) btn.disabled = true;
   fetch('/api/packs/' + encodeURIComponent(_currentPackName) + '/paths', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -130,7 +138,8 @@ function addPackPath() {  // eslint-disable-line no-unused-vars
       refreshPackEditorPaths(_currentPackName);
       loadPacks();
     })
-    .catch(function (e) { if (statusEl) statusEl.textContent = 'Error: ' + e.message; });
+    .catch(function (e) { if (statusEl) statusEl.textContent = 'Error: ' + e.message; })
+    .finally(function () { if (btn) btn.disabled = false; });
 }
 
 function removePackPath(path) {  // eslint-disable-line no-unused-vars
