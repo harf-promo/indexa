@@ -116,8 +116,14 @@ fn main() {
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &update, &install_cli, &quit])?;
 
+            // Monochrome template image for the macOS menu bar — the OS auto-inverts
+            // it to white-on-dark or dark-on-light, matching native menu-bar icons.
+            // The Dock / window icon stays the full-colour brand mark (default_window_icon).
+            let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-mono.png"))
+                .unwrap_or_else(|_| app.default_window_icon().unwrap().clone());
             let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(tray_icon)
+                .icon_as_template(true)  // macOS: use alpha channel only, auto-invert; no-op on other platforms
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {

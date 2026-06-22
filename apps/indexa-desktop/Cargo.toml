@@ -25,7 +25,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri              = { version = "2", features = ["tray-icon"] }
+tauri              = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-shell   = { version = "2" }
 tauri-plugin-updater = { version = "2" }
 # Persist window size/position across launches (v0.37). First-party Tauri plugin,
