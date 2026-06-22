@@ -250,11 +250,17 @@ function renderSummary(d) {
     '<div id="summary-classify"></div>';
 }
 
+// Module-level cleanup ref: ensures any lingering key/click handler from a
+// prior open is removed when a new menu opens (or when the same menu re-opens).
+var _exportMenuCleanup = null;
+
 function toggleExportMenu(btn) {
   if (!btn) return;
   var menu = btn.nextElementSibling;
   if (!menu) return;
   var isHidden = menu.hidden;
+  // Remove any lingering handlers from a previously-open export menu.
+  if (_exportMenuCleanup) { _exportMenuCleanup(); _exportMenuCleanup = null; }
   // Collapse any other open export menus and reset their buttons' aria-expanded.
   document.querySelectorAll('.export-menu').forEach(function(m) {
     m.hidden = true;
@@ -264,14 +270,44 @@ function toggleExportMenu(btn) {
   menu.hidden = !isHidden;
   btn.setAttribute('aria-expanded', menu.hidden ? 'false' : 'true');
   if (!menu.hidden) {
+    // Move focus to first menu item so the menu is immediately keyboard-navigable.
+    var menuItems = Array.from(menu.querySelectorAll('button:not([disabled])'));
+    if (menuItems.length) menuItems[0].focus();
+
+    function closeExportMenu() {
+      menu.hidden = true;
+      btn.setAttribute('aria-expanded', 'false');
+      document.removeEventListener('keydown', onMenuKey);
+      document.removeEventListener('click', onOutsideClick);
+      _exportMenuCleanup = null;
+    }
+    // Arrow-key / Esc / Enter / Space navigation (WAI-ARIA menu pattern).
+    function onMenuKey(e) {
+      var items = Array.from(menu.querySelectorAll('button:not([disabled])'));
+      var idx = items.indexOf(document.activeElement);
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        items[(idx + 1) % items.length].focus();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        items[(idx - 1 + items.length) % items.length].focus();
+      } else if (e.key === 'Escape' || e.key === 'Tab') {
+        closeExportMenu();
+        if (e.key === 'Escape') { e.preventDefault(); btn.focus(); }
+      } else if ((e.key === 'Enter' || e.key === ' ') && idx !== -1) {
+        e.preventDefault();
+        items[idx].click();
+      }
+    }
+    // Outside-click handler: shares the same cleanup path so both handlers are removed together.
+    function onOutsideClick(e) {
+      if (!menu.contains(e.target) && e.target !== btn) closeExportMenu();
+    }
+    // Defer one tick so the current click that opened the menu does not immediately close it.
     setTimeout(function() {
-      document.addEventListener('click', function closeMenu(e) {
-        if (!menu.contains(e.target) && e.target !== btn) {
-          menu.hidden = true;
-          btn.setAttribute('aria-expanded', 'false');
-          document.removeEventListener('click', closeMenu);
-        }
-      });
+      document.addEventListener('keydown', onMenuKey);
+      document.addEventListener('click', onOutsideClick);
+      _exportMenuCleanup = closeExportMenu;
     }, 0);
   }
 }
