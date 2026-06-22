@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.73.0] — 2026-06-22
+
 ### Added
 
 - **Running per-conversation savings in the chat.** The core pitch ("Indexa serves a slice, not
