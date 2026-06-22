@@ -59,7 +59,31 @@ function toggleTheme() {
   document.documentElement.setAttribute('data-theme', next);
   localStorage.setItem('indexa_theme', next);
   const btn = document.getElementById('theme-toggle');
-  if (btn) btn.innerHTML = next === 'light' ? THEME_ICON_SUN : THEME_ICON_MOON;
+  if (btn) {
+    btn.innerHTML = next === 'light' ? THEME_ICON_SUN : THEME_ICON_MOON;
+    btn.setAttribute('aria-pressed', next === 'light' ? 'true' : 'false');
+    btn.setAttribute('aria-label', next === 'light' ? 'Switch to dark theme' : 'Switch to light theme');
+  }
+}
+
+// Sound-notification toggle — persists to localStorage; icon reflects muted state.
+(function initSound() {
+  var btn = document.getElementById('sound-toggle');
+  if (!btn) return;
+  var on = localStorage.getItem('indexa_sound') !== 'off';
+  btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  btn.setAttribute('aria-label', on ? 'Mute sound notifications' : 'Unmute sound notifications');
+})();
+
+function toggleSound() {  // eslint-disable-line no-unused-vars
+  var on = localStorage.getItem('indexa_sound') !== 'off';
+  var next = !on;
+  localStorage.setItem('indexa_sound', next ? 'on' : 'off');
+  var btn = document.getElementById('sound-toggle');
+  if (btn) {
+    btn.setAttribute('aria-pressed', next ? 'true' : 'false');
+    btn.setAttribute('aria-label', next ? 'Mute sound notifications' : 'Unmute sound notifications');
+  }
 }
 
 /* ── Navigation ──

@@ -10,6 +10,8 @@ function runInsights(kind) {  // eslint-disable-line no-unused-vars
   if (!el) return;
   el.style.display = '';
   el.textContent = 'Running ' + kind + ' analysis…';
+  var btn = document.querySelector('button[onclick="runInsights(\'' + kind + '\')"]');
+  if (btn) btn.disabled = true;
 
   var staleDays = parseInt((document.getElementById('insights-stale-days')    || {}).value, 10) || 365;
   var diffDays  = parseInt((document.getElementById('insights-diff-days')     || {}).value, 10) || 7;
@@ -23,7 +25,8 @@ function runInsights(kind) {  // eslint-disable-line no-unused-vars
   fetch(url)
     .then(function (r) { return r.json(); })
     .then(function (d) { renderInsightsResult(kind, d, el); })
-    .catch(function (e) { el.textContent = 'Error: ' + e.message; });
+    .catch(function (e) { el.textContent = 'Error: ' + e.message; })
+    .finally(function () { if (btn) btn.disabled = false; });
 }
 
 function renderInsightsResult(kind, d, el) {
