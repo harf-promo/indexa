@@ -186,6 +186,16 @@
 .ask-confidence { margin-top: 8px; font-size: 11px; color: var(--muted); }
 .ask-impact { margin-top: 6px; font-size: 11px; color: var(--muted); }
 .ask-impact strong { color: var(--accent, var(--fg)); font-weight: 600; }
+/* Conversation-level running savings (below the thread, above the input). A quiet hairline-topped
+   strip so it reads as a persistent tally, not a per-answer note. */
+.ask-session-impact {
+  padding: 6px 12px;
+  border-top: 1px solid var(--border-subtle, var(--rule));
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+}
+.ask-session-impact strong { color: var(--accent, var(--fg)); font-weight: 600; }
 .ask-step {
   font-size: 11px; color: var(--muted); background: var(--surface-2);
   border: 1px solid var(--border-subtle, var(--border)); border-radius: var(--r-pill); /* Harf: pill chip */
