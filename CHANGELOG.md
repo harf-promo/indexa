@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.74.0] — 2026-06-23
+
+### Added
+
+- **Monochrome macOS menu-bar tray icon.** The Tauri tray now loads a dedicated
+  black-on-transparent template PNG (`apps/indexa-desktop/icons/tray-mono.png`) and sets
+  `icon_as_template(true)` — macOS auto-inverts it to white on a dark menu bar and dark on a
+  light one, matching native system icons. The Dock icon, window icon, browser favicon, and
+  in-app apostrophe marks all stay brand-green. No-op on Windows/Linux.
+
+### Changed
+
+- **Add-Root modal now traps focus and accepts Enter to submit.** `openAddRoot` activates the
+  same `inert`-background focus trap the side drawers use (`setBackgroundInert(true)`), so Tab
+  key stays inside the modal while it's open. Enter in the path field triggers the index
+  immediately. Focus returns to the opener element on close.
+
+- **Export menu is now fully keyboard-navigable.** ArrowDown/ArrowUp move focus between export
+  options, Enter/Space activate the focused item, Esc closes the menu and returns focus to the
+  trigger button, Tab closes without activation — completing the WAI-ARIA menu keyboard pattern
+  (the aria attributes shipped in v0.73's PR #322; the roving-focus behaviour ships here).
+  A module-level cleanup reference prevents listener accumulation when the menu is opened
+  multiple times.
+
 ## [0.73.0] — 2026-06-22
 
 ### Added
