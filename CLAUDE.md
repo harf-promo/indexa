@@ -24,7 +24,23 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.72.0)
+## Current feature surface (v0.73.0)
+
+**Value visibility & graph cleanup (v0.73):** a consolidation release — make the core pitch visible
++ tighten the code, no new public surface.
+- **Running per-conversation savings** — the chat now shows a live "saved ~N KB across M answers
+  (~P% less)" badge (`#ask-session-impact`), refreshed from the existing `GET /api/session-impact/{id}`
+  after every answer in a session (`06-chat-settings.js updateSessionImpact`, cleared on "＋ New").
+  Read-only, default-on, fail-open (hides on any error / when serving wasn't smaller). No backend or
+  MCP change — surfaces the already-honest `impact.rs` accounting at the most visceral spot.
+- **Graph overlay DRY** — the three near-identical `want_semantic`/`want_category`/`want_pack` blocks
+  in `crates/web/src/handlers/graph.rs` collapsed into one `overlay_layer(layers, name, fetch)` helper
+  (parse the `?layers=` flag → `spawn_blocking` a fresh-conn fetch → map to `EdgeDto{tier:name}`,
+  fail-open). Behavior-identical (semantic=642 / communities=5+29 bridges / no-layers=0 verified live);
+  kills the copy-paste-divergence risk an audit flagged. Pure refactor — no API change.
+- **Finding (not a feature):** `Store::blast_radius` already traverses callers/dependents ("what
+  breaks if I change X"), so reverse-reachability is shipped; the only open direction is the
+  transitive-*callee* closure — recorded as a roadmap candidate, not forced in.
 
 **Knowledge-graph depth + multimodal reach (v0.72):** three pending follow-ups, all additive/default-off.
 - **Map "Communities" view** (`GET /api/graph?layers=communities`) — the biggest KG UX gap, now done:
