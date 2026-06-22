@@ -35,6 +35,8 @@
   cursor: pointer; margin-top: 8px; transition: border-color 120ms, color 120ms;
 }
 .enqueue-btn:hover { border-color: var(--accent); color: var(--accent); }
+.enqueue-btn:active { background: var(--surface-2); }
+.enqueue-btn:focus-visible { box-shadow: var(--focus-ring); outline: none; }
 
 /* ── Chat view ── */
 .chat-view { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
@@ -65,6 +67,7 @@
 }
 .onboard-cta:hover { background: var(--grey-800); opacity: 1; }
 .onboard-cta:active { background: var(--accent-press-bg); color: var(--accent-press-fg); }
+.onboard-cta:disabled { opacity: 0.4; cursor: default; }
 .onboard-hint { color: var(--muted); font-size: 12.5px; }
 .onboard-hint code { color: var(--accent); font-family: var(--font-mono); font-size: 12px; }
 .msg { max-width: 800px; width: 100%; }
@@ -336,9 +339,11 @@
 .btn-sm {
   background: none; border: 1px solid var(--border); border-radius: var(--r-2);
   color: var(--muted); padding: 5px 10px; font-family: var(--font-sans); font-size: 12px;
-  cursor: pointer; white-space: nowrap; transition: border-color 120ms, color 120ms;
+  cursor: pointer; white-space: nowrap; transition: border-color 120ms, color 120ms, background 120ms;
 }
 .btn-sm:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.btn-sm:active:not(:disabled) { background: var(--surface-2); }
+.btn-sm:focus-visible { box-shadow: var(--focus-ring); outline: none; }
 .btn-sm:disabled { opacity: 0.4; cursor: default; }
 /* Refresh sits in .pull-row, whose `.pull-row button` (accent) would otherwise win
    on specificity — keep the secondary outline look for the .btn-sm there. */
@@ -375,7 +380,7 @@
   position: absolute; right: 0; top: calc(100% + 4px);
   background: var(--surface-3);
   border: 1px solid var(--border); border-radius: var(--r-0);
-  box-shadow: var(--shadow-2); z-index: 50; min-width: 200px;
+  box-shadow: var(--shadow-2); z-index: var(--z-dropdown); min-width: 200px;
   display: flex; flex-direction: column; overflow: hidden;
 }
 .export-menu button {
@@ -413,11 +418,12 @@
   background: var(--paper); border: 1px solid var(--rule-2); border-radius: var(--r-2);
   color: var(--ink-1); padding: 3px 8px; font-family: var(--font-sans); font-size: 12px;
 }
-.classify-confirm-btn { color: var(--green) !important; border-color: var(--green) !important; }
-.classify-confirm-btn:hover { background: color-mix(in srgb, var(--green) 12%, transparent) !important; }
-.classify-ignore-btn { color: var(--red) !important; border-color: var(--red) !important; }
-.classify-ignore-btn:hover { background: color-mix(in srgb, var(--red) 12%, transparent) !important; }
-.classify-undo-btn { color: var(--muted) !important; }
+/* Scoped so these override .btn-sm without !important */
+.btn-sm.classify-confirm-btn { color: var(--green); border-color: var(--green); }
+.btn-sm.classify-confirm-btn:hover { background: color-mix(in srgb, var(--green) 12%, transparent); }
+.btn-sm.classify-ignore-btn { color: var(--red); border-color: var(--red); }
+.btn-sm.classify-ignore-btn:hover { background: color-mix(in srgb, var(--red) 12%, transparent); }
+.btn-sm.classify-undo-btn { color: var(--muted); }
 
 /* ── Impact dashboard (token-savings telemetry) ── */
 .impact-headline { font-size: 22px; font-weight: 600; color: var(--text); margin-bottom: 4px; line-height: 1.2; }

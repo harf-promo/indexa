@@ -8,7 +8,7 @@
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
-  z-index: 10;
+  z-index: var(--z-sticky);
 }
 .app-logo {
   display: inline-flex;
@@ -66,6 +66,7 @@
   font-family: inherit;
   font-size: 13px;
   padding: 4px 7px;
+  min-height: 32px; /* floor tap target (44px applied at ≤768px via 13-responsive.css) */
   line-height: 1.4;
   transition: background 120ms, border-color 120ms, color 120ms;
   display: inline-flex;
@@ -74,11 +75,13 @@
   white-space: nowrap;
 }
 .icon-btn:hover { background: var(--surface-2); border-color: var(--border); color: var(--text); }
+.icon-btn:focus-visible { box-shadow: var(--focus-ring); outline: none; }
 .icon-btn.sm { padding: 2px 5px; font-size: 12px; }
 /* Harf: primary button = ink fill, paper text; hover darkens, press goes green. */
 .icon-btn.primary { background: var(--ink-1); border-color: transparent; color: var(--paper); font-weight: 600; }
 .icon-btn.primary:hover { background: var(--grey-800); opacity: 1; }
 .icon-btn.primary:active { background: var(--accent-press-bg); color: var(--accent-press-fg); }
+.icon-btn.primary:disabled { opacity: 0.4; cursor: default; }
 
 /* ── Tabs ── */
 .app-tabs { display: flex; gap: 2px; margin: 0 8px; }
@@ -109,4 +112,5 @@
 .tab.active { color: var(--text); }
 .tab.active::after { opacity: 1; }
 .tab:hover:not(.active) { background: var(--surface-2); color: var(--text); }
+.tab:focus-visible { box-shadow: var(--focus-ring); outline: none; }
 

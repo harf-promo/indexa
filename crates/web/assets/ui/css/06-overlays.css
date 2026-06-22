@@ -1,7 +1,7 @@
 /* ── Modals ── */
 .modal-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,0.6);
-  z-index: 100; display: none; align-items: center; justify-content: center;
+  z-index: var(--z-overlay); display: none; align-items: center; justify-content: center;
   backdrop-filter: blur(2px);
 }
 .modal-overlay.open { display: flex; }
@@ -52,13 +52,16 @@
 .modal-btn.primary { background: var(--ink-1); border-color: transparent; color: var(--paper); font-weight: 600; }
 .modal-btn.primary:hover { background: var(--grey-800); }
 .modal-btn.primary:active { background: var(--accent-press-bg); color: var(--accent-press-fg); }
+.modal-btn.primary:disabled { opacity: 0.4; cursor: default; }
 .modal-btn:hover:not(.primary) { border-color: var(--accent); color: var(--accent); }
+.modal-btn:active:not(.primary) { background: var(--surface-2); }
+.modal-btn:focus-visible { box-shadow: var(--focus-ring); outline: none; }
 
 /* ── Drawers (Settings, Activity) — full-height overlay cards opened over the
    Context workspace, reusing the modal backdrop pattern. ── */
 .drawer-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,0.6);
-  z-index: 150; display: none; align-items: center; justify-content: center;
+  z-index: var(--z-drawer); display: none; align-items: center; justify-content: center;
   backdrop-filter: blur(2px);
 }
 .drawer-overlay.open { display: flex; }
@@ -84,7 +87,7 @@
 /* ── Toast ── */
 #toast {
   position: fixed; top: 60px; left: 50%; transform: translateX(-50%);
-  z-index: 200; display: flex; flex-direction: column; gap: 6px;
+  z-index: var(--z-toast); display: flex; flex-direction: column; gap: 6px;
   align-items: center; pointer-events: none;
 }
 /* Harf: toast is a floating layer — sharp corners, keep the shadow. */
@@ -110,7 +113,7 @@
   width: 100%; max-width: 560px;
   position: fixed; top: 20%; left: 50%;
   transform: translateX(-50%);
-  z-index: 300;
+  z-index: var(--z-palette);
 }
 .cmd-palette::backdrop { background: rgba(0,0,0,0.5); backdrop-filter: blur(3px); }
 /* Harf: command palette is a floating layer — sharp corners, keep the shadow. */
@@ -146,7 +149,6 @@
   font-size: 13px; transition: background 80ms;
 }
 .cmd-item:hover, .cmd-item.focused { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-[data-theme="light"] .cmd-item:hover, [data-theme="light"] .cmd-item.focused { background: rgba(9,105,218,0.08); }
 .cmd-item-icon { color: var(--muted); font-size: 14px; flex-shrink: 0; width: 18px; text-align: center; }
 .cmd-item-label { flex: 1; color: var(--text); }
 .cmd-item-hint { font-size: 11px; color: var(--muted); font-family: var(--font-mono); }

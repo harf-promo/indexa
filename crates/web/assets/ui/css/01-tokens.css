@@ -133,7 +133,14 @@
   --scrim: rgba(26,27,29,0.40);     /* backdrop behind modals & drawers */
   --veil:  rgba(255,255,255,0.40);  /* cover over a busy / loading control */
   --z-base: 0; --z-raised: 1; --z-sticky: 10; --z-dropdown: 50;
-  --z-toast: 150; --z-overlay: 180; --z-drawer: 190; --z-modal: 200; --z-tooltip: 250;
+  /* Layer stack (each block sits above the last; every module uses these tokens): */
+  --z-overlay: 100;   /* modal/drawer backdrop overlays  */
+  --z-drawer: 150;    /* drawer overlay (above modal backdrop) */
+  --z-toast: 200;     /* toasts; same as --z-modal (rarely coexist) */
+  --z-modal: 200;     /* modal / floating card */
+  --z-tooltip: 250;   /* in-page tooltips (above all other floating UI) */
+  --z-palette: 300;   /* ⌘K command palette */
+  --z-update: 1000;   /* desktop update overlay (always on top) */
 
   /* ── Tracking · line-height ── */
   --track-display: -0.022em; --track-h1: -0.018em; --track-h2: -0.014em;

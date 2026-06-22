@@ -100,7 +100,7 @@
 /* Harf: floating tooltip — sharp corners, keep the shadow. */
 .graph-tooltip {
   position: fixed;
-  z-index: 100;
+  z-index: var(--z-tooltip);
   pointer-events: none;
   background: var(--surface);
   color: var(--text);

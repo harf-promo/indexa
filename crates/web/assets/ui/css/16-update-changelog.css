@@ -5,7 +5,7 @@
 .update-changelog-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1100; /* above the progress overlay (z-index: 1000) */
+  z-index: 1100; /* above the progress overlay (--z-update: 1000); intentional Sparkle palette, not tokenized */
   display: flex;
   align-items: center;
   justify-content: center;

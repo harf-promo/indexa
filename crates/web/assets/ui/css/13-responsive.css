@@ -68,4 +68,13 @@
   .workspace-toolbar { flex-wrap: wrap; row-gap: 8px; }
   .toolbar-export { margin-left: auto; }
   .input-bar { padding-left: 10px; padding-right: 10px; }
+
+  /* T12: Ask bar — #q input must not be crowded out by the surrounding controls */
+  #q { flex: 1 1 auto; min-width: 120px; }
+
+  /* T12: New / Save buttons in the Ask bar need to clear the 32px floor on mobile */
+  #new-convo, #save-q { min-height: 32px; }
+
+  /* T11: Graph toolbar — the only toolbar with no wrap rule; fix narrow-width clipping */
+  .graph-toolbar { flex-wrap: wrap; row-gap: 6px; }
 }

@@ -52,9 +52,10 @@
   color: var(--text);
 }
 
+/* T5: teal active-state matches .view-tab.active and .treemap-root-btn.active */
 .map-sub-tab.active {
-  background: var(--surface-3);
-  color: var(--text);
+  background: var(--accent);
+  color: var(--bg);
 }
 
 /* Breadcrumb */
@@ -167,7 +168,7 @@
   font-size: 12px;
   line-height: 1.5;
   pointer-events: none;
-  z-index: 100;
+  z-index: var(--z-tooltip);
   max-width: 320px;
   word-break: break-all;
   box-shadow: var(--shadow-3);

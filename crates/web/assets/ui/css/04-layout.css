@@ -1,7 +1,7 @@
 /* ── Layout ── */
 .app-body {
   display: grid;
-  grid-template-columns: var(--sidebar-width) 1fr;
+  grid-template-columns: clamp(200px, var(--sidebar-width), 480px) 1fr; /* T13: clamp against stray JS values */
   flex: 1;
   overflow: hidden;
   position: relative; /* anchor for the sidebar resize handle */
@@ -91,9 +91,7 @@
   position: relative;
 }
 .tree-node-row:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
-[data-theme="light"] .tree-node-row:hover { background: rgba(9,105,218,0.06); }
 .tree-node-row.selected { background: color-mix(in srgb, var(--accent) 13%, transparent); }
-[data-theme="light"] .tree-node-row.selected { background: rgba(9,105,218,0.1); }
 .tree-toggle { width: 14px; text-align: center; color: var(--muted); font-size: 10px; flex-shrink: 0; }
 .tree-icon { flex-shrink: 0; font-size: 13px; }
 .tree-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
@@ -149,8 +147,9 @@
   transition: background 100ms, color 100ms;
 }
 .tree-row-actions button:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
-.tree-row-actions button[data-act="remove"]:hover { background: rgba(248,81,73,0.12); color: var(--red); }
-[data-theme="light"] .tree-row-actions button:hover { background: rgba(9,105,218,0.1); }
+/* T9: destructive action visible at rest (not just on hover) */
+.tree-row-actions button[data-act="remove"] { color: color-mix(in srgb, var(--red) 55%, var(--muted)); }
+.tree-row-actions button[data-act="remove"]:hover { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); }
 
 /* Empty state */
 .empty-state { padding: 28px 18px; text-align: center; color: var(--muted); font-size: 13px; line-height: 1.8; }
@@ -188,9 +187,9 @@
   transition: background 0.15s;
 }
 
-.toolbar-export-btn:hover {
-  background: var(--surface-3);
-}
+.toolbar-export-btn:hover { background: var(--surface-3); }
+.toolbar-export-btn:active { background: var(--paper-4); }
+.toolbar-export-btn:focus-visible { box-shadow: var(--focus-ring); outline: none; }
 /* Harf: segmented control wrapper is sharp; the segment buttons get the 4px corner. */
 .view-toggle {
   display: inline-flex;
@@ -215,6 +214,7 @@
 .view-tab:hover:not(.active) { color: var(--text); }
 /* Active segment = teal (active UI), not a primary ink fill. */
 .view-tab.active { background: var(--accent); color: var(--bg); }
+.view-tab:focus-visible { box-shadow: var(--focus-ring); outline: none; }
 
 /* Holds the workspace view panels; the docked Ask bar sits below it. */
 .workspace-views { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
