@@ -24,7 +24,18 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.73.0)
+## Current feature surface (v0.74.0)
+
+**UX polish + monochrome macOS tray icon (v0.74):** keyboard a11y + native menu-bar integration.
+- **Monochrome macOS tray icon** — `apps/indexa-desktop/icons/tray-mono.png` (44×44 black apostrophe on
+  transparent ground) + `TrayIconBuilder::icon_as_template(true)` → macOS auto-inverts white-on-dark /
+  dark-on-light. Dock/window/favicon/web-header apostrophe all stay brand-green. Requires `tauri`
+  feature `image-png`. No-op on Windows/Linux.
+- **Add-Root modal focus trap + Enter** — `setBackgroundInert(true)` on open (same `inert`-background
+  pattern the drawers use); Enter in `#add-root-path` submits; focus restored to opener on close.
+- **Export-menu full keyboard nav** — ArrowDown/Up roving focus, Enter/Space activate, Esc closes +
+  returns focus to trigger, Tab closes; `_exportMenuCleanup` ref prevents listener accumulation.
+  Completes the WAI-ARIA menu pattern (aria attributes shipped in v0.73).
 
 **Value visibility & graph cleanup (v0.73):** a consolidation release — make the core pitch visible
 + tighten the code, no new public surface.
