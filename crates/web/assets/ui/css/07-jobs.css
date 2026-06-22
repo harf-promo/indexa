@@ -4,7 +4,7 @@
 
 /* Tab badge — small dot on the Jobs tab when jobs are running */
 .tab-jobs-badge {
-  display: inline-block; background: var(--accent); color: white;
+  display: inline-block; background: var(--accent); color: var(--bg);
   border-radius: var(--r-pill); padding: 1px 5px; font-size: 9px; font-weight: 700; /* Harf: pill badge */
   margin-left: 3px; vertical-align: middle; line-height: 1.5;
 }
@@ -17,7 +17,7 @@
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--r-pill); padding: 6px 12px;
   font-size: 12px; color: var(--text); cursor: pointer;
-  box-shadow: var(--shadow-2); z-index: 50;
+  box-shadow: var(--shadow-2); z-index: var(--z-dropdown);
   transition: background 100ms, box-shadow 100ms;
 }
 .jobs-pill:hover { background: var(--surface-2); box-shadow: var(--shadow-3); }
@@ -53,15 +53,20 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .jobs-filter-pills { display: flex; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; }
-/* Harf: pill filter (active state stays teal — it's an active-filter indicator). */
+/* Harf: pill filter (active state stays teal — it's an active-filter indicator).
+   T4: separate active from hover so the two states are visually distinct. */
 .jobs-filter {
   background: none; border: 1px solid var(--border); border-radius: var(--r-pill);
   padding: 2px 9px; font-size: 11px; color: var(--muted); cursor: pointer;
   transition: background 80ms, color 80ms, border-color 80ms;
 }
-.jobs-filter.active, .jobs-filter:hover {
-  background: var(--accent); border-color: var(--accent); color: white;
+.jobs-filter.active {
+  background: var(--accent); border-color: var(--accent); color: var(--bg);
 }
+.jobs-filter:hover:not(.active) {
+  background: var(--surface-2); border-color: var(--border); color: var(--text);
+}
+.jobs-filter:focus-visible { box-shadow: var(--focus-ring); outline: none; }
 .jobs-master-list { flex: 1; overflow-y: auto; padding: 6px 0; }
 .jobs-empty { padding: 24px 16px; color: var(--muted); font-size: 13px; text-align: center; }
 
@@ -72,7 +77,6 @@
 }
 .jobs-card:hover { background: var(--surface-2); }
 .jobs-card.selected { background: color-mix(in srgb, var(--accent) 8%, transparent); border-left-color: var(--accent); }
-[data-theme="light"] .jobs-card.selected { background: rgba(9,105,218,0.06); }
 .jobs-card.running { border-left-color: var(--accent); }
 .jobs-card.failed { border-left-color: var(--red); }
 .jobs-card.done { border-left-color: var(--green); }
@@ -115,9 +119,9 @@
   font-family: var(--font-mono); padding: 2px 7px; border-radius: var(--r-pill); /* Harf: pill badge */
   background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent);
 }
-.jd-kind-scan { background: rgba(63,185,80,0.12); color: var(--green); }
+.jd-kind-scan { background: color-mix(in srgb, var(--green) 12%, transparent); color: var(--green); }
 .jd-kind-deep { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
-.jd-kind-summarize { background: rgba(210,153,34,0.12); color: var(--orange); }
+.jd-kind-summarize { background: color-mix(in srgb, var(--orange) 12%, transparent); color: var(--orange); }
 .jd-kind-index { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
 .jd-path {
   flex: 1; font-size: 12px; color: var(--muted); font-family: var(--font-mono);
@@ -128,21 +132,24 @@
   background: var(--border); color: var(--muted);
 }
 .jd-status-chip.running { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
-.jd-status-chip.done { background: rgba(63,185,80,0.15); color: var(--green); }
-.jd-status-chip.failed { background: rgba(248,81,73,0.15); color: var(--red); }
+.jd-status-chip.done { background: color-mix(in srgb, var(--green) 15%, transparent); color: var(--green); }
+.jd-status-chip.failed { background: color-mix(in srgb, var(--red) 15%, transparent); color: var(--red); }
 .jd-elapsed { font-size: 11px; color: var(--muted); font-family: var(--font-mono); white-space: nowrap; }
 .jd-copy-btn, .jd-dismiss-btn {
   background: none; border: none; color: var(--muted); cursor: pointer;
   font-size: 14px; padding: 2px 4px; border-radius: var(--r-2); transition: color 100ms; /* Harf: 4px button corner */
+  min-height: 32px; /* T6: desktop tap target floor */
 }
 .jd-copy-btn:hover { color: var(--text); }
+/* T9: dismiss is destructive — persistent red tint (not just hover) */
+.jd-dismiss-btn { color: color-mix(in srgb, var(--red) 55%, var(--muted)); }
 .jd-dismiss-btn:hover { color: var(--red); }
 
 /* Cancel button — visible only on running jobs */
 .jd-cancel-btn {
   background: none;
-  border: 1px solid rgba(248,81,73,0.4);
-  color: var(--red, #f85149);
+  border: 1px solid color-mix(in srgb, var(--red) 40%, transparent);
+  color: var(--red);
   cursor: pointer;
   font-size: 11px;
   padding: 2px 8px;
@@ -150,7 +157,7 @@
   transition: background 120ms, color 120ms;
   white-space: nowrap;
 }
-.jd-cancel-btn:hover:not(:disabled) { background: rgba(248,81,73,0.12); }
+.jd-cancel-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 12%, transparent); }
 .jd-cancel-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Progress row */
@@ -185,8 +192,12 @@
   color: var(--muted); cursor: pointer; font-size: 11px; padding: 2px 8px;
   transition: background 80ms, color 80ms, border-color 80ms; flex-shrink: 0;
 }
-.jd-ai-toggle:hover, .jd-ai-toggle.active {
-  background: color-mix(in srgb, var(--accent) 10%, transparent); border-color: var(--accent); color: var(--accent);
+/* T4: separate active from hover (same fix as .jobs-filter) */
+.jd-ai-toggle.active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent); border-color: var(--accent); color: var(--accent);
+}
+.jd-ai-toggle:hover:not(.active) {
+  background: var(--surface-2); border-color: var(--border); color: var(--text);
 }
 .jd-ai-pre {
   font-size: 11px; font-family: var(--font-mono);
@@ -258,8 +269,8 @@
   white-space: nowrap;
   vertical-align: baseline;
 }
-.warn-pressure-throttle { background: rgba(210,153,34,0.15); color: var(--orange); }
-.warn-pressure-critical { background: rgba(248,81,73,0.15); color: var(--red); }
+.warn-pressure-throttle { background: color-mix(in srgb, var(--orange) 15%, transparent); color: var(--orange); }
+.warn-pressure-critical { background: color-mix(in srgb, var(--red) 15%, transparent); color: var(--red); }
 .warn-full-path {
   display: none; grid-column: 1 / -1; font-size: 10px; color: var(--muted);
   font-family: var(--font-mono); word-break: break-all; padding-top: 2px;
@@ -274,7 +285,8 @@
 /* Failed error section */
 /* Harf: sharp error card. */
 .jd-error-section {
-  background: rgba(248,81,73,0.06); border: 1px solid rgba(248,81,73,0.3);
+  background: color-mix(in srgb, var(--red) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
   border-radius: var(--r-0); padding: 12px;
 }
 .jd-error-msg { font-size: 13px; color: var(--red); margin-bottom: 6px; word-break: break-word; }
