@@ -134,8 +134,8 @@
   transform: translateY(-50%);
   align-items: center;
   gap: 1px;
-  padding-left: 20px;
-  background: linear-gradient(to right, transparent, var(--surface-2) 18px);
+  padding-left: 28px;
+  background: linear-gradient(to right, transparent, var(--surface-2) 28px);
   border-radius: var(--r-0); /* Harf: sharp overlay strip */
 }
 .tree-node-row:hover .tree-row-actions,

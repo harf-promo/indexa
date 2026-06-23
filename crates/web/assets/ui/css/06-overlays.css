@@ -1,6 +1,6 @@
 /* ── Modals ── */
 .modal-overlay {
-  position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  position: fixed; inset: 0; background: var(--scrim);
   z-index: var(--z-overlay); display: none; align-items: center; justify-content: center;
   backdrop-filter: blur(2px);
 }
@@ -60,7 +60,7 @@
 /* ── Drawers (Settings, Activity) — full-height overlay cards opened over the
    Context workspace, reusing the modal backdrop pattern. ── */
 .drawer-overlay {
-  position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  position: fixed; inset: 0; background: var(--scrim);
   z-index: var(--z-drawer); display: none; align-items: center; justify-content: center;
   backdrop-filter: blur(2px);
 }

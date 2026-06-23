@@ -239,9 +239,9 @@ function renderSummary(d) {
     '</div></div>';
 
   return crumbHtml +
-    '<div class="summary-header"><span style="font-size:22px">' + icon + '</span>' +
+    '<div class="summary-header"><span style="font-size:22px;flex-shrink:0">' + icon + '</span>' +
     '<span class="summary-title">' + escapeHtml(name) + '</span>' + covChip +
-    '<span style="flex:1"></span>' + askCtaHtml + regenHtml + exportBtnHtml + '</div>' +
+    '<span class="summary-actions">' + askCtaHtml + regenHtml + exportBtnHtml + '</span></div>' +
     metaHtml +
     abstractHtml +
     '<div class="summary-text">' + escapeHtml(d.summary) + '</div>' +

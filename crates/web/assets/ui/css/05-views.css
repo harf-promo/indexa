@@ -4,8 +4,11 @@
 .crumb { cursor: pointer; color: var(--accent); font-weight: 500; }
 .crumb:hover { text-decoration: underline; }
 .sep { margin: 0 4px; color: var(--border); }
-.summary-header { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
-.summary-title { font-size: 17px; font-weight: 600; color: var(--text); }
+.summary-header { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+/* Title truncates when the header is narrow (min-width:0 lets flex shrink past content size). */
+.summary-title { font-size: 17px; font-weight: 600; color: var(--text); min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Action buttons never shrink; they wrap to a second row on very narrow panels. */
+.summary-actions { display: flex; gap: 8px; flex-shrink: 0; flex-wrap: wrap; align-items: center; }
 .summary-meta { font-size: 12px; color: var(--muted); margin-bottom: 16px; }
 /* Harf: sharp card, hairline border, no shadow. */
 .summary-text {

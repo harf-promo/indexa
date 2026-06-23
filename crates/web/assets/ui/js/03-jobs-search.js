@@ -25,10 +25,6 @@ async function fireJob(kind, path) {
   }
 }
 
-// Add a folder to the index. Referenced by the empty-state CTA and the sidebar "+" button,
-// but was never defined (clicking threw a ReferenceError) — define it here next to fireJob.
-// There's no server-side directory picker, so the absolute path is entered directly; the same
-// path works with `indexa scan <path>` in a terminal (shown in the button hint).
 // Trigger an index job for every currently-indexed root. Called from the sidebar
 // refresh button and 27-health.js "Re-index now" banner.
 async function reindexAll() {  // eslint-disable-line no-unused-vars
@@ -46,14 +42,6 @@ async function reindexAll() {  // eslint-disable-line no-unused-vars
   } finally {
     if (btn) btn.disabled = false;
   }
-}
-
-function openAddRoot() {  // eslint-disable-line no-unused-vars
-  var path = window.prompt('Folder to index (absolute path):', '');
-  if (path === null) return; // cancelled
-  path = path.trim();
-  if (!path) return;
-  if (typeof fireJob === 'function') fireJob('index', path);
 }
 
 /* Calm, STATIC per-row context-coverage glyph. Replaces the old per-row pending
