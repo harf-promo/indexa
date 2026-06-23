@@ -17,5 +17,5 @@ async-trait = "0.1"
 indexa-http-util = { path = "../http-util" }
 serde_json = { workspace = true }
 base64 = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls", "stream"] }
 futures-util = "0.3"
