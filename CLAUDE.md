@@ -24,7 +24,24 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 Verify with `ollama list`.
 
-## Current feature surface (v0.74.0)
+## Current feature surface (v0.75.0)
+
+**Layout & provable savings (v0.75):** whole-experience layout pass + auditable token savings.
+- **Token estimate in savings readout** — per-answer chip, conversation badge, and CLI now all
+  show `(~N tokens at ≈4 bytes/token)` using the same formula as the weekly Impact dashboard.
+  `human_count()` promoted to `pub fn` in `indexa_core::text` (single source of truth).
+- **"How is this measured?" disclosure** — per-answer chip and Impact dashboard both carry a
+  `<details>` that explains the methodology: Served = answer + snippets; Source = cited-files-only
+  on-disk size (not the whole repo); ≈4 bytes/token basis.
+- **Map SVGs fill their panel** — Graph and Treemap canvases grow to fill available panel height
+  via `*-canvas-wrap` wrappers (`flex:1; position:relative`; SVG `position:absolute; inset:0`),
+  replacing `calc(100vh - N)` magic numbers. Legends stay visible below the canvas.
+- **Summary-header pile-up fixed** — action buttons now wrap to a second row on narrow workspaces.
+- **Folder-row overlap fixed** — hover-strip fade starts 8 px wider so the folder name is readable.
+- **Topbar / engine-bar / jobs-drawer responsive** — progressive hide at three breakpoints; jobs
+  master/detail stacks at ≤768 px.
+- **Overlay + z-index hygiene** — scrims use `var(--scrim)`; sidebar z-indexes use token stack;
+  Add-Root modal uses `classList.add('open')` pattern.
 
 **UX polish + monochrome macOS tray icon (v0.74):** keyboard a11y + native menu-bar integration.
 - **Monochrome macOS tray icon** — `apps/indexa-desktop/icons/tray-mono.png` (44×44 black apostrophe on

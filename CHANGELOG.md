@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.75.0] — 2026-06-23
+
+### Added
+
+- **Token estimate in the savings readout.** Every surface that shows "% less to your AI tool"
+  now also shows the concrete token estimate: `(~N tokens at ≈4 bytes/token)`. The per-answer
+  impact chip, the running conversation badge, and the CLI impact line all use the same integer
+  formula as the weekly Impact dashboard — one formula, no drift between views. `human_count()`
+  promoted from a private function to `pub fn` in `indexa_core::text` (single source of truth).
+
+- **"How is this measured?" explanation.** The per-answer impact chip and the weekly Impact
+  dashboard both now show a `<details>` disclosure explaining what "Served" and "Source" mean
+  (Served = answer text + snippets delivered; Source = on-disk size of cited files only, not
+  the whole repo), so the savings number is auditable without trusting a black box.
+
+- **Map SVGs fill their panel.** The Graph and Treemap SVGs now grow to fill whatever space the
+  panel has via `<div class="graph-canvas-wrap">` / `<div class="treemap-canvas-wrap">` wrappers
+  (`flex:1`, `position:relative`; SVG is `position:absolute; inset:0`), replacing the old
+  `calc(100vh - 300px)` / `calc(100vh - 280px)` magic numbers. Legend and note elements remain
+  visible below the canvas at all viewport heights.
+
+### Fixed
+
+- **Summary-header button pile-up on narrow workspaces.** The three action buttons (Ask about /
+  Regenerate / Export) now live in a `.summary-actions` group that wraps to a second line instead
+  of overflowing or stacking on top of the title.
+
+- **Folder-row action buttons overlapping the folder name.** The hover-strip fade starts 8 px
+  wider (`padding-left: 28px`) so the folder name is visibly readable before it transitions into
+  the action buttons.
+
+- **Topbar version label no longer overflows.** `.app-version` now has `flex-shrink:1; min-width:0;
+  text-overflow:ellipsis` so the version string truncates gracefully at narrow widths.
+
+- **Engine bar progressive hide on narrow viewports.** Non-critical widgets shed at three
+  breakpoints (1024/860/720 px) so RAM, pressure, and the Activity button are always reachable.
+
+- **Jobs drawer stacks on narrow viewports.** The master/detail split becomes a vertical stack
+  (`flex-direction:column`) below 768 px.
+
+- **Add-Root modal unified onto the `.open` class pattern.** `openAddRoot` now uses
+  `classList.add('open')` (CSS: `.modal-overlay.open { display:flex }`) instead of
+  `modal.style.display = 'flex'` — consistent with every other overlay in the app.
+
+### Changed
+
+- **Scrim token hygiene.** Six hardcoded `rgba(0,0,0,…)` backdrops replaced by `var(--scrim)`.
+  Mobile sidebar z-index values updated to the design-token stack
+  (`--z-drawer:150` / `--z-overlay:100`), fixing a hazard where dropdowns could punch through.
+
 ## [0.74.0] — 2026-06-23
 
 ### Added
