@@ -169,7 +169,9 @@
           <!-- Treemap sub-view -->
           <div id="map-panel-treemap" hidden>
             <div class="treemap-breadcrumb" id="treemap-breadcrumb" aria-label="Treemap navigation path"></div>
-            <svg id="treemap-svg" class="treemap-svg" role="group" aria-label="Context coverage treemap — cells sized by chunk count, colored by coverage state. Tab to navigate, Enter to drill down"></svg>
+            <div class="treemap-canvas-wrap">
+              <svg id="treemap-svg" class="treemap-svg" role="group" aria-label="Context coverage treemap — cells sized by chunk count, colored by coverage state. Tab to navigate, Enter to drill down"></svg>
+            </div>
             <div class="treemap-tooltip" id="treemap-tooltip" role="tooltip" hidden></div>
             <div class="treemap-legend" aria-label="Coverage legend">
               <span class="legend-item"><span class="legend-swatch" style="background:#22c55e"></span>Built</span>
@@ -211,7 +213,9 @@
               <button class="btn-sm" onclick="expandFocusNeighbors()">Expand neighbors</button>
               <button class="btn-sm" onclick="resetGraphView()">Show all in scope</button>
             </div>
-            <svg id="graph-svg" class="graph-svg" role="group" aria-label="Code knowledge graph — files as nodes sized by how central they are, calls as edges. Hover or focus a node to highlight its callers and callees; click or press Enter to focus it, then expand its neighbors."></svg>
+            <div class="graph-canvas-wrap">
+              <svg id="graph-svg" class="graph-svg" role="group" aria-label="Code knowledge graph — files as nodes sized by how central they are, calls as edges. Hover or focus a node to highlight its callers and callees; click or press Enter to focus it, then expand its neighbors."></svg>
+            </div>
             <div class="graph-tooltip" id="graph-tooltip" role="tooltip" hidden></div>
             <!-- Legend, built by renderGraphLegend() so labels match the live palette. -->
             <div id="graph-legend" class="graph-legend" role="group" aria-label="Graph legend"></div>
