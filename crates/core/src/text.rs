@@ -54,6 +54,20 @@ pub fn xml_escape_text(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Human-readable count with K / M suffixes (1 decimal): `42`, `1.4K`, `3.7M`.
+/// Single source of truth for the ≈4-bytes/token estimate used by the savings line
+/// (`UsageSummary::savings_line`), per-answer `AnswerImpact::human()`, and the web
+/// Impact dashboard — one formula, no drift.
+pub fn human_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 /// Largest byte index ≤ `byte` that is a UTF-8 char boundary of `s` (clamped to
 /// `s.len()`). A stable stand-in for the nightly-only `str::floor_char_boundary`,
 /// so byte-budget truncation (`&s[..floor_char_boundary(s, n)]`) never slices

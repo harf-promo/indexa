@@ -59,12 +59,18 @@ function updateSessionImpact() {
         return;
       }
       var pct = Math.min(99, Math.round((1 - d.served / d.counterfactual) * 100));
+      var savedBytes = Math.max(0, (d.counterfactual || 0) - (d.served || 0));
+      var tokStr = savedBytes > 0 ? (function(t) {
+        if (t >= 1000000) return '~' + (t / 1000000).toFixed(1) + 'M';
+        if (t >= 1000) return '~' + (t / 1000).toFixed(1) + 'K';
+        return '~' + String(t);
+      })(Math.round(savedBytes / 4)) + ' tokens' : '';
       el.hidden = false;
       el.innerHTML =
         '\u{1F4C9} This conversation: served <strong>' + escapeHtml(fmt(d.served)) +
-        '</strong> vs <strong>' + escapeHtml(fmt(d.counterfactual)) + '</strong> of source — <strong>' +
-        pct + '% less</strong> to your AI tool, across ' + d.calls +
-        (d.calls === 1 ? ' answer' : ' answers');
+        '</strong> vs <strong>' + escapeHtml(fmt(d.counterfactual)) + '</strong> of source \u{2014} <strong>' +
+        pct + '% less</strong>' + (tokStr ? ' (' + escapeHtml(tokStr) + ')' : '') +
+        ' across ' + d.calls + (d.calls === 1 ? ' answer' : ' answers');
     })
     .catch(function () { el.hidden = true; });
 }
@@ -237,12 +243,29 @@ async function doAsk() {
   // The "retrieve the slice" win, made concrete for THIS answer: how much smaller the served
   // context was than pasting the cited files whole. Absent (empty) on no-match answers and
   // older servers — purely additive, like the confidence line.
+  const fmtTokens = function(saved) {
+    // bytes/4 ≈ tokens — same basis as UsageSummary::savings_line and AnswerImpact::human().
+    var t = Math.round(Math.max(0, saved) / 4);
+    if (t >= 1000000) return (t / 1000000).toFixed(1) + 'M';
+    if (t >= 1000) return (t / 1000).toFixed(1) + 'K';
+    return String(t);
+  };
   const renderImpact = function() {
     if (!impact || !impact.saved_percent) return '';
-    return '<div class="ask-impact" title="Indexa retrieved only the relevant slice instead of the whole cited files — that is the token budget you saved on this answer.">' +
+    var saved = (impact.counterfactual_bytes || 0) - (impact.served_bytes || 0);
+    var tokLine = saved > 0
+      ? ' (~' + escapeHtml(fmtTokens(saved)) + ' tokens at \u{2248}4 bytes/token)'
+      : '';
+    return '<div class="ask-impact">' +
       '\u{1F4C9} served ' + escapeHtml(fmtBytes(impact.served_bytes)) + ' vs ' +
-      escapeHtml(fmtBytes(impact.counterfactual_bytes)) + ' of source — <strong>' +
-      escapeHtml(String(impact.saved_percent)) + '% less</strong> to your AI tool</div>';
+      escapeHtml(fmtBytes(impact.counterfactual_bytes)) + ' of source \u{2014} <strong>' +
+      escapeHtml(String(impact.saved_percent)) + '% less</strong>' + escapeHtml(tokLine) +
+      '<details class="ask-impact-details"><summary>How is this measured?</summary>' +
+      '<p>Indexa retrieved only the relevant slices of your cited files instead of their full content. ' +
+      '<strong>Served</strong> = the answer text + the snippets actually delivered. ' +
+      '<strong>Source</strong> = the on-disk size of the cited files only (not the whole repo) — ' +
+      'so the saving is conservative. The token estimate uses \u{2248}4 bytes per token.</p>' +
+      '</details></div>';
   };
   // Render the partial answer (leading whitespace from the model's first token trimmed so
   // it doesn't briefly indent) + sources, keeping the view pinned to the bottom.
