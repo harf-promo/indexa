@@ -9,6 +9,9 @@
   gap: 10px;
   flex-shrink: 0;
   z-index: var(--z-sticky);
+  /* Prevent the bar from overflowing when the viewport is narrow. */
+  min-width: 0;
+  overflow: hidden;
 }
 .app-logo {
   display: inline-flex;
@@ -29,6 +32,12 @@
   color: var(--muted);
   font-family: var(--font-mono);
   opacity: 0.8;
+  /* Shrink + truncate before the action buttons lose space. */
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .app-version.update-available {
   color: var(--accent);
@@ -54,6 +63,7 @@
   align-items: center;
   gap: 4px;
   margin-left: auto;
+  flex-shrink: 0; /* action buttons never shrink; the version badge gives up space first */
 }
 
 /* ── Icon button ── */

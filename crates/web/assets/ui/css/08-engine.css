@@ -208,6 +208,29 @@
 /* Keep the floating jobs pill clear of the new bottom bar. */
 .jobs-pill { bottom: 44px; }
 
+/* ── Progressive engine-bar widget hiding ──────────────────────────────────
+   Shed lowest-priority info first as the viewport narrows.
+   RAM meter, pressure pip, and the Activity button are NEVER hidden —
+   they are primary safety signals.
+   Raw z-index 60 on .engine-mem-popover is intentional: it sits in the
+   tier gap between --z-dropdown:50 and --z-overlay:100. */
+
+/* 1024px: machine hostname is low-density; hide it before the sidebar overlay fires. */
+@media (max-width: 1024px) {
+  .engine-machine { display: none; }
+}
+
+/* 860px: CPU sparkline becomes too small to read; drop it. */
+@media (max-width: 860px) {
+  .engine-spark { display: none; }
+}
+
+/* 720px: shed the token-savings widget and "Free models" button last. */
+@media (max-width: 720px) {
+  .engine-savings { display: none; }
+  .engine-release { display: none; }
+}
+
 /* "What's using my RAM" popover — read-only top-consumers list off the engine bar. */
 .engine-mem-popover {
   position: fixed;
