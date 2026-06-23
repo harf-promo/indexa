@@ -99,7 +99,7 @@ tempfile = "3"
 # All deps are 100% Rust; no native dylibs, safe for macOS hardened-runtime notarization.
 candle-core = "0.9"
 candle-nn = "0.9"
-candle-transformers = "0.9"
+candle-transformers = "0.10"
 # HuggingFace model hub — model file cache (Apache-2.0).
 # v0.5 + the `ureq` feature gives the sync download API backed by ureq 3, whose
 # default TLS is rustls + ring (NOT native-tls/openssl, NOT aws-lc). This keeps
