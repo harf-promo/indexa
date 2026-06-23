@@ -2,7 +2,7 @@
 //! the concrete, per-query proof of Indexa's "retrieve the slice, don't pack the repo" pitch.
 
 use indexa_core::store::Store;
-use indexa_core::text::human_bytes;
+use indexa_core::text::{human_bytes, human_count};
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 
@@ -49,13 +49,27 @@ impl AnswerImpact {
         self.counterfactual_bytes > 0 && self.served_bytes < self.counterfactual_bytes
     }
 
-    /// One-line human readout, e.g. "served 4.2 KB vs 1.8 MB of source — 99% less to your AI tool".
+    /// One-line human readout, e.g.:
+    /// `"served 4.2 KB vs 1.8 MB of source — 99% less (~450K tokens at ≈4 bytes/token)"`.
+    ///
+    /// The token estimate uses the same `(saved_bytes / 4)` basis as
+    /// `UsageSummary::savings_line` and the web Impact dashboard — one formula, no drift.
+    /// The estimate is omitted when there is no saving (degenerate or zero-counterfactual case).
     pub fn human(&self) -> String {
-        format!(
+        let pct = self.saved_percent();
+        let base = format!(
             "served {} vs {} of source — {}% less to your AI tool",
             human_bytes(self.served_bytes),
             human_bytes(self.counterfactual_bytes),
-            self.saved_percent(),
+            pct,
+        );
+        if pct == 0 {
+            return base;
+        }
+        let tokens = self.counterfactual_bytes.saturating_sub(self.served_bytes) / 4;
+        format!(
+            "{base} (~{} tokens at \u{2248}4 bytes/token)",
+            human_count(tokens)
         )
     }
 }
@@ -170,6 +184,32 @@ mod tests {
         assert!(line.contains("4.2 KB"), "served: {line}");
         assert!(line.contains("1.8 MB"), "counterfactual: {line}");
         assert!(line.contains("% less"), "percent: {line}");
+        // Token estimate is present when there is a saving.
+        assert!(line.contains("tokens at"), "token estimate: {line}");
+    }
+
+    #[test]
+    fn human_token_estimate_matches_savings_line_basis() {
+        // The ≈4 bytes/token estimate must be identical to UsageSummary::savings_line's
+        // formula so a user can cross-check the per-answer readout against the weekly total.
+        // served=1000, counterfactual=9000 → saved=8000 → 8000/4=2000 tokens.
+        let impact = AnswerImpact::new(1_000, 9_000);
+        let line = impact.human();
+        // Expect "~2000 tokens at ≈4 bytes/token" (or "~2.0K" if ≥1000 — 2000 → "2.0K").
+        assert!(
+            line.contains("2.0K tokens at") || line.contains("2000 tokens at"),
+            "token estimate mismatch: {line}"
+        );
+    }
+
+    #[test]
+    fn human_omits_token_estimate_when_no_saving() {
+        // saved_percent() == 0 → no token estimate (nothing to claim).
+        let line = AnswerImpact::new(1000, 1000).human();
+        assert!(
+            !line.contains("tokens at"),
+            "should not show tokens: {line}"
+        );
     }
 
     #[test]

@@ -58,6 +58,20 @@ function renderImpact(body, d) {
     basis.textContent = d.savings_line;
     body.appendChild(basis);
   }
+  // Methodology caption — answers the "is this real?" question the savings number raises.
+  var howEl = document.createElement('details');
+  howEl.className = 'impact-how';
+  var sumEl = document.createElement('summary');
+  sumEl.textContent = 'How is this measured?';
+  var descEl = document.createElement('p');
+  descEl.className = 'impact-how-body';
+  descEl.textContent =
+    'Served = answer text + snippets actually delivered to your AI tool. ' +
+    'Source = on-disk size of the cited files only (not the whole repo) — so the saving is conservative. ' +
+    'The token estimate uses \u{2248}4 bytes per token, matching indexa status and the per-answer readout.';
+  howEl.appendChild(sumEl);
+  howEl.appendChild(descEl);
+  body.appendChild(howEl);
 
   var tools = d.by_tool || [];
   if (tools.length) {

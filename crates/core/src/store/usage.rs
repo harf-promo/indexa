@@ -67,14 +67,10 @@ fn human_size(bytes: u64) -> String {
     crate::text::human_bytes(bytes)
 }
 
+// Delegate to the shared implementation in `indexa_core::text` so the formula
+// stays a single source of truth across the savings line, impact readout, and JS.
 fn human_count(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}K", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
-    }
+    crate::text::human_count(n)
 }
 
 impl Store {
