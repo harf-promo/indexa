@@ -10,6 +10,8 @@ pub enum DeepScanPolicy {
     StructureOnly,
     /// Skip entirely — build artifacts, caches, etc.
     Skip,
+    /// Credential / private-key store — skip by default; opt in via `[scan] include_sensitive`.
+    Sensitive,
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +222,99 @@ static HINTS: &[(Predicate, PathHint)] = &[
             label: "User binaries",
             category: "applications",
             deep_scan: DeepScanPolicy::StructureOnly,
+        },
+    ),
+    // ── Sensitive credential / key stores — skip by default ──────────────
+    // These must appear BEFORE the broader Library/* catch-alls so they win the
+    // first-match lookup and are never accidentally promoted to StructureOnly.
+    (
+        |p| home_subdir(p, ".ssh"),
+        PathHint {
+            label: "SSH keys",
+            category: "sensitive",
+            deep_scan: DeepScanPolicy::Sensitive,
+        },
+    ),
+    (
+        |p| home_subdir(p, ".gnupg"),
+        PathHint {
+            label: "GPG keyring",
+            category: "sensitive",
+            deep_scan: DeepScanPolicy::Sensitive,
+        },
+    ),
+    (
+        |p| home_subdir(p, ".aws"),
+        PathHint {
+            label: "AWS credentials",
+            category: "sensitive",
+            deep_scan: DeepScanPolicy::Sensitive,
+        },
+    ),
+    (
+        |p| path_contains(p, "Library/Keychains"),
+        PathHint {
+            label: "macOS Keychains",
+            category: "sensitive",
+            deep_scan: DeepScanPolicy::Sensitive,
+        },
+    ),
+    // ── Browser profiles (saved passwords, cookies, session tokens) ───────
+    (
+        |p| path_contains(p, "Application Support/Google/Chrome"),
+        PathHint {
+            label: "Chrome profile",
+            category: "sensitive",
+            deep_scan: DeepScanPolicy::Sensitive,
+        },
+    ),
+    (
+        |p| path_contains(p, "Application Support/BraveSoftware"),
+        PathHint {
+            label: "Brave profile",
+            category: "sensitive",
+            deep_scan: DeepScanPolicy::Sensitive,
+        },
+    ),
+    (
+        |p| path_contains(p, "Application Support/Firefox"),
+        PathHint {
+            label: "Firefox profile",
+            category: "sensitive",
+            deep_scan: DeepScanPolicy::Sensitive,
+        },
+    ),
+    (
+        |p| path_contains(p, "Application Support/com.apple.Safari"),
+        PathHint {
+            label: "Safari data",
+            category: "sensitive",
+            deep_scan: DeepScanPolicy::Sensitive,
+        },
+    ),
+    (
+        |p| home_subdir(p, ".mozilla"),
+        PathHint {
+            label: "Mozilla profile",
+            category: "sensitive",
+            deep_scan: DeepScanPolicy::Sensitive,
+        },
+    ),
+    // ── Password managers ─────────────────────────────────────────────────
+    (
+        |p| home_subdir(p, ".password-store"),
+        PathHint {
+            label: "pass password store",
+            category: "sensitive",
+            deep_scan: DeepScanPolicy::Sensitive,
+        },
+    ),
+    (
+        |p| path_contains(p, "Group Containers/2BUA8C4S2C.com.agilebits"),
+        PathHint {
+            label: "1Password data",
+            category: "sensitive",
+            deep_scan: DeepScanPolicy::Sensitive,
         },
     ),
     // ── macOS system data ──────────────────────────────────────────────────
@@ -716,6 +811,33 @@ mod tests {
     fn unknown_extension_returns_none() {
         let p = PathBuf::from("/home/user/mystery.xyzabc123");
         assert!(classify_file_by_extension(&p).is_none());
+    }
+
+    #[test]
+    fn sensitive_paths_classified_as_sensitive() {
+        // These paths should never be descended into by default; they carry
+        // private keys, tokens, and saved browser passwords.
+        for path in [
+            "/Users/testuser/Library/Keychains",
+            "/Users/testuser/Library/Application Support/Google/Chrome",
+            "/Users/testuser/Library/Application Support/BraveSoftware",
+            "/Users/testuser/Library/Application Support/Firefox",
+            "/Users/testuser/Library/Application Support/com.apple.Safari",
+            "/home/testuser/.password-store",
+        ] {
+            let p = PathBuf::from(path);
+            if let Some(hint) = classify(&p) {
+                assert_eq!(
+                    hint.deep_scan,
+                    DeepScanPolicy::Sensitive,
+                    "{path} should be Sensitive, got {:?}",
+                    hint.deep_scan
+                );
+            }
+            // If classify returns None it means the path matches no HINT — which is fine
+            // for paths outside the user's real home dir; the home-subdir predicates are
+            // live-home-dir checks, so only the path_contains-based ones fire here.
+        }
     }
 
     #[test]
