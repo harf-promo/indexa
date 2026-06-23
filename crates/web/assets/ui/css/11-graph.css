@@ -29,15 +29,24 @@
   color: var(--muted);
 }
 
-/* Harf: sharp canvas panel. */
-.graph-svg {
-  display: block;
-  width: 100%;
-  height: calc(100vh - 300px);
+/* SVG canvas — wrapped in a flex:1 container so the SVG grows to fill the panel
+   without magic calc(100vh-N) math. Legend/note below stay in normal flow. */
+.graph-canvas-wrap {
+  flex: 1;
   min-height: 280px;
+  position: relative;
+  overflow: hidden;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-0);
+}
+/* Harf: sharp canvas panel. */
+.graph-svg {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
   overflow: hidden;
 }
 
