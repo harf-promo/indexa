@@ -299,14 +299,14 @@ impl Store {
     }
 
     /// All (path, kind) entries under `root` that are not yet in summary_queue
-    /// and whose deep_policy is not 'Skip'.
+    /// and whose deep_policy is not 'Skip' or 'Sensitive'.
     pub fn entries_for_summarization(&self, root: &str) -> Result<Vec<(String, String)>> {
         let pattern = like_prefix(root);
         let mut stmt = self.conn.prepare(
             "SELECT path, kind FROM entries
              WHERE (path LIKE ?1 ESCAPE '\\' OR parent_path LIKE ?1 ESCAPE '\\')
                AND path NOT IN (SELECT path FROM summary_queue)
-               AND (deep_policy IS NULL OR deep_policy != 'Skip')",
+               AND (deep_policy IS NULL OR (deep_policy != 'Skip' AND deep_policy != 'Sensitive'))",
         )?;
         let rows = stmt.query_map(params![pattern], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -324,7 +324,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT path, kind FROM entries
              WHERE (path LIKE ?1 ESCAPE '\\' OR parent_path LIKE ?1 ESCAPE '\\')
-               AND (deep_policy IS NULL OR deep_policy != 'Skip')",
+               AND (deep_policy IS NULL OR (deep_policy != 'Skip' AND deep_policy != 'Sensitive'))",
         )?;
         let rows = stmt.query_map(params![pattern], |r| {
             let path: String = r.get(0)?;
@@ -357,7 +357,7 @@ impl Store {
             "SELECT e.path, e.kind FROM entries e
              JOIN summaries s ON s.path = e.path
              WHERE (e.path = ?1 OR e.path LIKE ?2 ESCAPE '\\')
-               AND (e.deep_policy IS NULL OR e.deep_policy != 'Skip')
+               AND (e.deep_policy IS NULL OR (e.deep_policy != 'Skip' AND e.deep_policy != 'Sensitive'))
                AND e.modified_s IS NOT NULL
                AND e.modified_s >= s.generated_at",
         )?;

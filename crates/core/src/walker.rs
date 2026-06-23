@@ -26,6 +26,9 @@ pub struct WalkConfig {
     pub respect_gitignore: bool,
     /// Extra gitignore-style patterns to skip (from `[scan] ignore`).
     pub ignore: Vec<String>,
+    /// Descend into `DeepScanPolicy::Sensitive` directories (`.ssh`, `.gnupg`, browser profiles,
+    /// etc.). Defaults to `false` — these are never walked unless explicitly opted in.
+    pub include_sensitive: bool,
 }
 
 impl Default for WalkConfig {
@@ -36,6 +39,7 @@ impl Default for WalkConfig {
             // Default on: a scan respects the repo's .gitignore unless a caller opts out.
             respect_gitignore: true,
             ignore: Vec::new(),
+            include_sensitive: false,
         }
     }
 }
@@ -71,6 +75,14 @@ pub fn is_skip_dir(dir_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// True if `dir_path` is a credential/key store (`.ssh`, `.gnupg`, browser profiles, etc.)
+/// that should be excluded unless `WalkConfig::include_sensitive` is set.
+pub fn is_sensitive_dir(dir_path: &Path) -> bool {
+    classify(dir_path)
+        .map(|h| h.deep_scan == DeepScanPolicy::Sensitive)
+        .unwrap_or(false)
+}
+
 /// Walk `root` and return all entries. Directories classified `Skip` (build
 /// artifacts, caches, VCS internals) are recorded but **not descended into**, so
 /// we never index the thousands of generated files inside `target/`,
@@ -84,6 +96,7 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
         .unwrap_or(2);
 
     let skip_hidden = cfg.skip_hidden;
+    let include_sensitive = cfg.include_sensitive;
     // .gitignore + `[scan] ignore` matcher (None when there's nothing to match).
     let matcher = build_ignore_matcher(root, cfg).map(std::sync::Arc::new);
     let cb_matcher = matcher.clone();
@@ -112,7 +125,8 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
                     let ignored = cb_matcher
                         .as_ref()
                         .is_some_and(|m| m.matched(&cp, true).is_ignore());
-                    if hidden || is_skip_dir(&cp) || ignored {
+                    let sensitive = !include_sensitive && is_sensitive_dir(&cp);
+                    if hidden || is_skip_dir(&cp) || ignored || sensitive {
                         // Prevent descending into this directory.
                         child.read_children_path = None;
                     }
@@ -355,6 +369,55 @@ mod tests {
         };
         let entries = walk(dir.path(), &cfg).unwrap();
         assert!(entries.iter().any(|e| e.path.ends_with("secret.txt")));
+    }
+
+    #[test]
+    fn is_sensitive_dir_recognizes_known_paths() {
+        use std::path::PathBuf;
+        // path_contains-based predicates fire regardless of real home dir.
+        assert!(is_sensitive_dir(&PathBuf::from(
+            "/Users/x/Library/Keychains"
+        )));
+        assert!(is_sensitive_dir(&PathBuf::from(
+            "/Users/x/Library/Application Support/Google/Chrome"
+        )));
+        assert!(is_sensitive_dir(&PathBuf::from(
+            "/Users/x/Library/Application Support/Firefox"
+        )));
+        // A normal code dir is not sensitive.
+        assert!(!is_sensitive_dir(&PathBuf::from("/Users/x/projects/myapp")));
+    }
+
+    #[test]
+    fn sensitive_dir_contents_pruned_by_default() {
+        // Simulate a Library/Keychains subtree: the Keychains dir itself is recorded
+        // but nothing inside it is indexed without include_sensitive=true.
+        let dir = tempfile::tempdir().unwrap();
+        let keychains = dir.path().join("Library").join("Keychains");
+        std::fs::create_dir_all(&keychains).unwrap();
+        std::fs::write(keychains.join("login.keychain-db"), "secret").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "keep").unwrap();
+
+        let entries = walk(dir.path(), &WalkConfig::default()).unwrap();
+        assert!(
+            !entries.iter().any(|e| e.path.ends_with("login.keychain-db")),
+            "sensitive dir contents must not be indexed by default"
+        );
+        assert!(
+            entries.iter().any(|e| e.path.ends_with("notes.txt")),
+            "non-sensitive files must still be indexed"
+        );
+
+        // With include_sensitive=true the contents become visible.
+        let cfg = WalkConfig {
+            include_sensitive: true,
+            ..Default::default()
+        };
+        let entries = walk(dir.path(), &cfg).unwrap();
+        assert!(
+            entries.iter().any(|e| e.path.ends_with("login.keychain-db")),
+            "include_sensitive=true must expose sensitive dir contents"
+        );
     }
 
     #[test]

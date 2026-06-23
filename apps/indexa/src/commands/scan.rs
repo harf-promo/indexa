@@ -14,6 +14,7 @@ pub(crate) async fn cmd_scan(paths: Vec<String>, all: bool, cfg: &Config) -> Res
     let walk_cfg = WalkConfig {
         respect_gitignore: cfg.scan.respect_gitignore,
         ignore: cfg.scan.ignore.clone(),
+        include_sensitive: cfg.scan.include_sensitive,
         ..Default::default()
     };
 
