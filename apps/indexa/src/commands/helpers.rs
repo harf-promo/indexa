@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use directories::BaseDirs;
 use indexa_core::config::{self, Config, SummaryMode};
 use indexa_core::resource;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Post-processing + destination for a rendered export. Shared by `export` and `pack export`
 /// so both get secret redaction, the token-budget guard, and `--clipboard` identically.
@@ -449,6 +449,54 @@ pub(crate) fn format_size(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+/// True when `path` is an unreasonably large scan root: the filesystem root or
+/// the user's home directory. Scanning either indexes hundreds of thousands of
+/// files and can consume gigabytes of disk/WAL. Guarded by `check_huge_root_guard`.
+fn is_huge_root(path: &Path) -> bool {
+    // Filesystem root: has no parent (/ on Unix, C:\ on Windows).
+    let is_fs_root = path.parent().is_none();
+    // User home directory.
+    let is_home = BaseDirs::new()
+        .map(|b| path == b.home_dir())
+        .unwrap_or(false);
+    is_fs_root || is_home
+}
+
+/// Guard against accidentally indexing the whole home directory or filesystem.
+///
+/// In an interactive terminal: prompts for confirmation. Non-interactively (e.g. in
+/// a CI script or piped command): bails with an error to avoid silently filling disk.
+/// Pass `--yes` to skip this check.
+pub(crate) fn check_huge_root_guard(root: &Path) -> anyhow::Result<()> {
+    use std::io::IsTerminal as _;
+    use std::io::Write as _;
+
+    if !is_huge_root(root) {
+        return Ok(());
+    }
+    if std::io::stdin().is_terminal() {
+        print!(
+            "About to index a very large tree: {}\n\
+             This can index hundreds of thousands of files and consume significant disk. \
+             Continue? [y/N] ",
+            root.display()
+        );
+        let _ = std::io::stdout().flush();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
+            anyhow::bail!("Aborted. Pass an explicit path to scan, or use --yes to confirm.");
+        }
+    } else {
+        anyhow::bail!(
+            "Refusing to index {} in a non-interactive session. \
+             Pass an explicit path, or re-run with --yes to confirm.",
+            root.display()
+        );
+    }
+    Ok(())
 }
 
 /// Current Unix time in whole seconds (fails open to 0 before the epoch / on a clock error).

@@ -103,6 +103,10 @@ impl Store {
             db_path: path.to_path_buf(),
         };
         store.init_schema()?;
+        // Truncate any WAL that accumulated while the process was stopped.
+        // Fail-open: another reader holding a lock just means the checkpoint
+        // is deferred — it doesn't prevent the database from opening.
+        store.checkpoint_truncate();
         Ok(store)
     }
 
@@ -126,5 +130,27 @@ impl Store {
     /// Prefer dedicated store methods for all non-diagnostic use.
     pub fn db_connection(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Checkpoint the WAL with `TRUNCATE` mode, which zeroes the WAL file after
+    /// writing all committed frames back to the main database. Fail-open: a lock
+    /// contention or no-WAL error is logged as a warning, not propagated.
+    pub fn checkpoint_truncate(&self) {
+        if self.db_path == std::path::Path::new(":memory:") {
+            return; // in-memory databases have no WAL file
+        }
+        if let Err(e) = self.conn.pragma_update(None, "wal_checkpoint", "TRUNCATE") {
+            tracing::warn!("wal_checkpoint(TRUNCATE) failed (index is still usable): {e}");
+        }
+    }
+
+    /// Rewrite the database to reclaim free pages from deleted rows, then
+    /// truncate the WAL. `VACUUM` requires a brief exclusive lock and cannot
+    /// run inside an open transaction. Fail-open: a VACUUM failure (e.g. locked)
+    /// is returned as an error so the caller can print a useful message.
+    pub fn vacuum(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch("VACUUM;")?;
+        self.checkpoint_truncate();
+        Ok(())
     }
 }
