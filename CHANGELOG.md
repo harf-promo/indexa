@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.76.0] — 2026-06-28
+
+### Added
+
+- **`add_note` MCP tool (47th tool) — write-back learning loop.** An AI caller that learns
+  something new (a bug root-cause, a design decision, a meeting outcome) can now persist it
+  as a Markdown note in the Indexa data directory: `add_note(pack, title, body)`. The note
+  is written to `<data_dir>/notes/<slug>-<sha8>.md`, attached to an existing pack, and
+  immediately indexed via `indexa index <notes_dir>` — so it becomes searchable via `search`,
+  `ask`, and `export_pack` within the same session. Re-submitting the same title + body is
+  idempotent (same file name → in-place overwrite). Notes inherit secret redaction on
+  `export_pack` automatically. Requires a pre-existing pack (`create_pack` first). Implemented
+  in `indexa_core::notes` (shared by MCP and any future CLI surface). Inspired by the
+  `memodb-io/acontext` write-back pattern: "context that an agent writes to is context that
+  gets better over time."
+
+- **Catalog retrieval mode — progressive disclosure.** `ask(catalog: true)` runs the full
+  retrieval pipeline (hybrid + boosts + rerank + MMR) but returns only a scored file list
+  with L0 one-line abstracts — no chunk bodies, no local LLM synthesis. Use it as the "table
+  of contents" step: ask the catalog, pick the interesting files, then expand them with
+  `get_summary`/`read_file`/`get_chunk_context` and synthesize with your own (stronger) model.
+  This is the cheapest retrieval mode: minimal tokens, bounded KV-cache, zero local model
+  calls. Compatible with `session_id` (conversational follow-ups rewrite the search query
+  before retrieval). Incompatible with `agentic` (catalog is a single-pass retrieval, not a
+  multi-hop loop). Usage is recorded as `ask_catalog` in the savings ledger. Optional param
+  on the existing `ask` tool — `catalog` absent ⇒ byte-identical behavior. MCP tool count
+  stays 47.
+
+- **`indexa_core::notes` module** — `slugify(s)` and `write_note_file(data_dir, pack, title,
+  body)` as public, tested, reusable primitives. Future surfaces (CLI `indexa note add`,
+  web sidebar) can call the same code without duplicating the cache-as-file logic.
+
 ## [0.75.0] — 2026-06-23
 
 ### Added

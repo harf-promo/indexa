@@ -225,6 +225,116 @@ pub async fn answer_retrieval_only_history(
     })
 }
 
+/// **Catalog (progressive-disclosure) retrieval** — returns a scored list of files without
+/// synthesizing an answer. Each entry shows the file path, its L0 one-line abstract, and its
+/// RRF retrieval score.
+///
+/// Use this when the caller is a capable LLM that wants to *choose* which files to expand
+/// (via `get_summary`, `read_file`, or `get_chunk_context`) rather than receiving a single
+/// synthesized answer. This is the "table of contents" step in a progressive-disclosure loop:
+///
+/// ```text
+/// ask(catalog:true) → pick interesting paths → get_summary / read_file → synthesize yourself
+/// ```
+///
+/// Callers get bounded KV-cache: only the L0 abstracts (≤1 sentence each) are sent, not
+/// the full chunk bodies. The full retrieval pipeline still runs (hybrid + boosts + rerank +
+/// MMR + per-file cap), but results are deduplicated to the file level before returning.
+pub async fn answer_catalog(
+    db_path: &Path,
+    embedder: &dyn Embedder,
+    llm: &dyn Generator,
+    question: &str,
+    cfg: &QaConfig,
+    ann: Option<&AnnIndex>,
+) -> Result<Answer> {
+    answer_catalog_history(db_path, embedder, llm, question, cfg, ann, &[]).await
+}
+
+/// [`answer_catalog`] with prior conversation turns for follow-up rewriting.
+/// `history = &[]` ⇒ identical to [`answer_catalog`].
+#[allow(clippy::too_many_arguments)]
+pub async fn answer_catalog_history(
+    db_path: &Path,
+    embedder: &dyn Embedder,
+    llm: &dyn Generator,
+    question: &str,
+    cfg: &QaConfig,
+    ann: Option<&AnnIndex>,
+    history: &[PriorTurn],
+) -> Result<Answer> {
+    let (hits, _overview, _clusters) =
+        retrieve_and_rerank(db_path, embedder, llm, question, cfg, ann, history).await?;
+
+    if hits.is_empty() {
+        let mut a = no_match_answer(question);
+        a.synthesized = false;
+        return Ok(a);
+    }
+
+    // Deduplicate to file level: keep the best RRF score per path.
+    let mut seen: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for hit in &hits {
+        seen.entry(hit.entry_path.clone())
+            .and_modify(|s| {
+                if hit.rrf_score > *s {
+                    *s = hit.rrf_score;
+                }
+            })
+            .or_insert(hit.rrf_score);
+    }
+    // Sort by score descending, stable.
+    let mut file_hits: Vec<(String, f64)> = seen.into_iter().collect();
+    file_hits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Fetch L0 abstracts in a sync scope (no &Store crossing .await).
+    let lines: Vec<String> = {
+        let store = Store::open(db_path)?;
+        file_hits
+            .iter()
+            .map(|(path, score)| {
+                let l0 = store
+                    .summary_by_path(path)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.summary_l0)
+                    .unwrap_or_default();
+                if l0.is_empty() {
+                    format!("{path}  (score {score:.3})")
+                } else {
+                    format!("{path} — {l0}  (score {score:.3})")
+                }
+            })
+            .collect()
+    };
+
+    let sources: Vec<SourceCitation> = file_hits
+        .iter()
+        .map(|(path, _)| SourceCitation {
+            path: path.clone(),
+            heading: String::new(),
+            snippet: String::new(),
+        })
+        .collect();
+
+    let body = format!(
+        "CATALOG — {n} files matching \"{question}\".\n\
+         Expand a file with `get_summary`, `read_file`, or `get_chunk_context`.\n\n\
+         {list}",
+        n = lines.len(),
+        list = lines.join("\n")
+    );
+
+    Ok(Answer {
+        question: question.to_owned(),
+        answer: body,
+        sources,
+        confidence: None,
+        synthesized: false,
+        model: None,
+    })
+}
+
 /// Embed → retrieve → optional rerank + project overview, shared by [`answer`] and
 /// [`answer_stream`]. Returns `(hits, overview, clusters)`. Empty hits ⇒ callers short-circuit.
 /// The `&Store` is confined to a sync scope and dropped before any `.await`, so the

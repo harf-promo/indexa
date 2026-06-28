@@ -1,3 +1,4 @@
+add_note
 add_pack_paths
 answer_decision
 ask

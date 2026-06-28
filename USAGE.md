@@ -303,7 +303,7 @@ Add it to **Claude Desktop** (`claude_desktop_config.json`) — or any MCP clien
 }
 ```
 
-**46 tools** are exposed (see [docs/how-to/live-retrieval-over-mcp.md](docs/how-to/live-retrieval-over-mcp.md)
+**47 tools** are exposed (see [docs/how-to/live-retrieval-over-mcp.md](docs/how-to/live-retrieval-over-mcp.md)
 for the full table). The ones you'll reach for most: `search` (content search), `browse_tree` (one
 directory level), `get_summary` (`tier` = l0 one-liner / l1 full+children / l2 file content —
 progressive disclosure), `get_chunk_context` (a file's indexed chunks, or the neighbors of a search
