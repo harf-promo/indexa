@@ -33,6 +33,10 @@ impl Store {
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
             PRAGMA foreign_keys = ON;
+            -- Auto-checkpoint the WAL every 1000 pages (~4 MB at 4 KB/page).
+            -- Without this the WAL grows unboundedly when long-lived connections
+            -- hold read locks that block automatic checkpointing.
+            PRAGMA wal_autocheckpoint = 1000;
             -- WAL allows one writer at a time across connections. The worker pool, the
             -- per-event watcher, and the web summarize path each open their own connection,
             -- so without a busy timeout a contended write fails immediately with SQLITE_BUSY.
