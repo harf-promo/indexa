@@ -175,7 +175,7 @@ jobs:
           fi
 
       - name: Build + bundle desktop app
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Tauri updater signature (for the .sig the in-app updater verifies).
@@ -305,7 +305,7 @@ jobs:
         run: npm install -g @tauri-apps/cli@^2
 
       - name: Build + bundle desktop app
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # tauri.conf.json sets createUpdaterArtifacts: true, so the bundler insists on
