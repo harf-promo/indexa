@@ -36,7 +36,7 @@ serde_json = "1"
 # Temp directories for video frame extraction
 tempfile = { workspace = true }
 # XML/HTML tag stripping for EPUB and office formats
-quick-xml = "0.40"
+quick-xml = "0.41"
 # HTML → Markdown conversion (Apache-2.0; already used by the remote-source fetch path)
 htmd = { workspace = true }
 tar = "0.4.46"

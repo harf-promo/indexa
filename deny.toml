@@ -42,6 +42,13 @@ ignore = [
     # (2026-07, harfbuzz/ttf-parser#217), NOT a vulnerability, no safe upgrade while
     # pdf-extract/lopdf pin it. Used only in the offline PDF text-extraction path.
     { id = "RUSTSEC-2026-0192", reason = "transitive via pdf-extract/lopdf; unmaintained-not-vuln; offline PDF parsing only" },
+    # quick-xml <0.41 DoS advisories (quadratic dup-attr check; unbounded NsReader
+    # namespace alloc). The DIRECT dep is patched (0.41); the remaining vulnerable
+    # instance is quick-xml 0.31 transitive via calamine, whose newest release
+    # (0.35) still pins ^0.39 — nothing upstream reaches 0.41 yet. DoS-only, in the
+    # offline local XLSX parsing path. Re-check on each calamine release.
+    { id = "RUSTSEC-2026-0194", reason = "direct dep patched to 0.41; remainder transitive via calamine (<=0.35 pins ^0.39); offline XLSX DoS only" },
+    { id = "RUSTSEC-2026-0195", reason = "direct dep patched to 0.41; remainder transitive via calamine (<=0.35 pins ^0.39); offline XLSX DoS only" },
 ]
 
 [bans]
