@@ -26,7 +26,7 @@ tree-sitter-cpp = "0.23"
 # Image EXIF
 kamadak-exif = "0.6"
 # PDF text extraction (pure Rust, text-layer PDFs)
-pdf-extract = "0.10"
+pdf-extract = "0.12"
 # Office formats
 calamine = { version = "0.26", features = ["dates"] }
 # docx extraction (zip-based)
