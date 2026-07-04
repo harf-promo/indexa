@@ -38,6 +38,10 @@ ignore = [
     # paste 1.0.15 → candle-core / candle-transformers (via gemm); proc-macro crate marked
     # unmaintained with no replacement. Used internally by candle for macro expansion; no security impact.
     { id = "RUSTSEC-2024-0436", reason = "transitive via candle-core/gemm/paste; proc-macro only, no security impact" },
+    # ttf-parser 0.25.1 → pdf-extract → lopdf; author declared the crate unmaintained
+    # (2026-07, harfbuzz/ttf-parser#217), NOT a vulnerability, no safe upgrade while
+    # pdf-extract/lopdf pin it. Used only in the offline PDF text-extraction path.
+    { id = "RUSTSEC-2026-0192", reason = "transitive via pdf-extract/lopdf; unmaintained-not-vuln; offline PDF parsing only" },
 ]
 
 [bans]
