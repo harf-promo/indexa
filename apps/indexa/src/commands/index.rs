@@ -16,6 +16,7 @@ pub(crate) async fn cmd_index(
     mode: String,
     passes: Option<u32>,
     contextual: bool,
+    yes: bool,
     cfg: &Config,
 ) -> Result<()> {
     // ── Preflight: confirm Ollama is up and required models are pulled ─────────
@@ -23,7 +24,7 @@ pub(crate) async fn cmd_index(
 
     // ── Phase 1: scan ─────────────────────────────────────────────────────────
     println!("── Phase 1 / 3 · Scan ──────────────────────────────────────");
-    cmd_scan(paths.clone(), false, cfg).await?;
+    cmd_scan(paths.clone(), false, yes, cfg).await?;
 
     // ── Phase 2: deep embed + code graph ──────────────────────────────────────
     println!("\n── Phase 2 / 3 · Deep context ──────────────────────────────");

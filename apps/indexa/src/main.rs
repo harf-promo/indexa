@@ -17,7 +17,14 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| std::env::temp_dir().join("indexa-logs"));
     let _ = std::fs::create_dir_all(&log_dir);
 
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "indexa.log");
+    // Rotate daily; keep at most 14 log files so logs don't accumulate unboundedly.
+    // Fail-open: if Builder fails (e.g. permissions), fall back to the uncapped daily appender.
+    let file_appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("indexa.log")
+        .max_log_files(14)
+        .build(&log_dir)
+        .unwrap_or_else(|_| tracing_appender::rolling::daily(&log_dir, "indexa.log"));
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     let env_filter = tracing_subscriber::EnvFilter::from_default_env()
@@ -71,8 +78,9 @@ async fn main() -> Result<()> {
             mode,
             passes,
             contextual,
-        } => commands::cmd_index(paths, embed_model, mode, passes, contextual, &cfg).await,
-        Commands::Scan { paths, all } => commands::cmd_scan(paths, all, &cfg).await,
+            yes,
+        } => commands::cmd_index(paths, embed_model, mode, passes, contextual, yes, &cfg).await,
+        Commands::Scan { paths, all, yes } => commands::cmd_scan(paths, all, yes, &cfg).await,
         Commands::Deep {
             paths,
             embed_model,
@@ -351,7 +359,7 @@ async fn main() -> Result<()> {
         } => commands::cmd_status(unknown, deep, json, &cfg).await,
         Commands::Formats { json, level } => commands::cmd_formats(json, level).await,
         Commands::Rm { paths, recursive } => commands::cmd_rm(paths, recursive).await,
-        Commands::Prune { dry_run } => commands::cmd_prune(dry_run).await,
+        Commands::Prune { dry_run, vacuum } => commands::cmd_prune(dry_run, vacuum).await,
         Commands::Doctor {
             profile,
             files,

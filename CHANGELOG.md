@@ -39,6 +39,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   body)` as public, tested, reusable primitives. Future surfaces (CLI `indexa note add`,
   web sidebar) can call the same code without duplicating the cache-as-file logic.
 
+### Fixed
+
+- **Stop Indexa from filling the disk — five root-cause fixes (#337).**
+  - **Walker** — replaced `jwalk` + a root-only `.gitignore` parser with `ignore::WalkBuilder`
+    (ripgrep's parallel walker). Nested `.gitignore` files are now honoured, and `WalkState::Skip`
+    prunes `.git/`, `node_modules/`, `target/`, `__pycache__`, and 10+ other junk dirs *before*
+    descent (previously 129k+ junk entries entered the index). New scan-time 8 MB per-file cap
+    skips large blobs. `jwalk` dropped (the `ignore` crate was already in the tree).
+  - **WAL** — `wal_autocheckpoint=1000` + `Store::checkpoint_truncate()` on every `Store::open`
+    (the WAL grew past 100 MB and never truncated between runs).
+  - **VACUUM** — `Store::vacuum()` + `indexa prune --vacuum` (prints before→after size); no VACUUM
+    ever ran before.
+  - **Logs** — cap the log directory to 14 daily files (`max_log_files(14)`), previously unbounded.
+  - **Large-root guard** — `is_huge_root()` detects `/` and `$HOME`; interactive sessions prompt
+    `[y/N]`, non-tty sessions bail with a clear error. `--yes` on `scan`/`index`/`deep` bypasses
+    for scripted use.
+
 ## [0.75.0] — 2026-06-23
 
 ### Added
