@@ -79,6 +79,10 @@ pub enum Commands {
         /// Also enabled by `[describer] contextual_retrieval = true` in config.
         #[arg(long)]
         contextual: bool,
+
+        /// Skip the large-root confirmation prompt (for scripts / non-interactive use).
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Build the surface context map of a path (fast — no AI calls).
@@ -95,6 +99,11 @@ pub enum Commands {
         /// Scan the entire computer (two-phase surface + deep scan).
         #[arg(long, conflicts_with = "paths")]
         all: bool,
+
+        /// Skip the large-root confirmation prompt (for scripts / non-interactive use).
+        /// Required when scanning the home directory or filesystem root non-interactively.
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Print a summary map of what Indexa found and how regions were classified.
@@ -700,6 +709,11 @@ pub enum Commands {
         /// Show what would be removed without deleting anything.
         #[arg(long)]
         dry_run: bool,
+        /// After pruning, VACUUM the database to reclaim freed disk pages and
+        /// truncate the WAL. Rewrites the DB file (brief exclusive lock; takes
+        /// longer on large indexes). Cannot combine with --dry-run.
+        #[arg(long, conflicts_with = "dry_run")]
+        vacuum: bool,
     },
 
     /// Detect your machine's specs, recommend AI models, and estimate job times.
@@ -1206,7 +1220,7 @@ mod tests {
     fn cli_parses_scan_path() {
         let cli = Cli::try_parse_from(["indexa", "scan", "~/Documents"]).unwrap();
         match cli.command {
-            Commands::Scan { paths, all } => {
+            Commands::Scan { paths, all, .. } => {
                 assert_eq!(paths, vec!["~/Documents"]);
                 assert!(!all);
             }
@@ -1218,7 +1232,7 @@ mod tests {
     fn cli_parses_scan_all() {
         let cli = Cli::try_parse_from(["indexa", "scan", "--all"]).unwrap();
         match cli.command {
-            Commands::Scan { paths, all } => {
+            Commands::Scan { paths, all, .. } => {
                 assert!(paths.is_empty());
                 assert!(all);
             }

@@ -26,7 +26,7 @@ tree-sitter-cpp = "0.23"
 # Image EXIF
 kamadak-exif = "0.6"
 # PDF text extraction (pure Rust, text-layer PDFs)
-pdf-extract = "0.10"
+pdf-extract = "0.12"
 # Office formats
 calamine = { version = "0.26", features = ["dates"] }
 # docx extraction (zip-based)
@@ -36,7 +36,7 @@ serde_json = "1"
 # Temp directories for video frame extraction
 tempfile = { workspace = true }
 # XML/HTML tag stripping for EPUB and office formats
-quick-xml = "0.40"
+quick-xml = "0.41"
 # HTML → Markdown conversion (Apache-2.0; already used by the remote-source fetch path)
 htmd = { workspace = true }
 tar = "0.4.46"

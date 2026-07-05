@@ -15,7 +15,7 @@ const DECISION_GC_SECS: i64 = 365 * 86_400;
 /// `entries` row) plus stale decision-ledger rows. Orphans accumulate when a root is removed
 /// or re-pointed; the normal pipeline never revisits them. Index-only and recoverable by
 /// re-scanning the affected paths (ledger GC is the one irreversible part — see above).
-pub(crate) async fn cmd_prune(dry_run: bool) -> Result<()> {
+pub(crate) async fn cmd_prune(dry_run: bool, vacuum: bool) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };
@@ -31,7 +31,10 @@ pub(crate) async fn cmd_prune(dry_run: bool) -> Result<()> {
     let noise_candidates = detectors::sweep_filtered_noise(&mut store, &review_cfg, true)?;
     if counts.is_empty() && gc_candidates == 0 && noise_candidates == 0 {
         println!("Index is clean — no orphaned rows or stale review questions to prune.");
-        return Ok(());
+        // Still allow --vacuum on a clean-but-bloated DB (e.g. after bulk deletes).
+        if !vacuum {
+            return Ok(());
+        }
     }
 
     if dry_run {
@@ -80,5 +83,25 @@ evidence still stands)"
     } else {
         println!("Review questions GC'd: 0");
     }
+
+    if vacuum {
+        let before = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+        match store.vacuum() {
+            Ok(()) => {
+                let after = std::fs::metadata(&db_path)
+                    .map(|m| m.len())
+                    .unwrap_or(before);
+                let reclaimed = before.saturating_sub(after);
+                println!(
+                    "VACUUM complete: {} → {} ({} reclaimed).",
+                    super::helpers::format_size(before),
+                    super::helpers::format_size(after),
+                    super::helpers::format_size(reclaimed),
+                );
+            }
+            Err(e) => eprintln!("VACUUM failed (index left intact): {e:#}"),
+        }
+    }
+
     Ok(())
 }

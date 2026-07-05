@@ -1,5 +1,6 @@
-//! Admin tools: `get_stats`, `prune`, and `trigger_index`.
+//! Admin tools: `get_stats`, `prune`, `trigger_index`, and `add_note`.
 
+use indexa_core::store::Store;
 use rmcp::{
     handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router, ErrorData,
 };
@@ -11,6 +12,17 @@ use crate::{mcp_err, ok_text, IndexaMcp};
 pub struct TriggerIndexParams {
     /// Absolute path to scan, deep-index, and summarize.
     pub path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AddNoteParams {
+    /// Name of an **existing** pack to attach the note to.
+    /// Create the pack first with `create_pack` if it does not exist yet.
+    pub pack: String,
+    /// Short title for the note (becomes the Markdown `# heading` and the search slug).
+    pub title: String,
+    /// Markdown body of the note — the knowledge you want to persist and make searchable.
+    pub body: String,
 }
 
 #[tool_router(router = router_admin, vis = "pub(crate)")]
@@ -202,5 +214,83 @@ impl IndexaMcp {
                 .trim()
             )))
         }
+    }
+
+    /// Persist a learned fact as a Markdown note in the Indexa data directory, attach it
+    /// to an existing pack, and immediately index it — so it becomes searchable via
+    /// `search`, `ask`, and `export_pack` right away.
+    ///
+    /// This is the **write-back** counterpart to retrieval: an AI caller that discovers
+    /// something new (a bug root-cause, a design decision, a meeting outcome) can persist
+    /// it here so the knowledge survives the session and enriches future context.
+    ///
+    /// The pack must already exist — create it first with `create_pack`.
+    /// Notes are plain Markdown files; they inherit secret redaction on `export_pack`
+    /// automatically (they live inside the pack). Re-submitting the same title + body is
+    /// idempotent (same file is overwritten in place).
+    #[tool(
+        description = "Write a Markdown note to the Indexa data directory, attach it to an \
+                       existing pack, and index it immediately so it is searchable. Use this \
+                       to persist learned facts (design decisions, bug root-causes, meeting \
+                       outcomes) that should survive the session. The pack must already exist \
+                       — call `create_pack` first. Re-submitting the same title+body is \
+                       idempotent. Notes are redacted on `export_pack` like any other file."
+    )]
+    pub(crate) async fn add_note(
+        &self,
+        params: Parameters<AddNoteParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let AddNoteParams { pack, title, body } = params.0;
+
+        // Derive data_dir from db_path (db_path = <data_dir>/index.db).
+        let data_dir = self
+            .db_path
+            .parent()
+            .ok_or_else(|| mcp_err("db_path has no parent directory"))?;
+
+        // Verify the pack exists before writing anything.
+        let mut store = Store::open(&self.db_path).map_err(mcp_err)?;
+        let pack_rec = store.pack_by_name(&pack).map_err(mcp_err)?.ok_or_else(|| {
+            mcp_err(format!(
+                "no pack named \"{pack}\" — create it first with `create_pack`"
+            ))
+        })?;
+
+        // Write the note file (idempotent: same title+body → same filename).
+        let note_path = indexa_core::notes::write_note_file(data_dir, &pack, &title, &body)
+            .map_err(|e| mcp_err(format!("writing note: {e}")))?;
+
+        let note_path_str = note_path.to_string_lossy().into_owned();
+
+        // Register the note in the pack so `search_pack` / `export_pack` find it.
+        store
+            .add_pack_paths(&pack_rec.id, std::slice::from_ref(&note_path_str))
+            .map_err(mcp_err)?;
+
+        // Index immediately: scan + deep-embed + summarize the notes directory so the
+        // note is searchable right away. Best-effort — a failure here still means the
+        // note is written and pack-registered; the caller can trigger re-indexing later.
+        let notes_dir = data_dir.join("notes");
+        let notes_dir_str = notes_dir.to_string_lossy().into_owned();
+        let index_result = tokio::process::Command::new("indexa")
+            .args(["index", &notes_dir_str])
+            .output()
+            .await;
+
+        let index_note = match index_result {
+            Ok(out) if out.status.success() => String::new(),
+            Ok(out) => {
+                let msg = String::from_utf8_lossy(&out.stderr);
+                format!(
+                    "\n⚠ Indexing note failed (exit {:?}): {msg}",
+                    out.status.code()
+                )
+            }
+            Err(e) => format!("\n⚠ Could not spawn `indexa index`: {e}"),
+        };
+
+        Ok(ok_text(format!(
+            "Note \"{title}\" added to pack \"{pack}\" and indexed.\nFile: {note_path_str}{index_note}"
+        )))
     }
 }

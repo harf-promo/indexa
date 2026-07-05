@@ -14,7 +14,6 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-jwalk = { workspace = true }
 ignore = { workspace = true }
 rusqlite = { workspace = true }
 directories = { workspace = true }

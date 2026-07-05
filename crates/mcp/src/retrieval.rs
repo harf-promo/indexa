@@ -112,6 +112,15 @@ pub struct AskParams {
     /// own (stronger) model. Prefer `false` when you are a capable model and want the best answer.
     #[serde(default)]
     pub synthesize: Option<bool>,
+    /// Catalog (progressive-disclosure) mode. When `true`, Indexa runs its full retrieval
+    /// pipeline but returns only a scored list of files with their L0 one-line abstracts —
+    /// **no chunk bodies, no synthesis**. Use this to find which files are relevant, then
+    /// expand the ones you want with `get_summary`, `read_file`, or `get_chunk_context`.
+    /// This is the cheapest retrieval mode: minimal tokens, bounded KV-cache, no local LLM
+    /// call. Incompatible with `agentic`; ignored when `synthesize` is also set to `false`
+    /// (retrieval-only returns the full slice, which is richer than the catalog).
+    #[serde(default)]
+    pub catalog: Option<bool>,
 }
 
 #[tool_router(router = router_retrieval, vis = "pub(crate)")]
@@ -347,7 +356,9 @@ impl IndexaMcp {
             session_id,
             top_k,
             synthesize,
+            catalog,
         } = params.0;
+        let catalog = catalog.unwrap_or(false);
         let synthesize = synthesize.unwrap_or(true);
         let agentic = agentic.unwrap_or(self.config.retrieval.agentic);
         let cfg = QaConfig {
@@ -384,6 +395,33 @@ impl IndexaMcp {
         // empty for a stateless ask) so the pipeline can rewrite the follow-up + fold context.
         let history =
             load_session_history(&self.db_path, session_id.as_deref(), cfg.scope.as_deref());
+
+        // Catalog mode: return a scored file list with L0 abstracts — no chunk bodies,
+        // no synthesis. Cheap progressive disclosure for capable caller models.
+        if catalog {
+            let answer = indexa_query::answer_catalog_history(
+                &self.db_path,
+                self.embedder.as_ref(),
+                self.llm.as_ref(),
+                &question,
+                &cfg,
+                None,
+                &history,
+            )
+            .await
+            .map_err(|e| mcp_err(format!("catalog retrieval: {e}")))?;
+            let bytes = answer.answer.len();
+            let counterfactual = {
+                let paths: Vec<&str> = answer.sources.iter().map(|s| s.path.as_str()).collect();
+                let store = self.store()?;
+                store.counterfactual_bytes_for_paths(&paths).unwrap_or(0)
+            };
+            {
+                let mut store = self.store()?;
+                record_usage(&mut store, "ask_catalog", bytes, counterfactual);
+            }
+            return Ok(ok_text(answer.answer));
+        }
 
         // Single shared, Send-safe pipeline (embed → scoped retrieve → optional
         // rerank → synthesize). The `_history` entry points open their own short-lived read

@@ -22,14 +22,25 @@ pub struct WalkConfig {
     pub skip_hidden: bool,
     /// Maximum directory depth (None = unlimited).
     pub max_depth: Option<usize>,
-    /// Honor the scan root's `.gitignore` (its patterns, anchored at the root).
+    /// Honor `.gitignore` files (root AND nested subdirectories) plus global gitignore
+    /// and `.git/info/exclude`. Powered by the `ignore` crate — all nested ignore
+    /// files are honoured, unlike the old root-only implementation.
     pub respect_gitignore: bool,
     /// Extra gitignore-style patterns to skip (from `[scan] ignore`).
     pub ignore: Vec<String>,
-    /// Descend into `DeepScanPolicy::Sensitive` directories (`.ssh`, `.gnupg`, browser profiles,
-    /// etc.). Defaults to `false` — these are never walked unless explicitly opted in.
+    /// Scan-time per-file size cap (bytes). Files larger than this are not yielded.
+    /// `None` = no cap. Default: `Some(8 MiB)` — skips media blobs / VM images /
+    /// large DB dumps that are never useful context.
+    pub max_filesize: Option<u64>,
+    /// Descend into `DeepScanPolicy::Sensitive` directories (`.ssh`, `.gnupg`, browser
+    /// profiles, Keychains, etc.). Defaults to `false` — these credential/key stores are
+    /// never walked unless a caller explicitly opts in.
     pub include_sensitive: bool,
 }
+
+/// Default scan-time per-file size cap (8 MiB). Skips blobs that are almost
+/// never useful context and dominate disk/index growth on a broad scan.
+pub const DEFAULT_MAX_FILESIZE: u64 = 8 * 1024 * 1024;
 
 impl Default for WalkConfig {
     fn default() -> Self {
@@ -39,155 +50,262 @@ impl Default for WalkConfig {
             // Default on: a scan respects the repo's .gitignore unless a caller opts out.
             respect_gitignore: true,
             ignore: Vec::new(),
+            max_filesize: Some(DEFAULT_MAX_FILESIZE),
             include_sensitive: false,
         }
     }
 }
 
-/// Build a gitignore-style matcher for a scan `root` from its `.gitignore` (when
-/// `respect_gitignore`) plus any `[scan] ignore` patterns. Returns `None` when there is
-/// nothing to match (so the hot path skips the check entirely). Patterns are anchored at
-/// `root`; nested per-subdirectory `.gitignore` files are not separately loaded.
-fn build_ignore_matcher(root: &Path, cfg: &WalkConfig) -> Option<ignore::gitignore::Gitignore> {
-    if !cfg.respect_gitignore && cfg.ignore.is_empty() {
-        return None;
-    }
-    let mut b = ignore::gitignore::GitignoreBuilder::new(root);
-    if cfg.respect_gitignore {
-        let gi = root.join(".gitignore");
-        if gi.is_file() {
-            let _ = b.add(gi); // add() returns Some(err) on a bad file — ignore, build empty
+/// Directory names that are ALWAYS skipped, regardless of gitignore or `[scan]`
+/// config — VCS internals, IDE state, and language-specific cache dirs that are
+/// never useful context and can be enormous.
+static ALWAYS_SKIP_DIR_NAMES: &[&str] = &[
+    // Version-control internals
+    ".git",
+    ".svn",
+    ".hg",
+    ".jj",
+    // Python caches / tool dirs
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    "__pycache__",
+    // IDE / editor state
+    ".idea",
+    ".vscode",
+    ".eclipse",
+    ".metals",
+    ".bloop",
+    // Dart / Flutter
+    ".dart_tool",
+    ".pub-cache",
+    // Misc caches
+    ".cache",
+    ".nx",
+];
+
+/// True if `dir_path` is a directory we should never descend into — VCS
+/// internals (`.git/`), language/tool caches (`.pytest_cache`, `.mypy_cache`,
+/// etc.), IDE state (`.idea/`), or build artifacts (`target/`, `node_modules/`).
+///
+/// The first check is a fast name-based lookup for dirs that are unconditionally
+/// skipped. The second delegates to `classify()` for project-structure-aware
+/// recognition of build output directories (e.g. `target/` adjacent to
+/// `Cargo.toml`, `Pods/` adjacent to a `Podfile`).
+///
+/// Centralises the skip decision so both the walker prune callback and any
+/// caller can share it.
+pub fn is_skip_dir(dir_path: &Path) -> bool {
+    // Fast path: well-known names that are never useful context.
+    if let Some(name) = dir_path.file_name().and_then(|n| n.to_str()) {
+        if ALWAYS_SKIP_DIR_NAMES.contains(&name) {
+            return true;
         }
     }
-    for pat in &cfg.ignore {
-        let _ = b.add_line(None, pat);
-    }
-    b.build().ok()
-}
-
-/// True if `dir_path` is a directory we should never descend into — build
-/// artifacts (`target/`, `node_modules/`), VCS internals (`.git/`), caches, etc.
-/// Centralises the "don't waste time indexing generated files" decision so both
-/// the walker prune callback and any caller can share it.
-pub fn is_skip_dir(dir_path: &Path) -> bool {
+    // Project-structure-aware classification (target/, node_modules/, Pods/, …).
     classify(dir_path)
         .map(|h| h.deep_scan == DeepScanPolicy::Skip)
         .unwrap_or(false)
 }
 
-/// True if `dir_path` is a credential/key store (`.ssh`, `.gnupg`, browser profiles, etc.)
-/// that should be excluded unless `WalkConfig::include_sensitive` is set.
+/// True if `dir_path` is a credential/key store (`.ssh`, `.gnupg`, browser profiles,
+/// Keychains, etc.) classified `DeepScanPolicy::Sensitive`. Such directories are excluded
+/// from the walk unless `WalkConfig::include_sensitive` is set.
 pub fn is_sensitive_dir(dir_path: &Path) -> bool {
     classify(dir_path)
         .map(|h| h.deep_scan == DeepScanPolicy::Sensitive)
         .unwrap_or(false)
 }
 
-/// Walk `root` and return all entries. Directories classified `Skip` (build
-/// artifacts, caches, VCS internals) are recorded but **not descended into**, so
-/// we never index the thousands of generated files inside `target/`,
-/// `node_modules/`, `.git/`, etc. Uses `jwalk` for parallel traversal and prunes
-/// via the `process_read_dir` callback.
+/// Walk `root` and return all entries.
+///
+/// Uses `ignore::WalkBuilder` (ripgrep's parallel walker) so that **nested**
+/// `.gitignore` files are honoured automatically — the old `jwalk` implementation
+/// only loaded the root-level `.gitignore`, which caused build artifacts, `.git`
+/// objects, and `node_modules` trees to leak into the index when projects had
+/// per-subdirectory gitignore files.
+///
+/// Build-artifact / VCS / cache directories (`target/`, `node_modules/`, `.git/`,
+/// `__pycache__`, `.idea`, …) are pruned by name via `is_skip_dir` even when no
+/// `.gitignore` is present. In the parallel walk, `WalkState::Skip` prevents both
+/// yielding the entry AND descending into its subtree.
 pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
-    use jwalk::{Parallelism, WalkDir};
+    use ignore::{WalkBuilder, WalkState};
+    use std::sync::{Arc, Mutex};
 
-    let pool_threads = std::thread::available_parallelism()
+    let threads = std::thread::available_parallelism()
         .map(|n| n.get().min(4))
         .unwrap_or(2);
 
+    // Capture the fields we need in the `'static` parallel closure.
     let skip_hidden = cfg.skip_hidden;
     let include_sensitive = cfg.include_sensitive;
-    // .gitignore + `[scan] ignore` matcher (None when there's nothing to match).
-    let matcher = build_ignore_matcher(root, cfg).map(std::sync::Arc::new);
-    let cb_matcher = matcher.clone();
 
-    let walker = {
-        let mut w = WalkDir::new(root)
-            .sort(false)
-            // Each walk owns its own rayon pool to avoid deadlock when multiple
-            // walks run concurrently sharing the global rayon pool.
-            .parallelism(Parallelism::RayonNewPool(pool_threads))
-            // Prune at read-dir time: stop jwalk from descending into Skip dirs
-            // (and hidden / gitignored dirs). The dir entry itself is still yielded
-            // here; the main loop drops gitignored entries so they aren't recorded.
-            .process_read_dir(move |_depth, _path, _state, children| {
-                for child in children.iter_mut().flatten() {
-                    if !child.file_type().is_dir() {
-                        continue;
-                    }
-                    let cp = child.path();
-                    let hidden = skip_hidden
-                        && child
-                            .file_name()
-                            .to_str()
-                            .map(|n| n.starts_with('.'))
-                            .unwrap_or(false);
-                    let ignored = cb_matcher
-                        .as_ref()
-                        .is_some_and(|m| m.matched(&cp, true).is_ignore());
-                    let sensitive = !include_sensitive && is_sensitive_dir(&cp);
-                    if hidden || is_skip_dir(&cp) || ignored || sensitive {
-                        // Prevent descending into this directory.
-                        child.read_children_path = None;
-                    }
-                }
-            });
-        if let Some(d) = cfg.max_depth {
-            w = w.max_depth(d);
+    // Build a callback-side gitignore matcher.
+    //
+    // This serves two purposes:
+    //
+    // (1) Root .gitignore — WalkBuilder's `git_ignore(true)` only reads .gitignore
+    //     files when the walked directory is inside a git repository (it detects
+    //     a `.git` dir in an ancestor). Test fixtures and standalone project
+    //     directories created outside any git repo are silently bypassed. Loading
+    //     the root .gitignore explicitly via GitignoreBuilder ensures the patterns
+    //     are always honoured, regardless of whether a `.git` ancestor exists.
+    //     In a real git repo the patterns are applied twice (once by WalkBuilder,
+    //     once by this matcher) — gitignore matching is idempotent, so this is safe.
+    //
+    // (2) `[scan] ignore` config patterns — extra gitignore-style globs from the
+    //     user's config, anchored at root.
+    let combined_matcher: Option<Arc<ignore::gitignore::Gitignore>> = {
+        let mut gb = ignore::gitignore::GitignoreBuilder::new(root);
+        let mut has_rules = false;
+
+        if cfg.respect_gitignore {
+            let root_gi = root.join(".gitignore");
+            if root_gi.is_file() {
+                // GitignoreBuilder::add reads the file and anchors its patterns
+                // at the directory containing the file (= root). This is the
+                // GitignoreBuilder method, not WalkBuilder::add.
+                let _ = gb.add(&root_gi); // fail-open: bad file is silently skipped
+                has_rules = true;
+            }
         }
-        w
+
+        for pat in &cfg.ignore {
+            let _ = gb.add_line(None, pat); // fail-open: a bad pattern is silently skipped
+            has_rules = true;
+        }
+
+        if has_rules {
+            gb.build().ok().map(Arc::new)
+        } else {
+            None
+        }
     };
 
-    let mut entries = Vec::new();
+    let mut b = WalkBuilder::new(root);
+    b.threads(threads)
+        .follow_links(false)
+        // Honor .gitignore files found during the walk (root AND nested) plus global
+        // gitignore and .git/info/exclude. All gated on respect_gitignore.
+        // For non-git directories, the root .gitignore is handled by combined_matcher.
+        .git_ignore(cfg.respect_gitignore)
+        .git_global(cfg.respect_gitignore)
+        .git_exclude(cfg.respect_gitignore)
+        .parents(cfg.respect_gitignore)
+        // Also honor .ignore files (gitignore-style, not git-specific).
+        .ignore(cfg.respect_gitignore)
+        // WalkBuilder.hidden(true) skips dot-prefixed files/dirs natively.
+        .hidden(cfg.skip_hidden)
+        // Scan-time size cap: files above this are not yielded by the walker.
+        .max_filesize(cfg.max_filesize);
 
-    for result in walker {
-        let entry = result?;
-        let path = entry.path();
-        let meta = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        // Drop gitignored / `[scan] ignore`-matched entries (an ignored dir is recorded by
-        // jwalk before pruning; this also keeps its own row out of the index).
-        if let Some(m) = &matcher {
-            if m.matched(&path, meta.is_dir()).is_ignore() {
-                continue;
-            }
-        }
-
-        if cfg.skip_hidden {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with('.') {
-                    continue;
-                }
-            }
-        }
-
-        let hint = classify(&path).or_else(|| {
-            if meta.is_file() {
-                classify_file_by_extension(&path)
-            } else {
-                None
-            }
-        });
-
-        let kind = if meta.is_dir() {
-            EntryKind::Dir
-        } else {
-            EntryKind::File
-        };
-
-        entries.push(Entry {
-            path,
-            kind,
-            size: if meta.is_file() { meta.len() } else { 0 },
-            modified: meta.modified().ok(),
-            hint,
-        });
+    if let Some(d) = cfg.max_depth {
+        b.max_depth(Some(d));
     }
 
-    Ok(entries)
+    let entries: Arc<Mutex<Vec<Entry>>> = Arc::new(Mutex::new(Vec::new()));
+
+    b.build_parallel().run({
+        let entries = entries.clone();
+        let combined_matcher = combined_matcher.clone();
+        move || {
+            let entries = entries.clone();
+            let combined_matcher = combined_matcher.clone();
+            Box::new(
+                move |result: std::result::Result<ignore::DirEntry, ignore::Error>| {
+                    let de = match result {
+                        Ok(d) => d,
+                        Err(_) => return WalkState::Continue, // fail-open: skip unreadable
+                    };
+                    let path = de.path();
+                    let is_dir = de.file_type().map(|t| t.is_dir()).unwrap_or(false);
+
+                    // Belt-and-suspenders hidden check: WalkBuilder.hidden(true) handles
+                    // this, but guard in the callback too for robustness. Depth > 0 so we
+                    // never accidentally prune the walk root itself.
+                    if skip_hidden
+                        && de.depth() > 0
+                        && path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with('.'))
+                    {
+                        return if is_dir {
+                            WalkState::Skip
+                        } else {
+                            WalkState::Continue
+                        };
+                    }
+
+                    // Prune build-artifact / VCS / cache directories by name.
+                    // `is_skip_dir` calls `classify()` which recognises target/, node_modules/,
+                    // .git/, __pycache__, .idea, Pods, vendor, build, etc.
+                    // Return WalkState::Skip: prevents both recording the entry AND descending.
+                    // Guard depth > 0 so we never prune the walk root itself.
+                    if is_dir && de.depth() > 0 && is_skip_dir(path) {
+                        return WalkState::Skip;
+                    }
+
+                    // Privacy: prune credential/key stores (.ssh, .gnupg, Keychains, browser
+                    // profiles) unless the caller explicitly opted in via `include_sensitive`.
+                    // WalkState::Skip stops both recording the dir entry AND descending into it.
+                    if is_dir && de.depth() > 0 && !include_sensitive && is_sensitive_dir(path) {
+                        return WalkState::Skip;
+                    }
+
+                    // Apply the combined gitignore matcher: root .gitignore patterns +
+                    // [scan] ignore config patterns. Both are anchored at root.
+                    if let Some(m) = &combined_matcher {
+                        if m.matched(path, is_dir).is_ignore() {
+                            // Skip dirs (prunes subtree); for files just don't record — continue
+                            // so the walker keeps processing siblings.
+                            if is_dir {
+                                return WalkState::Skip;
+                            } else {
+                                return WalkState::Continue; // don't push; move on
+                            }
+                        }
+                    }
+
+                    // Fetch metadata for size / mtime; skip entries we can't read.
+                    let meta = match de.metadata() {
+                        Ok(m) => m,
+                        Err(_) => return WalkState::Continue,
+                    };
+
+                    let kind = if meta.is_dir() {
+                        EntryKind::Dir
+                    } else {
+                        EntryKind::File
+                    };
+
+                    let hint = classify(path).or_else(|| {
+                        if meta.is_file() {
+                            classify_file_by_extension(path)
+                        } else {
+                            None
+                        }
+                    });
+
+                    entries.lock().unwrap().push(Entry {
+                        path: path.to_path_buf(),
+                        kind,
+                        size: if meta.is_file() { meta.len() } else { 0 },
+                        modified: meta.modified().ok(),
+                        hint,
+                    });
+                    WalkState::Continue
+                },
+            )
+        }
+    });
+
+    // `run()` is synchronous — all worker threads have finished by here.
+    // The Arc clone moved into `run()` is dropped when `run()` returns, so
+    // `Arc::try_unwrap` finds exactly one strong reference remaining (ours).
+    Ok(Arc::try_unwrap(entries).unwrap().into_inner().unwrap())
 }
 
 #[cfg(test)]
@@ -221,7 +339,7 @@ mod tests {
         std::fs::write(nm.join("nested").join("more.js"), "more").unwrap();
 
         let entries = walk(dir.path(), &WalkConfig::default()).unwrap();
-        // The node_modules dir itself is recorded, but nothing inside it is.
+        // node_modules/ and its contents are pruned by WalkState::Skip + is_skip_dir.
         let has_dep = entries.iter().any(|e| e.path.ends_with("dep.js"));
         let has_nested = entries.iter().any(|e| e.path.ends_with("more.js"));
         let has_real = entries.iter().any(|e| e.path.ends_with("real.txt"));
@@ -264,10 +382,9 @@ mod tests {
 
     #[test]
     fn prunes_vcs_cache_and_artifact_dirs() {
-        // When scanning a parent of many projects, nested `.gitignore` files are NOT
-        // loaded (only the scan root's), so build/VCS/cache directories must be pruned
-        // by name. `.git/` is the worst offender — left un-skipped it indexes thousands
-        // of git objects/refs. Regression for the "index full of target/.git junk" report.
+        // Nested `.gitignore` files are now honoured (nested per-dir, not just root),
+        // AND build/VCS/cache directories are pruned by name via is_skip_dir so they
+        // are excluded even without a .gitignore.
         let dir = tempfile::tempdir().unwrap();
         // Manifests that mark a recognized project, so the guarded build-dir rules
         // (Pods next to a Podfile, vendor next to go.mod, build next to a Makefile) fire.
@@ -372,55 +489,6 @@ mod tests {
     }
 
     #[test]
-    fn is_sensitive_dir_recognizes_known_paths() {
-        use std::path::PathBuf;
-        // path_contains-based predicates fire regardless of real home dir.
-        assert!(is_sensitive_dir(&PathBuf::from(
-            "/Users/x/Library/Keychains"
-        )));
-        assert!(is_sensitive_dir(&PathBuf::from(
-            "/Users/x/Library/Application Support/Google/Chrome"
-        )));
-        assert!(is_sensitive_dir(&PathBuf::from(
-            "/Users/x/Library/Application Support/Firefox"
-        )));
-        // A normal code dir is not sensitive.
-        assert!(!is_sensitive_dir(&PathBuf::from("/Users/x/projects/myapp")));
-    }
-
-    #[test]
-    fn sensitive_dir_contents_pruned_by_default() {
-        // Simulate a Library/Keychains subtree: the Keychains dir itself is recorded
-        // but nothing inside it is indexed without include_sensitive=true.
-        let dir = tempfile::tempdir().unwrap();
-        let keychains = dir.path().join("Library").join("Keychains");
-        std::fs::create_dir_all(&keychains).unwrap();
-        std::fs::write(keychains.join("login.keychain-db"), "secret").unwrap();
-        std::fs::write(dir.path().join("notes.txt"), "keep").unwrap();
-
-        let entries = walk(dir.path(), &WalkConfig::default()).unwrap();
-        assert!(
-            !entries.iter().any(|e| e.path.ends_with("login.keychain-db")),
-            "sensitive dir contents must not be indexed by default"
-        );
-        assert!(
-            entries.iter().any(|e| e.path.ends_with("notes.txt")),
-            "non-sensitive files must still be indexed"
-        );
-
-        // With include_sensitive=true the contents become visible.
-        let cfg = WalkConfig {
-            include_sensitive: true,
-            ..Default::default()
-        };
-        let entries = walk(dir.path(), &cfg).unwrap();
-        assert!(
-            entries.iter().any(|e| e.path.ends_with("login.keychain-db")),
-            "include_sensitive=true must expose sensitive dir contents"
-        );
-    }
-
-    #[test]
     fn respects_config_ignore_patterns() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("app.rs"), "code").unwrap();
@@ -444,5 +512,42 @@ mod tests {
             !entries.iter().any(|e| e.path.ends_with("lib.rs")),
             "config `ignore` must skip vendor/ contents"
         );
+    }
+
+    #[test]
+    fn max_filesize_skips_large_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("small.txt"), "tiny").unwrap();
+        // Write a file just above the 5-byte cap.
+        std::fs::write(dir.path().join("big.bin"), "123456").unwrap();
+
+        let cfg = WalkConfig {
+            max_filesize: Some(5),
+            ..Default::default()
+        };
+        let entries = walk(dir.path(), &cfg).unwrap();
+        assert!(entries.iter().any(|e| e.path.ends_with("small.txt")));
+        assert!(
+            !entries.iter().any(|e| e.path.ends_with("big.bin")),
+            "files above max_filesize must be skipped"
+        );
+    }
+
+    #[test]
+    fn is_sensitive_dir_recognizes_credential_stores() {
+        use std::path::PathBuf;
+        // Classified DeepScanPolicy::Sensitive by surface::classify (path-contains predicates,
+        // independent of the real home dir) — pruned from the walk unless include_sensitive.
+        assert!(is_sensitive_dir(&PathBuf::from(
+            "/Users/x/Library/Keychains"
+        )));
+        assert!(is_sensitive_dir(&PathBuf::from(
+            "/Users/x/Library/Application Support/Google/Chrome"
+        )));
+        assert!(is_sensitive_dir(&PathBuf::from(
+            "/Users/x/Library/Application Support/Firefox"
+        )));
+        // A normal code dir is not sensitive.
+        assert!(!is_sensitive_dir(&PathBuf::from("/Users/x/projects/myapp")));
     }
 }
