@@ -130,6 +130,59 @@ pub fn build_blurb_prompt(doc_context: &str, chunk_text: &str) -> String {
     )
 }
 
+// ── Deterministic contextual prefix (no LLM) ────────────────────────────────────
+
+/// Max characters of the document-context snippet folded into a chunk's prefix. Keeps the
+/// prefix from dwarfing the chunk (and from blowing past a small embedder's context window).
+const CONTEXT_PREFIX_DOC_CHARS: usize = 500;
+
+/// Build a deterministic document-context prefix for a chunk — **no LLM call**.
+///
+/// This is the free, local sibling of the Anthropic-style [`contextual_embed_texts`]: instead of
+/// an LLM-generated situating blurb, it prepends cheap, deterministic structural signals — the
+/// file path, the section heading (when the parser produced one), and a capped snippet of the
+/// document-level context — so the chunk's embedding reflects where it sits in the whole document.
+/// Same idea voyage-context-4 bakes into its model, realized locally at zero token cost.
+///
+/// The returned prefix is meant to be prepended to the chunk's **embed input only**; the original
+/// chunk text is what gets stored and hashed (see [`contextual_prefix_texts`]).
+pub fn build_context_prefix(rel_path: &str, heading: &str, doc_context: &str) -> String {
+    let mut prefix = format!("File: {rel_path}");
+    let h = heading.trim();
+    if !h.is_empty() {
+        prefix.push_str("\nSection: ");
+        prefix.push_str(h);
+    }
+    let ctx = doc_context.trim();
+    if !ctx.is_empty() {
+        let snippet: String = ctx.chars().take(CONTEXT_PREFIX_DOC_CHARS).collect();
+        prefix.push_str("\nDocument context: ");
+        prefix.push_str(snippet.trim());
+    }
+    prefix
+}
+
+/// Prepend a deterministic context prefix (see [`build_context_prefix`]) to each chunk's embed
+/// text. Returns `"{prefix}\n\n{chunk_text}"` per chunk. `headings[i]` pairs with `chunk_texts[i]`
+/// (pass `""` where the parser produced no heading). Never calls an LLM and never touches the
+/// stored/hashed chunk text — the caller feeds the result to the embedder only.
+pub fn contextual_prefix_texts(
+    doc_context: &str,
+    headings: &[&str],
+    chunk_texts: &[&str],
+    rel_path: &str,
+) -> Vec<String> {
+    chunk_texts
+        .iter()
+        .enumerate()
+        .map(|(i, &chunk)| {
+            let heading = headings.get(i).copied().unwrap_or("");
+            let prefix = build_context_prefix(rel_path, heading, doc_context);
+            format!("{prefix}\n\n{chunk}")
+        })
+        .collect()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -300,5 +353,62 @@ mod tests {
             fragment_count, 4,
             "expected 4 fragment events, got {fragment_count}"
         );
+    }
+
+    // ── build_context_prefix / contextual_prefix_texts (deterministic) ─────────
+
+    #[test]
+    fn context_prefix_includes_path_heading_and_doc() {
+        let p = build_context_prefix("src/foo.rs", "Bar section", "This is the document opening.");
+        assert!(p.contains("File: src/foo.rs"), "{p}");
+        assert!(p.contains("Section: Bar section"), "{p}");
+        assert!(
+            p.contains("Document context: This is the document opening."),
+            "{p}"
+        );
+    }
+
+    #[test]
+    fn context_prefix_omits_empty_heading_and_doc() {
+        let p = build_context_prefix("a.txt", "", "");
+        assert_eq!(p, "File: a.txt");
+        assert!(!p.contains("Section:"));
+        assert!(!p.contains("Document context:"));
+    }
+
+    #[test]
+    fn context_prefix_caps_doc_snippet() {
+        // Marker char 'y' appears nowhere in "File: a.md\nDocument context: ", so counting it
+        // isolates the doc-snippet contribution from the fixed prefix text.
+        let long = "y".repeat(2000);
+        let p = build_context_prefix("a.md", "", &long);
+        let ys = p.chars().filter(|&c| c == 'y').count();
+        assert!(ys > 0, "doc snippet should be present");
+        assert!(
+            ys <= CONTEXT_PREFIX_DOC_CHARS,
+            "doc snippet not capped: {ys}"
+        );
+    }
+
+    #[test]
+    fn prefix_texts_prepend_prefix_then_chunk() {
+        let chunks = ["alpha body", "beta body"];
+        let headings = ["H1", "H2"];
+        let out = contextual_prefix_texts("doc ctx", &headings, &chunks, "f.rs");
+        assert_eq!(out.len(), 2);
+        assert!(out[0].starts_with("File: f.rs"), "{}", out[0]);
+        assert!(out[0].contains("Section: H1"));
+        assert!(out[0].ends_with("\n\nalpha body"), "{}", out[0]);
+        assert!(out[1].contains("Section: H2"));
+        assert!(out[1].ends_with("\n\nbeta body"));
+    }
+
+    #[test]
+    fn prefix_texts_tolerates_missing_headings() {
+        let chunks = ["only chunk"];
+        // No headings provided → empty heading, no Section line.
+        let out = contextual_prefix_texts("", &[], &chunks, "f.rs");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], "File: f.rs\n\nonly chunk");
     }
 }

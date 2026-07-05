@@ -444,8 +444,14 @@ pub struct DescriberConfig {
     /// Model for Q&A answer synthesis.
     pub model: String,
     pub base_url: String,
-    /// Enable Anthropic-style per-chunk contextual prefix at index time.
+    /// Enable Anthropic-style per-chunk contextual retrieval at index time — an LLM writes a
+    /// situating blurb prepended to each chunk before embedding. Higher quality, but ~2–3× slower
+    /// deep (one LLM call per chunk). See `contextual_prefix` for the free, local alternative.
     pub contextual_retrieval: bool,
+    /// Enable the DETERMINISTIC contextual prefix at index time — prepend the file path, section
+    /// heading, and a document-context snippet to each chunk's embed input (no LLM call, local and
+    /// free). The local sibling of `contextual_retrieval`; if both are set, the LLM path wins.
+    pub contextual_prefix: bool,
     /// Model for per-file summarization (smaller/faster is fine).
     pub file_model: String,
     /// Model for directory roll-up summaries (stronger model recommended).
@@ -486,6 +492,7 @@ impl Default for DescriberConfig {
             model: "gemma3:12b".into(),
             base_url: "http://localhost:11434".into(),
             contextual_retrieval: false,
+            contextual_prefix: false,
             file_model: "gemma3:4b".into(),
             dir_model: "gemma3:12b".into(),
             num_ctx: 4096,

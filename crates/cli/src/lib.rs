@@ -80,6 +80,13 @@ pub enum Commands {
         #[arg(long)]
         contextual: bool,
 
+        /// Enable the deterministic, local contextual prefix: prepend the file path, section
+        /// heading, and a document-context snippet to each chunk's embed input — no LLM call
+        /// (free). The local sibling of `--contextual`. Also enabled by
+        /// `[describer] contextual_prefix = true`.
+        #[arg(long)]
+        contextual_prefix: bool,
+
         /// Skip the large-root confirmation prompt (for scripts / non-interactive use).
         #[arg(long)]
         yes: bool,
@@ -150,6 +157,13 @@ pub enum Commands {
         /// Also enabled by `[describer] contextual_retrieval = true` in config.
         #[arg(long)]
         contextual: bool,
+
+        /// Enable the deterministic, local contextual prefix: prepend the file path, section
+        /// heading, and a document-context snippet to each chunk's embed input — no LLM call
+        /// (free). The local sibling of `--contextual`. Also enabled by
+        /// `[describer] contextual_prefix = true`.
+        #[arg(long)]
+        contextual_prefix: bool,
 
         /// FTS-only: parse + chunk + index for sparse (BM25) search WITHOUT computing
         /// embeddings. Skips the Ollama preflight and every model call (embeddings,
@@ -1340,6 +1354,38 @@ mod tests {
         let cli = Cli::try_parse_from(["indexa", "index", "~/Projects", "--contextual"]).unwrap();
         match cli.command {
             Commands::Index { contextual, .. } => assert!(contextual),
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_deep_contextual_prefix_flag() {
+        let cli =
+            Cli::try_parse_from(["indexa", "deep", "~/Projects", "--contextual-prefix"]).unwrap();
+        match cli.command {
+            Commands::Deep {
+                contextual_prefix,
+                contextual,
+                ..
+            } => {
+                assert!(contextual_prefix);
+                assert!(
+                    !contextual,
+                    "--contextual-prefix must not imply --contextual"
+                );
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_index_contextual_prefix_flag() {
+        let cli =
+            Cli::try_parse_from(["indexa", "index", "~/Projects", "--contextual-prefix"]).unwrap();
+        match cli.command {
+            Commands::Index {
+                contextual_prefix, ..
+            } => assert!(contextual_prefix),
             _ => panic!("wrong command"),
         }
     }

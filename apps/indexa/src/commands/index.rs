@@ -10,12 +10,14 @@ use super::{cmd_deep, cmd_scan, cmd_summarize};
 /// Equivalent to running `indexa scan`, `indexa deep`, and `indexa summarize`
 /// in sequence, but in a single command — ideal for first-time setup or full
 /// refreshes. Each phase prints its own progress.
+#[allow(clippy::too_many_arguments)] // thin CLI fan-out; grouping into a struct would just move fields
 pub(crate) async fn cmd_index(
     paths: Vec<String>,
     embed_model: Option<String>,
     mode: String,
     passes: Option<u32>,
     contextual: bool,
+    contextual_prefix: bool,
     yes: bool,
     cfg: &Config,
 ) -> Result<()> {
@@ -34,6 +36,7 @@ pub(crate) async fn cmd_index(
         false,
         mode.clone(),
         contextual,
+        contextual_prefix,
         false, // `index` always embeds; `--no-embed` is a `deep`-only fast path
         cfg,
     )

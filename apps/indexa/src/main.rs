@@ -78,8 +78,21 @@ async fn main() -> Result<()> {
             mode,
             passes,
             contextual,
+            contextual_prefix,
             yes,
-        } => commands::cmd_index(paths, embed_model, mode, passes, contextual, yes, &cfg).await,
+        } => {
+            commands::cmd_index(
+                paths,
+                embed_model,
+                mode,
+                passes,
+                contextual,
+                contextual_prefix,
+                yes,
+                &cfg,
+            )
+            .await
+        }
         Commands::Scan { paths, all, yes } => commands::cmd_scan(paths, all, yes, &cfg).await,
         Commands::Deep {
             paths,
@@ -87,6 +100,7 @@ async fn main() -> Result<()> {
             dry_run,
             mode,
             contextual,
+            contextual_prefix,
             no_embed,
         } => {
             commands::cmd_deep(
@@ -95,6 +109,7 @@ async fn main() -> Result<()> {
                 dry_run,
                 mode,
                 contextual,
+                contextual_prefix,
                 no_embed,
                 &cfg,
             )

@@ -13,12 +13,14 @@ use super::helpers::{
     build_embedder, parse_summary_mode, preflight_ollama, require_index_db, resolve_roots,
 };
 
+#[allow(clippy::too_many_arguments)] // thin CLI fan-out; grouping into a struct would just move fields
 pub(crate) async fn cmd_deep(
     paths: Vec<String>,
     embed_model_flag: Option<String>,
     dry_run: bool,
     mode: String,
     contextual: bool,
+    contextual_prefix: bool,
     no_embed: bool,
     cfg: &Config,
 ) -> Result<()> {
@@ -117,6 +119,9 @@ pub(crate) async fn cmd_deep(
     // Effective contextual-retrieval flag: CLI --contextual OR config [describer] contextual_retrieval.
     // Forced off under --no-embed — a situating blurb needs an LLM call.
     let use_contextual = !no_embed && (contextual || cfg.describer.contextual_retrieval);
+    // Effective deterministic contextual-prefix flag: CLI --contextual-prefix OR config
+    // [describer] contextual_prefix. Forced off under --no-embed (nothing is embedded).
+    let use_prefix = !no_embed && (contextual_prefix || cfg.describer.contextual_prefix);
     // Build the contextual LLM once (re-used per file) when the feature is enabled.
     // Uses the same file-describer model and base URL — no extra model pull needed.
     let ctx_llm: Option<OllamaLlm> = if use_contextual {
@@ -422,6 +427,24 @@ pub(crate) async fn cmd_deep(
                             },
                         )
                         .await
+                    } else if use_prefix {
+                        // Deterministic, local, no-LLM contextual prefix: prepend the file path,
+                        // section heading, and a document-context snippet to each miss chunk's
+                        // embed input. Grounds the embedding in the whole document at zero token
+                        // cost. Applied to embed text ONLY — the stored/hashed text is untouched.
+                        let all_raw: Vec<&str> =
+                            extracted.chunks.iter().map(|c| c.text.as_str()).collect();
+                        let doc_context = indexa_query::contextual::build_doc_context(&all_raw);
+                        let miss_headings: Vec<&str> = miss_indices
+                            .iter()
+                            .map(|&i| extracted.chunks[i].heading.as_str())
+                            .collect();
+                        indexa_query::contextual::contextual_prefix_texts(
+                            &doc_context,
+                            &miss_headings,
+                            &miss_raw_texts,
+                            &path_str,
+                        )
                     } else {
                         miss_raw_texts.iter().map(|s| s.to_string()).collect()
                     }
