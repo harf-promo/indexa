@@ -15,6 +15,10 @@ pub struct Entry {
     pub size: u64,
     pub modified: Option<SystemTime>,
     pub hint: Option<PathHint>,
+    /// NUL-sniffed binary flag (only meaningful when [`WalkConfig::sniff_binary`] was set;
+    /// always `false` otherwise). The deep phase skips files marked binary so a whole-computer
+    /// scan doesn't try to parse executables/images/DB blobs. Metadata is still recorded.
+    pub is_binary: bool,
 }
 
 pub struct WalkConfig {
@@ -36,6 +40,10 @@ pub struct WalkConfig {
     /// profiles, Keychains, etc.). Defaults to `false` — these credential/key stores are
     /// never walked unless a caller explicitly opts in.
     pub include_sensitive: bool,
+    /// Sniff each file's first 8 KB for a NUL byte and set [`Entry::is_binary`] (ripgrep's
+    /// heuristic). Off by default — adds one file-open per file. When on (`[scan] skip_binary`),
+    /// the deep phase skips flagged binaries. Fail-open: an unreadable file is never flagged.
+    pub sniff_binary: bool,
 }
 
 /// Default scan-time per-file size cap (8 MiB). Skips blobs that are almost
@@ -52,6 +60,7 @@ impl Default for WalkConfig {
             ignore: Vec::new(),
             max_filesize: Some(DEFAULT_MAX_FILESIZE),
             include_sensitive: false,
+            sniff_binary: false,
         }
     }
 }
@@ -118,6 +127,21 @@ pub fn is_sensitive_dir(dir_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Fail-open NUL sniff: read a file's first 8 KB and check for a NUL byte (via
+/// [`crate::text::is_binary`]). Returns `false` on any open/read error — an unreadable file is
+/// never *classified* binary (so it isn't skipped on the strength of a read failure).
+fn file_is_binary(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 8192];
+    match f.read(&mut buf) {
+        Ok(n) => crate::text::is_binary(&buf[..n]),
+        Err(_) => false,
+    }
+}
+
 /// Walk `root` and return all entries.
 ///
 /// Uses `ignore::WalkBuilder` (ripgrep's parallel walker) so that **nested**
@@ -141,6 +165,7 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
     // Capture the fields we need in the `'static` parallel closure.
     let skip_hidden = cfg.skip_hidden;
     let include_sensitive = cfg.include_sensitive;
+    let sniff_binary = cfg.sniff_binary;
 
     // Build a callback-side gitignore matcher.
     //
@@ -289,12 +314,18 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
                         }
                     });
 
+                    // Whole-computer groundwork: when opted in, NUL-sniff files so the deep phase
+                    // can skip binaries without opening them. Fail-open (an unreadable file is
+                    // never flagged). Only files; the entry itself is still recorded either way.
+                    let is_binary = sniff_binary && meta.is_file() && file_is_binary(path);
+
                     entries.lock().unwrap().push(Entry {
                         path: path.to_path_buf(),
                         kind,
                         size: if meta.is_file() { meta.len() } else { 0 },
                         modified: meta.modified().ok(),
                         hint,
+                        is_binary,
                     });
                     WalkState::Continue
                 },
@@ -453,6 +484,33 @@ mod tests {
         // depth=1 means only root + immediate children; deep.txt is at depth 2
         let has_deep = entries.iter().any(|e| e.path.ends_with("deep.txt"));
         assert!(!has_deep);
+    }
+
+    #[test]
+    fn sniff_binary_flags_nul_files_only_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("code.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.path().join("blob.bin"), [0u8, 1, 2, 0, 255]).unwrap();
+
+        // Default (off): nothing is flagged — the walk stays metadata-only.
+        let off = walk(dir.path(), &WalkConfig::default()).unwrap();
+        assert!(
+            off.iter().all(|e| !e.is_binary),
+            "no file should be flagged when sniff_binary is off"
+        );
+        // The binary is still RECORDED (metadata preserved), just not flagged.
+        assert!(off.iter().any(|e| e.path.ends_with("blob.bin")));
+
+        // On: the NUL blob is flagged; the text file is not.
+        let cfg = WalkConfig {
+            sniff_binary: true,
+            ..Default::default()
+        };
+        let on = walk(dir.path(), &cfg).unwrap();
+        let bin = on.iter().find(|e| e.path.ends_with("blob.bin")).unwrap();
+        let code = on.iter().find(|e| e.path.ends_with("code.rs")).unwrap();
+        assert!(bin.is_binary, "NUL file must be flagged binary");
+        assert!(!code.is_binary, "text file must not be flagged");
     }
 
     #[test]

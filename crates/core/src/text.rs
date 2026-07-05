@@ -68,6 +68,15 @@ pub fn human_count(n: u64) -> String {
     }
 }
 
+/// Whether `bytes` look **binary**: a NUL byte in the first 8 KB — ripgrep's `is_binary`
+/// heuristic. Cheap and reliable: real text (any encoding) essentially never contains a NUL,
+/// so this catches executables, images, archives, and DB blobs without a full UTF-8 scan. The
+/// caller passes the leading bytes it already read; this never opens a file. Single source of
+/// truth shared by the scan walker's binary filter and the web file-preview `binary` flag.
+pub fn is_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(8192).any(|&b| b == 0)
+}
+
 /// Largest byte index ≤ `byte` that is a UTF-8 char boundary of `s` (clamped to
 /// `s.len()`). A stable stand-in for the nightly-only `str::floor_char_boundary`,
 /// so byte-budget truncation (`&s[..floor_char_boundary(s, n)]`) never slices
@@ -91,6 +100,22 @@ mod tests {
             xml_escape_attr(r#"a & b < c > d " e"#),
             "a &amp; b &lt; c &gt; d &quot; e"
         );
+    }
+
+    #[test]
+    fn is_binary_detects_nul_only() {
+        assert!(is_binary(b"abc\0def"), "a NUL byte marks binary");
+        assert!(is_binary(&[0u8, 1, 2]), "leading NUL marks binary");
+        assert!(!is_binary(b"plain ascii text"), "text has no NUL");
+        assert!(
+            !is_binary("héllo — utf8 ☺".as_bytes()),
+            "UTF-8 text is not binary"
+        );
+        assert!(!is_binary(b""), "empty is not binary");
+        // Only the first 8 KB matter: a NUL past the window is not sniffed.
+        let mut late = vec![b'a'; 9000];
+        late.push(0);
+        assert!(!is_binary(&late), "NUL past the 8 KB window is ignored");
     }
 
     #[test]

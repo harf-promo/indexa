@@ -97,9 +97,9 @@ pub(crate) async fn api_file_preview(
     };
 
     let capped = &bytes[..bytes.len().min(PREVIEW_CAP)];
-    // Binary heuristic: a NUL byte in the first 8 KB. Text files don't contain NUL; this avoids
-    // dumping garbage from images/binaries (and is cheaper + safer than a full UTF-8 scan).
-    let binary = capped.iter().take(8192).any(|&b| b == 0);
+    // Binary heuristic (shared with the scan walker's filter): a NUL byte in the first 8 KB.
+    // Text files don't contain NUL; this avoids dumping garbage from images/binaries.
+    let binary = indexa_core::text::is_binary(capped);
     let content = if binary {
         None
     } else {

@@ -85,6 +85,7 @@ you can honor `.gitignore` and add your own patterns.
 respect_gitignore = true   # honor the scan root's .gitignore (its patterns, anchored at the root)
 ignore            = []     # extra gitignore-style patterns, e.g. ["build/", "*.log", "vendor/"]
 auto_reindex      = "off"  # "off" | "7d" | "30d" | "12h" … staleness interval for `worker --auto-reindex`
+skip_binary       = false  # NUL-sniff files during deep; skip binaries (executables/images/blobs) from parsing
 ```
 
 > `respect_gitignore` reads the scan root's own `.gitignore`; nested per-subdirectory `.gitignore`

@@ -84,6 +84,7 @@ mod tests {
             size: 0,
             modified: None,
             hint: None,
+            is_binary: false,
         }
     }
     fn dir(path: &str) -> Entry {

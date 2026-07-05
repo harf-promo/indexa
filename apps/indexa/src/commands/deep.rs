@@ -44,6 +44,9 @@ pub(crate) async fn cmd_deep(
     let walk_cfg = WalkConfig {
         respect_gitignore: cfg.scan.respect_gitignore,
         ignore: cfg.scan.ignore.clone(),
+        // Whole-computer groundwork: when `[scan] skip_binary` is on, the walk NUL-sniffs files
+        // so the loops below can skip binaries without opening them for a parse attempt.
+        sniff_binary: cfg.scan.skip_binary,
         ..Default::default()
     };
 
@@ -63,7 +66,7 @@ pub(crate) async fn cmd_deep(
             let entries = walk(root, &walk_cfg)?;
             let files: Vec<_> = entries
                 .iter()
-                .filter(|e| e.kind == indexa_core::walker::EntryKind::File)
+                .filter(|e| e.kind == indexa_core::walker::EntryKind::File && !e.is_binary)
                 .collect();
             total_files += files.len();
             for entry in files {

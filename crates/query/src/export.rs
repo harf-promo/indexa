@@ -680,6 +680,7 @@ mod tests {
             size: 100,
             modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime_secs)),
             hint: None,
+            is_binary: false,
         }
     }
 
