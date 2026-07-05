@@ -39,6 +39,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   body)` as public, tested, reusable primitives. Future surfaces (CLI `indexa note add`,
   web sidebar) can call the same code without duplicating the cache-as-file logic.
 
+- **Privacy: safe-by-default sensitive-path deny list + index-time redaction (#335).** A new
+  `DeepScanPolicy::Sensitive` classification blocks descent into credential/key stores — `.ssh`,
+  `.gnupg`, `.aws`, macOS Keychains, Chrome/Brave/Firefox/Safari browser profiles, `.mozilla`,
+  `.password-store`, and 1Password group containers (11 curated hints). The walker prunes them via
+  `WalkState::Skip` unless a caller opts in with `[scan] include_sensitive = true` (default `false`).
+  Independently, `[scan] redact_at_index` (default `true`) runs `redact_secrets` on every chunk before
+  it enters the store, so API keys / tokens / PEM blocks in ordinary source files never become
+  full-text-searchable. Summarization also skips `Sensitive` entries (no LLM cost on credential dirs).
+  Prerequisite for any machine-wide (`~/` or `/`) scan — the whole-computer-indexing groundwork.
+
 ### Fixed
 
 - **Stop Indexa from filling the disk — five root-cause fixes (#337).**

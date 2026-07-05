@@ -32,6 +32,10 @@ pub struct WalkConfig {
     /// `None` = no cap. Default: `Some(8 MiB)` — skips media blobs / VM images /
     /// large DB dumps that are never useful context.
     pub max_filesize: Option<u64>,
+    /// Descend into `DeepScanPolicy::Sensitive` directories (`.ssh`, `.gnupg`, browser
+    /// profiles, Keychains, etc.). Defaults to `false` — these credential/key stores are
+    /// never walked unless a caller explicitly opts in.
+    pub include_sensitive: bool,
 }
 
 /// Default scan-time per-file size cap (8 MiB). Skips blobs that are almost
@@ -47,6 +51,7 @@ impl Default for WalkConfig {
             respect_gitignore: true,
             ignore: Vec::new(),
             max_filesize: Some(DEFAULT_MAX_FILESIZE),
+            include_sensitive: false,
         }
     }
 }
@@ -104,6 +109,15 @@ pub fn is_skip_dir(dir_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// True if `dir_path` is a credential/key store (`.ssh`, `.gnupg`, browser profiles,
+/// Keychains, etc.) classified `DeepScanPolicy::Sensitive`. Such directories are excluded
+/// from the walk unless `WalkConfig::include_sensitive` is set.
+pub fn is_sensitive_dir(dir_path: &Path) -> bool {
+    classify(dir_path)
+        .map(|h| h.deep_scan == DeepScanPolicy::Sensitive)
+        .unwrap_or(false)
+}
+
 /// Walk `root` and return all entries.
 ///
 /// Uses `ignore::WalkBuilder` (ripgrep's parallel walker) so that **nested**
@@ -126,6 +140,7 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
 
     // Capture the fields we need in the `'static` parallel closure.
     let skip_hidden = cfg.skip_hidden;
+    let include_sensitive = cfg.include_sensitive;
 
     // Build a callback-side gitignore matcher.
     //
@@ -230,6 +245,13 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
                     // Return WalkState::Skip: prevents both recording the entry AND descending.
                     // Guard depth > 0 so we never prune the walk root itself.
                     if is_dir && de.depth() > 0 && is_skip_dir(path) {
+                        return WalkState::Skip;
+                    }
+
+                    // Privacy: prune credential/key stores (.ssh, .gnupg, Keychains, browser
+                    // profiles) unless the caller explicitly opted in via `include_sensitive`.
+                    // WalkState::Skip stops both recording the dir entry AND descending into it.
+                    if is_dir && de.depth() > 0 && !include_sensitive && is_sensitive_dir(path) {
                         return WalkState::Skip;
                     }
 
@@ -509,5 +531,23 @@ mod tests {
             !entries.iter().any(|e| e.path.ends_with("big.bin")),
             "files above max_filesize must be skipped"
         );
+    }
+
+    #[test]
+    fn is_sensitive_dir_recognizes_credential_stores() {
+        use std::path::PathBuf;
+        // Classified DeepScanPolicy::Sensitive by surface::classify (path-contains predicates,
+        // independent of the real home dir) — pruned from the walk unless include_sensitive.
+        assert!(is_sensitive_dir(&PathBuf::from(
+            "/Users/x/Library/Keychains"
+        )));
+        assert!(is_sensitive_dir(&PathBuf::from(
+            "/Users/x/Library/Application Support/Google/Chrome"
+        )));
+        assert!(is_sensitive_dir(&PathBuf::from(
+            "/Users/x/Library/Application Support/Firefox"
+        )));
+        // A normal code dir is not sensitive.
+        assert!(!is_sensitive_dir(&PathBuf::from("/Users/x/projects/myapp")));
     }
 }

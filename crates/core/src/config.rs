@@ -116,6 +116,14 @@ pub struct ScanConfig {
     /// any indexed root whose newest content is older than this. The `--auto-reindex` flag must
     /// still be passed to activate it (so an expensive rebuild never starts implicitly).
     pub auto_reindex: String,
+    /// Descend into sensitive credential directories (`.ssh`, `.gnupg`, `.aws`, browser profiles,
+    /// macOS Keychains, password managers). Defaults to `false` — these are never walked unless
+    /// explicitly opted in via `[scan] include_sensitive = true` or `--include-sensitive`.
+    pub include_sensitive: bool,
+    /// Redact obvious secrets (API keys, tokens, PEM private-key blocks) from chunk text at
+    /// index time. Defaults to `true`. A second protection layer on top of the sensitive-path
+    /// deny list — covers secrets accidentally committed to otherwise-included source trees.
+    pub redact_at_index: bool,
 }
 
 impl Default for ScanConfig {
@@ -124,6 +132,8 @@ impl Default for ScanConfig {
             respect_gitignore: true,
             ignore: Vec::new(),
             auto_reindex: "off".to_owned(),
+            include_sensitive: false,
+            redact_at_index: true,
         }
     }
 }
