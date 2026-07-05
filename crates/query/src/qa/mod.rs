@@ -37,9 +37,9 @@ pub use explain::{explain_retrieval, RetrievalStage, RetrievalTrace};
 pub(crate) use retrieve::retrieve;
 pub use retrieve::{build_project_overview, is_broad_intent};
 pub use synthesize::{
-    answer, answer_retrieval_only, answer_retrieval_only_history, answer_stream,
-    answer_stream_with_ann, answer_stream_with_ann_history, answer_with_ann,
-    answer_with_ann_history,
+    answer, answer_catalog, answer_catalog_history, answer_retrieval_only,
+    answer_retrieval_only_history, answer_stream, answer_stream_with_ann,
+    answer_stream_with_ann_history, answer_with_ann, answer_with_ann_history,
 };
 
 /// A prior conversation turn, folded into the prompt + used to rewrite a follow-up into

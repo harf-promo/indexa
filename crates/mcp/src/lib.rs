@@ -752,6 +752,7 @@ mod tests {
             session_id: sid.map(str::to_owned),
             top_k: None,
             synthesize: None,
+            catalog: None,
         };
 
         assert!(mcp

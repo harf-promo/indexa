@@ -22,6 +22,7 @@ pub mod config;
 pub mod decisions;
 pub mod fingerprint;
 pub mod models_catalog;
+pub mod notes;
 pub mod pathutil;
 pub mod resource;
 pub mod smart_classify;
