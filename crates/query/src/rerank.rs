@@ -8,9 +8,10 @@
 //!   `[retrieval] rerank_backend = "llm"` (default).
 //!
 //! - [`CandleReranker`] — pointwise rerank via a local DeBERTa-v2 sequence-classification
-//!   model (`mixedbread-ai/mxbai-rerank-xsmall-v1`, ~85 MB, Apache-2.0). Downloaded from
-//!   HuggingFace on first use and cached in `~/.cache/huggingface/hub/`. Uses pure-Rust
-//!   candle for inference — no onnxruntime, no native dylib, safe for macOS notarization.
+//!   model (default `mixedbread-ai/mxbai-rerank-xsmall-v1`, ~85 MB, Apache-2.0; the model is
+//!   configurable via `[retrieval] rerank_model` — base/large-v1 are same-arch drop-ins).
+//!   Downloaded from HuggingFace on first use and cached in `~/.cache/huggingface/hub/`. Uses
+//!   pure-Rust candle for inference — no onnxruntime, no native dylib, safe for macOS notarization.
 //!   Selected with `[retrieval] rerank_backend = "cross-encoder"`.
 //!
 //! **Reranking fails open**: it is a pure enhancement. Any parse problem, LLM error, model
@@ -82,7 +83,6 @@ impl CrossEncoder for LlmReranker<'_> {
 
 // ── Candle cross-encoder ─────────────────────────────────────────────────────
 
-const MXBAI_MODEL_ID: &str = "mixedbread-ai/mxbai-rerank-xsmall-v1";
 /// Max tokens to feed per (query, doc) pair — model max is 512.
 const MAX_SEQ_LEN: usize = 512;
 
@@ -118,7 +118,12 @@ impl CandleInner {
         // mutated; we hold a shared reference for the lifetime of the process.
         let vb =
             unsafe { VarBuilder::from_mmaped_safetensors(&[&weights_path], DType::F32, &device)? };
-        let model = DebertaV2SeqClassificationModel::load(vb, &cfg, None)?;
+        // HF `DebertaV2ForSequenceClassification` checkpoints (all the mxbai-rerank models) nest the
+        // transformer under a `deberta.` prefix, while candle's loader reads the base `DebertaV2Model`
+        // at the vb root and pulls the pooler/classifier from `vb.root()`. Prefix the base model with
+        // `deberta` so `deberta.embeddings.*` / `deberta.encoder.*` resolve (without it, load fails with
+        // "cannot find tensor embeddings.word_embeddings.weight" and reranking silently falls open).
+        let model = DebertaV2SeqClassificationModel::load(vb.pp("deberta"), &cfg, None)?;
 
         Ok(Self {
             model,
@@ -167,22 +172,25 @@ impl CandleInner {
 pub(crate) struct CandleReranker {
     /// Singleton model state — `OnceLock` so the 1–2 s load cost is paid once.
     inner: &'static OnceLock<anyhow::Result<CandleInner>>,
-    model_id: &'static str,
+    /// HuggingFace repo id of the DeBERTa-v2 reranker (from `[retrieval] rerank_model`).
+    model_id: String,
 }
 
-// One global slot per model id (only one model used today).
+// One global slot. `rerank_model` comes from config, which is fixed for the process
+// lifetime, so the single slot correctly caches the one configured model — whichever id
+// wins the first `get_or_init` is the only one used, and it's always the same id.
 static CANDLE_INNER: OnceLock<anyhow::Result<CandleInner>> = OnceLock::new();
 
 impl CandleReranker {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(model_id: &str) -> Self {
         Self {
             inner: &CANDLE_INNER,
-            model_id: MXBAI_MODEL_ID,
+            model_id: model_id.to_string(),
         }
     }
 
     fn get_inner(&self) -> anyhow::Result<&CandleInner> {
-        let result = self.inner.get_or_init(|| CandleInner::load(self.model_id));
+        let result = self.inner.get_or_init(|| CandleInner::load(&self.model_id));
         match result {
             Ok(inner) => Ok(inner),
             Err(e) => anyhow::bail!("candle reranker unavailable: {e:#}"),
@@ -389,5 +397,46 @@ mod tests {
         assert_eq!(parse_ranking("3,3,9,1", 3), vec![2, 0]);
         // no numbers → empty (caller fails open)
         assert!(parse_ranking("I cannot rank these", 3).is_empty());
+    }
+
+    /// Proves the config-supplied `[retrieval] rerank_model` id loads through the DeBERTa path
+    /// and scores. `#[ignore]`d — downloads the model from HuggingFace on first run.
+    ///
+    /// ```bash
+    /// cargo test -p indexa-query candle_reranker_loads -- --ignored --nocapture
+    /// # or point at a bigger variant:
+    /// #   (edit the id below to mixedbread-ai/mxbai-rerank-base-v1)
+    /// ```
+    #[tokio::test]
+    #[ignore = "needs a HuggingFace model download (~85 MB for xsmall) + network"]
+    async fn candle_reranker_loads_configured_model() {
+        // The config default id, or any variant via INDEXA_TEST_RERANK_MODEL (e.g. base-v1).
+        let model = std::env::var("INDEXA_TEST_RERANK_MODEL")
+            .unwrap_or_else(|_| indexa_core::config::RetrievalConfig::default().rerank_model);
+        let reranker = CandleReranker::new(&model);
+        let docs = [
+            "The mitochondria is the powerhouse of the cell.",
+            "Tokio is an asynchronous runtime for Rust with a work-stealing scheduler.",
+            "Sourdough bread relies on a wild-yeast starter.",
+        ];
+        let order = reranker
+            .rerank("how does the tokio async scheduler work", &docs)
+            .await
+            .expect("rerank should not error");
+        // A successful load returns a full permutation; a load FAILURE returns an empty vec
+        // (fail-open), so a non-empty full permutation is the proof the model actually loaded.
+        assert_eq!(
+            order.len(),
+            docs.len(),
+            "empty order = model failed to load (fail-open) for id {model}"
+        );
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![0, 1, 2], "must be a permutation of all docs");
+        // Quality sanity: the Tokio doc is the obvious match → should rank first.
+        assert_eq!(
+            order[0], 1,
+            "expected the tokio doc top-ranked, got {order:?}"
+        );
     }
 }

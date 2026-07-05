@@ -119,7 +119,7 @@ pub async fn explain_retrieval(
     let final_hits = if cfg.rerank && !fused.is_empty() {
         final_label.push_str(" + rerank");
         if cfg.rerank_backend == "cross-encoder" {
-            apply_rerank(&CandleReranker::new(), question, fused).await
+            apply_rerank(&CandleReranker::new(&cfg.rerank_model), question, fused).await
         } else {
             apply_rerank(&LlmReranker::new(llm), question, fused).await
         }

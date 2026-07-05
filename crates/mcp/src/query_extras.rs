@@ -87,6 +87,7 @@ impl IndexaMcp {
             summary_depth_alpha: self.config.retrieval.summary_depth_alpha,
             rerank: self.config.retrieval.rerank,
             rerank_backend: self.config.retrieval.rerank_backend.clone(),
+            rerank_model: self.config.retrieval.rerank_model.clone(),
             use_weights: self.config.retrieval.use_weights,
             use_recency_weight: self.config.retrieval.recency_boost,
             recency_days: self.config.retrieval.recency_days,

@@ -198,10 +198,14 @@ Re-ranking the `top_k` (default 12) hits before synthesis is **on by default** (
 
 - **`"llm"` (default)** — a lightweight **listwise re-ranker that reuses the local generation model**
   in a single extra call. No second model, no download, no new native dependency.
-- **`"cross-encoder"` (opt-in, shipped v0.43)** — a pointwise DeBERTa-v2 cross-encoder
-  (`mixedbread-ai/mxbai-rerank-xsmall-v1`, ~85 MB, Apache-2.0, CPU-only) downloaded from HuggingFace
-  on first use and cached at `~/.cache/huggingface/hub/`. Higher quality at ~100–500 ms/query and a
-  one-time download — hence opt-in. Falls back to `"llm"` if the model can't be loaded.
+- **`"cross-encoder"` (opt-in, shipped v0.43)** — a pointwise DeBERTa-v2 cross-encoder downloaded
+  from HuggingFace on first use and cached at `~/.cache/huggingface/hub/`. Higher quality at
+  ~100–500 ms/query and a one-time download — hence opt-in. Falls back to `"llm"` if the model can't
+  be loaded. The model is configurable via `[retrieval] rerank_model` — all three
+  `mixedbread-ai/mxbai-rerank-*-v1` variants share the same DeBERTa-v2 architecture, so they are
+  drop-in (larger = better + heavier): `xsmall-v1` (default, ~85 MB), `base-v1` (~370 MB),
+  `large-v1` (~870 MB). The mxbai-rerank-**v2** family is Qwen-decoder-based and does not load through
+  this DeBERTa path — not supported.
 
 Both **fail open**: any model error, empty, or unparseable output falls back to the original
 retrieval order, so re-ranking can never make `ask` worse.
@@ -374,7 +378,7 @@ mis-synthesize from good evidence (and the sources are always listed so you can 
 | **Whisper transcription** (audio) | Requires a ~150MB model + compute | `[parsers.audio] transcribe = true` |
 | **Vision captioning** (images) | Requires a vision model | `[parsers.image] caption = true` |
 | **OCR** (scanned PDFs) | Requires poppler (`pdftoppm`) + Tesseract CLI | `[parsers.pdf] backend = "ocr"` |
-| **Cross-encoder re-ranking** | Downloads a ~85 MB DeBERTa-v2 model on first use | `[retrieval] rerank_backend = "cross-encoder"` (base `rerank` is on by default) |
+| **Cross-encoder re-ranking** | Downloads a DeBERTa-v2 model on first use (~85 MB xsmall default; base/large-v1 via `rerank_model`) | `[retrieval] rerank_backend = "cross-encoder"` (base `rerank` is on by default) |
 | **Contextual retrieval** | LLM call per chunk at index time (expensive) | `[describer] contextual_retrieval = true` |
 | **Cloud embeddings** | Requires API key, costs money | `[embedding] provider = "openai"` |
 | **Cloud LLM** | Requires API key | `[describer] provider = "anthropic"` |
@@ -476,3 +480,4 @@ Changes to defaults are recorded here with rationale.
 | 2026-05-28 | Added `google` embedding provider | Google `text-embedding-004` matches nomic-embed-text dim (768), state-of-the-art quality |
 | 2026-06-11 | Call-graph queries resolve calls by tier (same-file → same-dir → import → bare) at query time; strict = drop bare tier (was: unique-definition name filter) | Bare-name matching's worst false positive — a local helper named like a popular symbol fanning out repo-wide — is structural, not statistical; tiered resolution removes it without re-indexing, never invents edges, and confines the caveat to the labeled bare remainder |
 | 2026-07-05 | `[chunking] size`/`overlap` now honored by every word-window parser (was: hardcoded 800/100, config ignored) | The config existed but was dead; threading it via a defaulted `Parser::parse_chunked` keeps defaults (800/100) and the public trait intact while making the knob real — a prerequisite for eval-tuning chunk size |
+| 2026-07-05 | Cross-encoder reranker model configurable via `[retrieval] rerank_model` (default unchanged: `mxbai-rerank-xsmall-v1`) | The id was a hardcoded const; base/large-v1 are same-DeBERTa-v2-arch drop-ins offering more quality for a bigger download. Default stays xsmall (behavior-neutral); promoting a larger model to default would be a separate eval-proven decision. v2/Qwen excluded (wrong arch + non-Chinese-default preference) |

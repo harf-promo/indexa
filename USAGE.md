@@ -181,6 +181,7 @@ rrf_k = 60                   # RRF constant
 top_k = 12                   # passages retrieved before reranking
 rerank = true                # rerank before synthesis (default on; reuses the gen model, fails open)
 rerank_backend = "llm"       # "llm" (listwise, no download) | "cross-encoder" (~85 MB DeBERTa-v2)
+rerank_model = "mixedbread-ai/mxbai-rerank-xsmall-v1"  # cross-encoder model: xsmall (~85 MB) | base-v1 (~370 MB) | large-v1 (~870 MB)
 summary_weight = 0.0         # >0 boosts chunks under summary-matched dirs
 summary_depth_alpha = 0.15   # shallower summaries get a broader-context boost
 context_budget = 8000        # max chars packed into the answer prompt

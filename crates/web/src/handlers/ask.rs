@@ -43,6 +43,7 @@ fn qa_config_from(r: &RetrievalConfig, scope: Option<&str>, top_k: Option<usize>
         summary_depth_alpha: r.summary_depth_alpha,
         rerank: r.rerank,
         rerank_backend: r.rerank_backend.clone(),
+        rerank_model: r.rerank_model.clone(),
         use_weights: r.use_weights,
         use_recency_weight: r.recency_boost,
         recency_days: r.recency_days,
