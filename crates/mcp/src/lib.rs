@@ -526,7 +526,7 @@ mod tests {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         for rel in [
             "README.md",
-            "CLAUDE.md",
+            "AGENTS.md",
             "docs/how-to/live-retrieval-over-mcp.md",
         ] {
             let text = std::fs::read_to_string(repo.join(rel)).unwrap();
