@@ -495,6 +495,23 @@ pub(crate) async fn run_deep_phase(
                             },
                         )
                         .await
+                    } else if cfg.contextual_prefix {
+                        // Deterministic, local, no-LLM contextual prefix (mirrors the CLI deep
+                        // path). Prepend the file path, section heading, and a doc-context snippet
+                        // to each miss chunk's embed input; the stored/hashed text is untouched.
+                        let all_raw: Vec<&str> =
+                            extracted.chunks.iter().map(|c| c.text.as_str()).collect();
+                        let doc_ctx = build_doc_context(&all_raw);
+                        let miss_headings: Vec<&str> = miss_indices
+                            .iter()
+                            .map(|&i| extracted.chunks[i].heading.as_str())
+                            .collect();
+                        indexa_query::contextual::contextual_prefix_texts(
+                            &doc_ctx,
+                            &miss_headings,
+                            &miss_raw_texts,
+                            &path_str,
+                        )
                     } else {
                         miss_raw_texts.iter().map(|s| s.to_string()).collect()
                     }

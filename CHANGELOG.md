@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Local contextualized-chunk embeddings — deterministic contextual prefix (`[describer]
+  contextual_prefix`, default off).** The free, local sibling of Anthropic-style Contextual
+  Retrieval: at index time each cache-miss chunk's *embed input* is prefixed with its file path,
+  section heading, and a capped document-context snippet, so the stored embedding reflects where
+  the chunk sits in the whole document — the idea behind Voyage AI's voyage-context-4, realized
+  locally with the existing embedder at **zero token cost** (no LLM call, unlike
+  `contextual_retrieval`). If both are enabled the LLM path wins. The prefix is applied to the
+  embed text **only** — the stored/hashed chunk text is untouched, so the embedding cache and FTS
+  index are unaffected. Wired identically in the CLI and web deep paths; new pure helpers
+  `build_context_prefix` / `contextual_prefix_texts` in `indexa_query::contextual` (unit-tested).
+
 ## [0.76.0] — 2026-06-28
 
 ### Added

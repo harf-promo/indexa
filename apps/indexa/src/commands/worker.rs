@@ -64,7 +64,8 @@ async fn run_auto_reindex(db_path: &std::path::Path, cfg: &Config) -> Result<()>
             "augment".to_owned(),
             None,
             false,
-            true, // yes: worker already resolved the root; skip the huge-root guard
+            false, // contextual_prefix off here; config [describer] contextual_prefix still applies
+            true,  // yes: worker already resolved the root; skip the huge-root guard
             cfg,
         )
         .await
