@@ -95,6 +95,11 @@ pub struct AskParams {
     /// Reranker backend when `rerank` is true: `"llm"` (default) or `"cross-encoder"`.
     #[serde(default)]
     pub rerank_backend: Option<String>,
+    /// Include the itemized per-file "show the math" behind the impact readout — each cited
+    /// file's full source size that Indexa served a retrieved slice of instead. Off by default
+    /// (the one-line impact is always shown); set true for the per-file proof.
+    #[serde(default)]
+    pub explain_savings: Option<bool>,
     /// Conversational Ask: an opaque conversation id. Pass the SAME id across calls to make
     /// a multi-turn conversation — the server folds the session's recent turns into the
     /// prompt, rewrites the follow-up into a standalone query, and records this turn. Omit
@@ -353,11 +358,13 @@ impl IndexaMcp {
             agentic,
             rerank,
             rerank_backend,
+            explain_savings,
             session_id,
             top_k,
             synthesize,
             catalog,
         } = params.0;
+        let explain_savings = explain_savings.unwrap_or(false);
         let catalog = catalog.unwrap_or(false);
         let synthesize = synthesize.unwrap_or(true);
         let agentic = agentic.unwrap_or(self.config.retrieval.agentic);
@@ -541,9 +548,19 @@ impl IndexaMcp {
             // Show the agent the same "retrieve the slice" win the CLI and web surfaces print —
             // only when meaningful (cited files existed AND serving was smaller), never a
             // misleading "0% saved". Appended before record_usage so the readout is counted too.
-            let imp = indexa_query::AnswerImpact::new(out.len() as u64, counterfactual);
+            let served = out.len() as u64;
+            let imp = indexa_query::AnswerImpact::new(served, counterfactual);
             if imp.is_meaningful() {
                 out.push_str(&format!("\nImpact: {}\n", imp.human()));
+                // Opt-in per-file "show the math" proof behind the one-liner.
+                if explain_savings {
+                    let mut bd = indexa_query::ask_impact_breakdown(&store, &answer);
+                    bd.answer_text_bytes = served; // match the one-liner's served measure
+                    let table = bd.human_table();
+                    if !table.is_empty() {
+                        out.push_str(&format!("{table}\n"));
+                    }
+                }
             }
             record_usage(&mut store, "ask", out.len(), counterfactual);
             // Persist the turn (best-effort; never fails the answer). Only for synthesized

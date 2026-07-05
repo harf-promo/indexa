@@ -462,14 +462,18 @@ pub(crate) async fn api_ask_stream(
                     );
                 }
                 if let Some(i) = impact {
-                    done.insert(
-                        "impact".into(),
-                        serde_json::json!({
-                            "served_bytes": i.served_bytes,
-                            "counterfactual_bytes": i.counterfactual_bytes,
-                            "saved_percent": i.saved_percent(),
-                        }),
-                    );
+                    let mut obj = serde_json::json!({
+                        "served_bytes": i.served_bytes,
+                        "counterfactual_bytes": i.counterfactual_bytes,
+                        "saved_percent": i.saved_percent(),
+                    });
+                    // Itemized per-file source sizes for the "Show the math" table (best-effort;
+                    // absent on a store error, and the JS treats it as optional).
+                    if let Ok(store) = Store::open(&db_path) {
+                        let bd = indexa_query::ask_impact_breakdown(&store, &answer);
+                        obj["items"] = serde_json::to_value(&bd.items).unwrap_or_default();
+                    }
+                    done.insert("impact".into(), obj);
                 }
                 if let Some(id) = &session_id {
                     done.insert("session_id".into(), serde_json::json!(id));

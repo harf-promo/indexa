@@ -132,6 +132,91 @@ pub fn served_bytes(answer: &Answer) -> u64 {
     (answer.answer.len() + citations) as u64
 }
 
+/// One cited file's contribution to the counterfactual: its full on-disk source size — what
+/// pasting that whole file into the AI tool would have cost.
+#[derive(Debug, Clone, Serialize)]
+pub struct ImpactItem {
+    pub path: String,
+    pub source_bytes: u64,
+}
+
+/// The itemized "show the math" breakdown behind an [`AnswerImpact`]: the per-file source sizes
+/// that **sum to** `counterfactual_bytes`, plus the served answer size. Built on demand (one extra
+/// per-path store lookup via [`Store::counterfactual_sizes_for_paths`]), so surfaces that only want
+/// the one-line readout don't pay for it. `items` are in first-seen citation order.
+#[derive(Debug, Clone, Serialize)]
+pub struct ImpactBreakdown {
+    /// Per cited file, its full source size — sums to the aggregate counterfactual.
+    pub items: Vec<ImpactItem>,
+    /// Bytes Indexa actually served — the `served` figure (answer text + delivered citations),
+    /// identical to [`AnswerImpact::served_bytes`] for the same answer.
+    pub answer_text_bytes: u64,
+}
+
+impl ImpactBreakdown {
+    /// Total counterfactual bytes = sum of the per-file source sizes. Equals
+    /// [`AnswerImpact::counterfactual_bytes`] for the same answer (the reconciliation invariant).
+    pub fn counterfactual_bytes(&self) -> u64 {
+        self.items.iter().map(|i| i.source_bytes).sum()
+    }
+
+    /// The matching aggregate [`AnswerImpact`] (served vs. the summed counterfactual).
+    pub fn impact(&self) -> AnswerImpact {
+        AnswerImpact::new(self.answer_text_bytes, self.counterfactual_bytes())
+    }
+
+    /// Multi-line "show the math" block for the CLI and MCP surfaces: the cited files sorted
+    /// largest-source-first (biggest savings on top), then a served/saved footer. Empty string
+    /// when there's nothing meaningful to show (no cited files, or serving wasn't smaller).
+    pub fn human_table(&self) -> String {
+        let impact = self.impact();
+        if !impact.is_meaningful() || self.items.is_empty() {
+            return String::new();
+        }
+        let mut rows: Vec<&ImpactItem> = self.items.iter().collect();
+        rows.sort_by_key(|i| std::cmp::Reverse(i.source_bytes));
+
+        let mut out = String::from(
+            "Show the math — Indexa served a retrieved slice instead of these whole files:\n",
+        );
+        for item in rows {
+            out.push_str(&format!(
+                "  {:>9}  {}\n",
+                human_bytes(item.source_bytes),
+                item.path
+            ));
+        }
+        let saved = impact
+            .counterfactual_bytes
+            .saturating_sub(impact.served_bytes);
+        out.push_str(&format!(
+            "  = {} of source; served {} — {}% less (~{} tokens at \u{2248}4 bytes/token)",
+            human_bytes(impact.counterfactual_bytes),
+            human_bytes(impact.served_bytes),
+            impact.saved_percent(),
+            human_count(saved / 4),
+        ));
+        out
+    }
+}
+
+/// Build the itemized [`ImpactBreakdown`] for an answer: per-cited-file source sizes + the served
+/// size. One extra store lookup; returns an empty breakdown on store error (detail must never fail
+/// the answer). The aggregate [`ImpactBreakdown::impact`] reconciles with [`record_ask_impact`].
+pub fn ask_impact_breakdown(store: &Store, answer: &Answer) -> ImpactBreakdown {
+    let paths: Vec<&str> = answer.sources.iter().map(|s| s.path.as_str()).collect();
+    let items = store
+        .counterfactual_sizes_for_paths(&paths)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(path, source_bytes)| ImpactItem { path, source_bytes })
+        .collect();
+    ImpactBreakdown {
+        items,
+        answer_text_bytes: served_bytes(answer),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +315,55 @@ mod tests {
         assert_eq!(served_bytes(&a), 23);
         // No citations → just the answer text.
         assert_eq!(served_bytes(&answer_with("hi", vec![])), 2);
+    }
+
+    fn breakdown(items: &[(&str, u64)], served: u64) -> ImpactBreakdown {
+        ImpactBreakdown {
+            items: items
+                .iter()
+                .map(|(p, b)| ImpactItem {
+                    path: (*p).to_owned(),
+                    source_bytes: *b,
+                })
+                .collect(),
+            answer_text_bytes: served,
+        }
+    }
+
+    #[test]
+    fn breakdown_items_sum_to_aggregate_counterfactual() {
+        // The reconciliation invariant: per-file source sizes must sum to the aggregate the
+        // one-line readout reports, and impact() must equal the same-served AnswerImpact.
+        let b = breakdown(&[("/a.rs", 1_000), ("/b.rs", 3_000), ("/dir", 6_000)], 250);
+        assert_eq!(b.counterfactual_bytes(), 10_000);
+        let agg = b.impact();
+        assert_eq!(agg.served_bytes, 250);
+        assert_eq!(agg.counterfactual_bytes, 10_000);
+        assert_eq!(
+            agg.saved_percent(),
+            AnswerImpact::new(250, 10_000).saved_percent()
+        );
+    }
+
+    #[test]
+    fn human_table_sorts_largest_first_and_reconciles() {
+        let b = breakdown(&[("/small.rs", 1_000), ("/huge.rs", 9_000)], 200);
+        let table = b.human_table();
+        // Largest source first.
+        let huge = table.find("/huge.rs").unwrap();
+        let small = table.find("/small.rs").unwrap();
+        assert!(huge < small, "largest file must be listed first:\n{table}");
+        // Footer carries the summed counterfactual + served + token estimate.
+        assert!(table.contains("of source"), "{table}");
+        assert!(table.contains("% less"), "{table}");
+        assert!(table.contains("tokens at"), "{table}");
+    }
+
+    #[test]
+    fn human_table_empty_when_not_meaningful() {
+        // Served >= counterfactual → nothing honest to show.
+        assert!(breakdown(&[("/a.rs", 100)], 500).human_table().is_empty());
+        // No cited files → empty.
+        assert!(breakdown(&[], 500).human_table().is_empty());
     }
 }

@@ -250,6 +250,23 @@ async function doAsk() {
     if (t >= 1000) return (t / 1000).toFixed(1) + 'K';
     return String(t);
   };
+  // "Show the math" — the per-file breakdown behind the one-liner: each cited file's full
+  // on-disk size (largest first) that Indexa served a retrieved slice of instead. Present only
+  // when the server sent `impact.items` (additive; older servers omit it).
+  const renderSavingsTable = function() {
+    if (!impact || !impact.items || !impact.items.length) return '';
+    var rows = impact.items.slice().sort(function(a, b) {
+      return (b.source_bytes || 0) - (a.source_bytes || 0);
+    });
+    var body = '';
+    for (var i = 0; i < rows.length; i++) {
+      body += '<tr><td>' + escapeHtml(rows[i].path || '') + '</td>' +
+        '<td class="impact-num">' + escapeHtml(fmtBytes(rows[i].source_bytes || 0)) + '</td></tr>';
+    }
+    return '<details class="ask-impact-details"><summary>Show the math</summary>' +
+      '<table class="impact-table"><thead><tr><th>Cited file</th><th>Full source</th></tr></thead>' +
+      '<tbody>' + body + '</tbody></table></details>';
+  };
   const renderImpact = function() {
     if (!impact || !impact.saved_percent) return '';
     var saved = (impact.counterfactual_bytes || 0) - (impact.served_bytes || 0);
@@ -265,7 +282,7 @@ async function doAsk() {
       '<strong>Served</strong> = the answer text + the snippets actually delivered. ' +
       '<strong>Source</strong> = the on-disk size of the cited files only (not the whole repo) — ' +
       'so the saving is conservative. The token estimate uses \u{2248}4 bytes per token.</p>' +
-      '</details></div>';
+      '</details>' + renderSavingsTable() + '</div>';
   };
   // Render the partial answer (leading whitespace from the model's first token trimmed so
   // it doesn't briefly indent) + sources, keeping the view pinned to the bottom.

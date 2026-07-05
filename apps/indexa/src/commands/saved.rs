@@ -82,6 +82,7 @@ pub(crate) async fn cmd_saved_run(name: String, json: bool, cfg: &Config) -> Res
         agentic,
         None,
         false,
+        false, // explain_savings: saved queries emit just the answer
         None,  // session_id: saved queries are stateless
         false, // continue_
         json,

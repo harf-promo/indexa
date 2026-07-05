@@ -554,6 +554,12 @@ pub enum Commands {
         #[arg(long, conflicts_with_all = ["agentic", "max_steps"])]
         explain: bool,
 
+        /// After the answer, print the per-file "show the math" breakdown behind the impact
+        /// readout: each cited file's full source size (largest first) that Indexa served a
+        /// retrieved slice of instead. With `--json`, the breakdown is added under `savings`.
+        #[arg(long = "explain-savings")]
+        explain_savings: bool,
+
         /// Conversational Ask: continue (or start) a conversation under this id. Prior turns
         /// are folded into the prompt and the follow-up is rewritten into a standalone query.
         #[arg(long)]

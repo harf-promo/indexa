@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   All three mxbai-rerank-**v1** variants share the same architecture, so `base-v1` (~370 MB) and
   `large-v1` (~870 MB) are drop-in higher-quality options. Default stays xsmall (behavior-neutral);
   only applies when `rerank_backend = "cross-encoder"`. (v2/Qwen is a different arch — not supported.)
+- **Itemized per-answer savings — "show the math" (Savings Step 2).** The impact readout after an
+  `ask` (`served X vs Y of source — N% less`) can now be expanded into the **per-file** breakdown
+  behind it: each cited file's full source size, sorted largest-first, summing to the aggregate. New
+  `Store::counterfactual_sizes_for_paths` (the aggregate now sums it — one source of truth) +
+  `ImpactBreakdown`/`ImpactItem` in `indexa_query`. Surfaced everywhere: web **"Show the math"** table
+  under the answer, CLI `indexa ask --explain-savings` (and `--json` `savings`), and an opt-in MCP
+  `ask` `explain_savings` param. MCP tool count unchanged (47).
 
 ### Fixed
 

@@ -78,6 +78,39 @@ fn counterfactual_dedups_paths_and_falls_back_to_summary_byte_size() {
 }
 
 #[test]
+fn counterfactual_sizes_are_per_path_and_sum_to_the_aggregate() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            dummy_entry("/p/a.rs", EntryKind::File, 1_234),
+            dummy_entry("/p", EntryKind::Dir, 0),
+        ])
+        .unwrap();
+    store
+        .upsert_summary(&dummy_summary("/p", "dir", None, 0))
+        .unwrap();
+
+    let paths = ["/p/a.rs", "/p/a.rs", "/p", "/nope.txt"];
+    let items = store.counterfactual_sizes_for_paths(&paths).unwrap();
+
+    // First-seen order, deduped: a.rs (once), /p (dir → summary 100), /nope.txt (unknown → 0).
+    assert_eq!(
+        items,
+        vec![
+            ("/p/a.rs".to_string(), 1_234),
+            ("/p".to_string(), 100),
+            ("/nope.txt".to_string(), 0),
+        ]
+    );
+    // Reconciliation: the per-path items sum to the aggregate the one-line readout reports.
+    let summed: u64 = items.iter().map(|(_, b)| b).sum();
+    assert_eq!(
+        summed,
+        store.counterfactual_bytes_for_paths(&paths).unwrap()
+    );
+}
+
+#[test]
 fn session_usage_ledger_sums_per_session_and_ignores_stateless() {
     let mut store = Store::open_in_memory().unwrap();
     // Two conversational sessions + one stateless (None) call.

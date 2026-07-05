@@ -63,6 +63,9 @@ struct AnswerJson {
     /// Per-answer byte savings vs. the cited files whole; absent when nothing to show.
     #[serde(skip_serializing_if = "Option::is_none")]
     impact: Option<AnswerImpact>,
+    /// Itemized per-file source sizes behind `impact` — present only with `--explain-savings`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    savings: Option<indexa_query::ImpactBreakdown>,
     #[serde(skip_serializing_if = "Option::is_none")]
     retrieval: Option<RetrievalJson>,
     /// Conversation id this turn was recorded under (Conversational Ask); absent when stateless.
@@ -143,6 +146,7 @@ pub(crate) async fn cmd_ask(
     agentic_flag: bool,
     max_steps_flag: Option<usize>,
     explain: bool,
+    explain_savings: bool,
     session_id_flag: Option<String>,
     continue_: bool,
     json: bool,
@@ -166,6 +170,7 @@ pub(crate) async fn cmd_ask(
                     sources: Vec::new(),
                     confidence: None,
                     impact: None,
+                    savings: None,
                     retrieval: None,
                     session_id: None,
                     synthesized: true,
@@ -326,15 +331,19 @@ pub(crate) async fn cmd_ask(
     // impact); it's the same served accounting the web surface uses. (`store` was dropped above so
     // the query path didn't hold two handles; a fresh open here is the same cost every other
     // command pays.)
-    let impact: Option<AnswerImpact> = match Store::open(&db_path) {
-        Ok(mut s) => Some(indexa_query::record_ask_impact(
-            &mut s, "cli", &answer, None,
-        )),
-        Err(e) => {
-            tracing::debug!("usage telemetry skipped: {e:#}");
-            None
-        }
-    };
+    let (impact, breakdown): (Option<AnswerImpact>, Option<indexa_query::ImpactBreakdown>) =
+        match Store::open(&db_path) {
+            Ok(mut s) => {
+                let imp = indexa_query::record_ask_impact(&mut s, "cli", &answer, None);
+                // `--explain-savings`: the itemized per-file "show the math" (one extra lookup).
+                let bd = explain_savings.then(|| indexa_query::ask_impact_breakdown(&s, &answer));
+                (Some(imp), bd)
+            }
+            Err(e) => {
+                tracing::debug!("usage telemetry skipped: {e:#}");
+                (None, None)
+            }
+        };
     // Only surface the readout when it's a real win (cited files existed and serving was
     // smaller) — never a misleading "0% saved" on a no-match answer.
     let impact = impact.filter(AnswerImpact::is_meaningful);
@@ -368,6 +377,7 @@ pub(crate) async fn cmd_ask(
                 uncovered: c.uncovered.clone(),
             }),
             impact,
+            savings: breakdown.clone(),
             retrieval: trace.as_ref().map(trace_to_json),
             session_id: session_id.clone(),
             synthesized: answer.synthesized,
@@ -454,6 +464,13 @@ pub(crate) async fn cmd_ask(
             println!("\n\x1b[2m{line}\x1b[0m");
         } else {
             println!("\n{line}");
+        }
+    }
+    // `--explain-savings`: the per-file breakdown behind that one-liner.
+    if let Some(bd) = &breakdown {
+        let table = bd.human_table();
+        if !table.is_empty() {
+            println!("\n{table}");
         }
     }
 
