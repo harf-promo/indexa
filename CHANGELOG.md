@@ -32,9 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `indexa eval … --mode rrf` against a populated index (Ollama + `nomic-embed-text`), gating on
   hit_rate/MRR/recall/nDCG so a dense change (contextual-prefix, reranker) is promoted only when
   proven non-regressing. `docs/methodology.md` documents the baseline-vs-branch A/B recipe.
+- **Configurable cross-encoder reranker model (`[retrieval] rerank_model`).** The candle DeBERTa-v2
+  reranker's model was hardcoded to `mixedbread-ai/mxbai-rerank-xsmall-v1`; it's now a config knob.
+  All three mxbai-rerank-**v1** variants share the same architecture, so `base-v1` (~370 MB) and
+  `large-v1` (~870 MB) are drop-in higher-quality options. Default stays xsmall (behavior-neutral);
+  only applies when `rerank_backend = "cross-encoder"`. (v2/Qwen is a different arch — not supported.)
 
 ### Fixed
 
+- **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
+  open to the LLM reranker for every user who enabled it: candle's DeBERTa loader read the transformer
+  at the safetensors root, but HF `DebertaV2ForSequenceClassification` checkpoints nest it under a
+  `deberta.` prefix, so loading failed with *"cannot find tensor embeddings.word_embeddings.weight"*
+  (swallowed by the fail-open path). Prefixing the base model with `deberta` fixes it; the backend now
+  loads and reranks. Surfaced by the new `#[ignore]` load test (no prior test exercised the real model).
 - **Markdown/HTML chunk overlap ignored configuration** — `chunk_markdown` hardcoded a 100-word
   overlap even conceptually; it now takes `overlap` from `[chunking]` like every other parser.
 

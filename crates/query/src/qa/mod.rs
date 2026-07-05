@@ -115,6 +115,9 @@ pub struct QaConfig {
     /// Which reranker backend to use when `rerank = true`.
     /// `"llm"` = listwise LLM call (default). `"cross-encoder"` = candle DeBERTa-v2.
     pub rerank_backend: String,
+    /// HuggingFace model id for the `"cross-encoder"` backend (from `[retrieval] rerank_model`).
+    /// Default `mixedbread-ai/mxbai-rerank-xsmall-v1`; base/large-v1 are same-arch drop-ins.
+    pub rerank_model: String,
     /// Apply importance weights (v0.8) as a multiplicative boost after RRF fusion.
     pub use_weights: bool,
     /// Apply a recency boost (v0.31) — multiplies up recently-modified files (the positive twin
@@ -172,6 +175,7 @@ impl Default for QaConfig {
             summary_depth_alpha: 0.15,
             rerank: true,
             rerank_backend: "llm".to_string(),
+            rerank_model: "mixedbread-ai/mxbai-rerank-xsmall-v1".to_string(),
             use_weights: true,
             use_recency_weight: false,
             recency_days: 90,

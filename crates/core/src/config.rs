@@ -333,6 +333,19 @@ pub struct RetrievalConfig {
     ///
     /// TOML: `[retrieval] rerank_backend = "cross-encoder"`
     pub rerank_backend: String,
+    /// HuggingFace model for the `"cross-encoder"` rerank backend (v0.77). All three
+    /// options share the same DeBERTa-v2 architecture, so they are drop-in — larger =
+    /// higher quality, larger download:
+    /// - `mixedbread-ai/mxbai-rerank-xsmall-v1` (default, ~85 MB) — the fast baseline.
+    /// - `mixedbread-ai/mxbai-rerank-base-v1` (~370 MB) — stronger.
+    /// - `mixedbread-ai/mxbai-rerank-large-v1` (~870 MB) — strongest.
+    ///
+    /// Ignored unless `rerank_backend = "cross-encoder"`. Loading failure falls open to
+    /// `"llm"`. (The mxbai-rerank-**v2** family is Qwen-decoder-based and does NOT load
+    /// through the DeBERTa path — not supported here.)
+    ///
+    /// TOML: `[retrieval] rerank_model = "mixedbread-ai/mxbai-rerank-base-v1"`
+    pub rerank_model: String,
     /// Path segments that mark content as historical/superseded (matched case-insensitively
     /// and segment-bounded). Hits under such a path are down-weighted by `archive_penalty`
     /// (v0.29). Extend it (`legacy`/`attic`/`backup`) to suit your tree, or set it to an empty
@@ -411,6 +424,7 @@ impl Default for RetrievalConfig {
             recency_days: 90,
             mmr_lambda: 0.5,
             rerank_backend: "llm".to_string(),
+            rerank_model: "mixedbread-ai/mxbai-rerank-xsmall-v1".to_string(),
             archive_segments: default_archive_segments(),
             archive_penalty: DEFAULT_ARCHIVE_PENALTY,
             broad_per_file_cap: 0,
@@ -927,6 +941,10 @@ auto_reindex = "7d"
         assert_eq!(cfg.retrieval.context_budget, 8000);
         assert!(cfg.retrieval.rerank);
         assert_eq!(cfg.retrieval.rerank_backend, "llm");
+        assert_eq!(
+            cfg.retrieval.rerank_model,
+            "mixedbread-ai/mxbai-rerank-xsmall-v1"
+        );
         assert!(!cfg.parsers.audio.transcribe);
         assert!(!cfg.parsers.image.caption);
         // Caption model falls back to the default vision model when unset.
@@ -956,12 +974,19 @@ dim = 768
 
 [retrieval]
 top_k = 20
+rerank_model = "mixedbread-ai/mxbai-rerank-base-v1"
 "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.embedding.model, "nomic-embed-text:v1.5");
         assert_eq!(cfg.retrieval.top_k, 20);
+        // A configured rerank_model round-trips (the knob is real, not just a default).
+        assert_eq!(
+            cfg.retrieval.rerank_model,
+            "mixedbread-ai/mxbai-rerank-base-v1"
+        );
         // Fields not specified fall back to struct defaults.
         assert_eq!(cfg.retrieval.rrf_k, 60);
+        assert_eq!(cfg.retrieval.rerank_backend, "llm");
         assert_eq!(cfg.describer.model, "gemma3:12b");
     }
 

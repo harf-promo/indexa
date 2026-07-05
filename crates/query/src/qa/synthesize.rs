@@ -401,7 +401,7 @@ async fn retrieve_and_rerank(
     //    because they all call this helper.
     let hits = if cfg.rerank {
         if cfg.rerank_backend == "cross-encoder" {
-            apply_rerank(&CandleReranker::new(), question, hits).await
+            apply_rerank(&CandleReranker::new(&cfg.rerank_model), question, hits).await
         } else {
             apply_rerank(&LlmReranker::new(llm), question, hits).await
         }
