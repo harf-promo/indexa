@@ -5,7 +5,7 @@
 //! they participate in code-aware retrieval — and skip outputs, which are usually large,
 //! binary, or irrelevant to "what does this notebook do".
 
-use crate::types::{chunk_words, Chunk, Extracted, Parser};
+use crate::types::{chunk_words, Chunk, ChunkParams, Extracted, Parser};
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
@@ -28,6 +28,10 @@ impl Parser for IpynbParser {
     }
 
     fn parse(&self, path: &Path) -> Result<Extracted> {
+        self.parse_chunked(path, ChunkParams::default())
+    }
+
+    fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> Result<Extracted> {
         let raw = std::fs::read_to_string(path)?;
         let json: serde_json::Value = serde_json::from_str(&raw)
             .map_err(|e| anyhow!("ipynb: invalid notebook JSON in {}: {e}", path.display()))?;
@@ -57,7 +61,16 @@ impl Parser for IpynbParser {
                 } else {
                     None
                 };
-                chunk_words(path, &src, &heading, lang, 800, 100, &mut seq, &mut chunks);
+                chunk_words(
+                    path,
+                    &src,
+                    &heading,
+                    lang,
+                    chunk.size,
+                    chunk.overlap,
+                    &mut seq,
+                    &mut chunks,
+                );
             }
         }
 

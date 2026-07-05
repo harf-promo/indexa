@@ -1,6 +1,6 @@
 //! EPUB 2/3 parser — reads spine order from OPF, strips XHTML tags per chapter.
 
-use crate::types::{Chunk, Extracted, Parser};
+use crate::types::{Chunk, ChunkParams, Extracted, Parser};
 use anyhow::{bail, Result};
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -25,6 +25,10 @@ impl Parser for EpubParser {
     }
 
     fn parse(&self, path: &Path) -> Result<Extracted> {
+        self.parse_chunked(path, ChunkParams::default())
+    }
+
+    fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> Result<Extracted> {
         let file = std::fs::File::open(path)?;
         let mut archive = zip::ZipArchive::new(file)?;
 
@@ -95,7 +99,16 @@ impl Parser for EpubParser {
                 .trim_end_matches(".html")
                 .to_string();
 
-            crate::types::chunk_words(path, &text, &heading, None, 800, 100, &mut seq, &mut chunks);
+            crate::types::chunk_words(
+                path,
+                &text,
+                &heading,
+                None,
+                chunk.size,
+                chunk.overlap,
+                &mut seq,
+                &mut chunks,
+            );
         }
 
         if chunks.is_empty() {

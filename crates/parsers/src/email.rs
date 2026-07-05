@@ -5,7 +5,7 @@
 //! bytes are not extracted. `.msg` (Outlook OLE compound format) has no pure-Rust reader, so
 //! it gets a quiet stub rather than counting as a hard parse error.
 
-use crate::types::{chunk_words, Chunk, Extracted, Parser};
+use crate::types::{chunk_words, Chunk, ChunkParams, Extracted, Parser};
 use anyhow::Result;
 use mail_parser::{Address, Message, MessageParser, MimeHeaders};
 use std::path::Path;
@@ -30,6 +30,10 @@ impl Parser for EmailParser {
     }
 
     fn parse(&self, path: &Path) -> Result<Extracted> {
+        self.parse_chunked(path, ChunkParams::default())
+    }
+
+    fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> Result<Extracted> {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let display = path
             .file_name()
@@ -49,7 +53,16 @@ impl Parser for EmailParser {
 
         let mut chunks = Vec::new();
         let mut seq = 0usize;
-        chunk_words(path, &text, "email", None, 800, 100, &mut seq, &mut chunks);
+        chunk_words(
+            path,
+            &text,
+            "email",
+            None,
+            chunk.size,
+            chunk.overlap,
+            &mut seq,
+            &mut chunks,
+        );
         if chunks.is_empty() {
             chunks.push(Chunk {
                 source: path.to_path_buf(),

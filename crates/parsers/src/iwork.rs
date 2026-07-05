@@ -4,7 +4,7 @@
 //! maintained pure-Rust reader, so this captures the rendered snapshot's text — not every cell or
 //! formula — and a file without a preview yields a quiet stub.
 
-use crate::types::{chunk_words, Chunk, Extracted, Parser};
+use crate::types::{chunk_words, Chunk, ChunkParams, Extracted, Parser};
 use anyhow::Result;
 use std::io::Read;
 use std::path::Path;
@@ -34,6 +34,10 @@ impl Parser for IworkParser {
     }
 
     fn parse(&self, path: &Path) -> Result<Extracted> {
+        self.parse_chunked(path, ChunkParams::default())
+    }
+
+    fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> Result<Extracted> {
         let display = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -57,7 +61,16 @@ impl Parser for IworkParser {
                 language: None,
             });
         } else {
-            chunk_words(path, &text, "", None, 800, 100, &mut seq, &mut chunks);
+            chunk_words(
+                path,
+                &text,
+                "",
+                None,
+                chunk.size,
+                chunk.overlap,
+                &mut seq,
+                &mut chunks,
+            );
         }
 
         Ok(Extracted {

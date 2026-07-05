@@ -1,30 +1,11 @@
-use crate::types::{split_char_budget, Chunk, Extracted, Parser, MAX_CHUNK_CHARS};
+use crate::types::{split_char_budget, Chunk, ChunkParams, Extracted, Parser, MAX_CHUNK_CHARS};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser as MdParser, Tag, TagEnd};
 use std::path::Path;
 
-pub struct TextParser {
-    chunk_size: usize,
-    overlap: usize,
-}
-
-impl Default for TextParser {
-    fn default() -> Self {
-        Self {
-            chunk_size: 800,
-            overlap: 100,
-        }
-    }
-}
+pub struct TextParser;
 
 impl TextParser {
-    pub fn new(chunk_size: usize, overlap: usize) -> Self {
-        Self {
-            chunk_size,
-            overlap,
-        }
-    }
-
-    fn fixed_chunks(&self, source: &Path, text: &str) -> Vec<Chunk> {
+    fn fixed_chunks(&self, source: &Path, text: &str, size: usize, overlap: usize) -> Vec<Chunk> {
         let words: Vec<&str> = text.split_whitespace().collect();
         if words.is_empty() {
             return Vec::new();
@@ -35,7 +16,7 @@ impl TextParser {
         let mut seq = 0;
 
         while start < words.len() {
-            let end = (start + self.chunk_size).min(words.len());
+            let end = (start + size).min(words.len());
             let chunk_text = words[start..end].join(" ");
             // Cap each window at MAX_CHUNK_CHARS so a file with few whitespace-separated
             // "words" (minified CSS/HTML, long lines) can't emit a chunk that overflows
@@ -55,9 +36,9 @@ impl TextParser {
             if end == words.len() {
                 break;
             }
-            // step forward with overlap; .max(1) so a config with overlap >= chunk_size can't
+            // step forward with overlap; .max(1) so a config with overlap >= size can't
             // produce a zero stride and spin the loop forever (matches org.rs's guard).
-            start += self.chunk_size.saturating_sub(self.overlap).max(1);
+            start += size.saturating_sub(overlap).max(1);
         }
         chunks
     }
@@ -85,8 +66,12 @@ impl Parser for TextParser {
     }
 
     fn parse(&self, path: &Path) -> anyhow::Result<Extracted> {
+        self.parse_chunked(path, ChunkParams::default())
+    }
+
+    fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> anyhow::Result<Extracted> {
         let text = std::fs::read_to_string(path)?;
-        let chunks = self.fixed_chunks(path, &text);
+        let chunks = self.fixed_chunks(path, &text, chunk.size, chunk.overlap);
         Ok(Extracted {
             source: path.to_path_buf(),
             mime: "text/plain".into(),
@@ -98,21 +83,7 @@ impl Parser for TextParser {
 
 // ──────────────────────────────────────────────────────────────────────────────
 
-pub struct MarkdownParser {
-    chunk_size: usize,
-}
-
-impl Default for MarkdownParser {
-    fn default() -> Self {
-        Self { chunk_size: 800 }
-    }
-}
-
-impl MarkdownParser {
-    pub fn new(chunk_size: usize) -> Self {
-        Self { chunk_size }
-    }
-}
+pub struct MarkdownParser;
 
 impl Parser for MarkdownParser {
     fn accepts_mime(&self, mime: &str) -> bool {
@@ -125,10 +96,14 @@ impl Parser for MarkdownParser {
     }
 
     fn parse(&self, path: &Path) -> anyhow::Result<Extracted> {
+        self.parse_chunked(path, ChunkParams::default())
+    }
+
+    fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> anyhow::Result<Extracted> {
         let raw = std::fs::read_to_string(path)?;
         let (frontmatter, body) = split_frontmatter(&raw);
 
-        let mut chunks = chunk_markdown(path, &body, self.chunk_size);
+        let mut chunks = chunk_markdown(path, &body, chunk.size, chunk.overlap);
 
         // Lift frontmatter metadata (title/tags/date/…) into a leading, searchable chunk.
         if let Some(meta) = frontmatter {
@@ -157,9 +132,14 @@ impl Parser for MarkdownParser {
 }
 
 /// Section a Markdown string into heading-breadcrumbed chunks (≤ `chunk_size` words each,
-/// 100-word overlap on long sections, each char-capped). Shared by [`MarkdownParser`] and the
+/// `overlap`-word overlap on long sections, each char-capped). Shared by [`MarkdownParser`] and the
 /// HTML parser, which converts HTML → Markdown first.
-pub(crate) fn chunk_markdown(path: &Path, markdown: &str, chunk_size: usize) -> Vec<Chunk> {
+pub(crate) fn chunk_markdown(
+    path: &Path,
+    markdown: &str,
+    chunk_size: usize,
+    overlap: usize,
+) -> Vec<Chunk> {
     let opts = Options::ENABLE_TABLES | Options::ENABLE_FOOTNOTES | Options::ENABLE_STRIKETHROUGH;
     let parser = MdParser::new_ext(markdown, opts);
 
@@ -248,9 +228,9 @@ pub(crate) fn chunk_markdown(path: &Path, markdown: &str, chunk_size: usize) -> 
                 if end == words.len() {
                     break;
                 }
-                // saturating + .max(1) so a chunk_size <= 100 can't yield a zero stride and
+                // saturating + .max(1) so a chunk_size <= overlap can't yield a zero stride and
                 // spin the loop forever (matches org.rs's guard).
-                start += chunk_size.saturating_sub(100).max(1); // 100-word overlap
+                start += chunk_size.saturating_sub(overlap).max(1);
             }
         }
     }
@@ -310,8 +290,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("a.txt");
         std::fs::write(&p, "one two three four five six seven eight nine ten").unwrap();
-        let parser = TextParser::new(5, 2);
-        let extracted = parser.parse(&p).unwrap();
+        let extracted = TextParser
+            .parse_chunked(
+                &p,
+                ChunkParams {
+                    size: 5,
+                    overlap: 2,
+                },
+            )
+            .unwrap();
         assert!(!extracted.chunks.is_empty());
         assert_eq!(extracted.chunks[0].text, "one two three four five");
     }
@@ -325,7 +312,7 @@ mod tests {
             "# Introduction\n\nSome intro text.\n\n## Background\n\nBackground content here.",
         )
         .unwrap();
-        let parser = MarkdownParser::default();
+        let parser = MarkdownParser;
         let extracted = parser.parse(&p).unwrap();
         assert_eq!(extracted.chunks.len(), 2);
         assert!(extracted.chunks[0].heading.contains("Introduction"));
@@ -337,7 +324,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("flat.md");
         std::fs::write(&p, "Just a paragraph with no headings at all.").unwrap();
-        let parser = MarkdownParser::default();
+        let parser = MarkdownParser;
         let extracted = parser.parse(&p).unwrap();
         assert_eq!(extracted.chunks.len(), 1);
         assert!(extracted.chunks[0].heading.is_empty());
@@ -352,7 +339,7 @@ mod tests {
             "---\ntitle: My Post\ntags: rust, indexing\ndate: 2026-06-16\n---\n\n# Body\n\nThe actual content.",
         )
         .unwrap();
-        let ex = MarkdownParser::default().parse(&p).unwrap();
+        let ex = MarkdownParser.parse(&p).unwrap();
         assert_eq!(ex.chunks[0].heading, "frontmatter");
         assert_eq!(ex.chunks[0].seq, 0);
         assert!(
@@ -377,7 +364,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("plain.md");
         std::fs::write(&p, "# Title\n\nNo frontmatter here.").unwrap();
-        let ex = MarkdownParser::default().parse(&p).unwrap();
+        let ex = MarkdownParser.parse(&p).unwrap();
         assert!(ex.chunks.iter().all(|c| c.heading != "frontmatter"));
         assert!(ex.chunks[0].heading.contains("Title"));
     }
@@ -394,15 +381,23 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         std::fs::write(&p, &text).unwrap();
-        let ex = TextParser::new(3, 5).parse(&p).unwrap();
+        let ex = TextParser
+            .parse_chunked(
+                &p,
+                ChunkParams {
+                    size: 3,
+                    overlap: 5,
+                },
+            )
+            .unwrap();
         assert!(!ex.chunks.is_empty());
         assert!(ex.chunks.len() <= 30, "got {} chunks", ex.chunks.len());
     }
 
     #[test]
     fn markdown_parser_terminates_when_chunk_size_le_overlap() {
-        // The per-section word-splitter uses a fixed 100-word overlap; a chunk_size <= 100 would
-        // give a zero stride without the `.max(1)` guard. Must terminate over a >chunk_size body.
+        // This pins overlap=100 with chunk_size=2: a chunk_size <= overlap would give a zero
+        // stride without the `.max(1)` guard. Must terminate over a >chunk_size body.
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("degenerate.md");
         let body = (0..40)
@@ -410,7 +405,15 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         std::fs::write(&p, format!("# H\n\n{body}")).unwrap();
-        let ex = MarkdownParser::new(2).parse(&p).unwrap();
+        let ex = MarkdownParser
+            .parse_chunked(
+                &p,
+                ChunkParams {
+                    size: 2,
+                    overlap: 100,
+                },
+            )
+            .unwrap();
         assert!(!ex.chunks.is_empty());
         assert!(ex.chunks.len() <= 60, "got {} chunks", ex.chunks.len());
     }

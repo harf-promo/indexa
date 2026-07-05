@@ -1,0 +1,82 @@
+# Manual dense/RRF retrieval eval — the counterpart to ci.yml's hermetic sparse gate.
+#
+# ci.yml scores retrieval in SPARSE (BM25) mode with `deep --no-embed`, so it needs no Ollama and
+# is blind to embedding-quality changes (contextual-prefix chunk embeddings, a reranker swap). This
+# workflow installs Ollama + `nomic-embed-text`, indexes this repo WITH embeddings, and scores the
+# EXACT production `retrieve()` ranking in RRF (dense+sparse) mode against the committed golden set.
+#
+# `workflow_dispatch` ONLY — it never runs on push/PR, so it costs nothing unless a human triggers
+# it (this is a public repo → unlimited free Actions minutes regardless). Run it before promoting a
+# dense change to default, and compare the printed hit_rate/MRR/recall/nDCG across branches.
+name: dense retrieval eval (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      min_hit_rate:
+        description: "Fail if dense/RRF hit-rate falls below this fraction (0..1)"
+        default: "0.80"
+        required: false
+
+concurrency:
+  group: dense-eval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dense-eval:
+    name: dense/RRF eval (Ollama + nomic-embed-text)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install Ollama and pull the embedding model
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          nohup ollama serve >/tmp/ollama.log 2>&1 &
+          # Wait for the server to accept connections before pulling.
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:11434/api/version >/dev/null; then break; fi
+            sleep 1
+          done
+          ollama pull nomic-embed-text
+
+      - name: Write a CI config (Ollama embeddings; describer off so no LLM is pulled)
+        run: |
+          cat > /tmp/ci-dense.toml <<'TOML'
+          [embedding]
+          provider = "ollama"
+          model = "nomic-embed-text"
+
+          # `deep` and `eval` never call the describer LLM (summaries are a separate `summarize`
+          # stage; contextual/caption are opt-in). Pointing the describer at a non-ollama provider
+          # keeps preflight from demanding the ~10 GB gemma3 summary models in CI — no key is used.
+          [describer]
+          provider = "openai"
+          TOML
+
+      - name: Build indexa (debug)
+        run: cargo build -p indexa
+
+      - name: Index this repo WITH embeddings
+        run: |
+          ./target/debug/indexa --config /tmp/ci-dense.toml scan .
+          ./target/debug/indexa --config /tmp/ci-dense.toml deep .
+
+      - name: Score dense/RRF retrieval against the self-golden set
+        run: |
+          ./target/debug/indexa --config /tmp/ci-dense.toml eval fixtures/self-golden.json \
+            --mode rrf --top-k 10 --min-hit-rate "${{ github.event.inputs.min_hit_rate }}"

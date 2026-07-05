@@ -44,7 +44,7 @@ use crate::pdf::PdfParser;
 use crate::presentation::PresentationParser;
 use crate::svg::SvgParser;
 use crate::text::{MarkdownParser, TextParser};
-use crate::types::{Extracted, Parser, Support};
+use crate::types::{ChunkParams, Extracted, Parser, Support};
 use anyhow::{bail, Result};
 use std::path::Path;
 
@@ -59,6 +59,10 @@ use std::path::Path;
 /// For one-shot parsing without customisation, use the free-function [`parse`].
 pub struct Registry {
     parsers: Vec<Box<dyn Parser>>,
+    /// Chunk sizing threaded to every word-window parser via `parse_chunked`.
+    /// `Registry::new` leaves this at the historical 800/100 default; `with_chunk`
+    /// overrides it from `[chunking]` config.
+    chunk: ChunkParams,
 }
 
 impl Default for Registry {
@@ -76,21 +80,31 @@ impl Registry {
                 Box::new(CodeParser),
                 Box::new(PdfParser),
                 Box::new(EpubParser),
-                Box::new(OrgParser::default()),
+                Box::new(OrgParser),
                 Box::new(SvgParser), // must precede ImageParser (image/svg+xml)
                 Box::new(ImageParser),
                 Box::new(MediaParser),
                 Box::new(PresentationParser), // must precede OfficeParser (pptx vs. ppt)
                 Box::new(IworkParser),        // .pages/.numbers/.key → embedded preview PDF
                 Box::new(OfficeParser),
-                Box::new(EmailParser),           // .eml/.msg
+                Box::new(EmailParser),   // .eml/.msg
                 Box::new(ArchiveParser), // .zip/.tar/.tar.gz — after office/epub so it never claims their zip containers
                 Box::new(BinaryParser),  // .so/.dylib/.exe/.wasm/.jar — symbol/export listing
-                Box::new(HtmlParser::default()), // .html/.htm → Markdown, before the text fallback
-                Box::new(MarkdownParser::default()),
-                Box::new(TextParser::default()),
+                Box::new(HtmlParser),    // .html/.htm → Markdown, before the text fallback
+                Box::new(MarkdownParser),
+                Box::new(TextParser),
             ],
+            chunk: ChunkParams::default(),
         }
+    }
+
+    /// Build a registry whose word-window parsers use the given chunk sizing (from `[chunking]`
+    /// config). Same parser list as [`Registry::new`]; only the `size`/`overlap` threaded through
+    /// `parse_chunked` differ.
+    pub fn with_chunk(chunk: ChunkParams) -> Self {
+        let mut r = Self::new();
+        r.chunk = chunk;
+        r
     }
 
     /// Register a custom parser. It is inserted **before** the built-ins so it
@@ -104,7 +118,7 @@ impl Registry {
         let mime = mime_guess::from_path(path)
             .first_or_octet_stream()
             .to_string();
-        dispatch(&self.parsers, path, &mime)
+        dispatch(&self.parsers, path, &mime, self.chunk)
     }
 
     /// Parse `path` with size and panic guards (see [`parse_guarded`]), using this
@@ -176,20 +190,25 @@ pub fn parse(path: &Path) -> Result<Extracted> {
 }
 
 /// Core dispatch logic shared by [`Registry::parse`] and the free-function [`parse`].
-fn dispatch(parsers: &[Box<dyn Parser>], path: &Path, mime: &str) -> Result<Extracted> {
+fn dispatch(
+    parsers: &[Box<dyn Parser>],
+    path: &Path,
+    mime: &str,
+    chunk: ChunkParams,
+) -> Result<Extracted> {
     // Prefer path-aware acceptance (handles extensions mime_guess gets wrong).
     if let Some(p) = parsers.iter().find(|p| p.accepts_path(path)) {
-        return p.parse(path);
+        return p.parse_chunked(path, chunk);
     }
 
     // MIME-based fallback.
     if let Some(p) = parsers.iter().find(|p| p.accepts_mime(mime)) {
-        return p.parse(path);
+        return p.parse_chunked(path, chunk);
     }
 
     // Last resort: plain text for text/* MIME types.
     if mime.starts_with("text/") {
-        return TextParser::default().parse(path);
+        return TextParser.parse_chunked(path, chunk);
     }
 
     // Many text files have no extension, or a name `mime_guess` maps to
@@ -197,7 +216,7 @@ fn dispatch(parsers: &[Box<dyn Parser>], path: &Path, mime: &str) -> Result<Extr
     // bytes: if it looks like UTF-8 text with no NUL byte, index it as plain text
     // instead of warning "no parser".
     if looks_like_text(path) {
-        return TextParser::default().parse(path);
+        return TextParser.parse_chunked(path, chunk);
     }
 
     bail!("no parser for: {} (MIME: {mime})", path.display());
@@ -321,6 +340,38 @@ mod tests {
         assert!(parse_guarded(&p, size, 0).is_ok());
         // A generous cap → parses fine.
         assert!(parse_guarded(&p, size, 10_000_000).is_ok());
+    }
+
+    #[test]
+    fn with_chunk_config_reaches_the_chunker() {
+        // A ~40-word file: the default 800-word window yields one chunk, but a small
+        // config (5 words, no overlap) must slice it into many. Proves `[chunking]`
+        // size/overlap actually flows Registry → dispatch → parse_chunked → chunk_words,
+        // not just for plain text but through the whole word-window path.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("long.txt");
+        let text = (0..40)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        std::fs::write(&p, &text).unwrap();
+
+        let default_chunks = Registry::new().parse(&p).unwrap().chunks.len();
+        let small = Registry::with_chunk(ChunkParams {
+            size: 5,
+            overlap: 0,
+        });
+        let small_chunks = small.parse(&p).unwrap().chunks.len();
+
+        assert_eq!(default_chunks, 1, "800-word default should be one chunk");
+        assert!(
+            small_chunks >= 8,
+            "size=5 over 40 words should be ~8 chunks, got {small_chunks}"
+        );
+        assert!(
+            small_chunks > default_chunks,
+            "smaller chunk size must yield more chunks ({small_chunks} vs {default_chunks})"
+        );
     }
 
     // ── Plugin SDK: Registry ──────────────────────────────────────────────────

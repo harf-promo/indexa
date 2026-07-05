@@ -75,6 +75,13 @@ pub(crate) async fn api_watch_start(
     let embedder = state.embedder.clone();
     let embed_model = state.config.embedding.model.clone();
     let max_parse_bytes = state.config.parsers.max_file_mb.saturating_mul(1024 * 1024);
+    // Chunk-aware registry honoring `[chunking]` size/overlap; built before the `'static` watch
+    // task so it can be moved in and reused for every event.
+    let registry =
+        indexa_parsers::registry::Registry::with_chunk(indexa_parsers::types::ChunkParams {
+            size: state.config.chunking.size,
+            overlap: state.config.chunking.overlap,
+        });
     let watch_root = PathBuf::from(&path);
     let watch_root2 = watch_root.clone();
     let events_count = Arc::new(AtomicU64::new(0));
@@ -136,11 +143,7 @@ pub(crate) async fn api_watch_start(
                     ChangeKind::Upsert => {
                         let meta = std::fs::metadata(path).ok();
                         let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                        let extracted = match indexa_parsers::registry::parse_guarded(
-                            path,
-                            size,
-                            max_parse_bytes,
-                        ) {
+                        let extracted = match registry.parse_guarded(path, size, max_parse_bytes) {
                             Ok(e) => e,
                             Err(_) => return,
                         };

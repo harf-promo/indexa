@@ -1,10 +1,10 @@
 //! PDF text extraction via `pdf-extract` (pure Rust, text-layer PDFs only).
 //!
-//! Extracts text per-page and splits into ~800-word chunks with 100-word overlap.
+//! Extracts text per-page and splits into word chunks (sizes from `[chunking]` config; default ~800 words / 100 overlap).
 //! Scanned / image-only PDFs will produce empty or near-empty output — OCR is an
 //! opt-in enhancement (Marker or Tesseract, configurable in config.toml).
 
-use crate::types::{Chunk, Extracted, Parser};
+use crate::types::{Chunk, ChunkParams, Extracted, Parser};
 use anyhow::{anyhow, bail, Result};
 use std::path::Path;
 
@@ -25,6 +25,10 @@ impl Parser for PdfParser {
     }
 
     fn parse(&self, path: &Path) -> Result<Extracted> {
+        self.parse_chunked(path, ChunkParams::default())
+    }
+
+    fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> Result<Extracted> {
         let bytes = std::fs::read(path)?;
 
         // pdf_extract::extract_text_from_mem returns one big string.
@@ -53,16 +57,16 @@ impl Parser for PdfParser {
             if use_sections {
                 let mut seq = 0usize;
                 for (heading, body) in sections {
-                    word_window_chunks(path, &body, &heading, &mut seq, &mut chunks);
+                    word_window_chunks(path, &body, &heading, chunk, &mut seq, &mut chunks);
                 }
             } else {
                 // Flat 800-word windows (original behaviour).
                 let mut seq = 0usize;
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     let full = format!("File: {name}\n{text}");
-                    word_window_chunks(path, &full, "", &mut seq, &mut chunks);
+                    word_window_chunks(path, &full, "", chunk, &mut seq, &mut chunks);
                 } else {
-                    word_window_chunks(path, &text, "", &mut seq, &mut chunks);
+                    word_window_chunks(path, &text, "", chunk, &mut seq, &mut chunks);
                 }
             }
         }
@@ -119,10 +123,20 @@ fn word_window_chunks(
     path: &Path,
     text: &str,
     heading: &str,
+    chunk: ChunkParams,
     seq: &mut usize,
     chunks: &mut Vec<Chunk>,
 ) {
-    crate::types::chunk_words(path, text, heading, None, 800, 100, seq, chunks);
+    crate::types::chunk_words(
+        path,
+        text,
+        heading,
+        None,
+        chunk.size,
+        chunk.overlap,
+        seq,
+        chunks,
+    );
 }
 
 /// OCR a scanned PDF (one with no text layer): rasterise each page to PNG with `pdftoppm`

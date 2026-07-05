@@ -3,7 +3,7 @@
 //! and a `.jar` by its class names. **Names only** — no disassembly. Pure-Rust (`object`,
 //! `wasmparser`); a stripped or unreadable binary yields a quiet stub.
 
-use crate::types::{chunk_words, Chunk, Extracted, Parser};
+use crate::types::{chunk_words, Chunk, ChunkParams, Extracted, Parser};
 use anyhow::Result;
 use std::path::Path;
 
@@ -38,6 +38,10 @@ impl Parser for BinaryParser {
     }
 
     fn parse(&self, path: &Path) -> Result<Extracted> {
+        self.parse_chunked(path, ChunkParams::default())
+    }
+
+    fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> Result<Extracted> {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let display = path
             .file_name()
@@ -67,8 +71,8 @@ impl Parser for BinaryParser {
             &text,
             "symbols",
             None,
-            800,
-            100,
+            chunk.size,
+            chunk.overlap,
             &mut seq,
             &mut chunks,
         );
