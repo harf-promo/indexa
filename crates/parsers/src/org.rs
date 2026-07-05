@@ -1,18 +1,10 @@
 //! Org-mode parser — heading-aware, handles code blocks, mirrors MarkdownParser pattern.
 
-use crate::types::{Chunk, Extracted, Parser};
+use crate::types::{Chunk, ChunkParams, Extracted, Parser};
 use anyhow::Result;
 use std::path::Path;
 
-pub struct OrgParser {
-    chunk_size: usize,
-}
-
-impl Default for OrgParser {
-    fn default() -> Self {
-        Self { chunk_size: 800 }
-    }
-}
+pub struct OrgParser;
 
 impl Parser for OrgParser {
     fn accepts_path(&self, path: &Path) -> bool {
@@ -25,6 +17,10 @@ impl Parser for OrgParser {
     }
 
     fn parse(&self, path: &Path) -> Result<Extracted> {
+        self.parse_chunked(path, ChunkParams::default())
+    }
+
+    fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> Result<Extracted> {
         let raw = std::fs::read_to_string(path)?;
         let sections = collect_sections(&raw);
 
@@ -36,7 +32,7 @@ impl Parser for OrgParser {
             if words.is_empty() {
                 continue;
             }
-            if words.len() <= self.chunk_size {
+            if words.len() <= chunk.size {
                 chunks.push(Chunk {
                     source: path.to_path_buf(),
                     seq,
@@ -48,7 +44,7 @@ impl Parser for OrgParser {
             } else {
                 let mut start = 0;
                 loop {
-                    let end = (start + self.chunk_size).min(words.len());
+                    let end = (start + chunk.size).min(words.len());
                     chunks.push(Chunk {
                         source: path.to_path_buf(),
                         seq,
@@ -60,8 +56,8 @@ impl Parser for OrgParser {
                     if end == words.len() {
                         break;
                     }
-                    // saturating + min(1) so a chunk_size <= 100 can't underflow or stall.
-                    start += self.chunk_size.saturating_sub(100).max(1);
+                    // saturating + min(1) so a size <= overlap can't underflow or stall.
+                    start += chunk.size.saturating_sub(chunk.overlap).max(1);
                 }
             }
         }
@@ -269,7 +265,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.org");
         std::fs::write(&path, src).unwrap();
-        OrgParser::default().parse(&path).unwrap()
+        OrgParser.parse(&path).unwrap()
     }
 
     #[test]
@@ -310,7 +306,7 @@ mod tests {
 
     #[test]
     fn org_parser_accepts_org_extension() {
-        let p = OrgParser::default();
+        let p = OrgParser;
         assert!(p.accepts_path(Path::new("notes.org")));
         assert!(!p.accepts_path(Path::new("notes.md")));
     }

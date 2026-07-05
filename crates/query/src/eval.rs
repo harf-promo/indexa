@@ -560,4 +560,70 @@ mod tests {
         assert_eq!(m.retrieved, 1, "k=1 must cap retrieval, not just scoring");
         assert!(m.hit);
     }
+
+    /// Live dense/RRF A/B eval over the committed golden set against a populated index. The CI gate
+    /// scores sparse-only (hermetic, no Ollama), so it can't see an embedding change; this is the
+    /// opt-in counterpart that *can* — run it on `main` and on a branch to prove a contextual-prefix
+    /// embedding change (or a reranker swap) doesn't regress recall/nDCG before promoting it to
+    /// default. `#[ignore]`d: needs a real Ollama (`nomic-embed-text`) + a populated index.
+    ///
+    /// ```bash
+    /// # uses the macOS default index unless INDEXA_TEST_INDEX_DB is set
+    /// cargo test -p indexa-query dense_rrf_eval_over_golden -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore = "dense A/B; needs Ollama (nomic-embed-text) + a populated index; run with --ignored --nocapture"]
+    async fn dense_rrf_eval_over_golden() {
+        use indexa_embed::Embedder;
+
+        let db = std::env::var("INDEXA_TEST_INDEX_DB")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                    .join("Library/Application Support/dev.indexa.Indexa/index.db")
+            });
+        if !db.exists() {
+            eprintln!("SKIP: no index at {db:?} (set INDEXA_TEST_INDEX_DB)");
+            return;
+        }
+
+        // The committed golden set, located relative to this crate so it works from any checkout.
+        let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/self-golden.json");
+        let raw = std::fs::read_to_string(&golden_path)
+            .unwrap_or_else(|e| panic!("read golden {golden_path:?}: {e}"));
+        let golden: GoldenSet = serde_json::from_str(&raw).expect("parse golden json");
+
+        let store = Store::open(&db).unwrap();
+        let embedder =
+            indexa_embed::OllamaEmbedder::new("http://localhost:11434", "nomic-embed-text", 768);
+        // RRF fuses dense + sparse; rerank off keeps this an embedding/retrieval measurement (no LLM).
+        let cfg = QaConfig {
+            mode: HybridMode::Rrf,
+            top_k: 10,
+            rerank: false,
+            ..QaConfig::default()
+        };
+
+        let mut per_question = Vec::with_capacity(golden.questions.len());
+        for q in &golden.questions {
+            let vec = embedder.embed(&q.question).await.expect("embed question");
+            per_question.push(evaluate_question(&store, q, &cfg, Some(&vec)).unwrap());
+        }
+        let summary = aggregate(&per_question);
+        eprintln!(
+            "dense/RRF over {} golden Qs: hit_rate={:.3} mrr={:.3} recall={:.3} ndcg={:.3}",
+            summary.questions,
+            summary.hit_rate,
+            summary.mrr,
+            summary.mean_recall,
+            summary.mean_ndcg
+        );
+        // Loose floor: dense hybrid over the self-index should comfortably clear 0.5.
+        assert!(
+            summary.hit_rate >= 0.5,
+            "dense hit_rate {:.3} below floor 0.5 — retrieval regression?",
+            summary.hit_rate
+        );
+    }
 }

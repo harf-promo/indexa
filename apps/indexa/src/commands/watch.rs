@@ -37,6 +37,9 @@ pub(crate) async fn cmd_watch(
 
     let db_path_clone = db_path.clone();
     let max_parse_bytes = cfg.parsers.max_file_mb.saturating_mul(1024 * 1024);
+    // Chunk-aware registry, built before the (`'static`) watch closure so it can be moved in and
+    // reused for every event, honoring `[chunking]` size/overlap.
+    let registry = super::helpers::chunk_registry(cfg);
     // `resolve_roots` already returns canonical (verbatim-stripped) roots, which match
     // notify's canonical event paths — so the ancestor-walk `starts_with` check works
     // without re-canonicalizing here (which on Windows would re-add the `\\?\` prefix).
@@ -85,11 +88,7 @@ pub(crate) async fn cmd_watch(
                 ChangeKind::Upsert => {
                     let meta = std::fs::metadata(path).ok();
                     let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                    let extracted = match indexa_parsers::registry::parse_guarded(
-                        path,
-                        size,
-                        max_parse_bytes,
-                    ) {
+                    let extracted = match registry.parse_guarded(path, size, max_parse_bytes) {
                         Ok(e) => e,
                         Err(_) => return,
                     };

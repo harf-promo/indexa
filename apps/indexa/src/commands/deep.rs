@@ -38,6 +38,9 @@ pub(crate) async fn cmd_deep(
         return Ok(());
     };
     let max_parse_bytes = cfg.parsers.max_file_mb.saturating_mul(1024 * 1024);
+    // Parser registry honoring `[chunking]` size/overlap; built once and reused for every file
+    // (both the dry-run count and the real parse) instead of the free `parse_guarded`.
+    let registry = super::helpers::chunk_registry(cfg);
     let walk_cfg = WalkConfig {
         respect_gitignore: cfg.scan.respect_gitignore,
         ignore: cfg.scan.ignore.clone(),
@@ -64,11 +67,7 @@ pub(crate) async fn cmd_deep(
                 .collect();
             total_files += files.len();
             for entry in files {
-                if let Ok(ex) = indexa_parsers::registry::parse_guarded(
-                    &entry.path,
-                    entry.size,
-                    max_parse_bytes,
-                ) {
+                if let Ok(ex) = registry.parse_guarded(&entry.path, entry.size, max_parse_bytes) {
                     total_chunks += ex.chunks.len();
                     let family = ex.mime.split('/').next().unwrap_or("other").to_owned();
                     *by_mime.entry(family).or_default() += 1;
@@ -239,14 +238,11 @@ pub(crate) async fn cmd_deep(
                 continue;
             }
 
-            let mut extracted = match indexa_parsers::registry::parse_guarded(
-                &entry.path,
-                entry.size,
-                max_parse_bytes,
-            ) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
+            let mut extracted =
+                match registry.parse_guarded(&entry.path, entry.size, max_parse_bytes) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
 
             // Image captioning (opt-in): append a vision-model caption as an extra chunk
             // (kept alongside the EXIF chunk, not replacing it — both are searchable).

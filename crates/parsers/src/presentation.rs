@@ -19,7 +19,7 @@
 //!   NOT handled here. `.ppt` is claimed by `OfficeParser` which returns a quiet stub.
 
 use crate::office::strip_xml_tags;
-use crate::types::{Chunk, Extracted, Parser};
+use crate::types::{Chunk, ChunkParams, Extracted, Parser};
 use std::io::Read;
 use std::path::Path;
 
@@ -47,6 +47,10 @@ impl Parser for PresentationParser {
     }
 
     fn parse(&self, path: &Path) -> anyhow::Result<Extracted> {
+        self.parse_chunked(path, ChunkParams::default())
+    }
+
+    fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> anyhow::Result<Extracted> {
         let filename = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -54,7 +58,7 @@ impl Parser for PresentationParser {
 
         // Graceful fallback — never bail!, so the deep phase stores a stub rather than
         // counting this as a hard_error.
-        let chunks = match parse_pptx(path, filename) {
+        let chunks = match parse_pptx(path, filename, chunk) {
             Ok(c) if !c.is_empty() => c,
             _ => fallback_chunk(path, filename),
         };
@@ -83,7 +87,7 @@ fn fallback_chunk(path: &Path, filename: &str) -> Vec<Chunk> {
 
 /// Extract slide text + notes from a PPTX zip. Returns `Err` only on I/O failure
 /// opening the file; individual slide errors are silently skipped (best-effort).
-fn parse_pptx(path: &Path, filename: &str) -> anyhow::Result<Vec<Chunk>> {
+fn parse_pptx(path: &Path, filename: &str, chunk: ChunkParams) -> anyhow::Result<Vec<Chunk>> {
     let file = std::fs::File::open(path)?;
     let mut archive = zip::ZipArchive::new(file)?;
 
@@ -225,8 +229,8 @@ fn parse_pptx(path: &Path, filename: &str) -> anyhow::Result<Vec<Chunk>> {
             &full_text,
             &heading,
             None,
-            800,
-            100,
+            chunk.size,
+            chunk.overlap,
             &mut seq,
             &mut chunks,
         );
@@ -260,7 +264,16 @@ fn parse_pptx(path: &Path, filename: &str) -> anyhow::Result<Vec<Chunk>> {
         } else {
             "Diagram"
         };
-        crate::types::chunk_words(path, text, heading, None, 800, 100, &mut seq, &mut chunks);
+        crate::types::chunk_words(
+            path,
+            text,
+            heading,
+            None,
+            chunk.size,
+            chunk.overlap,
+            &mut seq,
+            &mut chunks,
+        );
     }
 
     // If all slides were empty/skipped, return fallback.

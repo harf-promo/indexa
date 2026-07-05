@@ -1,6 +1,6 @@
 //! Office format parser: xlsx/csv via calamine, plain-text extraction for docx.
 
-use crate::types::{Chunk, Extracted, Parser};
+use crate::types::{Chunk, ChunkParams, Extracted, Parser};
 use anyhow::Result;
 use std::path::Path;
 
@@ -59,6 +59,10 @@ impl Parser for OfficeParser {
     }
 
     fn parse(&self, path: &Path) -> Result<Extracted> {
+        self.parse_chunked(path, ChunkParams::default())
+    }
+
+    fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> Result<Extracted> {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         let text = match ext {
@@ -104,7 +108,7 @@ impl Parser for OfficeParser {
             _ => "application/octet-stream",
         };
 
-        // Split into ~800-word chunks with 100-word overlap.
+        // Split into word chunks with overlap (sizes from [chunking] config).
         let words: Vec<&str> = text.split_whitespace().collect();
         let mut chunks = Vec::new();
         let mut seq = 0usize;
@@ -123,7 +127,16 @@ impl Parser for OfficeParser {
                 language: None,
             });
         } else {
-            crate::types::chunk_words(path, &text, "", None, 800, 100, &mut seq, &mut chunks);
+            crate::types::chunk_words(
+                path,
+                &text,
+                "",
+                None,
+                chunk.size,
+                chunk.overlap,
+                &mut seq,
+                &mut chunks,
+            );
         }
 
         Ok(Extracted {

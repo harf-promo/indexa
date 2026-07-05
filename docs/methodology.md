@@ -407,6 +407,57 @@ change that **preserves the file's mtime** (rsync `-t`, `tar -x`, `cp -p`, some 
 re-examined until something else touches it. The web "Regenerate" action bypasses all of this
 (clears stored hashes) when you need certainty.
 
+## Chunking configuration
+
+`[chunking] size` / `overlap` (words per chunk / words shared between consecutive windows) are
+honored by every word-window parser (PDF, Office, EPUB, email, HTML, Markdown, plain text, …). The
+defaults — **800 / 100** — are unchanged, so an index built without a `[chunking]` block chunks
+exactly as before. `strategy` (`structure` / `fixed` / `recursive` / `semantic`) is currently a
+forward-looking selector: nothing branches on it yet, so all four run today's structure-aware
+word-window chunker; `size`/`overlap` apply under every variant. `[chunking]` is orthogonal to
+`[describer] contextual_prefix` — the former sets chunk *boundaries*, the latter enriches the *embed
+input* of each chunk (see below). Changing chunk size and re-running `indexa deep` re-embeds affected
+files; the embedding cache is keyed on the original chunk text, so unchanged chunks still hit cache.
+
+## Dense-mode retrieval eval (A/B for embedding changes)
+
+The CI gate (`.github/workflows/ci.yml`) scores retrieval in **sparse** (BM25/FTS) mode: it indexes
+this repo with `deep --no-embed` so it needs no Ollama and no models — fully hermetic — and asserts a
+hit-rate floor. That gate is deliberately blind to embedding-quality changes (contextual-prefix chunk
+embeddings, a reranker swap): a dense change can't move a sparse score. To measure those, run the
+**dense** eval locally (or via the manual `dense-eval` workflow), which requires Ollama +
+`nomic-embed-text` and a populated index:
+
+```bash
+# 1. Build the baseline on `main`:
+git checkout main
+indexa index .                                             # scan → deep (with embeddings) → summarize
+indexa eval fixtures/self-golden.json --mode rrf --json > /tmp/baseline.json
+
+# 2. On the feature branch, rebuild embeddings and gate against the baseline:
+git checkout <branch>
+indexa deep . --contextual-prefix                          # or the reranker/chunking change under test
+indexa eval fixtures/self-golden.json --mode rrf \
+  --baseline /tmp/baseline.json --max-regression 0.0       # exit 1 if any metric regresses
+```
+
+`--mode rrf` fuses dense + sparse (the ask pipeline's default); `--mode dense` isolates the vectors.
+`compare_to_baseline` gates on hit_rate / MRR / recall / nDCG / precision, so a change is promoted to
+default only when it shows a non-negative delta across the board. A fast in-repo version of the same
+loop is the `#[ignore]`-gated `dense_rrf_eval_over_golden` test in `crates/query/src/eval.rs` (`cargo
+test -p indexa-query dense_rrf_eval_over_golden -- --ignored --nocapture`), which skips gracefully if
+no index is present.
+
+### Late chunking — a designed follow-up, not yet built
+
+True token-level *late chunking* (embed the whole document once, mean-pool per-chunk over the token
+embeddings so each chunk vector carries document context) needs token-level output. Ollama's
+`/api/embed` returns only a pooled vector, so realizing it requires a **candle-native long-context
+embedder** (reusing the reranker's candle + `hf-hub` pattern with a JinaBERT/nomic model at
+`pooling=none`). The deterministic `[describer] contextual_prefix` — prepending file path + section
+heading + a document-context snippet to each chunk's embed input — is the shippable, zero-token-cost
+local approximation of the same benefit; late chunking is tracked as the higher-fidelity successor.
+
 ## Decision log
 
 Changes to defaults are recorded here with rationale.
@@ -424,3 +475,4 @@ Changes to defaults are recorded here with rationale.
 | 2026-05-28 | Default describer upgraded: `gemma3:12b` / `gemma3:4b` (was `gemma2:9b` / `gemma2:2b`) | Gemma 3 (March 2025) outperforms Gemma 2 at same parameter count; available on Ollama |
 | 2026-05-28 | Added `google` embedding provider | Google `text-embedding-004` matches nomic-embed-text dim (768), state-of-the-art quality |
 | 2026-06-11 | Call-graph queries resolve calls by tier (same-file → same-dir → import → bare) at query time; strict = drop bare tier (was: unique-definition name filter) | Bare-name matching's worst false positive — a local helper named like a popular symbol fanning out repo-wide — is structural, not statistical; tiered resolution removes it without re-indexing, never invents edges, and confines the caveat to the labeled bare remainder |
+| 2026-07-05 | `[chunking] size`/`overlap` now honored by every word-window parser (was: hardcoded 800/100, config ignored) | The config existed but was dead; threading it via a defaulted `Parser::parse_chunked` keeps defaults (800/100) and the public trait intact while making the knob real — a prerequisite for eval-tuning chunk size |

@@ -43,6 +43,25 @@ pub struct Extracted {
 /// makes Ollama 500 with "the input length exceeds the context length".
 pub const MAX_CHUNK_CHARS: usize = 4000;
 
+/// Chunk sizing knobs threaded from `[chunking]` config into the word-window parsers.
+/// `size` is the target words per chunk; `overlap` is the words shared between consecutive
+/// windows. [`Default`] is the historical `800`/`100` so every free-function / `Registry::new`
+/// path stays behavior-neutral.
+#[derive(Debug, Clone, Copy)]
+pub struct ChunkParams {
+    pub size: usize,
+    pub overlap: usize,
+}
+
+impl Default for ChunkParams {
+    fn default() -> Self {
+        Self {
+            size: 800,
+            overlap: 100,
+        }
+    }
+}
+
 /// Split `s` into consecutive pieces, each at most `max_chars` chars, breaking on a
 /// UTF-8 boundary (preferring the last ASCII space in the window for a cleaner cut).
 /// `floor_char_boundary` is nightly-only, so the cut from `char_indices().nth(..)` is
@@ -162,6 +181,23 @@ pub trait Parser: Send + Sync {
     fn accepts_mime(&self, mime: &str) -> bool;
     /// Parse the file at `path` and return extracted chunks.
     fn parse(&self, path: &std::path::Path) -> anyhow::Result<Extracted>;
+
+    /// Parse honoring caller-supplied chunk sizing (from `[chunking]` config).
+    /// Default delegates to [`parse`](Parser::parse) and ignores `chunk`, so parsers that don't
+    /// word-window (code/image/media) and external/plugin parsers need no change. Word-window
+    /// parsers OVERRIDE this to thread `chunk.size`/`chunk.overlap` into their chunker, and make
+    /// their `parse` delegate here with [`ChunkParams::default`].
+    ///
+    /// NOTE: if you override this **and** make `parse` call it, you MUST override this — otherwise
+    /// the default `parse_chunked → parse → parse_chunked` recurses forever.
+    fn parse_chunked(
+        &self,
+        path: &std::path::Path,
+        chunk: ChunkParams,
+    ) -> anyhow::Result<Extracted> {
+        let _ = chunk;
+        self.parse(path)
+    }
 
     /// The `(extension, support level)` pairs this parser advertises, for `indexa formats`.
     /// Default: none (parsers matched by MIME only, or that don't want to be advertised).

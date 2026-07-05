@@ -8,7 +8,7 @@
 //! Registered *after* the Office/EPUB parsers, and matched on the full `.zip`/`.tar`/`.tar.gz`
 //! /`.tgz` name, so it never hijacks the zip-container formats those own (docx/xlsx/pptx/epub/odt).
 
-use crate::types::{chunk_words, Chunk, Extracted, Parser};
+use crate::types::{chunk_words, Chunk, ChunkParams, Extracted, Parser};
 use anyhow::Result;
 use std::io::Read;
 use std::path::Path;
@@ -45,6 +45,10 @@ impl Parser for ArchiveParser {
     }
 
     fn parse(&self, path: &Path) -> Result<Extracted> {
+        self.parse_chunked(path, ChunkParams::default())
+    }
+
+    fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> Result<Extracted> {
         let name = file_name_lower(path);
         let (entries, mime) = if name.ends_with(".zip") {
             (list_zip(path), "application/zip")
@@ -84,8 +88,8 @@ impl Parser for ArchiveParser {
             &listing,
             "contents",
             None,
-            800,
-            100,
+            chunk.size,
+            chunk.overlap,
             &mut seq,
             &mut chunks,
         );

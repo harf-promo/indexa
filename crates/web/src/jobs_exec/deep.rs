@@ -120,6 +120,15 @@ pub(crate) async fn run_deep_phase(
         std::collections::VecDeque::with_capacity(16);
     samples.push_back((std::time::Instant::now(), 0));
     let max_parse_bytes = state.config.parsers.max_file_mb.saturating_mul(1024 * 1024);
+    // Chunk-aware registry honoring `[chunking]` size/overlap. This loop spawns a fresh blocking
+    // task per file, so share one registry via `Arc` (cloned into each closure) rather than
+    // rebuilding a default one per file (which the free `parse_guarded` would do).
+    let registry = std::sync::Arc::new(indexa_parsers::registry::Registry::with_chunk(
+        indexa_parsers::types::ChunkParams {
+            size: state.config.chunking.size,
+            overlap: state.config.chunking.overlap,
+        },
+    ));
 
     for entry in &files {
         // Honor cancellation requested via DELETE /api/jobs/:id.
@@ -153,8 +162,9 @@ pub(crate) async fn run_deep_phase(
         } else {
             let ep = entry.path.clone();
             let sz = entry.size;
+            let reg = registry.clone();
             let mut extracted = match tokio::task::spawn_blocking(move || {
-                indexa_parsers::registry::parse_guarded(&ep, sz, max_parse_bytes)
+                reg.parse_guarded(&ep, sz, max_parse_bytes)
             })
             .await
             {

@@ -425,6 +425,16 @@ pub(crate) fn migrate_legacy_data_dir(new_dir: &std::path::Path) {
 
 /// Parse the `--mode` flag into a `SummaryMode`, rejecting unknown values with a
 /// clear error instead of silently treating a typo (e.g. `compres`) as `augment`.
+/// Build a parser registry whose word-window parsers honor `[chunking]` `size`/`overlap`
+/// (default 800/100). Every content-parse pipeline (`deep`, `watch`) uses this instead of the
+/// free `registry::parse_guarded`, which would rebuild a default-800/100 registry per call.
+pub(crate) fn chunk_registry(cfg: &Config) -> indexa_parsers::registry::Registry {
+    indexa_parsers::registry::Registry::with_chunk(indexa_parsers::types::ChunkParams {
+        size: cfg.chunking.size,
+        overlap: cfg.chunking.overlap,
+    })
+}
+
 pub(crate) fn parse_summary_mode(mode: &str) -> Result<SummaryMode> {
     match mode {
         "augment" => Ok(SummaryMode::Augment),

@@ -6,7 +6,7 @@
 //! rasterisation/OCR — text drawn as outlined vector paths (glyphs converted to shapes) is
 //! not recovered. This indexes the *words in a diagram*, not its drawing instructions.
 
-use crate::types::{chunk_words, Chunk, Extracted, Parser};
+use crate::types::{chunk_words, Chunk, ChunkParams, Extracted, Parser};
 use anyhow::Result;
 use std::path::Path;
 
@@ -27,12 +27,25 @@ impl Parser for SvgParser {
     }
 
     fn parse(&self, path: &Path) -> Result<Extracted> {
+        self.parse_chunked(path, ChunkParams::default())
+    }
+
+    fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> Result<Extracted> {
         let raw = std::fs::read_to_string(path)?;
         let text = extract_svg_text(&raw);
 
         let mut chunks = Vec::new();
         let mut seq = 0usize;
-        chunk_words(path, &text, "", None, 800, 100, &mut seq, &mut chunks);
+        chunk_words(
+            path,
+            &text,
+            "",
+            None,
+            chunk.size,
+            chunk.overlap,
+            &mut seq,
+            &mut chunks,
+        );
         if chunks.is_empty() {
             chunks.push(Chunk {
                 source: path.to_path_buf(),

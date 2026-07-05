@@ -4,19 +4,11 @@
 //! executed; tables are flattened to Markdown.
 
 use crate::text::chunk_markdown;
-use crate::types::{Chunk, Extracted, Parser};
+use crate::types::{Chunk, ChunkParams, Extracted, Parser};
 use anyhow::Result;
 use std::path::Path;
 
-pub struct HtmlParser {
-    chunk_size: usize,
-}
-
-impl Default for HtmlParser {
-    fn default() -> Self {
-        Self { chunk_size: 800 }
-    }
-}
+pub struct HtmlParser;
 
 impl Parser for HtmlParser {
     fn accepts_path(&self, path: &Path) -> bool {
@@ -36,6 +28,10 @@ impl Parser for HtmlParser {
     }
 
     fn parse(&self, path: &Path) -> Result<Extracted> {
+        self.parse_chunked(path, ChunkParams::default())
+    }
+
+    fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> Result<Extracted> {
         let html = std::fs::read_to_string(path)?;
         // htmd does not drop <script>/<style> content, so remove those blocks first (mirrors
         // the remote-source fetch path), then convert to Markdown. Fall back to the cleaned
@@ -43,7 +39,7 @@ impl Parser for HtmlParser {
         let cleaned = strip_blocks(&strip_blocks(&html, "script"), "style");
         let markdown = htmd::convert(&cleaned).unwrap_or(cleaned);
 
-        let mut chunks = chunk_markdown(path, &markdown, self.chunk_size);
+        let mut chunks = chunk_markdown(path, &markdown, chunk.size, chunk.overlap);
         if chunks.is_empty() {
             chunks.push(Chunk {
                 source: path.to_path_buf(),
@@ -112,7 +108,7 @@ mod tests {
                <h2>Details</h2><p>Sessions are minted per request.</p></body></html>"#,
         )
         .unwrap();
-        let ex = HtmlParser::default().parse(&p).unwrap();
+        let ex = HtmlParser.parse(&p).unwrap();
         let all: String = ex
             .chunks
             .iter()
@@ -132,7 +128,7 @@ mod tests {
 
     #[test]
     fn html_accepts_extensions_and_mime() {
-        let p = HtmlParser::default();
+        let p = HtmlParser;
         assert!(p.accepts_path(Path::new("/x/index.html")));
         assert!(p.accepts_path(Path::new("/x/page.htm")));
         assert!(!p.accepts_path(Path::new("/x/page.md")));
