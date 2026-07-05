@@ -354,6 +354,7 @@ mod tests {
                         size: 0,
                         modified: None,
                         hint: None,
+                        is_binary: false,
                     },
                     Entry {
                         path: inside.clone(),
@@ -361,6 +362,7 @@ mod tests {
                         size: 11,
                         modified: None,
                         hint: None,
+                        is_binary: false,
                     },
                 ])
                 .unwrap();
@@ -406,6 +408,7 @@ mod tests {
                         size: 0,
                         modified: None,
                         hint: None,
+                        is_binary: false,
                     },
                     Entry {
                         path: inside.clone(),
@@ -413,6 +416,7 @@ mod tests {
                         size: 16,
                         modified: None,
                         hint: None,
+                        is_binary: false,
                     },
                 ])
                 .unwrap();

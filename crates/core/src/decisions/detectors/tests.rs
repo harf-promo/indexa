@@ -13,6 +13,7 @@ fn old_entry(path: &str, kind: EntryKind) -> Entry {
         size: 0,
         modified: Some(UNIX_EPOCH + Duration::from_secs(1_000)),
         hint: None,
+        is_binary: false,
     }
 }
 
@@ -464,6 +465,7 @@ fn fresh_entry(path: &str, kind: EntryKind) -> Entry {
         size: 0,
         modified: Some(std::time::SystemTime::now()),
         hint: None,
+        is_binary: false,
     }
 }
 

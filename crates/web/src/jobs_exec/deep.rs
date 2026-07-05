@@ -21,7 +21,14 @@ pub(crate) async fn run_deep_phase_standalone(
     path: &str,
     handle: &Arc<JobHandle>,
 ) {
-    let Some(entries) = walk_for_job(path, handle, &state.walk_semaphore).await else {
+    let Some(entries) = walk_for_job(
+        path,
+        handle,
+        &state.walk_semaphore,
+        state.config.scan.skip_binary,
+    )
+    .await
+    else {
         return;
     };
     let n_files = entries.iter().filter(|e| e.kind == EntryKind::File).count();
@@ -41,7 +48,7 @@ pub(crate) async fn run_deep_phase(
 ) -> bool {
     let files: Vec<_> = entries
         .iter()
-        .filter(|e| e.kind == EntryKind::File)
+        .filter(|e| e.kind == EntryKind::File && !e.is_binary)
         .collect();
     let n_files = files.len() as u64;
     let total_bytes: u64 = files.iter().map(|e| e.size).sum();

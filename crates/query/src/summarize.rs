@@ -1070,6 +1070,7 @@ mod scheduler_tests {
                 size: 10,
                 modified: None,
                 hint: None,
+                is_binary: false,
             }])
             .unwrap();
 
@@ -1777,6 +1778,7 @@ mod incremental_tests {
             size: 1,
             modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime_secs)),
             hint: None,
+            is_binary: false,
         }
     }
 

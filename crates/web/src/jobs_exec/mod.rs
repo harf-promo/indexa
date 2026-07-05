@@ -106,12 +106,21 @@ pub(crate) async fn walk_for_job(
     path: &str,
     handle: &Arc<JobHandle>,
     sem: &tokio::sync::Semaphore,
+    sniff_binary: bool,
 ) -> Option<Vec<indexa_core::walker::Entry>> {
     let _permit = sem.acquire().await.ok()?;
     let pb = std::path::PathBuf::from(path);
-    let walked = tokio::task::spawn_blocking(move || walk(&pb, &WalkConfig::default()))
-        .await
-        .unwrap_or_else(|e| Err(anyhow::anyhow!(e)));
+    let walked = tokio::task::spawn_blocking(move || {
+        walk(
+            &pb,
+            &WalkConfig {
+                sniff_binary,
+                ..WalkConfig::default()
+            },
+        )
+    })
+    .await
+    .unwrap_or_else(|e| Err(anyhow::anyhow!(e)));
     match walked {
         Ok(e) => Some(e),
         Err(e) => {
@@ -128,7 +137,14 @@ pub(crate) async fn run_index_job(
     model_override: Option<(String, String, u32)>,
 ) {
     // Phase 1: scan
-    let Some(entries) = walk_for_job(&path, &handle, &state.walk_semaphore).await else {
+    let Some(entries) = walk_for_job(
+        &path,
+        &handle,
+        &state.walk_semaphore,
+        state.config.scan.skip_binary,
+    )
+    .await
+    else {
         return;
     };
 
@@ -161,7 +177,14 @@ pub(crate) async fn run_scan_phase_standalone(
     path: &str,
     handle: &Arc<JobHandle>,
 ) {
-    let Some(entries) = walk_for_job(path, handle, &state.walk_semaphore).await else {
+    let Some(entries) = walk_for_job(
+        path,
+        handle,
+        &state.walk_semaphore,
+        state.config.scan.skip_binary,
+    )
+    .await
+    else {
         return;
     };
     if run_scan_phase_with_entries(state, path, &entries, handle).await {

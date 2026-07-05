@@ -203,6 +203,7 @@ fn boost_with_recency_ranks_fresh_above_stale() {
         size: 10,
         modified: Some(now),
         hint: None,
+        is_binary: false,
     };
     let stale = Entry {
         path: PathBuf::from("/proj/stale.rs"),
@@ -210,6 +211,7 @@ fn boost_with_recency_ranks_fresh_above_stale() {
         size: 10,
         modified: Some(now - Duration::from_secs(200 * 86_400)),
         hint: None,
+        is_binary: false,
     };
     store.upsert_entries(&[fresh, stale]).unwrap();
 

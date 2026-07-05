@@ -124,6 +124,11 @@ pub struct ScanConfig {
     /// index time. Defaults to `true`. A second protection layer on top of the sensitive-path
     /// deny list — covers secrets accidentally committed to otherwise-included source trees.
     pub redact_at_index: bool,
+    /// Skip binary files (NUL-sniffed) from content parsing during `deep`. Defaults to `false`
+    /// so ordinary repo scans stay metadata-only (fast); enable for whole-computer indexing so
+    /// executables/images/DB blobs aren't opened and parsed. The entry is still recorded either
+    /// way — this only stops the deep phase from parsing flagged binaries.
+    pub skip_binary: bool,
 }
 
 impl Default for ScanConfig {
@@ -134,6 +139,7 @@ impl Default for ScanConfig {
             auto_reindex: "off".to_owned(),
             include_sensitive: false,
             redact_at_index: true,
+            skip_binary: false,
         }
     }
 }

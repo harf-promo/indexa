@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   All three mxbai-rerank-**v1** variants share the same architecture, so `base-v1` (~370 MB) and
   `large-v1` (~870 MB) are drop-in higher-quality options. Default stays xsmall (behavior-neutral);
   only applies when `rerank_backend = "cross-encoder"`. (v2/Qwen is a different arch — not supported.)
+- **Binary-detection scan filter (`[scan] skip_binary`, whole-computer groundwork).** Off by default
+  (ordinary repo scans stay metadata-only/fast). When enabled, the walk NUL-sniffs each file's first
+  8 KB (ripgrep's `is_binary` heuristic) and the `deep` phase skips flagged binaries — so a
+  machine-wide scan doesn't open and try to parse executables/images/DB blobs. The entry is still
+  recorded (metadata preserved); only content parsing is skipped. Fail-open (an unreadable file is
+  never flagged). The NUL heuristic is now a single shared `indexa_core::text::is_binary`, reused by
+  the file-preview `binary` flag.
 - **Itemized per-answer savings — "show the math" (Savings Step 2).** The impact readout after an
   `ask` (`served X vs Y of source — N% less`) can now be expanded into the **per-file** breakdown
   behind it: each cited file's full source size, sorted largest-first, summing to the aggregate. New

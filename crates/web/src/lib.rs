@@ -469,6 +469,7 @@ mod tests {
             size: 10,
             modified: None,
             hint: None,
+            is_binary: false,
         }
     }
     fn chunk(path: &str, seq: usize, text: &str) -> ChunkRecord {

@@ -30,6 +30,7 @@ fn dummy_entry(path: &str, kind: EntryKind, size: u64) -> Entry {
         size,
         modified: None,
         hint: None,
+        is_binary: false,
     }
 }
 
