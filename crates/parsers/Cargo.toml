@@ -25,8 +25,10 @@ tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23"
 # Image EXIF
 kamadak-exif = "0.6"
-# PDF text extraction (pure Rust, text-layer PDFs)
-pdf-extract = "0.10"
+# PDF text extraction (pure Rust, text-layer PDFs). Pinned ≥0.12 so the transitive
+# lopdf is ≥0.42, which fixes the unbounded-recursion stack overflow (RUSTSEC advisory
+# against lopdf <0.42). Only `extract_text_from_mem` is used — stable across 0.10→0.12.
+pdf-extract = "0.12"
 # Office formats
 calamine = { version = "0.26", features = ["dates"] }
 # docx extraction (zip-based)
@@ -35,8 +37,10 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 serde_json = "1"
 # Temp directories for video frame extraction
 tempfile = { workspace = true }
-# XML/HTML tag stripping for EPUB and office formats
-quick-xml = "0.40"
+# XML/HTML tag stripping for EPUB and office formats. Pinned ≥0.41 to fix the
+# quadratic-attribute (RUSTSEC-2026-0194) and unbounded-namespace-allocation
+# (RUSTSEC-2026-0195) DoS advisories on our direct XML-parsing path.
+quick-xml = "0.41"
 # HTML → Markdown conversion (Apache-2.0; already used by the remote-source fetch path)
 htmd = { workspace = true }
 tar = "0.4.46"

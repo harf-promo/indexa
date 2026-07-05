@@ -38,6 +38,18 @@ ignore = [
     # paste 1.0.15 → candle-core / candle-transformers (via gemm); proc-macro crate marked
     # unmaintained with no replacement. Used internally by candle for macro expansion; no security impact.
     { id = "RUSTSEC-2024-0436", reason = "transitive via candle-core/gemm/paste; proc-macro only, no security impact" },
+    # ttf-parser 0.25.1 → lopdf 0.42 → pdf-extract (PDF text extraction). Author declared the
+    # crate unmaintained (no successor pinned by lopdf); NOT a vulnerability, no safe upgrade.
+    # Exercised only on the offline, read-only PDF-parsing path.
+    { id = "RUSTSEC-2026-0192", reason = "transitive via lopdf/pdf-extract/ttf-parser; unmaintained-not-vuln; no upstream fix; offline PDF parsing only" },
+    # quick-xml <0.41 DoS advisories. Our DIRECT XML usage (epub/svg/docx) is patched to 0.41;
+    # the only residual vulnerable copy is the transitive one pulled by calamine (xlsx parsing) —
+    # calamine's latest release (0.35) still pins quick-xml ^0.39, so no upstream fix is available.
+    # Risk is DoS-only (memory/CPU exhaustion) on a single maliciously-crafted LOCAL spreadsheet;
+    # Indexa is an offline, read-only indexer with a memory watchdog. Re-evaluate when calamine
+    # bumps quick-xml ≥0.41.
+    { id = "RUSTSEC-2026-0194", reason = "residual only via calamine→quick-xml ^0.39 (no calamine fix); direct path patched to 0.41; offline local DoS-only" },
+    { id = "RUSTSEC-2026-0195", reason = "residual only via calamine→quick-xml ^0.39 (no calamine fix); direct path patched to 0.41; offline local DoS-only" },
 ]
 
 [bans]
