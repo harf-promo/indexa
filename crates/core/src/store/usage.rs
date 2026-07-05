@@ -183,24 +183,37 @@ impl Store {
         Ok(n)
     }
 
-    /// Counterfactual bytes for a set of served paths: the full on-disk size of
-    /// each DISTINCT path (duplicate hits in one response don't double-count).
-    /// `entries.size` first; `NULLIF(…, 0)` so directories (size 0 in entries)
-    /// fall through to `summaries.byte_size`, the subtree total. Unknown paths
-    /// contribute 0 — under-counting keeps the savings claim honest.
-    pub fn counterfactual_bytes_for_paths(&self, paths: &[&str]) -> Result<u64> {
-        let distinct: HashSet<&str> = paths.iter().copied().collect();
+    /// Per-path counterfactual sizes for a set of served paths — the itemized form of
+    /// [`Store::counterfactual_bytes_for_paths`] (which sums this). Each DISTINCT path appears
+    /// once, in **first-seen order** (stable for display in the "show the math" breakdown).
+    /// Size resolution is identical: `entries.size` first, then `summaries.byte_size` for
+    /// directories (`NULLIF(…, 0)`), else 0 for unknown paths (under-counting stays honest).
+    pub fn counterfactual_sizes_for_paths(&self, paths: &[&str]) -> Result<Vec<(String, u64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT COALESCE(
                         NULLIF((SELECT size FROM entries WHERE path = ?1), 0),
                         (SELECT byte_size FROM summaries WHERE path = ?1),
                         0)",
         )?;
-        let mut total: u64 = 0;
-        for path in distinct {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut out: Vec<(String, u64)> = Vec::new();
+        for &path in paths {
+            if !seen.insert(path) {
+                continue; // duplicate hit in one response — don't double-count
+            }
             let size: i64 = stmt.query_row(params![path], |r| r.get(0))?;
-            total += size.max(0) as u64;
+            out.push((path.to_string(), size.max(0) as u64));
         }
-        Ok(total)
+        Ok(out)
+    }
+
+    /// Counterfactual bytes for a set of served paths: the sum of
+    /// [`Store::counterfactual_sizes_for_paths`] (single source of truth for the size math).
+    pub fn counterfactual_bytes_for_paths(&self, paths: &[&str]) -> Result<u64> {
+        Ok(self
+            .counterfactual_sizes_for_paths(paths)?
+            .iter()
+            .map(|(_, size)| size)
+            .sum())
     }
 }

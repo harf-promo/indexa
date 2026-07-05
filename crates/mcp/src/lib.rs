@@ -749,6 +749,7 @@ mod tests {
             agentic: Some(false),
             rerank: Some(false),
             rerank_backend: None,
+            explain_savings: None,
             session_id: sid.map(str::to_owned),
             top_k: None,
             synthesize: None,
