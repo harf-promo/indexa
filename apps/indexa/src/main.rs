@@ -16,6 +16,14 @@ async fn main() -> Result<()> {
         .map(|d| d.join("logs"))
         .unwrap_or_else(|| std::env::temp_dir().join("indexa-logs"));
     let _ = std::fs::create_dir_all(&log_dir);
+    // Logs can echo indexed paths / content — tighten the dir to 0700 on Unix so other local users
+    // can't read them. Rotation creates a new file daily under the default umask, so hardening the
+    // directory (not each file) is the durable containment. Fail-open.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o700));
+    }
 
     // Rotate daily; keep at most 14 log files so logs don't accumulate unboundedly.
     // Fail-open: if Builder fails (e.g. permissions), fall back to the uncapped daily appender.
