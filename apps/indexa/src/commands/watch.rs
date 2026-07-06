@@ -44,6 +44,14 @@ pub(crate) async fn cmd_watch(
     // notify's canonical event paths — so the ancestor-walk `starts_with` check works
     // without re-canonicalizing here (which on Windows would re-add the `\\?\` prefix).
     let watch_roots = roots.clone();
+    // Apply the same file-selection policy the scan walker uses, per event: skip build artifacts /
+    // sensitive dirs / oversized files / `[scan] ignore`+gitignore matches. Built once, moved in.
+    let scan_matchers = indexa_core::walker::build_scan_matchers(
+        &roots,
+        cfg.scan.respect_gitignore,
+        &cfg.scan.ignore,
+    );
+    let include_sensitive = cfg.scan.include_sensitive;
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Handle::current();
 
@@ -86,6 +94,17 @@ pub(crate) async fn cmd_watch(
                     }
                 }
                 ChangeKind::Upsert => {
+                    // Don't re-index build artifacts / sensitive files / oversized blobs / ignored
+                    // paths — the scan walker skips them, so a live watch must too.
+                    if !indexa_core::walker::should_index_file(
+                        path,
+                        &watch_roots,
+                        include_sensitive,
+                        Some(indexa_core::walker::DEFAULT_MAX_FILESIZE),
+                        &scan_matchers,
+                    ) {
+                        return;
+                    }
                     let meta = std::fs::metadata(path).ok();
                     let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
                     let extracted = match registry.parse_guarded(path, size, max_parse_bytes) {

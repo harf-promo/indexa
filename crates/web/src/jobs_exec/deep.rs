@@ -25,7 +25,7 @@ pub(crate) async fn run_deep_phase_standalone(
         path,
         handle,
         &state.walk_semaphore,
-        state.config.scan.skip_binary,
+        super::scan_walk_config(&state.config.scan),
     )
     .await
     else {

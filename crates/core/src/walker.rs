@@ -21,6 +21,7 @@ pub struct Entry {
     pub is_binary: bool,
 }
 
+#[derive(Debug, Clone)]
 pub struct WalkConfig {
     /// Skip hidden files/dirs (dot-prefixed on Unix).
     pub skip_hidden: bool,
@@ -127,6 +128,87 @@ pub fn is_sensitive_dir(dir_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Build a gitignore matcher for `root` combining the root `.gitignore` (when `respect_gitignore`)
+/// and the `[scan] ignore` config patterns, both anchored at `root`. Returns `None` when there are
+/// no rules. Shared by the walker prune callback and the watchers' per-event
+/// [`should_index_file`] check, so file selection can't drift between a scan and a live watch.
+pub fn build_ignore_matcher(
+    root: &Path,
+    respect_gitignore: bool,
+    ignore: &[String],
+) -> Option<ignore::gitignore::Gitignore> {
+    let mut gb = ignore::gitignore::GitignoreBuilder::new(root);
+    let mut has_rules = false;
+    if respect_gitignore {
+        let root_gi = root.join(".gitignore");
+        if root_gi.is_file() {
+            let _ = gb.add(&root_gi); // fail-open: a bad file is silently skipped
+            has_rules = true;
+        }
+    }
+    for pat in ignore {
+        let _ = gb.add_line(None, pat); // fail-open: a bad pattern is silently skipped
+        has_rules = true;
+    }
+    if has_rules {
+        gb.build().ok()
+    } else {
+        None
+    }
+}
+
+/// One [`build_ignore_matcher`] per root, for the watchers (which check individual event paths, not
+/// a walk). Roots with no rules are omitted.
+pub fn build_scan_matchers(
+    roots: &[PathBuf],
+    respect_gitignore: bool,
+    ignore: &[String],
+) -> Vec<(PathBuf, ignore::gitignore::Gitignore)> {
+    roots
+        .iter()
+        .filter_map(|r| {
+            build_ignore_matcher(r, respect_gitignore, ignore).map(|gi| (r.clone(), gi))
+        })
+        .collect()
+}
+
+/// Whether a single file event should be indexed — mirrors the walk's prune policy for the
+/// watchers, which see individual paths rather than a prunable walk. Rejects the file when it
+/// exceeds `max_filesize`, when any ancestor directory (up to its `roots` entry) is a skip-dir
+/// (`target/`, `node_modules/`, `.git/`, …) or a sensitive dir (`.ssh/`, `.gnupg/`, …) with
+/// `include_sensitive` off, or when a `[scan] ignore`/gitignore rule in `matchers` (from
+/// [`build_scan_matchers`]) matches. Without this a live watch re-indexes exactly the build
+/// artifacts / credential stores / oversized blobs the scan walker deliberately skips.
+pub fn should_index_file(
+    path: &Path,
+    roots: &[PathBuf],
+    include_sensitive: bool,
+    max_filesize: Option<u64>,
+    matchers: &[(PathBuf, ignore::gitignore::Gitignore)],
+) -> bool {
+    if let Some(cap) = max_filesize {
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.len() > cap {
+                return false;
+            }
+        }
+    }
+    for dir in crate::pathutil::ancestor_dirs_to_root(path, roots) {
+        if is_skip_dir(&dir) {
+            return false;
+        }
+        if !include_sensitive && is_sensitive_dir(&dir) {
+            return false;
+        }
+    }
+    for (root, gi) in matchers {
+        if path.starts_with(root) && gi.matched(path, false).is_ignore() {
+            return false;
+        }
+    }
+    true
+}
+
 /// Fail-open NUL sniff: read a file's first 8 KB and check for a NUL byte (via
 /// [`crate::text::is_binary`]). Returns `false` on any open/read error — an unreadable file is
 /// never *classified* binary (so it isn't skipped on the strength of a read failure).
@@ -182,32 +264,10 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
     //
     // (2) `[scan] ignore` config patterns — extra gitignore-style globs from the
     //     user's config, anchored at root.
-    let combined_matcher: Option<Arc<ignore::gitignore::Gitignore>> = {
-        let mut gb = ignore::gitignore::GitignoreBuilder::new(root);
-        let mut has_rules = false;
-
-        if cfg.respect_gitignore {
-            let root_gi = root.join(".gitignore");
-            if root_gi.is_file() {
-                // GitignoreBuilder::add reads the file and anchors its patterns
-                // at the directory containing the file (= root). This is the
-                // GitignoreBuilder method, not WalkBuilder::add.
-                let _ = gb.add(&root_gi); // fail-open: bad file is silently skipped
-                has_rules = true;
-            }
-        }
-
-        for pat in &cfg.ignore {
-            let _ = gb.add_line(None, pat); // fail-open: a bad pattern is silently skipped
-            has_rules = true;
-        }
-
-        if has_rules {
-            gb.build().ok().map(Arc::new)
-        } else {
-            None
-        }
-    };
+    // Root `.gitignore` + `[scan] ignore` patterns, anchored at root — shared with the watchers'
+    // per-event `should_index_file` so a scan and a live watch select the same files.
+    let combined_matcher: Option<Arc<ignore::gitignore::Gitignore>> =
+        build_ignore_matcher(root, cfg.respect_gitignore, &cfg.ignore).map(Arc::new);
 
     let mut b = WalkBuilder::new(root);
     b.threads(threads)
@@ -511,6 +571,41 @@ mod tests {
         let code = on.iter().find(|e| e.path.ends_with("code.rs")).unwrap();
         assert!(bin.is_binary, "NUL file must be flagged binary");
         assert!(!code.is_binary, "text file must not be flagged");
+    }
+
+    #[test]
+    fn should_index_file_applies_scan_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let roots = vec![root.clone()];
+        let matchers = build_scan_matchers(&roots, true, &["*.log".to_string()]);
+
+        let write = |p: &Path| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+        };
+        let cap = Some(DEFAULT_MAX_FILESIZE);
+
+        // A normal source file is indexed.
+        let ok = root.join("src/main.rs");
+        write(&ok);
+        assert!(should_index_file(&ok, &roots, false, cap, &matchers));
+
+        // Build artifacts / VCS internals are skipped (name fast-path + classify path).
+        let git = root.join(".git/objects/ab");
+        write(&git);
+        assert!(!should_index_file(&git, &roots, false, cap, &matchers));
+        let nm = root.join("node_modules/pkg/index.js");
+        write(&nm);
+        assert!(!should_index_file(&nm, &roots, false, cap, &matchers));
+
+        // A `[scan] ignore` / gitignore match is skipped.
+        let log = root.join("app.log");
+        write(&log);
+        assert!(!should_index_file(&log, &roots, false, cap, &matchers));
+
+        // Oversized files are skipped.
+        assert!(!should_index_file(&ok, &roots, false, Some(0), &matchers));
     }
 
     #[test]
