@@ -191,3 +191,37 @@ impl Default for QaConfig {
         }
     }
 }
+
+impl QaConfig {
+    /// Build a `QaConfig` from `[retrieval]` config — the single place that maps every field the
+    /// config owns (with its name remaps: `mode`←`hybrid`, `use_recency_weight`←`recency_boost`,
+    /// `max_steps`←`agentic_max_steps`). A new `[retrieval]` knob is threaded to ask/search/explain
+    /// in ONE spot, so those surfaces can't silently diverge (e.g. MCP `ask` vs `explain_retrieval`).
+    /// `scope` starts `None`; callers apply per-request overrides (top_k, mode, rerank, scope, …).
+    pub fn from_retrieval(r: &indexa_core::config::RetrievalConfig) -> Self {
+        Self {
+            top_k: r.top_k,
+            context_budget: r.context_budget,
+            mode: r.hybrid.clone(),
+            scope: None,
+            rrf_k: r.rrf_k as f32,
+            summary_weight: r.summary_weight,
+            summary_depth_alpha: r.summary_depth_alpha,
+            rerank: r.rerank,
+            rerank_backend: r.rerank_backend.clone(),
+            rerank_model: r.rerank_model.clone(),
+            use_weights: r.use_weights,
+            use_recency_weight: r.recency_boost,
+            recency_days: r.recency_days,
+            max_steps: r.agentic_max_steps,
+            mmr_lambda: r.mmr_lambda,
+            archive_segments: r.archive_segments.clone(),
+            archive_penalty: r.archive_penalty,
+            broad_per_file_cap: r.broad_per_file_cap,
+            graphrag_clusters: r.graphrag_clusters,
+            graphrag_max_clusters: r.graphrag_max_clusters,
+            graphrag_cluster_sim: r.graphrag_cluster_sim,
+            graphrag_summarize: r.graphrag_summarize,
+        }
+    }
+}

@@ -74,33 +74,13 @@ impl IndexaMcp {
             scope,
             mode,
         } = params.0;
-        let cfg = QaConfig {
-            top_k: self.config.retrieval.top_k,
-            mode: mode
-                .as_deref()
-                .map(|m| parse_hybrid_mode(Some(m)))
-                .unwrap_or_else(|| self.config.retrieval.hybrid.clone()),
-            scope: scope.filter(|s| !s.is_empty()),
-            context_budget: self.config.retrieval.context_budget,
-            rrf_k: self.config.retrieval.rrf_k as f32,
-            summary_weight: self.config.retrieval.summary_weight,
-            summary_depth_alpha: self.config.retrieval.summary_depth_alpha,
-            rerank: self.config.retrieval.rerank,
-            rerank_backend: self.config.retrieval.rerank_backend.clone(),
-            rerank_model: self.config.retrieval.rerank_model.clone(),
-            use_weights: self.config.retrieval.use_weights,
-            use_recency_weight: self.config.retrieval.recency_boost,
-            recency_days: self.config.retrieval.recency_days,
-            max_steps: self.config.retrieval.agentic_max_steps,
-            mmr_lambda: self.config.retrieval.mmr_lambda,
-            archive_segments: self.config.retrieval.archive_segments.clone(),
-            archive_penalty: self.config.retrieval.archive_penalty,
-            broad_per_file_cap: self.config.retrieval.broad_per_file_cap,
-            graphrag_clusters: self.config.retrieval.graphrag_clusters,
-            graphrag_max_clusters: self.config.retrieval.graphrag_max_clusters,
-            graphrag_cluster_sim: self.config.retrieval.graphrag_cluster_sim,
-            graphrag_summarize: self.config.retrieval.graphrag_summarize,
-        };
+        // Same config-derived defaults as MCP `ask` (via the shared constructor), so
+        // `explain_retrieval` can't drift from what `ask` actually runs.
+        let mut cfg = QaConfig::from_retrieval(&self.config.retrieval);
+        if let Some(m) = mode.as_deref() {
+            cfg.mode = parse_hybrid_mode(Some(m));
+        }
+        cfg.scope = scope.filter(|s| !s.is_empty());
 
         let trace = indexa_query::explain_retrieval(
             &self.db_path,

@@ -203,30 +203,13 @@ pub(crate) async fn cmd_ask(
     let agentic = agentic_flag || max_steps_flag.is_some() || cfg.retrieval.agentic;
     let max_steps = max_steps_flag.unwrap_or(cfg.retrieval.agentic_max_steps);
 
-    let qa_cfg = QaConfig {
-        top_k: top_k_flag.unwrap_or(cfg.retrieval.top_k),
-        mode,
-        scope,
-        context_budget: cfg.retrieval.context_budget,
-        rrf_k: cfg.retrieval.rrf_k as f32,
-        summary_weight: cfg.retrieval.summary_weight,
-        summary_depth_alpha: cfg.retrieval.summary_depth_alpha,
-        rerank: cfg.retrieval.rerank,
-        rerank_backend: cfg.retrieval.rerank_backend.clone(),
-        rerank_model: cfg.retrieval.rerank_model.clone(),
-        use_weights: cfg.retrieval.use_weights,
-        use_recency_weight: cfg.retrieval.recency_boost,
-        recency_days: cfg.retrieval.recency_days,
-        max_steps,
-        mmr_lambda: cfg.retrieval.mmr_lambda,
-        archive_segments: cfg.retrieval.archive_segments.clone(),
-        archive_penalty: cfg.retrieval.archive_penalty,
-        broad_per_file_cap: cfg.retrieval.broad_per_file_cap,
-        graphrag_clusters: cfg.retrieval.graphrag_clusters,
-        graphrag_max_clusters: cfg.retrieval.graphrag_max_clusters,
-        graphrag_cluster_sim: cfg.retrieval.graphrag_cluster_sim,
-        graphrag_summarize: cfg.retrieval.graphrag_summarize,
-    };
+    let mut qa_cfg = QaConfig::from_retrieval(&cfg.retrieval);
+    if let Some(k) = top_k_flag {
+        qa_cfg.top_k = k;
+    }
+    qa_cfg.mode = mode;
+    qa_cfg.scope = scope;
+    qa_cfg.max_steps = max_steps;
 
     // `store` is no longer needed by the query path — the pipeline opens its own
     // scoped connection. Drop it so we don't hold two handles open.

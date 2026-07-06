@@ -368,36 +368,21 @@ impl IndexaMcp {
         let catalog = catalog.unwrap_or(false);
         let synthesize = synthesize.unwrap_or(true);
         let agentic = agentic.unwrap_or(self.config.retrieval.agentic);
-        let cfg = QaConfig {
-            top_k: top_k
-                .map(|k| k.min(100))
-                .unwrap_or(self.config.retrieval.top_k),
-            mode: mode
-                .as_deref()
-                .map(|m| parse_hybrid_mode(Some(m)))
-                .unwrap_or_else(|| self.config.retrieval.hybrid.clone()),
-            scope: scope.filter(|s| !s.is_empty()),
-            context_budget: self.config.retrieval.context_budget,
-            rrf_k: self.config.retrieval.rrf_k as f32,
-            summary_weight: self.config.retrieval.summary_weight,
-            summary_depth_alpha: self.config.retrieval.summary_depth_alpha,
-            rerank: rerank.unwrap_or(self.config.retrieval.rerank),
-            rerank_backend: rerank_backend
-                .unwrap_or_else(|| self.config.retrieval.rerank_backend.clone()),
-            rerank_model: self.config.retrieval.rerank_model.clone(),
-            use_weights: self.config.retrieval.use_weights,
-            use_recency_weight: self.config.retrieval.recency_boost,
-            recency_days: self.config.retrieval.recency_days,
-            max_steps: self.config.retrieval.agentic_max_steps,
-            mmr_lambda: self.config.retrieval.mmr_lambda,
-            archive_segments: self.config.retrieval.archive_segments.clone(),
-            archive_penalty: self.config.retrieval.archive_penalty,
-            broad_per_file_cap: self.config.retrieval.broad_per_file_cap,
-            graphrag_clusters: self.config.retrieval.graphrag_clusters,
-            graphrag_max_clusters: self.config.retrieval.graphrag_max_clusters,
-            graphrag_cluster_sim: self.config.retrieval.graphrag_cluster_sim,
-            graphrag_summarize: self.config.retrieval.graphrag_summarize,
-        };
+        // Config-derived defaults from `[retrieval]`, then per-request overrides.
+        let mut cfg = QaConfig::from_retrieval(&self.config.retrieval);
+        if let Some(k) = top_k {
+            cfg.top_k = k.min(100);
+        }
+        if let Some(m) = mode.as_deref() {
+            cfg.mode = parse_hybrid_mode(Some(m));
+        }
+        cfg.scope = scope.filter(|s| !s.is_empty());
+        if let Some(r) = rerank {
+            cfg.rerank = r;
+        }
+        if let Some(b) = rerank_backend {
+            cfg.rerank_backend = b;
+        }
 
         // Conversational Ask: when a session id is given, load its recent turns (fail-open;
         // empty for a stateless ask) so the pipeline can rewrite the follow-up + fold context.

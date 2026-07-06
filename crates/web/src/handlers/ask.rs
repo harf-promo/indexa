@@ -34,33 +34,15 @@ fn qa_config(state: &AppState, body: &AskRequest) -> QaConfig {
 /// mapping and the scope normalization are unit-testable without building a full `AppState`.
 /// `top_k` overrides the server's retrieval breadth (capped at 100); `None` ⇒ the config default.
 fn qa_config_from(r: &RetrievalConfig, scope: Option<&str>, top_k: Option<usize>) -> QaConfig {
-    QaConfig {
-        top_k: top_k.map(|k| k.min(100)).unwrap_or(r.top_k),
-        mode: r.hybrid.clone(),
-        context_budget: r.context_budget,
-        rrf_k: r.rrf_k as f32,
-        summary_weight: r.summary_weight,
-        summary_depth_alpha: r.summary_depth_alpha,
-        rerank: r.rerank,
-        rerank_backend: r.rerank_backend.clone(),
-        rerank_model: r.rerank_model.clone(),
-        use_weights: r.use_weights,
-        use_recency_weight: r.recency_boost,
-        recency_days: r.recency_days,
-        max_steps: r.agentic_max_steps,
-        mmr_lambda: r.mmr_lambda,
-        archive_segments: r.archive_segments.clone(),
-        archive_penalty: r.archive_penalty,
-        broad_per_file_cap: r.broad_per_file_cap,
-        graphrag_clusters: r.graphrag_clusters,
-        graphrag_max_clusters: r.graphrag_max_clusters,
-        graphrag_cluster_sim: r.graphrag_cluster_sim,
-        graphrag_summarize: r.graphrag_summarize,
-        scope: scope
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned),
+    let mut cfg = QaConfig::from_retrieval(r);
+    if let Some(k) = top_k {
+        cfg.top_k = k.min(100);
     }
+    cfg.scope = scope
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    cfg
 }
 
 /// Whether agentic retrieval is requested for this call: the request's `agentic` flag,
