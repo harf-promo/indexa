@@ -84,6 +84,14 @@ pub(crate) async fn api_watch_start(
         });
     let watch_root = PathBuf::from(&path);
     let watch_root2 = watch_root.clone();
+    // Same per-event file-selection policy the scan walker uses (skip artifacts/sensitive/oversized/
+    // ignored paths); built once and moved into the watch task.
+    let scan_matchers = indexa_core::walker::build_scan_matchers(
+        std::slice::from_ref(&watch_root),
+        state.config.scan.respect_gitignore,
+        &state.config.scan.ignore,
+    );
+    let include_sensitive = state.config.scan.include_sensitive;
     let events_count = Arc::new(AtomicU64::new(0));
     let events_count2 = events_count.clone();
 
@@ -141,6 +149,17 @@ pub(crate) async fn api_watch_start(
                         }
                     }
                     ChangeKind::Upsert => {
+                        // Skip build artifacts / sensitive files / oversized blobs / ignored paths,
+                        // matching the scan walker so a live watch doesn't pollute the index.
+                        if !indexa_core::walker::should_index_file(
+                            path,
+                            std::slice::from_ref(&watch_root2),
+                            include_sensitive,
+                            Some(indexa_core::walker::DEFAULT_MAX_FILESIZE),
+                            &scan_matchers,
+                        ) {
+                            return;
+                        }
                         let meta = std::fs::metadata(path).ok();
                         let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
                         let extracted = match registry.parse_guarded(path, size, max_parse_bytes) {

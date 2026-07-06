@@ -102,25 +102,31 @@ pub(crate) fn finalize_cancelled(handle: &Arc<JobHandle>, done: usize) {
 
 /// Walk a path in a blocking thread; on failure, push the error to the job and return None.
 /// Acquires a permit from `sem` to limit concurrent walks and prevent rayon pool starvation.
+/// Build a `WalkConfig` from `[scan]` config so web jobs walk the SAME file set the CLI does —
+/// honoring `respect_gitignore`, `ignore` patterns, `include_sensitive`, and `skip_binary`.
+/// (Previously web jobs used `WalkConfig::default()`, silently bypassing user exclusions and
+/// causing cross-surface reconcile churn.)
+pub(crate) fn scan_walk_config(scan: &indexa_core::config::ScanConfig) -> WalkConfig {
+    WalkConfig {
+        respect_gitignore: scan.respect_gitignore,
+        ignore: scan.ignore.clone(),
+        include_sensitive: scan.include_sensitive,
+        sniff_binary: scan.skip_binary,
+        ..WalkConfig::default()
+    }
+}
+
 pub(crate) async fn walk_for_job(
     path: &str,
     handle: &Arc<JobHandle>,
     sem: &tokio::sync::Semaphore,
-    sniff_binary: bool,
+    walk_cfg: WalkConfig,
 ) -> Option<Vec<indexa_core::walker::Entry>> {
     let _permit = sem.acquire().await.ok()?;
     let pb = std::path::PathBuf::from(path);
-    let walked = tokio::task::spawn_blocking(move || {
-        walk(
-            &pb,
-            &WalkConfig {
-                sniff_binary,
-                ..WalkConfig::default()
-            },
-        )
-    })
-    .await
-    .unwrap_or_else(|e| Err(anyhow::anyhow!(e)));
+    let walked = tokio::task::spawn_blocking(move || walk(&pb, &walk_cfg))
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!(e)));
     match walked {
         Ok(e) => Some(e),
         Err(e) => {
@@ -141,7 +147,7 @@ pub(crate) async fn run_index_job(
         &path,
         &handle,
         &state.walk_semaphore,
-        state.config.scan.skip_binary,
+        scan_walk_config(&state.config.scan),
     )
     .await
     else {
@@ -181,7 +187,7 @@ pub(crate) async fn run_scan_phase_standalone(
         path,
         handle,
         &state.walk_semaphore,
-        state.config.scan.skip_binary,
+        scan_walk_config(&state.config.scan),
     )
     .await
     else {
