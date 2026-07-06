@@ -176,12 +176,25 @@ pub(crate) async fn cmd_deep(
             );
         }
         let entries = walk(root, &walk_cfg)?;
+        // `[scan] skip_binary` sniffs binaries during the walk; skip them here so `deep`/`index`
+        // never opens/parses an executable/image/DB blob (matches the dry-run + web deep paths).
         let files: Vec<_> = entries
             .iter()
-            .filter(|e| e.kind == indexa_core::walker::EntryKind::File)
+            .filter(|e| e.kind == indexa_core::walker::EntryKind::File && !e.is_binary)
             .collect();
+        let binaries_skipped = entries
+            .iter()
+            .filter(|e| e.kind == indexa_core::walker::EntryKind::File && e.is_binary)
+            .count();
 
-        println!("  parsing {} files...", files.len());
+        if binaries_skipped > 0 {
+            println!(
+                "  parsing {} files ({binaries_skipped} binaries skipped)...",
+                files.len()
+            );
+        } else {
+            println!("  parsing {} files...", files.len());
+        }
         let mut total_chunks = 0usize;
         let mut skipped = 0usize;
 
