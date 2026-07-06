@@ -202,12 +202,14 @@ impl Store {
         root_prefix: &str,
         live_paths: &std::collections::HashSet<String>,
     ) -> Result<usize> {
-        let pattern = like_prefix(root_prefix);
+        // Boundary-scoped: exact root OR paths under `{root}/` — a bare `LIKE root%` also matches a
+        // prefix-sibling root (scanning `/a/proj` would reconcile — and delete — `/a/projector`).
+        let (exact, child) = subtree_match(root_prefix);
         let indexed_paths: Vec<String> = {
             let mut stmt = self
                 .conn
-                .prepare("SELECT path FROM entries WHERE path LIKE ?1 ESCAPE '\\'")?;
-            let rows = stmt.query_map(params![pattern], |r| r.get(0))?;
+                .prepare("SELECT path FROM entries WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'")?;
+            let rows = stmt.query_map(params![exact, child], |r| r.get(0))?;
             rows.collect::<Result<Vec<String>, _>>()?
         };
 

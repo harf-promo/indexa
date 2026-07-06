@@ -301,14 +301,16 @@ impl Store {
     /// All (path, kind) entries under `root` that are not yet in summary_queue
     /// and whose deep_policy is not 'Skip' or 'Sensitive'.
     pub fn entries_for_summarization(&self, root: &str) -> Result<Vec<(String, String)>> {
-        let pattern = like_prefix(root);
+        // Boundary-scoped (exact root OR under `{root}/`) so summarizing `/a/proj` never enqueues a
+        // prefix-sibling root like `/a/projector` — the bare `LIKE root%` did. Mirrors stale_summary_candidates.
+        let (exact, child) = super::entries::subtree_match(root);
         let mut stmt = self.conn.prepare(
             "SELECT path, kind FROM entries
-             WHERE (path LIKE ?1 ESCAPE '\\' OR parent_path LIKE ?1 ESCAPE '\\')
+             WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\' OR parent_path = ?1 OR parent_path LIKE ?2 ESCAPE '\\')
                AND path NOT IN (SELECT path FROM summary_queue)
                AND (deep_policy IS NULL OR (deep_policy != 'Skip' AND deep_policy != 'Sensitive'))",
         )?;
-        let rows = stmt.query_map(params![pattern], |r| {
+        let rows = stmt.query_map(params![exact, child], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -320,13 +322,14 @@ impl Store {
     /// rows), this method is used by force-requeue: every item — even ones already `done` or
     /// `failed` — will be reset to `pending` via `mark_for_resummary`.
     pub fn entries_for_resummary(&self, root: &str) -> Result<Vec<(String, String, i64)>> {
-        let pattern = like_prefix(root);
+        // Boundary-scoped (exact root OR under `{root}/`) — see entries_for_summarization.
+        let (exact, child) = super::entries::subtree_match(root);
         let mut stmt = self.conn.prepare(
             "SELECT path, kind FROM entries
-             WHERE (path LIKE ?1 ESCAPE '\\' OR parent_path LIKE ?1 ESCAPE '\\')
+             WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\' OR parent_path = ?1 OR parent_path LIKE ?2 ESCAPE '\\')
                AND (deep_policy IS NULL OR (deep_policy != 'Skip' AND deep_policy != 'Sensitive'))",
         )?;
-        let rows = stmt.query_map(params![pattern], |r| {
+        let rows = stmt.query_map(params![exact, child], |r| {
             let path: String = r.get(0)?;
             let kind: String = r.get(1)?;
             let depth = path.chars().filter(|&c| c == '/' || c == '\\').count() as i64;

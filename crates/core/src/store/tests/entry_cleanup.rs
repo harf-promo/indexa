@@ -64,6 +64,57 @@ fn reconcile_entries_batch_removes_ghosts_leaves_no_orphans() {
 }
 
 #[test]
+fn reconcile_entries_spares_prefix_sibling_root() {
+    // Regression (data-loss): reconcile_entries("/proj", …) must not treat /projector's entries as
+    // ghosts. The bug was like_prefix("/proj") = "/proj%", so scanning /proj wiped the entire
+    // /projector index (entries, chunks, summaries, queue, classifications).
+    let mut store = Store::open_in_memory().unwrap();
+    seed_full_entry(&mut store, "/proj/a.rs");
+    seed_full_entry(&mut store, "/projector/x.rs"); // sibling sharing the string prefix
+
+    // /projector/x.rs is NOT under /proj, so it must survive a /proj reconcile.
+    let live: std::collections::HashSet<String> = ["/proj/a.rs".to_owned()].into_iter().collect();
+    let removed = store.reconcile_entries("/proj", &live).unwrap();
+    assert_eq!(
+        removed, 0,
+        "nothing under /proj is a ghost; /projector is not under /proj"
+    );
+    assert!(
+        orphan_rows_for(&store, "/projector/x.rs") >= 6,
+        "/projector must survive a /proj reconcile"
+    );
+    assert_eq!(store.entry_count().unwrap(), 2);
+}
+
+#[test]
+fn entries_for_summarization_spares_prefix_sibling_root() {
+    // Same boundary bug on the summarize side: summarizing /proj must not enqueue /projector.
+    // Bare entries (not seed_full_entry, which pre-enqueues and would be excluded).
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            dummy_entry("/proj/a.rs", EntryKind::File, 100),
+            dummy_entry("/projector/x.rs", EntryKind::File, 100),
+        ])
+        .unwrap();
+
+    let paths: Vec<String> = store
+        .entries_for_summarization("/proj")
+        .unwrap()
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+    assert!(
+        paths.iter().any(|p| p == "/proj/a.rs"),
+        "target root entry is enqueued: {paths:?}"
+    );
+    assert!(
+        !paths.iter().any(|p| p.starts_with("/projector")),
+        "prefix sibling must NOT be enqueued: {paths:?}"
+    );
+}
+
+#[test]
 fn importance_weights_persist_across_entry_delete() {
     // Documented design: weights are NOT cleared with the entry (unlike classifications).
     let mut store = Store::open_in_memory().unwrap();
