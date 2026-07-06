@@ -11,6 +11,7 @@
 //! - `GET /api/jobs/{id}/events` — SSE progress stream
 
 mod dto;
+mod guard;
 mod handlers;
 mod jobs;
 mod jobs_exec;
@@ -129,6 +130,7 @@ pub(crate) const UI_CSS: &str = concat!(
     include_str!("../assets/ui/css/19-conversation.css"),
 );
 pub(crate) const UI_JS: &str = concat!(
+    include_str!("../assets/ui/js/00-auth-bootstrap.js"),
     include_str!("../assets/ui/js/01-state-theme-tabs.js"),
     include_str!("../assets/ui/js/02-stats-tree.js"),
     include_str!("../assets/ui/js/03-jobs-search.js"),
@@ -249,13 +251,38 @@ pub async fn serve(
         watch_sessions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
-    let app = build_router(state, port);
+    // Request guard: on a loopback bind, validate Host/Origin (defeats DNS-rebinding + CSRF); on a
+    // LAN bind, require a shared bearer token on `/api/*` (the private data). `0.0.0.0` and any
+    // non-loopback IP ⇒ LAN. Loopback (the default) is behaviourally unchanged for legit clients.
+    let loopback = host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false);
+    let lan_token = if loopback {
+        None
+    } else {
+        Some(
+            std::env::var("INDEXA_WEB_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(guard::generate_token),
+        )
+    };
+    let guard_cfg = match &lan_token {
+        Some(t) => guard::GuardConfig::lan(t.clone()),
+        None => guard::GuardConfig::loopback(),
+    };
+    let app = build_router(state, port).layer(axum::middleware::from_fn_with_state(
+        guard_cfg,
+        guard::request_guard,
+    ));
 
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("Indexa web UI listening on http://{addr}");
 
-    if host == "127.0.0.1" || host == "localhost" {
+    if loopback {
         println!("Open http://localhost:{port} in your browser. Press Ctrl-C to stop.");
     } else {
         // LAN mode: print all non-loopback IPv4 addresses so the user knows what to connect to.
@@ -266,9 +293,16 @@ pub async fn serve(
             for iface in ifaces {
                 let ip = iface.ip();
                 if !ip.is_loopback() && ip.is_ipv4() {
-                    println!("   http://{}:{port}", ip);
+                    println!("   http://{ip}:{port}");
                 }
             }
+        }
+        if let Some(t) = &lan_token {
+            // The private `/api/*` routes require this token over LAN. The web UI picks it up from
+            // the `?token=` query on first load; append it when sharing the URL.
+            println!("   Access token (required for LAN API access):");
+            println!("      open  http://<ip>:{port}/?token={t}");
+            println!("      or set header  Authorization: Bearer {t}");
         }
         println!("   Ensure your network is trusted before sharing this URL.");
     }
