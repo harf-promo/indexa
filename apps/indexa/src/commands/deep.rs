@@ -6,7 +6,7 @@ use indexa_core::{
     walker::{walk, WalkConfig},
 };
 use indexa_llm::OllamaLlm;
-use indexa_query::{contextual::ContextualEvent, enqueue_subtree, redact::redact_secrets};
+use indexa_query::{contextual::ContextualEvent, enqueue_subtree, redact::chunk_text_for_store};
 use std::io::{IsTerminal, Write};
 
 use super::helpers::{
@@ -508,15 +508,9 @@ pub(crate) async fn cmd_deep(
                 .zip(all_embeddings)
                 .zip(chunk_hashes)
             {
-                // Redact obvious secrets before writing to the searchable store.
-                // Fail-open: if redaction somehow panicked (it won't — pure regex),
-                // the raw text is the fallback. The export layer runs a second pass.
-                let text = if cfg.scan.redact_at_index {
-                    let (redacted, _) = redact_secrets(&chunk.text);
-                    redacted
-                } else {
-                    chunk.text.clone()
-                };
+                // Redact obvious secrets before writing to the searchable store (shared choke
+                // point so every index path — deep + watch, CLI + web — behaves identically).
+                let text = chunk_text_for_store(&chunk.text, cfg.scan.redact_at_index);
                 chunk_records.push(ChunkRecord {
                     entry_path: path_str.clone(),
                     seq: chunk.seq,

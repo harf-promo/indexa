@@ -52,6 +52,7 @@ pub(crate) async fn cmd_watch(
         &cfg.scan.ignore,
     );
     let include_sensitive = cfg.scan.include_sensitive;
+    let redact_at_index = cfg.scan.redact_at_index;
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Handle::current();
 
@@ -123,7 +124,10 @@ pub(crate) async fn cmd_watch(
                                 entry_path: path.to_string_lossy().into_owned(),
                                 seq: chunk.seq,
                                 heading: chunk.heading.clone(),
-                                text: chunk.text.clone(),
+                                text: indexa_query::redact::chunk_text_for_store(
+                                    &chunk.text,
+                                    redact_at_index,
+                                ),
                                 language: chunk.language.clone(),
                                 embedding,
                                 embed_model: Some(embed_model.clone()),

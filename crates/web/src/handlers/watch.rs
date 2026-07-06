@@ -92,6 +92,7 @@ pub(crate) async fn api_watch_start(
         &state.config.scan.ignore,
     );
     let include_sensitive = state.config.scan.include_sensitive;
+    let redact_at_index = state.config.scan.redact_at_index;
     let events_count = Arc::new(AtomicU64::new(0));
     let events_count2 = events_count.clone();
 
@@ -197,7 +198,10 @@ pub(crate) async fn api_watch_start(
                                     entry_path: path.to_string_lossy().into_owned(),
                                     seq: chunk.seq,
                                     heading: chunk.heading.clone(),
-                                    text: chunk.text.clone(),
+                                    text: indexa_query::redact::chunk_text_for_store(
+                                        &chunk.text,
+                                        redact_at_index,
+                                    ),
                                     language: chunk.language.clone(),
                                     embedding,
                                     embed_model: Some(embed_model.clone()),

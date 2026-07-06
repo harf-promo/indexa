@@ -85,9 +85,33 @@ pub fn redact_secrets(input: &str) -> (String, usize) {
     (out, count)
 }
 
+/// The chunk text to STORE (it becomes searchable via FTS/embeddings and exportable) — with
+/// secrets redacted when `redact` is set. This is the single choke point every index write path
+/// (CLI/web `deep`, CLI/web `watch`) routes through so `[scan] redact_at_index` (default on) can't
+/// be silently bypassed on one surface. The embedding and `content_hash` are always computed over
+/// the ORIGINAL text (keeping the embed cache stable), so only what lands in the store is scrubbed.
+pub fn chunk_text_for_store(text: &str, redact: bool) -> String {
+    if redact {
+        redact_secrets(text).0
+    } else {
+        text.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::redact_secrets;
+    use super::{chunk_text_for_store, redact_secrets};
+
+    #[test]
+    fn chunk_text_for_store_redacts_only_when_enabled() {
+        let secret = "aws key AKIAIOSFODNN7EXAMPLE in source";
+        // Enabled → the key is scrubbed from what gets stored/searched.
+        let stored = chunk_text_for_store(secret, true);
+        assert!(!stored.contains("AKIAIOSFODNN7EXAMPLE"), "stored: {stored}");
+        assert!(stored.contains("[REDACTED"), "stored: {stored}");
+        // Disabled → verbatim.
+        assert_eq!(chunk_text_for_store(secret, false), secret);
+    }
 
     #[test]
     fn redacts_aws_and_github_and_private_key_but_keeps_prose() {
