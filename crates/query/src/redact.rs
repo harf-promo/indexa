@@ -37,6 +37,34 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
         mk("google-key", r"\bAIza[0-9A-Za-z_\-]{35}\b"),
         // OpenAI-style secret keys (sk-... / sk-proj-...).
         mk("openai-key", r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{20,}\b"),
+        // JSON Web Tokens: base64url `header.payload.signature`, always starting `eyJ` (b64 of `{"`).
+        mk(
+            "jwt",
+            r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",
+        ),
+        // Stripe secret/restricted keys (live+test) and webhook signing secrets.
+        mk(
+            "stripe-key",
+            r"\b(?:[sr]k_(?:live|test)|whsec)_[A-Za-z0-9]{10,}\b",
+        ),
+        // GitLab personal/project/group access tokens.
+        mk("gitlab-token", r"\bglpat-[A-Za-z0-9_-]{20,}\b"),
+        // npm access tokens.
+        mk("npm-token", r"\bnpm_[A-Za-z0-9]{30,}\b"),
+        // SendGrid API keys (`SG.<id>.<secret>`).
+        mk(
+            "sendgrid-key",
+            r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b",
+        ),
+        // Google OAuth access tokens.
+        mk("google-oauth", r"\bya29\.[A-Za-z0-9_-]{20,}"),
+        // Credentials embedded in a URL (`scheme://user:pass@host…`) — the whole match is redacted
+        // (a creds-bearing URL host is itself often sensitive). Raw `r#"…"#` for the `"` in the
+        // terminating char class.
+        mk(
+            "url-credentials",
+            r#"(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s:@]+@[^\s"'<>)\]]+"#,
+        ),
         // Generic `api_key = "…"` / `secret: '…'` / `token=…` assignments (value redacted).
         // Group 1 = key name, group 2 = the separator (`: ` / ` = ` / `=`) so it's preserved in
         // the output — redacting a YAML/TOML config keeps it syntactically intact.
@@ -144,6 +172,67 @@ This sentence is ordinary documentation and must survive.";
         let (out, n) = redact_secrets(input);
         assert_eq!(n, 0);
         assert_eq!(out, input);
+    }
+
+    #[test]
+    fn redacts_expanded_token_families() {
+        // Each fixture is assembled from split literals at runtime so the SOURCE never contains a
+        // contiguous provider-shaped token — else GitHub push protection blocks the commit. Joined,
+        // they still exercise the real patterns.
+        let j = |a: &str, b: &str| format!("{a}{b}");
+        let cases = [
+            (
+                "jwt",
+                j(
+                    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM",
+                    "0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+                ),
+            ),
+            ("stripe secret", j("sk_live", "_0123456789abcdefABCDEF01")),
+            ("stripe webhook", j("whsec", "_0123456789abcdefABCDEF01")),
+            ("gitlab", j("glpat", "-0123456789abcdefABCD")),
+            ("npm", j("npm", "_0123456789abcdefABCDEF0123456789abcd")),
+            (
+                "sendgrid",
+                j(
+                    "SG",
+                    ".0123456789abcdefABCDEF.0123456789abcdefABCDEF0123456789abcd",
+                ),
+            ),
+            (
+                "google oauth",
+                j("ya29", ".0123456789abcdefABCDEF0123456789"),
+            ),
+        ];
+        for (label, secret) in &cases {
+            // `value` is not an assignment keyword, so only the specific token pattern can catch it.
+            let input = format!("cfg value = {secret} end");
+            let (out, n) = redact_secrets(&input);
+            assert!(n >= 1, "{label}: no redaction in `{input}`");
+            assert!(
+                !out.contains(secret.as_str()),
+                "{label}: secret leaked: `{out}`"
+            );
+            assert!(out.contains("[REDACTED-"), "{label}: no marker: `{out}`");
+        }
+    }
+
+    #[test]
+    fn redacts_url_embedded_credentials() {
+        // Password kept as its own literal so the source has no contiguous `user:pass@` token.
+        let input = format!(
+            "clone from https://alice:{}@git.internal/repo.git today",
+            "s3cr3tpassword"
+        );
+        let (out, n) = redact_secrets(&input);
+        assert_eq!(n, 1, "got: {out}");
+        assert!(!out.contains("s3cr3tpassword"), "password leaked: {out}");
+        assert!(out.contains("[REDACTED-url-credentials]"), "got: {out}");
+        // Surrounding prose survives.
+        assert!(
+            out.contains("clone from") && out.contains("today"),
+            "got: {out}"
+        );
     }
 
     #[test]

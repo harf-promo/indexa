@@ -120,6 +120,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`0.0.0.0`) — auto-generated and printed at startup, or set via `INDEXA_WEB_TOKEN`; the UI picks it
   up from `?token=`. Localhost (the default) is unchanged for legitimate use. Background jobs are also
   capped at 4 concurrent to blunt the DoS lever.
+- **Export/pack redaction now catches more token families.** The pre-export secret scrubber gained
+  patterns for JWTs (`eyJ…`), Stripe keys (`sk_live_`/`rk_live_`/`whsec_`), GitLab (`glpat-`), npm
+  (`npm_`), SendGrid (`SG.…`), Google OAuth (`ya29.`), and credentials embedded in URLs
+  (`scheme://user:pass@host`) — on top of the existing AWS/GitHub/Slack/Google/OpenAI/PEM/assignment
+  patterns. The redaction-count accounting is unchanged.
 
 ## [0.76.0] — 2026-06-28
 
