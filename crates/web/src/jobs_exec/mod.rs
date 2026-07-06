@@ -486,6 +486,15 @@ pub(crate) async fn run_summarize_phase(
             Ok(QueueOutcome::Failed) => {
                 defers.remove(&item.path);
                 errors += 1;
+                push(
+                    handle,
+                    JobEvent::Warning {
+                        stage: "summarize".to_owned(),
+                        item_path: Some(item.path.clone()),
+                        message: "summary generation failed for this file".to_owned(),
+                        pressure: None,
+                    },
+                );
             }
             // Dir children not summarized yet; it was re-enqueued `pending`. Back off and
             // poll again (a deferred dir stays pending, so `break`-on-None won't drop it).
@@ -499,6 +508,15 @@ pub(crate) async fn run_summarize_phase(
             Err(e) => {
                 defers.remove(&item.path);
                 errors += 1;
+                push(
+                    handle,
+                    JobEvent::Warning {
+                        stage: "summarize".to_owned(),
+                        item_path: Some(item.path.clone()),
+                        message: format!("{e:#}"),
+                        pressure: None,
+                    },
+                );
                 if let Err(mark_err) =
                     job_store.mark_queue_state(&item.path, "failed", Some(&format!("{e:#}")))
                 {
@@ -535,13 +553,23 @@ pub(crate) async fn run_summarize_phase(
         );
     }
 
-    push(
-        handle,
-        JobEvent::Done {
-            summary: format!("{done} summaries generated"),
-        },
-    );
-    handle.set_status(JobStatus::Done);
+    if done == 0 && errors > 0 {
+        // Nothing succeeded AND there were failures (e.g. Ollama went down for the whole run) —
+        // report a failure, not a misleading "0 summaries generated" Done.
+        finalize_failed(
+            handle,
+            "summarize",
+            &anyhow::anyhow!("all {errors} summary item(s) failed — see indexa status / the log"),
+        );
+    } else {
+        let summary = if errors > 0 {
+            format!("{done} summaries generated, {errors} failed — see indexa status")
+        } else {
+            format!("{done} summaries generated")
+        };
+        push(handle, JobEvent::Done { summary });
+        handle.set_status(JobStatus::Done);
+    }
 }
 
 #[cfg(test)]
