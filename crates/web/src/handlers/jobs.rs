@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
-        IntoResponse,
+        IntoResponse, Response,
     },
     Json,
 };
@@ -40,36 +40,69 @@ pub(crate) async fn register_job(jobs: &Jobs, kind: &str, path: String) -> (Uuid
     (id, handle)
 }
 
+/// Max background jobs (scan/deep/summarize/index) that may run at once. Bounds the DoS lever a
+/// drive-by page (blocked by the request guard, but defense-in-depth) or a token-holding LAN
+/// client could pull by firing many `/api/jobs/*` starts — each spawns a heavy scan/embed loop.
+const MAX_CONCURRENT_JOBS: usize = 4;
+
+/// `Some(429 response)` when the concurrency cap is already reached, else `None` (proceed).
+async fn job_slot_available(jobs: &Jobs) -> Option<Response> {
+    let running = jobs
+        .read()
+        .await
+        .values()
+        .filter(|h| h.status() == JobStatus::Running)
+        .count();
+    (running >= MAX_CONCURRENT_JOBS).then(|| {
+        err_json(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "at most {MAX_CONCURRENT_JOBS} jobs may run concurrently; wait for one to finish"
+            ),
+        )
+        .into_response()
+    })
+}
+
 pub(crate) async fn api_job_scan(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Some(resp) = job_slot_available(&s.jobs).await {
+        return resp;
+    }
     let (id, handle) = register_job(&s.jobs, "scan", q.path.clone()).await;
     let state = s.clone();
     tokio::spawn(async move {
         run_scan_phase_standalone(&state, &q.path, &handle).await;
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
-    Json(JobStartResponse { job_id: id })
+    Json(JobStartResponse { job_id: id }).into_response()
 }
 
 pub(crate) async fn api_job_deep(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Some(resp) = job_slot_available(&s.jobs).await {
+        return resp;
+    }
     let (id, handle) = register_job(&s.jobs, "deep", q.path.clone()).await;
     let state = s.clone();
     tokio::spawn(async move {
         run_deep_phase_standalone(&state, &q.path, &handle).await;
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
-    Json(JobStartResponse { job_id: id })
+    Json(JobStartResponse { job_id: id }).into_response()
 }
 
 pub(crate) async fn api_job_summarize(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Some(resp) = job_slot_available(&s.jobs).await {
+        return resp;
+    }
     let (id, handle) = register_job(&s.jobs, "summarize", q.path.clone()).await;
     let model_override = model_override_from(&q, s.config.describer.num_ctx);
     let state = s.clone();
@@ -77,13 +110,16 @@ pub(crate) async fn api_job_summarize(
         run_summarize_phase(&state, &q.path, q.passes, &handle, model_override).await;
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
-    Json(JobStartResponse { job_id: id })
+    Json(JobStartResponse { job_id: id }).into_response()
 }
 
 pub(crate) async fn api_job_index(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Some(resp) = job_slot_available(&s.jobs).await {
+        return resp;
+    }
     let (id, handle) = register_job(&s.jobs, "index", q.path.clone()).await;
     let model_override = model_override_from(&q, s.config.describer.num_ctx);
     let state = s.clone();
@@ -92,7 +128,7 @@ pub(crate) async fn api_job_index(
         run_index_job(state.clone(), q.path, handle, model_override).await;
         schedule_cleanup(state.jobs.clone(), id);
     });
-    Json(JobStartResponse { job_id: id })
+    Json(JobStartResponse { job_id: id }).into_response()
 }
 
 /// `GET /api/jobs/estimate?path=…` — the pre-flight memory-fit estimate behind the

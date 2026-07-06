@@ -107,6 +107,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   separate threads so a full pipe can't deadlock the wait), failing open so the file is skipped
   rather than hanging. New `wait-timeout` dependency — `libc`-only, keeps the tree openssl-free.
 
+### Security
+
+- **Web server now rejects cross-origin and DNS-rebinding requests; LAN mode requires a token.** The
+  local server (:7620) only had a `localhost` CORS layer — but the state-changing POSTs take query
+  params (no JSON body), so they were CORS-"simple": a page you merely *visited* could fire
+  `/api/jobs/index?path=/` (a forced full-disk scan), start watchers, or unload models at your
+  127.0.0.1 server, and a DNS-rebinding page could read your entire private index (`/api/export`,
+  `/api/ask`, `/api/file`). A new request-guard middleware now (a) rejects any request whose `Host`
+  isn't loopback (defeats rebinding) and any cross-origin state-changing request (defeats CSRF) on a
+  loopback bind, and (b) requires a shared bearer token on `/api/*` when bound to a LAN address
+  (`0.0.0.0`) — auto-generated and printed at startup, or set via `INDEXA_WEB_TOKEN`; the UI picks it
+  up from `?token=`. Localhost (the default) is unchanged for legitimate use. Background jobs are also
+  capped at 4 concurrent to blunt the DoS lever.
+
 ## [0.76.0] — 2026-06-28
 
 ### Added
