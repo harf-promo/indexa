@@ -81,6 +81,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client with a minimal environment might have no `indexa` on `PATH`, or a different/older install;
   the server now re-invokes its own binary via `std::env::current_exe()`, matching the
   "doctor/status/MCP are authoritative" contract.
+- **Secret files were embedded into the searchable index.** `.env` files were classified as ordinary
+  `config` and embedded (redaction scrubbed known `KEY=VALUE` secrets, but not everything), and raw
+  key material (`id_rsa`, `*.pem`, `*.p12`/`.pfx`, `.pgpass`, `.netrc`, `.htpasswd`,
+  `.git-credentials`) wasn't recognized at all — a PEM block or keystore can't be redacted, so its
+  contents landed in the index (and any exported pack). These are now classified **Sensitive**:
+  recorded as metadata (name/size, listed and flagged) but **not** deep-parsed or embedded, and
+  excluded from summarization, unless `[scan] include_sensitive = true`. The gate lives at the shared
+  file-selection points (`walker::is_sensitive_file` in the CLI deep, web deep, and live-watch paths),
+  so scan, deep, and watch agree. `.key` (Apple Keynote) and public material (`*.pub`/`*.crt`) are
+  deliberately excluded. Verified end-to-end: a `.env`/`deploy.pem`/`id_rsa` is recorded but produces
+  zero chunks, and the secret values never appear in the index.
 
 ## [0.76.0] — 2026-06-28
 

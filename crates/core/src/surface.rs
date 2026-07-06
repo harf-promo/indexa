@@ -476,6 +476,33 @@ static HINTS: &[(Predicate, PathHint)] = &[
 pub fn classify_file_by_extension(path: &Path) -> Option<PathHint> {
     // Well-known filenames with no extension.
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        // Secret-bearing files: env files (redactable KEY=VALUE) and raw key/credential material.
+        // Classified `Sensitive` so they're excluded from summarization and — unless `[scan]
+        // include_sensitive` — never deep-parsed/embedded (only metadata is recorded). Redaction
+        // can't scrub a raw PEM/keystore, so these must stay out of the searchable index by
+        // default. `.key` is deliberately absent (it's Apple Keynote); public material
+        // (`*.pub`, `*.crt`) is likewise not treated as secret.
+        if name == ".env"
+            || name.starts_with(".env.")
+            || matches!(
+                name,
+                ".npmrc"
+                    | ".netrc"
+                    | ".pgpass"
+                    | ".htpasswd"
+                    | ".git-credentials"
+                    | "id_rsa"
+                    | "id_dsa"
+                    | "id_ecdsa"
+                    | "id_ed25519"
+            )
+        {
+            return Some(PathHint {
+                label: "file",
+                category: "sensitive",
+                deep_scan: DeepScanPolicy::Sensitive,
+            });
+        }
         let cat = match name {
             "Makefile" | "GNUmakefile" | "Rakefile" | "Gemfile" | "Dockerfile"
             | "Containerfile" | "Justfile" | "justfile" | "Vagrantfile" => Some("code"),
@@ -483,11 +510,9 @@ pub fn classify_file_by_extension(path: &Path) -> Option<PathHint> {
             | "README" | "CHANGELOG" | "CHANGES" | "INSTALL" | "TODO" | "FIXME" => {
                 Some("documents")
             }
-            ".env" | ".gitignore" | ".gitattributes" | ".gitmodules" | ".dockerignore"
-            | ".editorconfig" | ".npmrc" | ".yarnrc" | ".nvmrc" | ".node-version"
-            | ".python-version" | ".ruby-version" | ".tool-versions" => Some("config"),
-            // .env.* variants (e.g. .env.local, .env.production)
-            n if n.starts_with(".env.") => Some("config"),
+            ".gitignore" | ".gitattributes" | ".gitmodules" | ".dockerignore" | ".editorconfig"
+            | ".yarnrc" | ".nvmrc" | ".node-version" | ".python-version" | ".ruby-version"
+            | ".tool-versions" => Some("config"),
             "Cargo.lock" | "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock" | "go.sum"
             | "poetry.lock" | "Pipfile.lock" | "Gemfile.lock" | "composer.lock" | "mix.lock"
             | "flake.lock" => Some("lockfile"),
@@ -504,12 +529,20 @@ pub fn classify_file_by_extension(path: &Path) -> Option<PathHint> {
 
     // Extension-based explicit overrides (before MIME fallback).
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        // Secret-bearing by extension: env files and raw keys/keystores (see the filename branch).
+        // `.pem` can occasionally be a public cert — withholding it by default is the safe trade.
+        // `.key` (Apple Keynote) and public material (`.pub`/`.crt`/`.cer`) are excluded.
+        if matches!(ext.to_lowercase().as_str(), "env" | "pem" | "p12" | "pfx") {
+            return Some(PathHint {
+                label: "file",
+                category: "sensitive",
+                deep_scan: DeepScanPolicy::Sensitive,
+            });
+        }
         let cat = match ext.to_lowercase().as_str() {
             // Config files
-            "toml" | "yaml" | "yml" | "ini" | "conf" | "cfg" | "env" | "properties" | "plist"
-            | "hcl" | "tf" | "tfvars" => Some("config"),
-            // Dot-config patterns (e.g. .env.production)
-            "env.local" | "env.production" | "env.development" | "env.test" => Some("config"),
+            "toml" | "yaml" | "yml" | "ini" | "conf" | "cfg" | "properties" | "plist" | "hcl"
+            | "tf" | "tfvars" => Some("config"),
             // Lockfiles
             "lock" | "sum" => Some("lockfile"),
             // Data files
@@ -720,19 +753,55 @@ mod tests {
     }
 
     #[test]
-    fn env_file_classified_as_config() {
+    fn env_and_secret_files_classified_sensitive() {
         for name in [
             ".env",
             ".env.local",
-            "app.toml",
-            "settings.yaml",
-            "config.yml",
-            "server.ini",
+            ".env.production",
+            ".npmrc",
+            ".netrc",
+            ".pgpass",
+            ".htpasswd",
+            ".git-credentials",
+            "id_rsa",
+            "id_ed25519",
+            "deploy.pem",
+            "keystore.p12",
+            "cert.pfx",
+            "local.env",
         ] {
             let p = PathBuf::from(format!("/home/user/project/{name}"));
             let hint = classify_file_by_extension(&p).unwrap();
-            assert_eq!(hint.category, "config", "failed for {name}");
+            assert_eq!(hint.category, "sensitive", "category for {name}");
+            assert_eq!(
+                hint.deep_scan,
+                DeepScanPolicy::Sensitive,
+                "deep_scan for {name}"
+            );
         }
+    }
+
+    #[test]
+    fn plain_config_files_still_config_not_sensitive() {
+        for name in ["app.toml", "settings.yaml", "config.yml", "server.ini"] {
+            let p = PathBuf::from(format!("/home/user/project/{name}"));
+            let hint = classify_file_by_extension(&p).unwrap();
+            assert_eq!(hint.category, "config", "category for {name}");
+            assert_eq!(
+                hint.deep_scan,
+                DeepScanPolicy::Index,
+                "deep_scan for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn keynote_key_not_misclassified_sensitive() {
+        // `.key` is Apple Keynote, not a private key — it must never be withheld as a secret.
+        let p = PathBuf::from("/home/user/talks/deck.key");
+        let is_sensitive =
+            classify_file_by_extension(&p).map(|h| h.deep_scan) == Some(DeepScanPolicy::Sensitive);
+        assert!(!is_sensitive, "deck.key must not be classified sensitive");
     }
 
     #[test]
