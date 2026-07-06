@@ -18,10 +18,24 @@
    end maps each onto a Harf token so every module re-skins by inheritance.
 ============================================================================ */
 
-/* ── Webfonts — Geist (Latin) + Geist Mono (code), the Harf stack. One @import;
-   the spec discards any @import after another rule, so keep it first. (Indexa's
-   UI is English/LTR, so IBM Plex Sans Arabic is omitted.) ── */
-@import url('https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Geist+Mono:wght@400;500;600&display=swap');
+/* ── Webfonts — Geist (Latin) + Geist Mono (code), the Harf stack. Self-hosted (OFL): the WOFF2s
+   are embedded in the binary and served from /assets/fonts, so the UI never contacts Google Fonts
+   (privacy: nothing leaves your machine; also works offline). Latin-subset variable fonts — one
+   file per family covers the whole weight axis. ── */
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/assets/fonts/geist.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Geist Mono';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('/assets/fonts/geist-mono.woff2') format('woff2');
+}
 
 :root {
   /* light-dark() needs a resolvable color-scheme; data-theme flips it below. */

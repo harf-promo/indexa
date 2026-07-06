@@ -77,7 +77,9 @@ pub(crate) use telemetry::{
     api_engine_processes, api_engine_release, api_telemetry, api_telemetry_stream,
 };
 pub(crate) use tree::api_tree;
-pub(crate) use ui::{serve_favicon, serve_ui, serve_ui_css, serve_ui_js};
+pub(crate) use ui::{
+    serve_favicon, serve_font_geist, serve_font_geist_mono, serve_ui, serve_ui_css, serve_ui_js,
+};
 pub(crate) use update::{
     api_update_apply, api_update_check, api_update_control, api_update_progress_stream,
 };
