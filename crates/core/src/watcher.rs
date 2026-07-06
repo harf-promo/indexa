@@ -14,7 +14,8 @@ use notify::{
 };
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -122,15 +123,59 @@ pub fn watch<P: AsRef<Path>>(roots: &[P], cfg: &WatcherConfig) -> Result<WatchSe
     })
 }
 
+/// How often the cooperative-stop loop wakes to re-check its `stop` flag while idle.
+/// Small enough that a stop request is honored promptly; large enough that an idle
+/// watcher isn't busy-spinning.
+const STOP_POLL: Duration = Duration::from_millis(500);
+
 /// Consume events from `session.rx` and call `on_change` for each.
 /// Blocks the calling thread until the watcher is dropped or the channel closes.
 /// Pass this to a blocking thread (or `tokio::task::spawn_blocking`) from async code.
-pub fn run_watch_loop<F>(session: WatchSession, mut on_change: F)
+pub fn run_watch_loop<F>(session: WatchSession, on_change: F)
 where
     F: FnMut(ChangeEvent),
 {
-    for event in session.rx {
-        on_change(event);
+    // Delegate with a flag that is never set — behaviourally identical to the historical
+    // blocking `for event in session.rx` loop. The CLI uses this and stops by process exit.
+    let never = AtomicBool::new(false);
+    run_watch_loop_until(session, &never, on_change);
+}
+
+/// Like [`run_watch_loop`], but returns once `stop` is observed `true` (checked after each
+/// event and on every [`STOP_POLL`] idle tick). This lets a long-lived host (the web server)
+/// terminate ONE watch without killing the process: setting `stop` ends the loop, which drops
+/// `session` — and with it the debouncer — on *this* thread, stopping the OS watcher and
+/// freeing every per-event resource. It exists because aborting the async task that spawned a
+/// `spawn_blocking` closure cannot cancel that closure, so the debouncer would otherwise leak
+/// and the loop would run forever.
+pub fn run_watch_loop_until<F>(session: WatchSession, stop: &AtomicBool, on_change: F)
+where
+    F: FnMut(ChangeEvent),
+{
+    drain_until(&session.rx, stop, STOP_POLL, on_change);
+    // `session` (incl. `_debouncer`) drops here → watcher threads stop, channel closes.
+}
+
+/// Core drain loop, decoupled from `WatchSession` so it can be unit-tested with a bare
+/// `mpsc::channel` (no real debouncer to construct). Returns when `stop` is observed `true`,
+/// or when the sender side disconnects.
+fn drain_until<F>(
+    rx: &mpsc::Receiver<ChangeEvent>,
+    stop: &AtomicBool,
+    poll: Duration,
+    mut on_change: F,
+) where
+    F: FnMut(ChangeEvent),
+{
+    loop {
+        match rx.recv_timeout(poll) {
+            Ok(event) => on_change(event),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
     }
 }
 
@@ -157,5 +202,53 @@ mod tests {
         let event = session.rx.recv_timeout(Duration::from_secs(1));
         // Some CI environments may not deliver events, so we just check no panic.
         let _ = event;
+    }
+
+    fn ev(p: &str) -> ChangeEvent {
+        ChangeEvent {
+            path: PathBuf::from(p),
+            kind: ChangeKind::Upsert,
+        }
+    }
+
+    #[test]
+    fn drain_until_processes_queued_events_then_exits_on_disconnect() {
+        let (tx, rx) = mpsc::channel::<ChangeEvent>();
+        for i in 0..3 {
+            tx.send(ev(&format!("/f{i}"))).unwrap();
+        }
+        drop(tx); // disconnect after queuing → loop should drain then return
+        let stop = AtomicBool::new(false);
+        let mut seen = 0;
+        drain_until(&rx, &stop, Duration::from_millis(5), |_| seen += 1);
+        assert_eq!(seen, 3, "all queued events drained before disconnect exit");
+    }
+
+    #[test]
+    fn drain_until_returns_promptly_when_stop_is_set() {
+        // Sender stays alive (channel never disconnects); an idle watcher must still exit
+        // because `stop` is set. This is the web watch-stop path — without the flag the
+        // loop would block forever on `recv`.
+        let (_tx, rx) = mpsc::channel::<ChangeEvent>();
+        let stop = AtomicBool::new(true); // stop already requested
+        let mut seen = 0;
+        drain_until(&rx, &stop, Duration::from_millis(5), |_| seen += 1);
+        assert_eq!(seen, 0, "no events, stop honored on the first idle tick");
+    }
+
+    #[test]
+    fn drain_until_stops_after_processing_when_flag_flips_mid_stream() {
+        // An event that arrives before the stop flag is still processed; the loop then
+        // observes `stop` and returns without waiting for a disconnect.
+        let (tx, rx) = mpsc::channel::<ChangeEvent>();
+        tx.send(ev("/only")).unwrap();
+        let stop = AtomicBool::new(true);
+        let mut seen = 0;
+        drain_until(&rx, &stop, Duration::from_millis(5), |_| seen += 1);
+        assert_eq!(
+            seen, 1,
+            "the buffered event is handled, then stop ends the loop"
+        );
+        drop(tx);
     }
 }

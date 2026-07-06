@@ -62,6 +62,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loads and reranks. Surfaced by the new `#[ignore]` load test (no prior test exercised the real model).
 - **Markdown/HTML chunk overlap ignored configuration** — `chunk_markdown` hardcoded a 100-word
   overlap even conceptually; it now takes `overlap` from `[chunking]` like every other parser.
+- **Web file-watch "Stop" leaked the watcher.** Stopping a watch from the web UI only aborted the
+  outer async wrapper — it could not cancel the inner `spawn_blocking` loop, so the debouncer and its
+  background threads stayed alive and kept re-opening a database connection and re-embedding on every
+  file change, invisibly, for the life of the server (the UI showed "not watching" the whole time).
+  Stop now sets a cooperative flag (`watcher::run_watch_loop_until`) that actually ends the loop and
+  drops the debouncer, freeing every per-event resource. The CLI `watch` is unchanged (it stops on
+  process exit). Verified end-to-end: a file saved after Stop is no longer indexed.
 
 ## [0.76.0] — 2026-06-28
 
