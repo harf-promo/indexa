@@ -388,6 +388,41 @@ pub(crate) fn resolve_roots(paths: Vec<String>, all: bool) -> Result<Vec<PathBuf
         .collect())
 }
 
+/// Resolve the target roots for `scan`/`deep`/`summarize`/`index`. With explicit `paths` (or `--all`)
+/// this is exactly [`resolve_roots`]. With NO paths and not `--all`, it defaults to the **already-indexed
+/// roots** (`store.root_paths()`) instead of `$HOME` — so a bare `indexa deep`/`index`/`summarize`
+/// re-processes what you've already indexed rather than silently deep-scanning your entire home
+/// directory (which the old `resolve_roots` empty-path fallback did). Errors with a hint when nothing
+/// is indexed yet.
+pub(crate) fn resolve_target_roots(paths: Vec<String>, all: bool) -> Result<Vec<PathBuf>> {
+    resolve_target_roots_in(paths, all, index_db_path()?)
+}
+
+/// Testable core of [`resolve_target_roots`] with the index DB path injected.
+fn resolve_target_roots_in(
+    paths: Vec<String>,
+    all: bool,
+    db_path: PathBuf,
+) -> Result<Vec<PathBuf>> {
+    if all || !paths.is_empty() {
+        return resolve_roots(paths, all);
+    }
+    let roots = if db_path.exists() {
+        indexa_core::store::Store::open(&db_path)?.root_paths()?
+    } else {
+        Vec::new()
+    };
+    if roots.is_empty() {
+        anyhow::bail!(
+            "no indexed roots yet — pass a path (e.g. `indexa index ~/project`) to index something first"
+        );
+    }
+    Ok(roots
+        .into_iter()
+        .map(|r| canonical_root(PathBuf::from(r)))
+        .collect())
+}
+
 pub(crate) fn index_db_path() -> Result<PathBuf> {
     let data_dir = config::default_data_dir()
         .ok_or_else(|| anyhow::anyhow!("cannot determine data directory"))?;
@@ -670,5 +705,31 @@ mod tests {
         let missing = PathBuf::from("/no/such/indexa/path/zzz123");
         let got = resolve_roots(vec![missing.to_string_lossy().into_owned()], false).unwrap();
         assert_eq!(got, vec![missing]);
+    }
+
+    #[test]
+    fn resolve_target_roots_empty_with_no_index_errors_not_home() {
+        // The bug: bare `indexa deep`/`index`/`summarize` (no paths) resolved to $HOME and deep-scanned
+        // the whole home dir. Now, with nothing indexed, it errors with a hint instead of falling back.
+        let db = std::env::temp_dir().join(format!("indexa_rtr_none_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db); // ensure it doesn't exist
+        let err = super::resolve_target_roots_in(vec![], false, db)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no indexed roots"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_target_roots_delegates_for_explicit_paths() {
+        // Explicit paths behave exactly like resolve_roots regardless of the db path.
+        let base = std::env::temp_dir().canonicalize().unwrap();
+        let target = base.join(format!("indexa_rtr_target_{}", std::process::id()));
+        std::fs::create_dir_all(&target).unwrap();
+        let arg = target.to_string_lossy().into_owned();
+        let got =
+            super::resolve_target_roots_in(vec![arg.clone()], false, base.join("nonexistent.db"))
+                .unwrap();
+        assert_eq!(got, super::resolve_roots(vec![arg], false).unwrap());
+        let _ = std::fs::remove_dir_all(&target);
     }
 }

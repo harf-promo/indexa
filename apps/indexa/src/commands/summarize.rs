@@ -3,7 +3,9 @@ use indexa_core::{config::Config, store::Store};
 use indexa_embed::OllamaEmbedder;
 use indexa_query::summarize_subtree_sync;
 
-use super::helpers::{parse_summary_mode, require_index_db, resolve_roots, select_summary_models};
+use super::helpers::{
+    parse_summary_mode, require_index_db, resolve_target_roots, select_summary_models,
+};
 
 pub(crate) async fn cmd_summarize(
     paths: Vec<String>,
@@ -11,7 +13,7 @@ pub(crate) async fn cmd_summarize(
     passes: Option<u32>,
     cfg: &Config,
 ) -> Result<()> {
-    let roots = resolve_roots(paths, false)?;
+    let roots = resolve_target_roots(paths, false)?;
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };

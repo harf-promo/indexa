@@ -10,7 +10,7 @@ use indexa_query::{contextual::ContextualEvent, enqueue_subtree, redact::chunk_t
 use std::io::{IsTerminal, Write};
 
 use super::helpers::{
-    build_embedder, parse_summary_mode, preflight_ollama, require_index_db, resolve_roots,
+    build_embedder, parse_summary_mode, preflight_ollama, require_index_db, resolve_target_roots,
 };
 
 #[allow(clippy::too_many_arguments)] // thin CLI fan-out; grouping into a struct would just move fields
@@ -33,7 +33,7 @@ pub(crate) async fn cmd_deep(
     }
 
     let summary_mode = parse_summary_mode(&mode)?;
-    let roots = resolve_roots(paths, false)?;
+    let roots = resolve_target_roots(paths, false)?;
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };
