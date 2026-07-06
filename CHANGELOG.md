@@ -141,6 +141,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   into a pack. It now uses a dedicated client that rejects non-`http(s)` schemes and refuses any
   hop — initial or redirected — whose host resolves to a loopback / link-local / private / CGNAT
   address; redirects are also capped at 5. The shared HTTP client (LLM/embed providers) is untouched.
+- **The web UI no longer fetches fonts from Google.** Every page load pulled Geist + Geist Mono from
+  `fonts.googleapis.com`, leaking your IP/timing to Google on a "nothing leaves your machine" product
+  and breaking the UI offline. The OFL Geist WOFF2s are now embedded in the binary and served from
+  `/assets/fonts` via a local `@font-face`; the remote `<link>`/`@import` are gone. Verified: the
+  served HTML/CSS contain zero `googleapis` references and the fonts serve locally. (Geist © The
+  Geist Project Authors, SIL OFL 1.1 — license bundled under `assets/ui/fonts/`.)
 
 ## [0.76.0] — 2026-06-28
 

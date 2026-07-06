@@ -102,6 +102,13 @@ pub(crate) const UI_HTML: &str = include_str!("../assets/ui/index.html");
 /// The Indexa mark (green Harf apostrophe on an ink ground) served as the browser favicon.
 pub(crate) const FAVICON_SVG: &str = include_str!("../assets/ui/favicon.svg");
 
+/// Self-hosted webfonts (OFL Geist + Geist Mono, latin-subset variable WOFF2), embedded and served
+/// from `/assets/fonts/*` so the UI never fetches from `fonts.googleapis.com` — a "nothing leaves
+/// your machine" product must not leak the user's IP/timing to Google, and it must work offline.
+pub(crate) const GEIST_WOFF2: &[u8] = include_bytes!("../assets/ui/fonts/Geist-latin.woff2");
+pub(crate) const GEIST_MONO_WOFF2: &[u8] =
+    include_bytes!("../assets/ui/fonts/GeistMono-latin.woff2");
+
 // app.css and app.js are split into ordered source fragments for maintainability
 // and reassembled here at compile time. The concat! order below is the canonical
 // on-disk order (zero-padded prefixes); the served bytes are byte-identical to the
@@ -327,6 +334,8 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/", get(serve_ui))
         .route("/assets/app.css", get(serve_ui_css))
         .route("/assets/app.js", get(serve_ui_js))
+        .route("/assets/fonts/geist.woff2", get(serve_font_geist))
+        .route("/assets/fonts/geist-mono.woff2", get(serve_font_geist_mono))
         .route("/favicon.svg", get(serve_favicon))
         .route("/api/stats", get(api_stats))
         .route("/api/impact", get(api_impact))

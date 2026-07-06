@@ -3,7 +3,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::{FAVICON_SVG, UI_CSS, UI_HTML, UI_JS};
+use crate::{FAVICON_SVG, GEIST_MONO_WOFF2, GEIST_WOFF2, UI_CSS, UI_HTML, UI_JS};
 
 pub(crate) async fn serve_ui() -> Response {
     (
@@ -42,6 +42,31 @@ pub(crate) async fn serve_favicon() -> Response {
     (
         [(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")],
         FAVICON_SVG,
+    )
+        .into_response()
+}
+
+/// Long-cache header for the immutable embedded fonts (they only change on a redeploy).
+const FONT_CACHE: &str = "public, max-age=31536000, immutable";
+
+pub(crate) async fn serve_font_geist() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, FONT_CACHE),
+        ],
+        GEIST_WOFF2,
+    )
+        .into_response()
+}
+
+pub(crate) async fn serve_font_geist_mono() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, FONT_CACHE),
+        ],
+        GEIST_MONO_WOFF2,
     )
         .into_response()
 }
