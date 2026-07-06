@@ -43,6 +43,37 @@ pub struct Extracted {
 /// makes Ollama 500 with "the input length exceeds the context length".
 pub const MAX_CHUNK_CHARS: usize = 4000;
 
+/// Per-zip-entry decompressed-size cap (16 MiB). A zip header's declared uncompressed size is
+/// **untrusted** — a "zip bomb" declares little but decompresses to gigabytes — so container
+/// parsers bound the *actual* decompressed read via [`read_zip_entry_text`] /
+/// [`read_zip_entry_bytes`] rather than trusting `ZipFile::size()`. Real Office/EPUB parts are
+/// typically well under 4 MiB, so 16 MiB is generous headroom while capping a single bomb entry.
+pub const MAX_ZIP_ENTRY_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Running-total decompression cap (64 MiB) for multi-entry containers (EPUB spines, PPTX decks):
+/// extraction stops once the cumulative decompressed size crosses this, so many individually-legal
+/// entries can't sum to an OOM even when each fits under [`MAX_ZIP_ENTRY_BYTES`].
+pub const MAX_ZIP_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read a zip entry's decompressed bytes into a lossy UTF-8 string with a hard byte cap. Bounds
+/// the *read* (never trusts the declared size), and uses lossy decoding so a cap that lands
+/// mid-multibyte can't hard-fail an otherwise-valid document. Use for text parts (XML/XHTML).
+pub fn read_zip_entry_text<R: std::io::Read>(entry: R, cap: u64) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    entry.take(cap).read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Read a zip entry's raw decompressed bytes with a hard byte cap (see [`read_zip_entry_text`]).
+/// Use for binary parts (e.g. an embedded preview PDF).
+pub fn read_zip_entry_bytes<R: std::io::Read>(entry: R, cap: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    entry.take(cap).read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
 /// Chunk sizing knobs threaded from `[chunking]` config into the word-window parsers.
 /// `size` is the target words per chunk; `overlap` is the words shared between consecutive
 /// windows. [`Default`] is the historical `800`/`100` so every free-function / `Registry::new`
@@ -212,6 +243,29 @@ pub trait Parser: Send + Sync {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn read_zip_entry_text_bounds_the_read_not_the_declared_size() {
+        // A "1000-byte entry" read with a 100-byte cap yields exactly 100 bytes — proving the
+        // read is bounded by the cap, not by however large the source claims to be (zip-bomb guard).
+        let big = vec![b'a'; 1000];
+        let s = read_zip_entry_text(std::io::Cursor::new(big), 100).unwrap();
+        assert_eq!(s.len(), 100);
+    }
+
+    #[test]
+    fn read_zip_entry_text_returns_full_content_under_cap() {
+        let small = b"hello world".to_vec();
+        let s = read_zip_entry_text(std::io::Cursor::new(small), MAX_ZIP_ENTRY_BYTES).unwrap();
+        assert_eq!(s, "hello world");
+    }
+
+    #[test]
+    fn read_zip_entry_bytes_caps_binary_reads() {
+        let big = vec![0u8; 5000];
+        let b = read_zip_entry_bytes(std::io::Cursor::new(big), 256).unwrap();
+        assert_eq!(b.len(), 256);
+    }
 
     #[test]
     fn chunk_words_windows_with_overlap() {

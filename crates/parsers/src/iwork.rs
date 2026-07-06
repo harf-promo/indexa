@@ -6,7 +6,6 @@
 
 use crate::types::{chunk_words, Chunk, ChunkParams, Extracted, Parser};
 use anyhow::Result;
-use std::io::Read;
 use std::path::Path;
 
 pub struct IworkParser;
@@ -87,9 +86,10 @@ fn extract_preview_text(path: &Path) -> Result<String> {
     let file = std::fs::File::open(path)?;
     let mut zip = zip::ZipArchive::new(file)?;
     for name in ["preview.pdf", "QuickLook/Preview.pdf", "Preview.pdf"] {
-        if let Ok(mut entry) = zip.by_name(name) {
-            let mut buf = Vec::new();
-            if entry.read_to_end(&mut buf).is_ok() {
+        if let Ok(entry) = zip.by_name(name) {
+            if let Ok(buf) =
+                crate::types::read_zip_entry_bytes(entry, crate::types::MAX_ZIP_ENTRY_BYTES)
+            {
                 if let Ok(text) = pdf_extract::extract_text_from_mem(&buf) {
                     if !text.trim().is_empty() {
                         return Ok(text);

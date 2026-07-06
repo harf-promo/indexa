@@ -31,6 +31,9 @@ pdf-extract = "0.12"
 calamine = { version = "0.26", features = ["dates"] }
 # docx extraction (zip-based)
 zip = { version = "8", default-features = false, features = ["deflate"] }
+# Subprocess timeout: kill hung OCR/transcription/ffmpeg children instead of blocking indexing
+# forever. Tiny waitpid/WaitForSingleObject wrapper (MIT/Apache-2.0), no transitive deps.
+wait-timeout = "0.2"
 # Media metadata (audio/video via ffprobe subprocess — no extra dep needed)
 serde_json = "1"
 # Temp directories for video frame extraction

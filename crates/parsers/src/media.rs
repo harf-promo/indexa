@@ -109,8 +109,7 @@ pub fn transcribe_audio(path: &Path, binary: &str, model: Option<&str>) -> Resul
         cmd.args(["-m", m]);
     }
     cmd.args(["-f", path_str, "-nt", "-np"]);
-    let output = cmd
-        .output()
+    let output = crate::proc::run_capped(cmd, crate::proc::WHISPER_TIMEOUT)
         .with_context(|| format!("running {binary} (is it installed and on PATH?)"))?;
     if !output.status.success() {
         anyhow::bail!(
@@ -127,16 +126,16 @@ pub fn transcribe_audio(path: &Path, binary: &str, model: Option<&str>) -> Resul
 }
 
 fn run_ffprobe(path: &Path) -> Result<String> {
-    let output = Command::new("ffprobe")
-        .args([
-            "-v",
-            "quiet",
-            "-print_format",
-            "json",
-            "-show_format",
-            path.to_str().context("non-UTF-8 path")?,
-        ])
-        .output()
+    let mut cmd = Command::new("ffprobe");
+    cmd.args([
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_format",
+        path.to_str().context("non-UTF-8 path")?,
+    ]);
+    let output = crate::proc::run_capped(cmd, crate::proc::FFPROBE_TIMEOUT)
         .context("running ffprobe (is it installed?)")?;
 
     if !output.status.success() {
@@ -207,20 +206,20 @@ pub fn extract_video_frames(
 ) -> Result<(TempDir, Vec<std::path::PathBuf>)> {
     let dir = tempfile::tempdir().context("creating temp dir for video frames")?;
     let pattern = dir.path().join("frame_%03d.jpg");
-    let output = Command::new(ffmpeg_binary)
-        .args([
-            "-i",
-            path.to_str().context("non-UTF-8 video path")?,
-            "-vf",
-            &format!("fps={fps_sample}"),
-            "-frames:v",
-            &max_frames.to_string(),
-            "-q:v",
-            "2",
-            pattern.to_str().context("non-UTF-8 temp dir")?,
-            "-y",
-        ])
-        .output()
+    let mut cmd = Command::new(ffmpeg_binary);
+    cmd.args([
+        "-i",
+        path.to_str().context("non-UTF-8 video path")?,
+        "-vf",
+        &format!("fps={fps_sample}"),
+        "-frames:v",
+        &max_frames.to_string(),
+        "-q:v",
+        "2",
+        pattern.to_str().context("non-UTF-8 temp dir")?,
+        "-y",
+    ]);
+    let output = crate::proc::run_capped(cmd, crate::proc::FFMPEG_TIMEOUT)
         .with_context(|| format!("running {ffmpeg_binary} (is ffmpeg installed and on PATH?)"))?;
 
     if !output.status.success() {

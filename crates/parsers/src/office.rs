@@ -326,8 +326,6 @@ fn parse_csv(path: &Path) -> Result<String> {
 
 /// Docx extraction: grabs body + headers/footers + footnotes/endnotes from the OOXML zip.
 fn parse_docx_zip(path: &Path) -> Result<String> {
-    use std::io::Read;
-
     let file = std::fs::File::open(path)?;
     let mut archive = zip::ZipArchive::new(file)?;
 
@@ -342,8 +340,11 @@ fn parse_docx_zip(path: &Path) -> Result<String> {
     // Helper: read a named zip entry and strip XML tags, returning None if missing.
     let read_stripped =
         |archive: &mut zip::ZipArchive<std::fs::File>, entry: &str| -> Option<String> {
-            let mut xml = String::new();
-            archive.by_name(entry).ok()?.read_to_string(&mut xml).ok()?;
+            let xml = crate::types::read_zip_entry_text(
+                archive.by_name(entry).ok()?,
+                crate::types::MAX_ZIP_ENTRY_BYTES,
+            )
+            .ok()?;
             let t = strip_xml_tags(&xml);
             if t.trim().is_empty() {
                 None
@@ -354,10 +355,10 @@ fn parse_docx_zip(path: &Path) -> Result<String> {
 
     // 1. Main body (required — bail if missing).
     let body_text = {
-        let mut xml = String::new();
-        archive
-            .by_name("word/document.xml")?
-            .read_to_string(&mut xml)?;
+        let xml = crate::types::read_zip_entry_text(
+            archive.by_name("word/document.xml")?,
+            crate::types::MAX_ZIP_ENTRY_BYTES,
+        )?;
         strip_xml_tags(&xml)
     };
     if !body_text.trim().is_empty() {

@@ -5,7 +5,6 @@ use anyhow::{bail, Result};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::Path;
 
 pub struct EpubParser;
@@ -34,10 +33,10 @@ impl Parser for EpubParser {
 
         // Step 1: container.xml → OPF path
         let opf_path = {
-            let mut xml = String::new();
-            archive
-                .by_name("META-INF/container.xml")?
-                .read_to_string(&mut xml)?;
+            let xml = crate::types::read_zip_entry_text(
+                archive.by_name("META-INF/container.xml")?,
+                crate::types::MAX_ZIP_ENTRY_BYTES,
+            )?;
             parse_container_xml(&xml)?
         };
 
@@ -48,16 +47,17 @@ impl Parser for EpubParser {
             .unwrap_or_default();
 
         // Step 2: OPF → manifest + spine
-        let opf_xml = {
-            let mut s = String::new();
-            archive.by_name(&opf_path)?.read_to_string(&mut s)?;
-            s
-        };
+        let opf_xml = crate::types::read_zip_entry_text(
+            archive.by_name(&opf_path)?,
+            crate::types::MAX_ZIP_ENTRY_BYTES,
+        )?;
         let (manifest, spine) = parse_opf(&opf_xml)?;
 
         // Step 3: for each spine item, read XHTML and chunk
         let mut chunks = Vec::new();
         let mut seq = 0usize;
+        // Running total across chapters: a deck of many near-cap parts can't sum to an OOM.
+        let mut extracted_bytes: u64 = 0;
 
         for item_id in &spine {
             let href = match manifest.get(item_id.as_str()) {
@@ -76,17 +76,25 @@ impl Parser for EpubParser {
             }
 
             let xhtml = match archive.by_name(&full_path) {
-                Ok(mut entry) => {
-                    let mut s = String::new();
-                    let _ = entry.read_to_string(&mut s);
-                    s
+                Ok(entry) => {
+                    match crate::types::read_zip_entry_text(
+                        entry,
+                        crate::types::MAX_ZIP_ENTRY_BYTES,
+                    ) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    }
                 }
                 Err(_) => continue,
             };
+            extracted_bytes = extracted_bytes.saturating_add(xhtml.len() as u64);
 
             let text = strip_xhtml_text(&xhtml);
             let text = text.trim().to_string();
             if text.is_empty() {
+                if extracted_bytes > crate::types::MAX_ZIP_TOTAL_BYTES {
+                    break;
+                }
                 continue;
             }
 
@@ -109,6 +117,10 @@ impl Parser for EpubParser {
                 &mut seq,
                 &mut chunks,
             );
+
+            if extracted_bytes > crate::types::MAX_ZIP_TOTAL_BYTES {
+                break;
+            }
         }
 
         if chunks.is_empty() {

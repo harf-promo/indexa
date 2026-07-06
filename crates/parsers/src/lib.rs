@@ -14,6 +14,7 @@ pub mod office;
 pub mod org;
 pub mod pdf;
 pub mod presentation;
+pub mod proc;
 pub mod registry;
 pub mod svg;
 pub mod text;
