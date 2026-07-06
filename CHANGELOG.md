@@ -69,6 +69,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Stop now sets a cooperative flag (`watcher::run_watch_loop_until`) that actually ends the loop and
   drops the debouncer, freeing every per-event resource. The CLI `watch` is unchanged (it stops on
   process exit). Verified end-to-end: a file saved after Stop is no longer indexed.
+- **Desktop update refreshed the CLI to the *old* version.** After a self-update the app downloaded
+  the terminal/MCP `indexa` using `CARGO_PKG_VERSION` — the constant baked into the still-running
+  *old* binary — so it "refreshed" the CLI to the version being replaced, and the post-update check
+  (comparing against that same old constant) wrongly saw a match and cleared the stale-CLI marker.
+  It now uses the just-installed `update.version` for both the download tag and the verification.
+- **Desktop app exited silently on a fatal startup error.** If the embedded server failed to start
+  (or didn't bind within 15 s), the process exited with only a stderr line — the app just never
+  opened. It now shows a native error dialog naming the cause before exiting (macOS; no-op elsewhere).
+- **MCP `trigger_index` / `add_note` spawned a bare `indexa` from `$PATH`.** A GUI-launched MCP
+  client with a minimal environment might have no `indexa` on `PATH`, or a different/older install;
+  the server now re-invokes its own binary via `std::env::current_exe()`, matching the
+  "doctor/status/MCP are authoritative" contract.
 
 ## [0.76.0] — 2026-06-28
 
