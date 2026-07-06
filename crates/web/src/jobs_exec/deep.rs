@@ -626,7 +626,12 @@ pub(crate) async fn run_deep_phase(
                         entry_path: path_str.clone(),
                         seq: chunk.seq,
                         heading: chunk.heading.clone(),
-                        text: chunk.text.clone(), // store original text, embed enriched
+                        // Redact secrets before storing (embed uses original text); shared choke
+                        // point so web deep honors [scan] redact_at_index like the CLI.
+                        text: indexa_query::redact::chunk_text_for_store(
+                            &chunk.text,
+                            state.config.scan.redact_at_index,
+                        ),
                         language: chunk.language.clone(),
                         embedding,
                         embed_model: Some(embed_model.clone()),
