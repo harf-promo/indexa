@@ -178,22 +178,55 @@ pub(crate) async fn cmd_deep(
         let entries = walk(root, &walk_cfg)?;
         // `[scan] skip_binary` sniffs binaries during the walk; skip them here so `deep`/`index`
         // never opens/parses an executable/image/DB blob (matches the dry-run + web deep paths).
+        // Secret files (`.env`, keys, `.pem`/keystores) are recorded by scan but not embedded
+        // unless `[scan] include_sensitive` — redaction can't scrub a raw key, so their contents
+        // stay out of the searchable index by default.
+        let include_sensitive = walk_cfg.include_sensitive;
+        let is_sensitive = |e: &&indexa_core::walker::Entry| {
+            e.hint
+                .as_ref()
+                .is_some_and(|h| h.deep_scan == indexa_core::surface::DeepScanPolicy::Sensitive)
+        };
         let files: Vec<_> = entries
             .iter()
-            .filter(|e| e.kind == indexa_core::walker::EntryKind::File && !e.is_binary)
+            .filter(|e| {
+                e.kind == indexa_core::walker::EntryKind::File
+                    && !e.is_binary
+                    && (include_sensitive || !is_sensitive(e))
+            })
             .collect();
         let binaries_skipped = entries
             .iter()
             .filter(|e| e.kind == indexa_core::walker::EntryKind::File && e.is_binary)
             .count();
-
-        if binaries_skipped > 0 {
-            println!(
-                "  parsing {} files ({binaries_skipped} binaries skipped)...",
-                files.len()
-            );
+        let sensitive_skipped = if include_sensitive {
+            0
         } else {
+            entries
+                .iter()
+                .filter(|e| {
+                    e.kind == indexa_core::walker::EntryKind::File
+                        && !e.is_binary
+                        && is_sensitive(e)
+                })
+                .count()
+        };
+
+        let mut notes: Vec<String> = Vec::new();
+        if binaries_skipped > 0 {
+            notes.push(format!("{binaries_skipped} binaries"));
+        }
+        if sensitive_skipped > 0 {
+            notes.push(format!("{sensitive_skipped} sensitive"));
+        }
+        if notes.is_empty() {
             println!("  parsing {} files...", files.len());
+        } else {
+            println!(
+                "  parsing {} files ({} skipped)...",
+                files.len(),
+                notes.join(", ")
+            );
         }
         let mut total_chunks = 0usize;
         let mut skipped = 0usize;

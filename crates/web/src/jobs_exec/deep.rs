@@ -46,9 +46,20 @@ pub(crate) async fn run_deep_phase(
     entries: &[indexa_core::walker::Entry],
     handle: &Arc<JobHandle>,
 ) -> bool {
+    // Secret files (`.env`, keys, `.pem`/keystores) are recorded by scan but not embedded unless
+    // `[scan] include_sensitive` — redaction can't scrub a raw key, so their contents stay out of
+    // the searchable index by default. Mirrors the CLI deep + watch (`should_index_file`) gates.
+    let include_sensitive = state.config.scan.include_sensitive;
     let files: Vec<_> = entries
         .iter()
-        .filter(|e| e.kind == EntryKind::File && !e.is_binary)
+        .filter(|e| {
+            e.kind == EntryKind::File
+                && !e.is_binary
+                && (include_sensitive
+                    || !e.hint.as_ref().is_some_and(|h| {
+                        h.deep_scan == indexa_core::surface::DeepScanPolicy::Sensitive
+                    }))
+        })
         .collect();
     let n_files = files.len() as u64;
     let total_bytes: u64 = files.iter().map(|e| e.size).sum();

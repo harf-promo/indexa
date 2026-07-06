@@ -128,6 +128,17 @@ pub fn is_sensitive_dir(dir_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// True if `path` is itself a secret-bearing file (`.env`, private keys, `.pem`/keystores,
+/// credential files) classified `DeepScanPolicy::Sensitive` by [`classify_file_by_extension`] —
+/// the file-level analogue of [`is_sensitive_dir`]. Such files are recorded as metadata but not
+/// deep-parsed or embedded unless `include_sensitive` is set, so their contents (which redaction
+/// can't reliably scrub — e.g. a raw PEM) never enter the searchable index.
+pub fn is_sensitive_file(path: &Path) -> bool {
+    classify_file_by_extension(path)
+        .map(|h| h.deep_scan == DeepScanPolicy::Sensitive)
+        .unwrap_or(false)
+}
+
 /// Build a gitignore matcher for `root` combining the root `.gitignore` (when `respect_gitignore`)
 /// and the `[scan] ignore` config patterns, both anchored at `root`. Returns `None` when there are
 /// no rules. Shared by the walker prune callback and the watchers' per-event
@@ -176,9 +187,10 @@ pub fn build_scan_matchers(
 /// watchers, which see individual paths rather than a prunable walk. Rejects the file when it
 /// exceeds `max_filesize`, when any ancestor directory (up to its `roots` entry) is a skip-dir
 /// (`target/`, `node_modules/`, `.git/`, …) or a sensitive dir (`.ssh/`, `.gnupg/`, …) with
-/// `include_sensitive` off, or when a `[scan] ignore`/gitignore rule in `matchers` (from
-/// [`build_scan_matchers`]) matches. Without this a live watch re-indexes exactly the build
-/// artifacts / credential stores / oversized blobs the scan walker deliberately skips.
+/// `include_sensitive` off, when the file *itself* is a secret ([`is_sensitive_file`]: `.env`,
+/// `id_rsa`, `*.pem`, …) with `include_sensitive` off, or when a `[scan] ignore`/gitignore rule in
+/// `matchers` (from [`build_scan_matchers`]) matches. Without this a live watch re-indexes exactly
+/// the build artifacts / credential stores / oversized blobs the scan walker deliberately skips.
 pub fn should_index_file(
     path: &Path,
     roots: &[PathBuf],
@@ -200,6 +212,11 @@ pub fn should_index_file(
         if !include_sensitive && is_sensitive_dir(&dir) {
             return false;
         }
+    }
+    // File-level secret (a `.env`/`id_rsa`/`*.pem` outside a known sensitive dir): metadata-only
+    // unless the caller opted in. Mirrors the deep-phase gate so watch and scan agree.
+    if !include_sensitive && is_sensitive_file(path) {
+        return false;
     }
     for (root, gi) in matchers {
         if path.starts_with(root) && gi.matched(path, false).is_ignore() {
@@ -606,6 +623,30 @@ mod tests {
 
         // Oversized files are skipped.
         assert!(!should_index_file(&ok, &roots, false, Some(0), &matchers));
+
+        // Secret files (`.env`, `id_rsa`, `*.pem`) are metadata-only by default, but indexed
+        // when the caller opts into sensitive content.
+        let env = root.join("service/.env");
+        write(&env);
+        assert!(!should_index_file(&env, &roots, false, cap, &matchers));
+        assert!(should_index_file(&env, &roots, true, cap, &matchers));
+        let key = root.join("deploy/id_rsa");
+        write(&key);
+        assert!(!should_index_file(&key, &roots, false, cap, &matchers));
+        // A Keynote deck (`.key`) is NOT a secret and stays indexable.
+        let deck = root.join("talks/deck.key");
+        write(&deck);
+        assert!(should_index_file(&deck, &roots, false, cap, &matchers));
+    }
+
+    #[test]
+    fn is_sensitive_file_flags_secrets_not_keynote() {
+        assert!(is_sensitive_file(Path::new("/p/.env")));
+        assert!(is_sensitive_file(Path::new("/p/.env.production")));
+        assert!(is_sensitive_file(Path::new("/p/deploy.pem")));
+        assert!(is_sensitive_file(Path::new("/p/id_ed25519")));
+        assert!(!is_sensitive_file(Path::new("/p/deck.key")));
+        assert!(!is_sensitive_file(Path::new("/p/src/main.rs")));
     }
 
     #[test]
