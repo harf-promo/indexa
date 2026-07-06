@@ -129,7 +129,11 @@ async fn fetch_github(gh: &GhRef, timeout: u64, retries: u32) -> Result<String> 
 
 /// Fetch an arbitrary web page and convert it to Markdown (best-effort).
 async fn fetch_web(url: &str, timeout: u64, retries: u32) -> Result<String> {
-    let client = indexa_http_util::http_client(timeout);
+    // SSRF guard (C11): refuse non-http(s) or a host resolving to a private/loopback/link-local
+    // address, and — via the guarded client — any redirect hop to such a host (an external page can
+    // otherwise 3xx to 169.254.169.254 / localhost:7620 and pull that into the pack).
+    indexa_http_util::validate_public_url_str(url).map_err(|e| anyhow::anyhow!(e))?;
+    let client = indexa_http_util::ssrf_guarded_client(timeout);
     let resp =
         indexa_http_util::send_with_retry(|| client.get(url).header("User-Agent", UA), retries)
             .await
