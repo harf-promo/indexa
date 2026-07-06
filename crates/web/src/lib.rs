@@ -72,8 +72,14 @@ pub struct AppState {
 
 /// Info about a running watch task so it can be listed and aborted via the web API.
 pub(crate) struct WatchTaskInfo {
-    /// Abort signal to stop the background watcher task.
+    /// Abort signal for the outer async wrapper. Load-bearing only to make the wrapper's
+    /// `.await` return promptly (so the watchdog cleanup fires) — it CANNOT cancel the inner
+    /// `spawn_blocking` watch loop, which is why `stop` below exists.
     pub(crate) abort: tokio::task::AbortHandle,
+    /// Cooperative stop flag for the inner blocking watch loop. Setting it ends the loop,
+    /// which drops the debouncer and frees the per-event `Store` connections. This — not
+    /// `abort` — is what actually stops watching. See `handlers::watch::api_watch_stop`.
+    pub(crate) stop: Arc<std::sync::atomic::AtomicBool>,
     /// Total file-change events processed since the session started.
     pub(crate) events_count: Arc<std::sync::atomic::AtomicU64>,
     /// Unix timestamp when watching started.

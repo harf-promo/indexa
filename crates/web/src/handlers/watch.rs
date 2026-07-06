@@ -19,7 +19,7 @@ use indexa_core::{
 };
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::{atomic::AtomicU64, atomic::Ordering, Arc};
+use std::sync::{atomic::AtomicBool, atomic::AtomicU64, atomic::Ordering, Arc};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::dto::{err_json, require_path, PathQuery};
@@ -95,6 +95,10 @@ pub(crate) async fn api_watch_start(
     let redact_at_index = state.config.scan.redact_at_index;
     let events_count = Arc::new(AtomicU64::new(0));
     let events_count2 = events_count.clone();
+    // Cooperative stop flag: `api_watch_stop` sets it to end the blocking watch loop (which
+    // drops the debouncer). `stop2` is moved into the loop; `stop` is kept in `WatchTaskInfo`.
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop2 = stop.clone();
 
     let started_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -114,7 +118,7 @@ pub(crate) async fn api_watch_start(
         };
         let rt = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
-            watcher::run_watch_loop(session, |event| {
+            watcher::run_watch_loop_until(session, &stop2, |event| {
                 let path = &event.path;
                 if path.is_dir() {
                     return;
@@ -256,6 +260,7 @@ pub(crate) async fn api_watch_start(
         path.clone(),
         WatchTaskInfo {
             abort,
+            stop,
             events_count,
             started_at,
         },
@@ -288,6 +293,10 @@ pub(crate) async fn api_watch_stop(
 
     let mut sessions = state.watch_sessions.lock().await;
     if let Some(info) = sessions.remove(&path) {
+        // Signal the blocking watch loop to exit: it drops the debouncer (stopping the OS
+        // watcher) and stops opening a fresh `Store` per event. `abort` only nudges the outer
+        // async wrapper so the watchdog cleanup fires promptly — it can't stop the loop itself.
+        info.stop.store(true, Ordering::Relaxed);
         info.abort.abort();
         Json(serde_json::json!({ "stopped": true, "path": path })).into_response()
     } else {
