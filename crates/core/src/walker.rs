@@ -198,6 +198,11 @@ pub fn should_index_file(
     max_filesize: Option<u64>,
     matchers: &[(PathBuf, ignore::gitignore::Gitignore)],
 ) -> bool {
+    // A symlink escapes the root: indexing follows the link and reads the target (outside the
+    // root, past the size cap and deny-list). `is_symlink()` lstat's — it does not follow.
+    if path.is_symlink() {
+        return false;
+    }
     if let Some(cap) = max_filesize {
         if let Ok(meta) = std::fs::metadata(path) {
             if meta.len() > cap {
@@ -323,6 +328,16 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
                     };
                     let path = de.path();
                     let is_dir = de.file_type().map(|t| t.is_dir()).unwrap_or(false);
+
+                    // Skip symlinks entirely. With follow_links(false) the walker lstat's a symlink
+                    // as a size-0 File entry, but the deep phase OPENs the path — following the link
+                    // — indexing content OUTSIDE the root (e.g. a `notes.txt` link to ~/.ssh/id_rsa)
+                    // past both the size cap (0 bytes never trips it) and the sensitive deny-list
+                    // (which keys on the link's own name, not its target). Guard on is_symlink(),
+                    // NOT the name — an innocuously-named link would otherwise slip through.
+                    if de.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
+                        return WalkState::Continue; // don't record; keep walking siblings
+                    }
 
                     // Belt-and-suspenders hidden check: WalkBuilder.hidden(true) handles
                     // this, but guard in the callback too for robustness. Depth > 0 so we
@@ -647,6 +662,48 @@ mod tests {
         assert!(is_sensitive_file(Path::new("/p/id_ed25519")));
         assert!(!is_sensitive_file(Path::new("/p/deck.key")));
         assert!(!is_sensitive_file(Path::new("/p/src/main.rs")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_skips_symlinks_that_escape_the_root() {
+        use std::os::unix::fs::symlink;
+        // An out-of-root secret, reachable only via a link.
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("id_rsa");
+        std::fs::write(&secret, "-----BEGIN OPENSSH PRIVATE KEY-----\n").unwrap();
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("real.rs"), "fn main() {}").unwrap();
+        // Innocuously named so the name-based deny-list can't catch it — only is_symlink() can.
+        symlink(&secret, root.path().join("notes.rs")).unwrap();
+
+        let entries = walk(root.path(), &WalkConfig::default()).unwrap();
+        assert!(
+            entries.iter().any(|e| e.path.ends_with("real.rs")),
+            "the real file must be indexed"
+        );
+        assert!(
+            !entries.iter().any(|e| e.path.ends_with("notes.rs")),
+            "the escaping symlink must NOT be indexed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_index_file_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let target = root.join("target.rs");
+        std::fs::write(&target, "x").unwrap();
+        let link = root.join("link.rs");
+        symlink(&target, &link).unwrap();
+        let roots = vec![root.clone()];
+        let matchers = build_scan_matchers(&roots, false, &[]);
+        let cap = Some(DEFAULT_MAX_FILESIZE);
+        assert!(should_index_file(&target, &roots, false, cap, &matchers));
+        assert!(!should_index_file(&link, &roots, false, cap, &matchers));
     }
 
     #[test]

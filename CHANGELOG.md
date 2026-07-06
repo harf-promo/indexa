@@ -125,6 +125,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`npm_`), SendGrid (`SG.…`), Google OAuth (`ya29.`), and credentials embedded in URLs
   (`scheme://user:pass@host`) — on top of the existing AWS/GitHub/Slack/Google/OpenAI/PEM/assignment
   patterns. The redaction-count accounting is unchanged.
+- **Symlinks no longer escape the indexed root.** The walker recorded a symlink as a size-0 file
+  entry, and the deep phase then opened the path — *following the link* — so a benignly-named link
+  (`notes.rs` → `~/.ssh/id_rsa`) got its target indexed, past both the size cap (0 bytes never trips
+  it) and the sensitive deny-list (which keys on the link's own name). The scan walk and the live
+  watch now skip symlinks entirely, keyed on `is_symlink()` rather than the name.
+- **Index DB and log files are created owner-only on Unix.** `Store::open` now sets the index DB to
+  `0600` and its data directory to `0700` (also containing the WAL/SHM sidecars), and the CLI log
+  directory to `0700` — so on a shared host other local users can't read the indexed corpus (which
+  can include secrets on a whole-machine scan) or the logs. Fail-open; matches the existing
+  `config.toml` 0600 hardening. No-op on Windows.
 
 ## [0.76.0] — 2026-06-28
 

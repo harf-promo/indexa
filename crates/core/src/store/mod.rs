@@ -89,9 +89,24 @@ impl Store {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating index directory {}", parent.display()))?;
+            // The index holds the full indexed corpus (incl. secrets on a whole-machine scan). On a
+            // shared Unix host, tighten the data dir to 0700 so other local users can't read it —
+            // this also contains the `-wal`/`-shm` sidecars SQLite creates under the default umask.
+            // Fail-open: a perms error must never stop the index from opening.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            }
         }
         let conn = Connection::open(path)
             .with_context(|| format!("opening index at {}", path.display()))?;
+        // Tighten the DB file itself to 0600 (SQLite creates it under the default umask). Fail-open.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
         // Set the busy timeout BEFORE any SQL (init_schema sets it again via PRAGMA, but the
         // first statements there — journal_mode=WAL, the AUTOINCREMENT migration — can contend
         // when worker + serve open the same DB at once; without an already-armed timeout that

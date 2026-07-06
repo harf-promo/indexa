@@ -11,6 +11,21 @@ fn open_in_memory_and_upsert() {
     assert_eq!(store.entry_count().unwrap(), 2);
 }
 
+#[cfg(unix)]
+#[test]
+fn open_hardens_db_and_dir_perms() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    let _store = Store::open(&db).unwrap();
+    // The DB holds the indexed corpus (incl. secrets) — file 0600, data dir 0700, so other
+    // local users on a shared host can't read it.
+    let fmode = std::fs::metadata(&db).unwrap().permissions().mode() & 0o777;
+    assert_eq!(fmode, 0o600, "db file should be 0600, got {fmode:o}");
+    let dmode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
+    assert_eq!(dmode, 0o700, "data dir should be 0700, got {dmode:o}");
+}
+
 #[test]
 fn upsert_is_idempotent() {
     let mut store = Store::open_in_memory().unwrap();
