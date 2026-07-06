@@ -92,6 +92,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so scan, deep, and watch agree. `.key` (Apple Keynote) and public material (`*.pub`/`*.crt`) are
   deliberately excluded. Verified end-to-end: a `.env`/`deploy.pem`/`id_rsa` is recorded but produces
   zero chunks, and the secret values never appear in the index.
+- **Container parsers had no decompression cap (zip-bomb hardening).** The DOCX / EPUB / PPTX / iWork
+  parsers read zip entries with `read_to_string`/`read_to_end`, trusting the archive to be honest —
+  a crafted "zip bomb" (a tiny entry that decompresses to gigabytes) could exhaust memory during a
+  scan. Every entry read now goes through a **bounded** read (`read_zip_entry_text`/`_bytes`, 16 MiB
+  per entry) that caps the actual decompressed bytes rather than trusting the declared size, plus a
+  64 MiB running-total budget across the multi-part EPUB spine and PPTX slide/notes loops so many
+  near-cap parts can't sum to an OOM. Reads stay lossy-UTF-8, so a cap landing mid-character never
+  hard-fails an otherwise-valid document.
+- **Parser subprocesses could hang indexing forever.** PDF OCR (`pdftoppm`/`tesseract`), audio
+  transcription (whisper), and video probing/frame-extraction (`ffprobe`/`ffmpeg`) ran with no time
+  limit — one wedged tool would stall the whole `deep`/index run. They now run through a shared
+  `run_capped` helper that kills the child after a per-tool timeout (draining stdout/stderr on
+  separate threads so a full pipe can't deadlock the wait), failing open so the file is skipped
+  rather than hanging. New `wait-timeout` dependency — `libc`-only, keeps the tree openssl-free.
 
 ## [0.76.0] — 2026-06-28
 

@@ -20,7 +20,6 @@
 
 use crate::office::strip_xml_tags;
 use crate::types::{Chunk, ChunkParams, Extracted, Parser};
-use std::io::Read;
 use std::path::Path;
 
 pub struct PresentationParser;
@@ -118,21 +117,18 @@ fn parse_pptx(path: &Path, filename: &str, chunk: ChunkParams) -> anyhow::Result
 
     let mut chunks = Vec::new();
     let mut seq = 0usize;
+    // Running total across slides + notes: a deck of many near-cap parts can't sum to an OOM.
+    let mut extracted_bytes: u64 = 0;
 
     for slide_num in &slide_indices {
         let slide_entry = format!("ppt/slides/slide{slide_num}.xml");
 
-        // Read slide XML and strip tags.
-        let slide_text = {
-            let mut xml = String::new();
-            match archive.by_name(&slide_entry) {
-                Ok(mut e) => {
-                    let _ = e.read_to_string(&mut xml);
-                }
-                Err(_) => continue, // entry listed by name but missing — skip
-            }
-            strip_xml_tags(&xml)
+        // Read slide XML (capped) and strip tags.
+        let Some(slide_xml) = read_zip_text(&mut archive, &slide_entry) else {
+            continue; // entry listed by name but missing/unreadable — skip
         };
+        extracted_bytes = extracted_bytes.saturating_add(slide_xml.len() as u64);
+        let slide_text = strip_xml_tags(&slide_xml);
         let slide_text = slide_text.trim().to_owned();
 
         // Derive slide title: first non-empty whitespace-collapsed token sequence
@@ -188,24 +184,19 @@ fn parse_pptx(path: &Path, filename: &str, chunk: ChunkParams) -> anyhow::Result
 
             if let Some(n) = note_num {
                 let notes_entry = format!("ppt/notesSlides/notesSlide{n}.xml");
-                let mut xml = String::new();
-                if archive
-                    .by_name(&notes_entry)
-                    .ok()
-                    .and_then(|mut e| e.read_to_string(&mut xml).ok())
-                    .is_some()
-                {
-                    let stripped = strip_xml_tags(&xml);
-                    let stripped = stripped.trim().to_owned();
-                    // Speaker-note XML also contains the slide body text (it embeds a copy).
-                    // Deduplicate: only keep the notes portion if it differs meaningfully.
-                    if !stripped.is_empty() && stripped != slide_text {
-                        Some(stripped)
-                    } else {
-                        None
+                match read_zip_text(&mut archive, &notes_entry) {
+                    Some(xml) => {
+                        let stripped = strip_xml_tags(&xml);
+                        let stripped = stripped.trim().to_owned();
+                        // Speaker-note XML also contains the slide body text (it embeds a copy).
+                        // Deduplicate: only keep the notes portion if it differs meaningfully.
+                        if !stripped.is_empty() && stripped != slide_text {
+                            Some(stripped)
+                        } else {
+                            None
+                        }
                     }
-                } else {
-                    None
+                    None => None,
                 }
             } else {
                 None
@@ -234,6 +225,10 @@ fn parse_pptx(path: &Path, filename: &str, chunk: ChunkParams) -> anyhow::Result
             &mut seq,
             &mut chunks,
         );
+
+        if extracted_bytes > crate::types::MAX_ZIP_TOTAL_BYTES {
+            break;
+        }
     }
 
     // Chart + SmartArt text — nested OOXML parts the slide pass skips. Emit them as deck-level
@@ -245,15 +240,13 @@ fn parse_pptx(path: &Path, filename: &str, chunk: ChunkParams) -> anyhow::Result
         .collect();
     aux_names.sort();
     for name in aux_names {
-        let mut xml = String::new();
-        if archive
-            .by_name(name)
-            .ok()
-            .and_then(|mut e| e.read_to_string(&mut xml).ok())
-            .is_none()
-        {
-            continue;
+        if extracted_bytes > crate::types::MAX_ZIP_TOTAL_BYTES {
+            break;
         }
+        let Some(xml) = read_zip_text(&mut archive, name) else {
+            continue;
+        };
+        extracted_bytes = extracted_bytes.saturating_add(xml.len() as u64);
         let text = strip_xml_tags(&xml);
         let text = text.trim();
         if text.is_empty() {
@@ -304,14 +297,14 @@ fn notes_index(name: &str) -> Option<u32> {
     base.strip_suffix(".xml")?.parse::<u32>().ok()
 }
 
-/// Read a zip entry to a UTF-8 string (best-effort; `None` if absent/unreadable).
+/// Read a zip entry to a UTF-8 string, capped at [`MAX_ZIP_ENTRY_BYTES`] (best-effort; `None` if
+/// absent/unreadable). Central choke point so every PPTX part read is bomb-bounded.
 fn read_zip_text(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Option<String> {
-    let mut xml = String::new();
-    archive
-        .by_name(name)
-        .ok()
-        .and_then(|mut e| e.read_to_string(&mut xml).ok())?;
-    Some(xml)
+    crate::types::read_zip_entry_text(
+        archive.by_name(name).ok()?,
+        crate::types::MAX_ZIP_ENTRY_BYTES,
+    )
+    .ok()
 }
 
 /// Parse a slide's `.rels` XML for its notesSlide target number — the `M` in a

@@ -148,13 +148,12 @@ pub fn ocr_pdf(path: &Path, tesseract_bin: &str, lang: Option<&str>) -> Result<S
     use std::process::Command;
     let dir = tempfile::tempdir()?;
     let prefix = dir.path().join("page");
-    let status = Command::new("pdftoppm")
-        .args(["-png", "-r", "200"])
-        .arg(path)
-        .arg(&prefix)
-        .status()
-        .map_err(|e| anyhow!("pdftoppm unavailable ({e}); install poppler for PDF OCR"))?;
-    if !status.success() {
+    let mut cmd = Command::new("pdftoppm");
+    cmd.args(["-png", "-r", "200"]).arg(path).arg(&prefix);
+    let rasterise = crate::proc::run_capped(cmd, crate::proc::PDFTOPPM_TIMEOUT).map_err(|e| {
+        anyhow!("pdftoppm unavailable or timed out ({e}); install poppler for PDF OCR")
+    })?;
+    if !rasterise.status.success() {
         bail!("pdftoppm failed to rasterise {}", path.display());
     }
     let mut pages: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())?
@@ -170,8 +169,8 @@ pub fn ocr_pdf(path: &Path, tesseract_bin: &str, lang: Option<&str>) -> Result<S
         if let Some(l) = lang {
             cmd.args(["-l", l]);
         }
-        let out = cmd.output().map_err(|e| {
-            anyhow!("{tesseract_bin} unavailable ({e}); install tesseract for PDF OCR")
+        let out = crate::proc::run_capped(cmd, crate::proc::TESSERACT_TIMEOUT).map_err(|e| {
+            anyhow!("{tesseract_bin} unavailable or timed out ({e}); install tesseract for PDF OCR")
         })?;
         if out.status.success() {
             text.push_str(&String::from_utf8_lossy(&out.stdout));
