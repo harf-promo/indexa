@@ -99,7 +99,7 @@ pub enum Commands {
   indexa scan --all")]
     #[command(display_order = 40)]
     Scan {
-        /// Paths to scan. Omit to scan the home directory.
+        /// Paths to scan. Omit to re-scan all existing roots.
         #[arg(num_args = 0..)]
         paths: Vec<String>,
 

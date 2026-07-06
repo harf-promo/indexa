@@ -5,10 +5,10 @@ use indexa_core::{
     walker::{walk, WalkConfig},
 };
 
-use super::helpers::{check_huge_root_guard, index_db_path, resolve_roots};
+use super::helpers::{check_huge_root_guard, index_db_path, resolve_target_roots};
 
 pub(crate) async fn cmd_scan(paths: Vec<String>, all: bool, yes: bool, cfg: &Config) -> Result<()> {
-    let roots = resolve_roots(paths, all)?;
+    let roots = resolve_target_roots(paths, all)?;
     if !yes {
         for root in &roots {
             check_huge_root_guard(root)?;
