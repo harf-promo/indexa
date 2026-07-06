@@ -135,6 +135,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory to `0700` — so on a shared host other local users can't read the indexed corpus (which
   can include secrets on a whole-machine scan) or the logs. Fail-open; matches the existing
   `config.toml` 0600 hardening. No-op on Windows.
+- **`pack add-url` can no longer be redirected into your private network (SSRF).** The remote-source
+  fetch followed up to 10 redirects with no host check, so an external URL could `3xx` to
+  `169.254.169.254` (cloud metadata), `localhost:7620`, or an internal service and pull the response
+  into a pack. It now uses a dedicated client that rejects non-`http(s)` schemes and refuses any
+  hop — initial or redirected — whose host resolves to a loopback / link-local / private / CGNAT
+  address; redirects are also capped at 5. The shared HTTP client (LLM/embed providers) is untouched.
 
 ## [0.76.0] — 2026-06-28
 
