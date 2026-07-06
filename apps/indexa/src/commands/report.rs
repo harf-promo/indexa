@@ -39,30 +39,7 @@ pub(crate) async fn cmd_report(
 
     let embedder = build_embedder(cfg, None)?;
     let llm = build_llm(cfg, None)?;
-    let qa_cfg = QaConfig {
-        top_k: cfg.retrieval.top_k,
-        mode: cfg.retrieval.hybrid.clone(),
-        scope: None,
-        context_budget: cfg.retrieval.context_budget,
-        rrf_k: cfg.retrieval.rrf_k as f32,
-        summary_weight: cfg.retrieval.summary_weight,
-        summary_depth_alpha: cfg.retrieval.summary_depth_alpha,
-        rerank: cfg.retrieval.rerank,
-        rerank_backend: cfg.retrieval.rerank_backend.clone(),
-        rerank_model: cfg.retrieval.rerank_model.clone(),
-        use_weights: cfg.retrieval.use_weights,
-        use_recency_weight: cfg.retrieval.recency_boost,
-        recency_days: cfg.retrieval.recency_days,
-        max_steps: cfg.retrieval.agentic_max_steps,
-        mmr_lambda: cfg.retrieval.mmr_lambda,
-        archive_segments: cfg.retrieval.archive_segments.clone(),
-        archive_penalty: cfg.retrieval.archive_penalty,
-        broad_per_file_cap: cfg.retrieval.broad_per_file_cap,
-        graphrag_clusters: cfg.retrieval.graphrag_clusters,
-        graphrag_max_clusters: cfg.retrieval.graphrag_max_clusters,
-        graphrag_cluster_sim: cfg.retrieval.graphrag_cluster_sim,
-        graphrag_summarize: cfg.retrieval.graphrag_summarize,
-    };
+    let qa_cfg = QaConfig::from_retrieval(&cfg.retrieval);
 
     let mut answers: Vec<Answer> = Vec::with_capacity(qs.len());
     for (i, q) in qs.iter().enumerate() {
