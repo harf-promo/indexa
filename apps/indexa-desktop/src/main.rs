@@ -63,7 +63,15 @@ fn main() {
             .expect("tokio runtime");
         rt.block_on(async {
             if let Err(e) = run_server(PORT).await {
-                eprintln!("[indexa-desktop] server error: {e:#}");
+                let msg = format!("{e:#}");
+                eprintln!("[indexa-desktop] server error: {msg}");
+                // Without a dialog the app just fails to open with no explanation — the user sees
+                // nothing. Surface the fatal cause (missing data dir, config/DB error, embedder
+                // build failure) before exiting. No-op off macOS.
+                show_error_dialog(
+                    "Indexa — Failed to Start",
+                    &format!("Indexa's local server could not start:\n\n{msg}"),
+                );
                 std::process::exit(1); // propagate fatal errors (e.g. bind failure) to the UI process
             }
         });
@@ -72,6 +80,12 @@ fn main() {
     // Wait until our server is accepting connections (up to 15 s).
     if !wait_for_port(PORT, Duration::from_secs(15)) {
         eprintln!("[indexa-desktop] server did not start within 15 s");
+        // Same reasoning as above: a silent exit leaves the user with an app that never opens.
+        show_error_dialog(
+            "Indexa — Failed to Start",
+            "Indexa's local server did not become ready within 15 seconds.\n\n\
+             Check ~/Library/Application Support/dev.indexa.Indexa/logs/indexa.log for details.",
+        );
         std::process::exit(1);
     }
 
@@ -398,7 +412,10 @@ async fn install_update(app: tauri::AppHandle, update: tauri_plugin_updater::Upd
     // the app restart.
     {
         let (dir, on_path) = resolve_cli_dir();
-        let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+        // Download the CLI for the version we just installed (`version` == `update.version`),
+        // NOT `CARGO_PKG_VERSION` — that is baked into THIS still-running OLD binary, so using it
+        // would "refresh" the terminal/MCP `indexa` to the very version we're replacing.
+        let tag = format!("v{version}");
         let installed = match indexa_update::download_cli_to(&dir, &tag, None).await {
             Ok(p) => {
                 eprintln!(
@@ -417,7 +434,7 @@ async fn install_update(app: tauri::AppHandle, update: tauri_plugin_updater::Upd
         // banner when it didn't. The old refresh was silent best-effort — exactly the
         // trap that left a user's terminal/MCP `indexa` several versions behind with no
         // signal. Non-fatal; never blocks the imminent restart.
-        record_cli_refresh_outcome(installed.as_deref());
+        record_cli_refresh_outcome(installed.as_deref(), &version);
     }
 
     report_update_progress(UpdateProgress::done(title));
@@ -430,18 +447,23 @@ async fn install_update(app: tauri::AppHandle, update: tauri_plugin_updater::Upd
 /// After the post-update CLI refresh, verify the installed binary reports the app's
 /// version, and persist the result so the web UI can surface it.
 ///
+/// `app_version` is the version we just installed (the target `update.version`), NOT
+/// `CARGO_PKG_VERSION` — this runs in the still-old process before `app.restart()`, so the
+/// compiled-in constant is the version being replaced. Comparing the freshly-downloaded CLI
+/// against it would mis-flag a correctly-refreshed CLI as stale (and, before the tag fix above,
+/// silently accept a CLI left a version behind).
+///
 /// On success the skew marker is cleared; on any mismatch or failure (download failed,
 /// the binary won't run, codesign killed it, or it landed in a dir the user's shell
 /// doesn't use) `<data_dir>/cli_skew_warning.json` is written so `GET /api/health` can
 /// show a "your terminal/MCP `indexa` is stale" banner. Entirely best-effort — every
 /// error is swallowed so this never blocks the (imminent) restart. doctor/status/MCP
 /// remain the authoritative detectors since they run in the user's real shell.
-fn record_cli_refresh_outcome(installed: Option<&std::path::Path>) {
+fn record_cli_refresh_outcome(installed: Option<&std::path::Path>, app_version: &str) {
     let Some(data_dir) = indexa_core::config::default_data_dir() else {
         return;
     };
     let marker = data_dir.join(indexa_update::CLI_SKEW_MARKER_FILE);
-    let app_version = env!("CARGO_PKG_VERSION");
 
     // Ask the freshly-installed binary its version, e.g. `indexa 0.65.0` → "0.65.0".
     let cli_version = installed.and_then(|p| {

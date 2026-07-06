@@ -25,6 +25,18 @@ pub struct AddNoteParams {
     pub body: String,
 }
 
+/// Absolute path to the running `indexa` binary. The MCP server IS `indexa mcp`, so `current_exe`
+/// is the correct executable to re-invoke for `index`. Spawning the bare name `"indexa"` instead
+/// runs whatever is first on `$PATH` — which for a GUI-launched MCP client (minimal environment)
+/// may be missing entirely or a different, older install, contradicting the "doctor/status/MCP are
+/// authoritative" contract this crate already enforces via `detect_skew`. Canonicalized so it
+/// survives symlinked installs (mirrors `commands::mcp_install`).
+fn indexa_exe() -> Result<std::path::PathBuf, ErrorData> {
+    let exe = std::env::current_exe()
+        .map_err(|e| mcp_err(format!("cannot resolve the running indexa executable: {e}")))?;
+    Ok(exe.canonicalize().unwrap_or(exe))
+}
+
 #[tool_router(router = router_admin, vis = "pub(crate)")]
 impl IndexaMcp {
     /// Index statistics (entry + chunk counts).
@@ -184,10 +196,10 @@ impl IndexaMcp {
         params: Parameters<TriggerIndexParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let path = params.0.path;
-        // Spawn `indexa index <path>` as a subprocess. The indexa binary is on PATH
-        // (the same binary serving this MCP session). Both processes open the same DB
-        // via WAL + 5s busy_timeout, which handles contention safely.
-        let output = tokio::process::Command::new("indexa")
+        // Spawn `indexa index <path>` as a subprocess, using THIS server's own binary (not a
+        // bare PATH lookup) so we re-invoke the exact `indexa` serving this MCP session. Both
+        // processes open the same DB via WAL + 5s busy_timeout, which handles contention safely.
+        let output = tokio::process::Command::new(indexa_exe()?)
             .args(["index", &path])
             .output()
             .await
@@ -272,7 +284,7 @@ impl IndexaMcp {
         // note is written and pack-registered; the caller can trigger re-indexing later.
         let notes_dir = data_dir.join("notes");
         let notes_dir_str = notes_dir.to_string_lossy().into_owned();
-        let index_result = tokio::process::Command::new("indexa")
+        let index_result = tokio::process::Command::new(indexa_exe()?)
             .args(["index", &notes_dir_str])
             .output()
             .await;
@@ -292,5 +304,30 @@ impl IndexaMcp {
         Ok(ok_text(format!(
             "Note \"{title}\" added to pack \"{pack}\" and indexed.\nFile: {note_path_str}{index_note}"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::indexa_exe;
+
+    /// `trigger_index` / `add_note` must spawn the server's OWN binary, not a bare `"indexa"`
+    /// PATH lookup. Assert the resolver returns a concrete, absolute, existing path.
+    #[test]
+    fn indexa_exe_resolves_to_the_running_binary_not_a_bare_name() {
+        let exe = indexa_exe().expect("current_exe is resolvable under test");
+        assert!(
+            exe.is_absolute(),
+            "must be an absolute path (a real executable), not a bare `indexa` PATH lookup: {exe:?}"
+        );
+        assert!(
+            exe.exists(),
+            "resolved executable should exist on disk: {exe:?}"
+        );
+        assert_ne!(
+            exe.as_os_str(),
+            "indexa",
+            "must not regress to the bare command name"
+        );
     }
 }
