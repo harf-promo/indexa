@@ -139,7 +139,7 @@ summary_weight       = 0.0    # 0.0 disables the parent-summary boost; >0 blends
 summary_depth_alpha  = 0.15   # depth-boost coefficient for summary-aware retrieval
 context_budget       = 8000   # max characters of retrieved context packed into the answer prompt
 use_weights          = true   # apply per-file/dir/category importance weights as a multiplicative boost
-ann                  = false  # use an in-memory HNSW index for dense retrieval (vs brute-force cosine)
+ann                  = true   # on: HNSW dense index in serve/MCP above ann_min_chunks (else brute-force)
 ann_min_chunks       = 50000  # only build/use the ANN index above this chunk count
 agentic              = false  # default `ask` to the agentic multi-hop loop (per-call: --agentic / MCP agentic)
 agentic_max_steps    = 3      # max retrieval hops in agentic mode (clamped 1..=5)

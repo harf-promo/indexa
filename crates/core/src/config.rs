@@ -295,11 +295,12 @@ pub struct RetrievalConfig {
     pub summary_depth_alpha: f32,
     /// Max characters of retrieved context packed into the answer-synthesis prompt.
     pub context_budget: usize,
-    /// Use an in-memory HNSW (ANN) index for dense retrieval instead of a brute-force
-    /// cosine scan (opt-in). Brute-force is fine to ~300K chunks; enable this beyond that.
-    /// The index is built in a long-lived process (the web server) and cached; a one-shot
-    /// CLI `ask` would pay the build cost for a single query, so prefer it for `serve`.
-    /// Falls back to brute-force for scoped queries and below `ann_min_chunks`.
+    /// Use an in-memory HNSW (ANN) index for dense retrieval instead of a brute-force cosine
+    /// scan. **On by default** — but only takes effect in a long-lived process (the web server
+    /// and the MCP server, which cache the index) and above `ann_min_chunks`; below that, and for
+    /// scoped queries, dense retrieval falls back to the exact brute-force scan. A one-shot CLI
+    /// `ask` never builds the index (it would pay the full build cost for a single query). ANN is
+    /// approximate but recall is high; set to `false` to force exact brute-force everywhere.
     pub ann: bool,
     /// Minimum chunk count before the ANN index is built/used (below this, brute-force is
     /// faster than building an index). Only consulted when `ann` is true.
@@ -426,7 +427,7 @@ impl Default for RetrievalConfig {
             summary_weight: 0.0,
             summary_depth_alpha: 0.15,
             context_budget: 8000,
-            ann: false,
+            ann: true,
             ann_min_chunks: 50_000,
             use_weights: true,
             agentic: false,
@@ -951,6 +952,10 @@ auto_reindex = "7d"
         assert_eq!(cfg.retrieval.top_k, 12);
         assert_eq!(cfg.retrieval.context_budget, 8000);
         assert!(cfg.retrieval.rerank);
+        // ANN on by default: fast HNSW dense retrieval in long-lived processes above
+        // ann_min_chunks; brute-force fallback below it and for scoped queries.
+        assert!(cfg.retrieval.ann);
+        assert_eq!(cfg.retrieval.ann_min_chunks, 50_000);
         assert_eq!(cfg.retrieval.rerank_backend, "llm");
         assert_eq!(
             cfg.retrieval.rerank_model,
