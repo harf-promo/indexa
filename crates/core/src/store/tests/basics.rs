@@ -336,3 +336,105 @@ fn paths_modified_since_filters_by_mtime_and_kind() {
         "NULL-mtime entry excluded (can't claim it changed)"
     );
 }
+
+#[test]
+fn cosine_search_matches_brute_force_oracle() {
+    // D2: the allocation-free `cosine_search` must return byte-identical top-k to the old
+    // brute-force scan. Compare against an independent oracle over the same data.
+    let mut store = Store::open_in_memory().unwrap();
+    let dim = 8usize;
+    let n = 60usize;
+    let k = 12usize;
+
+    // Deterministic pseudo-random f32s in [-0.5, 0.5) — reproducible, no `rand` dep.
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((seed >> 40) as f32 / (1u64 << 24) as f32) - 0.5
+    };
+
+    let mut entries = Vec::new();
+    let mut chunks = Vec::new();
+    let mut embeds: Vec<(String, Vec<f32>)> = Vec::new();
+    for i in 0..n {
+        let path = format!("/corpus/f{i:03}.rs");
+        entries.push(dummy_entry(&path, EntryKind::File, 100));
+        let emb: Vec<f32> = (0..dim).map(|_| next()).collect();
+        chunks.push(ChunkRecord {
+            embedding: Some(emb.clone()),
+            embed_model: Some("test".to_owned()),
+            ..dummy_chunk(&path, 0, "some indexable text")
+        });
+        embeds.push((path, emb));
+    }
+    store.upsert_entries(&entries).unwrap();
+    store.upsert_chunks(&chunks).unwrap();
+
+    let query: Vec<f32> = (0..dim).map(|_| next()).collect();
+    let got = store.cosine_search(&query, k, None).unwrap();
+
+    // Oracle: brute-force cosine, STABLE sort by score DESC (insertion order == id order, so ties
+    // resolve exactly as `cosine_search`'s id-ascending tie-break).
+    let qnorm: f32 = query.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let mut oracle: Vec<(String, f32)> = embeds
+        .iter()
+        .map(|(p, e)| {
+            let dot: f32 = query.iter().zip(e).map(|(x, y)| x * y).sum();
+            let en: f32 = e.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let sim = if qnorm == 0.0 || en == 0.0 {
+                0.0
+            } else {
+                dot / (qnorm * en)
+            };
+            (p.clone(), sim)
+        })
+        .collect();
+    oracle.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let got_paths: Vec<&str> = got.iter().map(|(_, p)| p.as_str()).collect();
+    let oracle_paths: Vec<&str> = oracle.iter().take(k).map(|(p, _)| p.as_str()).collect();
+    assert_eq!(got.len(), k, "returns exactly top-k");
+    assert_eq!(
+        got_paths, oracle_paths,
+        "top-k order matches the brute-force oracle"
+    );
+}
+
+#[test]
+fn cosine_search_handles_empty_limit0_and_scope() {
+    let mut store = Store::open_in_memory().unwrap();
+    assert!(store
+        .cosine_search(&[0.1, 0.2, 0.3], 5, None)
+        .unwrap()
+        .is_empty());
+    store
+        .upsert_entries(&[dummy_entry("/a/x.rs", EntryKind::File, 1)])
+        .unwrap();
+    store
+        .upsert_chunks(&[ChunkRecord {
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            embed_model: Some("t".to_owned()),
+            ..dummy_chunk("/a/x.rs", 0, "text")
+        }])
+        .unwrap();
+    assert!(store
+        .cosine_search(&[1.0, 0.0, 0.0], 0, None)
+        .unwrap()
+        .is_empty());
+    let hit = store.cosine_search(&[1.0, 0.0, 0.0], 5, None).unwrap();
+    assert_eq!(hit.len(), 1);
+    assert_eq!(hit[0].1, "/a/x.rs");
+    assert!(store
+        .cosine_search(&[1.0, 0.0, 0.0], 5, Some("/b"))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store
+            .cosine_search(&[1.0, 0.0, 0.0], 5, Some("/a"))
+            .unwrap()
+            .len(),
+        1
+    );
+}
