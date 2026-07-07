@@ -118,10 +118,12 @@ impl Store {
             db_path: path.to_path_buf(),
         };
         store.init_schema()?;
-        // Truncate any WAL that accumulated while the process was stopped.
-        // Fail-open: another reader holding a lock just means the checkpoint
-        // is deferred — it doesn't prevent the database from opening.
-        store.checkpoint_truncate();
+        // Truncate the WAL only if it grew large while the process was stopped. A full TRUNCATE
+        // checkpoint on EVERY open (MCP opens per tool call, qa per ask) contended with active
+        // writers for no benefit when the WAL is already small — `wal_autocheckpoint` keeps it
+        // bounded (~4 MB) in normal operation, so this only reclaims a WAL left oversized by an
+        // abrupt stop. Fail-open: a lock just defers the checkpoint.
+        store.checkpoint_truncate_if_large();
         Ok(store)
     }
 
@@ -156,6 +158,32 @@ impl Store {
         }
         if let Err(e) = self.conn.pragma_update(None, "wal_checkpoint", "TRUNCATE") {
             tracing::warn!("wal_checkpoint(TRUNCATE) failed (index is still usable): {e}");
+        }
+    }
+
+    /// WAL byte size above which an open-time [`checkpoint_truncate`](Self::checkpoint_truncate) is
+    /// worth its writer contention — comfortably above the ~4 MB `wal_autocheckpoint` boundary so a
+    /// normally-operating DB is never truncated at open, only one left oversized by an abrupt stop.
+    const WAL_TRUNCATE_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
+
+    /// Truncate the WAL only when the `-wal` sidecar has grown past
+    /// [`WAL_TRUNCATE_THRESHOLD_BYTES`](Self::WAL_TRUNCATE_THRESHOLD_BYTES). Called on every open;
+    /// avoids a TRUNCATE checkpoint (which contends with active writers) when the WAL is small.
+    pub fn checkpoint_truncate_if_large(&self) {
+        if self.db_path == std::path::Path::new(":memory:") {
+            return;
+        }
+        // SQLite names the WAL `<db>-wal` (appended, not an extension swap).
+        let wal = {
+            let mut s = self.db_path.clone().into_os_string();
+            s.push("-wal");
+            std::path::PathBuf::from(s)
+        };
+        let oversized = std::fs::metadata(&wal)
+            .map(|m| m.len() >= Self::WAL_TRUNCATE_THRESHOLD_BYTES)
+            .unwrap_or(false);
+        if oversized {
+            self.checkpoint_truncate();
         }
     }
 

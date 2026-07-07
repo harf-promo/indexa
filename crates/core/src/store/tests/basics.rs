@@ -438,3 +438,40 @@ fn cosine_search_handles_empty_limit0_and_scope() {
         1
     );
 }
+
+#[test]
+fn open_stamps_schema_version_and_reopen_is_safe() {
+    // D8: Store::open stamps PRAGMA user_version so a re-open skips the DDL + migration probes.
+    // Prove the stamp lands, persists across re-open, and the schema stays fully usable.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("versioned.db");
+    let read_version = |s: &Store| -> i64 {
+        s.db_connection()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap()
+    };
+    {
+        let store = Store::open(&db).unwrap();
+        assert_eq!(
+            read_version(&store),
+            crate::store::schema::SCHEMA_VERSION,
+            "fresh open stamps the current schema version"
+        );
+    }
+    // Re-open takes the fast path (version already current); schema is intact and writable.
+    let mut store = Store::open(&db).unwrap();
+    assert_eq!(read_version(&store), crate::store::schema::SCHEMA_VERSION);
+    store
+        .upsert_entries(&[dummy_entry("/a.txt", EntryKind::File, 1)])
+        .unwrap();
+    store
+        .upsert_chunks(&[dummy_chunk("/a.txt", 0, "hello schema")])
+        .unwrap();
+    assert_eq!(store.entry_count().unwrap(), 1);
+    assert_eq!(store.chunk_count().unwrap(), 1);
+    // FTS (a virtual table created in the version-gated DDL) still works after the skip-init open.
+    let hits = store
+        .hybrid_search("schema", None, &HybridMode::Rrf, None, 5, 60.0)
+        .unwrap();
+    assert!(!hits.is_empty(), "FTS index intact after fast-path open");
+}

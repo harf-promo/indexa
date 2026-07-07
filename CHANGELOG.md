@@ -61,6 +61,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the dot product and row norm in a single pass directly over the stored bytes (no per-row vector),
   keeps only the top-k in a bounded heap, and resolves paths once at the end. Results are **byte-for-byte
   identical** (a new oracle test asserts the exact top-k) — same answers, far less work per query.
+- **Opening the index skips redundant schema work.** Every `Store::open` re-ran the full DDL
+  (~20 `CREATE … IF NOT EXISTS`) plus ~10 `pragma_table_info`/`sqlite_master` migration probes and a
+  `wal_checkpoint(TRUNCATE)` — on every open, and the MCP server opens a fresh connection per tool call
+  and the Q&A path per question. The schema is now stamped with `PRAGMA user_version`; an already-current
+  DB skips straight past the DDL + migration probes (old DBs still migrate and re-stamp), and the
+  open-time WAL truncate now only runs when the WAL has actually grown large. Faster, quieter opens with
+  no behaviour change.
 
 ### Fixed
 
