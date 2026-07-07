@@ -116,6 +116,29 @@ pub(super) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+/// A dense-search candidate, ordered so **greater == better**: higher cosine first, ties broken by
+/// LOWER id. Wrapped in `Reverse` it forms the bounded top-k **min-heap** in [`Store::cosine_search`]
+/// (the heap root is the current worst), and `into_sorted_vec` then yields best-first — reproducing
+/// the old stable-sort-by-similarity over rowid-ordered rows byte-for-byte.
+#[derive(PartialEq)]
+struct Candidate {
+    sim: f32,
+    id: i64,
+}
+impl Eq for Candidate {}
+impl Ord for Candidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.sim
+            .total_cmp(&other.sim)
+            .then_with(|| other.id.cmp(&self.id)) // equal score → lower id ranks higher
+    }
+}
+impl PartialOrd for Candidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// Map a row from the `entries` + `summary_queue` join (used by `search_paths`
 /// and `tree_level`) into a `TreeNode`.
 /// Column order: path, kind, size, file_count, chunk_count, summary_state,
@@ -648,21 +671,35 @@ impl Store {
     }
 
     /// Brute-force cosine similarity over all stored embeddings.
-    /// Returns (chunk_id, entry_path) sorted by descending similarity.
-    fn cosine_search(
+    /// Returns `(chunk_id, entry_path)` sorted by descending similarity (ties broken by ascending
+    /// id — byte-identical to the previous stable-sort-over-rowid behaviour). Allocation-light: no
+    /// per-row `Vec<f32>` or path `String`; dot + norm are computed directly over the blob bytes,
+    /// only the top-`limit` ids survive a bounded min-heap, and paths are resolved once at the end.
+    /// `pub(super)` so the store test module can assert its output equals a brute-force oracle.
+    pub(super) fn cosine_search(
         &self,
         query: &[f32],
         limit: usize,
         scope: Option<&str>,
     ) -> Result<Vec<(i64, String)>> {
+        if limit == 0 || query.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Select `id, embedding` only — the per-row path `String` is gone (resolved after, via
+        // `paths_for_ids`). Same WHERE (incl. STUB_EXCLUDE) so the candidate set is identical.
         let sql = if scope.is_some() {
-            format!("SELECT id, entry_path, embedding FROM chunks WHERE embedding IS NOT NULL AND entry_path LIKE ?1 ESCAPE '\\'{STUB_EXCLUDE_SQL}")
+            format!("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL AND entry_path LIKE ?1 ESCAPE '\\'{STUB_EXCLUDE_SQL}")
         } else {
-            format!("SELECT id, entry_path, embedding FROM chunks WHERE embedding IS NOT NULL{STUB_EXCLUDE_SQL}")
+            format!(
+                "SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL{STUB_EXCLUDE_SQL}"
+            )
         };
         let mut stmt = self.conn.prepare(&sql)?;
 
-        let mut scored: Vec<(i64, String, f32)> = Vec::new();
+        // Hoist the query norm out of the per-row loop (was recomputed every row).
+        let query_norm = query.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let expected_bytes = query.len() * 4;
+
         let scope_pattern = scope.map(like_prefix);
         let mut rows = if let Some(ref p) = scope_pattern {
             stmt.query(params![p])?
@@ -670,28 +707,52 @@ impl Store {
             stmt.query([])?
         };
 
+        // Bounded top-k: a min-heap of at most `limit` candidates (root = current worst).
+        let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<Candidate>> =
+            std::collections::BinaryHeap::with_capacity(limit + 1);
+
         while let Some(row) = rows.next()? {
             let id: i64 = row.get(0)?;
-            let path: String = row.get(1)?;
-            let blob: Vec<u8> = row.get(2)?;
-
-            // Deserialize f32 little-endian bytes
-            if !blob.len().is_multiple_of(4) {
+            let blob = row.get_ref(1)?.as_blob()?;
+            // Dimension mismatch (also covers non-multiple-of-4 blobs, since expected_bytes is 4·dim).
+            if blob.len() != expected_bytes {
                 continue;
             }
-            let vec = blob_to_embedding(&blob);
-
-            if vec.len() != query.len() {
-                continue;
+            // dot(query, row) and ‖row‖² in ONE pass over the raw bytes — no intermediate `Vec<f32>`.
+            // Sequential accumulation in the same order as the old code ⇒ bit-identical `sim`.
+            let mut dot = 0.0f32;
+            let mut row_norm_sq = 0.0f32;
+            for (i, c) in blob.chunks_exact(4).enumerate() {
+                let v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                dot += query[i] * v;
+                row_norm_sq += v * v;
             }
+            // Same zero-norm rule as `cosine_similarity`.
+            let sim = if query_norm == 0.0 || row_norm_sq == 0.0 {
+                0.0
+            } else {
+                dot / (query_norm * row_norm_sq.sqrt())
+            };
 
-            let sim = cosine_similarity(query, &vec);
-            scored.push((id, path, sim));
+            let cand = Candidate { sim, id };
+            if heap.len() < limit {
+                heap.push(std::cmp::Reverse(cand));
+            } else if let Some(std::cmp::Reverse(worst)) = heap.peek() {
+                if cand > *worst {
+                    heap.pop();
+                    heap.push(std::cmp::Reverse(cand));
+                }
+            }
         }
 
-        scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(limit);
-        Ok(scored.into_iter().map(|(id, path, _)| (id, path)).collect())
+        // `into_sorted_vec` on the `Reverse`-wrapped min-heap yields best-first (sim DESC, id ASC);
+        // resolve the paths in one batched `IN (…)` query.
+        let ids: Vec<i64> = heap
+            .into_sorted_vec()
+            .into_iter()
+            .map(|std::cmp::Reverse(c)| c.id)
+            .collect();
+        self.paths_for_ids(&ids)
     }
 
     /// Dense top-`limit` candidates as `(chunk_id, entry_path)`, via the ANN index when one

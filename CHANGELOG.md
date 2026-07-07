@@ -52,6 +52,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under the answer, CLI `indexa ask --explain-savings` (and `--json` `savings`), and an opt-in MCP
   `ask` `explain_savings` param. MCP tool count unchanged (47).
 
+### Performance
+
+- **Allocation-light brute-force dense search.** The cosine scan behind every `ask`/`search` (when the
+  ANN index is off — the default) previously decoded each chunk's embedding into a fresh `Vec<f32>`,
+  materialized its path string, recomputed the query norm for every row, and full-sorted *all* rows to
+  take the top-k (~1 GB decoded per query at 300k chunks). It now hoists the query norm once, computes
+  the dot product and row norm in a single pass directly over the stored bytes (no per-row vector),
+  keeps only the top-k in a bounded heap, and resolves paths once at the end. Results are **byte-for-byte
+  identical** (a new oracle test asserts the exact top-k) — same answers, far less work per query.
+
 ### Fixed
 
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
