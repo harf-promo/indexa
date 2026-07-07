@@ -47,6 +47,7 @@ pub(crate) async fn cmd_deep(
         // Whole-computer groundwork: when `[scan] skip_binary` is on, the walk NUL-sniffs files
         // so the loops below can skip binaries without opening them for a parse attempt.
         sniff_binary: cfg.scan.skip_binary,
+        threads: cfg.scan.threads,
         ..Default::default()
     };
 

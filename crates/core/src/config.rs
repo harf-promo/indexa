@@ -129,6 +129,10 @@ pub struct ScanConfig {
     /// executables/images/DB blobs aren't opened and parsed. The entry is still recorded either
     /// way — this only stops the deep phase from parsing flagged binaries.
     pub skip_binary: bool,
+    /// Walker worker-thread count. `None` (default) = `available_parallelism()` floored at 4 — the
+    /// walk is I/O/syscall-bound, so this scales past the core count. Set a number to cap on a
+    /// shared host (leave cores for other tenants) or raise it on a fast local NVMe machine.
+    pub threads: Option<usize>,
 }
 
 impl Default for ScanConfig {
@@ -140,6 +144,7 @@ impl Default for ScanConfig {
             include_sensitive: false,
             redact_at_index: true,
             skip_binary: false,
+            threads: None,
         }
     }
 }
