@@ -84,7 +84,7 @@ sysinfo = { version = "0.39" }
 
 # Content hashing (decision-ledger evidence fingerprints — must be stable across
 # runs and binary versions, which rules out std's DefaultHasher)
-sha2 = "0.10"
+sha2 = "0.11"
 
 # HTTP client (all consumers must use rustls-tls, never native-tls)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
