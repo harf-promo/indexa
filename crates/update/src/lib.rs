@@ -41,8 +41,88 @@ struct GhRelease {
 fn build_client() -> anyhow::Result<Client> {
     Client::builder()
         .user_agent(USER_AGENT)
+        // A stalled release host (no FIN, no bytes) must not hang the update forever. Generous
+        // whole-request cap (binaries are tens of MB) + a short connect timeout.
+        .timeout(std::time::Duration::from_secs(300))
+        .connect_timeout(std::time::Duration::from_secs(10))
         .build()
         .context("failed to build HTTP client")
+}
+
+/// Minisign public key (key ID `4A0852406D06E275`) — the SAME key the desktop's Tauri updater
+/// verifies the app bundle with (base64-decoded from `apps/indexa-desktop/tauri.conf.json`). CLI
+/// release assets are signed with its private half in `.github/workflows/release.yml`.
+const MINISIGN_PUBKEY_B64: &str = "RWR14gZtQFIISnysTnP1hTZ1o/OHzJenqE1f0SpTNe0W/UjFr5yfR1Uv";
+
+/// Fetch `{asset_url}.sig` and verify `bytes` against [`MINISIGN_PUBKEY_B64`].
+///
+/// **Fail-open when no signature is published** (HTTP error / empty): pre-signature release tags
+/// have no `.sig`, and refusing them would break self-update for everyone until the next signed
+/// release. A signature that IS published but does NOT verify is a hard error (tampering). The
+/// `.sig` is the Tauri format — base64 of a standard minisign signature file — so we base64-decode
+/// it before parsing, matching how the desktop verifies the bundle.
+async fn verify_asset_signature(
+    client: &Client,
+    asset_url: &str,
+    bytes: &[u8],
+) -> anyhow::Result<()> {
+    let sig_url = format!("{asset_url}.sig");
+    let sig_b64 = match client.get(&sig_url).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.text().await {
+            Ok(t) if !t.trim().is_empty() => t,
+            _ => {
+                tracing::warn!(%sig_url, "signature asset is empty — installing UNVERIFIED (pre-signature release)");
+                return Ok(());
+            }
+        },
+        _ => {
+            tracing::warn!(%sig_url, "no signature published for this release — installing UNVERIFIED (pre-signature release)");
+            return Ok(());
+        }
+    };
+
+    verify_minisign(MINISIGN_PUBKEY_B64, &sig_b64, bytes)?;
+    tracing::info!("update signature verified (minisign 4A0852406D06E275)");
+    Ok(())
+}
+
+/// Verify `bytes` against a base64-wrapped minisign signature file (`sig_b64` — the Tauri `.sig`
+/// format) using `pubkey_b64`. Pure (no I/O) so it is unit-tested with a real Tauri-format vector;
+/// [`verify_asset_signature`] fetches `sig_b64` and calls this.
+fn verify_minisign(pubkey_b64: &str, sig_b64: &str, bytes: &[u8]) -> anyhow::Result<()> {
+    use base64::Engine;
+    let sig_file = base64::engine::general_purpose::STANDARD
+        .decode(sig_b64.trim())
+        .context("update signature is not valid base64")?;
+    let sig_text = std::str::from_utf8(&sig_file).context("update signature is not valid UTF-8")?;
+    let signature = minisign_verify::Signature::decode(sig_text)
+        .map_err(|e| anyhow::anyhow!("malformed update signature: {e}"))?;
+    let pubkey = minisign_verify::PublicKey::from_base64(pubkey_b64)
+        .map_err(|e| anyhow::anyhow!("minisign public key is invalid: {e}"))?;
+    pubkey.verify(bytes, &signature, false).map_err(|e| {
+        anyhow::anyhow!(
+            "UPDATE SIGNATURE VERIFICATION FAILED — refusing to install (the download may be \
+             tampered or corrupt): {e}"
+        )
+    })
+}
+
+/// Cheap sanity check that `bytes` is an executable for some platform (Mach-O / ELF / PE) — so an
+/// HTML error page, a truncated download, or an LFS pointer can't be self-replaced over the running
+/// binary. Defense-in-depth beside the signature (a valid signature already implies authenticity;
+/// this just yields a clearer error for an obviously-wrong payload).
+fn looks_like_executable(bytes: &[u8]) -> bool {
+    let head4 = bytes.get(0..4);
+    matches!(
+        head4,
+        Some(b"\x7fELF")                       // ELF (Linux)
+            | Some([0xFE, 0xED, 0xFA, 0xCE])   // Mach-O 32-bit
+            | Some([0xFE, 0xED, 0xFA, 0xCF])   // Mach-O 64-bit
+            | Some([0xCE, 0xFA, 0xED, 0xFE])   // Mach-O 32-bit (byte-swapped)
+            | Some([0xCF, 0xFA, 0xED, 0xFE])   // Mach-O 64-bit (byte-swapped)
+            | Some([0xCA, 0xFE, 0xBA, 0xBE])   // Mach-O universal (fat)
+            | Some([0xBE, 0xBA, 0xFE, 0xCA]) // Mach-O universal (byte-swapped)
+    ) || bytes.starts_with(b"MZ") // PE (Windows)
 }
 
 /// Returns the literal release asset filename for the running platform.
@@ -295,6 +375,15 @@ pub async fn apply(tag: &str) -> anyhow::Result<String> {
         }
     }
 
+    // Cryptographically verify the download before replacing the running binary (fail-open only for
+    // pre-signature releases), and sanity-check the magic bytes.
+    verify_asset_signature(&client, &url, &bytes).await?;
+    if !looks_like_executable(&bytes) {
+        anyhow::bail!(
+            "downloaded asset is not a recognized executable (Mach-O/ELF/PE) — refusing to install"
+        );
+    }
+
     // Determine where the running exe lives — the temp file must be on the
     // same filesystem for `self_replace` to do an atomic rename.
     let exe = std::env::current_exe()
@@ -444,6 +533,15 @@ pub async fn download_cli_to(
         }
     }
 
+    // Verify the signature (fail-open only for pre-signature releases) + magic bytes before this
+    // binary is written to a PATH dir and later executed as `indexa`.
+    verify_asset_signature(&client, &url, &bytes).await?;
+    if !looks_like_executable(&bytes) {
+        anyhow::bail!(
+            "downloaded asset is not a recognized executable (Mach-O/ELF/PE) — refusing to install"
+        );
+    }
+
     let bin_name = if cfg!(windows) {
         "indexa.exe"
     } else {
@@ -533,9 +631,42 @@ fn permission_error(source: impl std::fmt::Display, path: &std::path::Path) -> a
 
 #[cfg(test)]
 mod tests {
-    use super::{cumulative_changelog, is_inside_app_bundle, self_replace_refusal};
+    use super::{
+        cumulative_changelog, is_inside_app_bundle, looks_like_executable, self_replace_refusal,
+        verify_minisign, MINISIGN_PUBKEY_B64,
+    };
     use semver::Version;
     use std::path::Path;
+
+    // Real Tauri-format test vector — generated with `tauri signer generate` + `tauri signer sign`
+    // over a TEST key (NOT the release key). A public key + a signature are safe to commit; this
+    // proves `verify_minisign` handles the exact `.sig` format `release.yml` produces.
+    const TEST_PUBKEY: &str = "RWSw/VA8WGxtADk+aLoZA7hZWsGqysn5SWCvU2eoLfwEoelvw8ydG1aM";
+    const TEST_MSG: &[u8] = b"indexa-update-signature-test-payload";
+    const TEST_SIG_B64: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTdy9WQThXR3h0QU8xYmorRXUralNSdHdBRitoc3dZNHB2Z2hhaU1YQ0p3TlpUOFp2M3B3Y2RoUWFURUtLTjg4MElubmtBdGZ4NlpIckgyYmRYUWpTRkd1eEJmOGZGVUE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzMzY3MDg3CWZpbGU6YmxvYgpWWHV1aXU5NVVUOUExUUFISkhpYkRaL0tZT2VVRHdXVVlPNHdMT0Z6MncyVER4Ykp3c01IUkNZRUdja2d6M240K0FWQnZiWThYd3NjZ20vRDBxTy9EZz09Cg==";
+
+    #[test]
+    fn verify_minisign_accepts_valid_rejects_tampered_and_wrong_key() {
+        // Correct message + key + signature verifies.
+        assert!(verify_minisign(TEST_PUBKEY, TEST_SIG_B64, TEST_MSG).is_ok());
+        // Tampered payload fails (this is the anti-tamper guarantee).
+        assert!(verify_minisign(TEST_PUBKEY, TEST_SIG_B64, b"tampered payload").is_err());
+        // A signature made by a different key does not verify against the real release pubkey.
+        assert!(verify_minisign(MINISIGN_PUBKEY_B64, TEST_SIG_B64, TEST_MSG).is_err());
+        // Garbage signature is rejected, not panicked on.
+        assert!(verify_minisign(TEST_PUBKEY, "not-base64!!", TEST_MSG).is_err());
+    }
+
+    #[test]
+    fn looks_like_executable_accepts_binaries_rejects_html() {
+        assert!(looks_like_executable(b"\x7fELF\x02\x01\x01\x00")); // ELF
+        assert!(looks_like_executable(&[0xCF, 0xFA, 0xED, 0xFE, 0, 0])); // Mach-O 64
+        assert!(looks_like_executable(&[0xCA, 0xFE, 0xBA, 0xBE, 0, 0])); // Mach-O fat
+        assert!(looks_like_executable(b"MZ\x90\x00")); // PE
+        assert!(!looks_like_executable(b"<!DOCTYPE html><html>404")); // error page
+        assert!(!looks_like_executable(b"version https://git-lfs")); // LFS pointer
+        assert!(!looks_like_executable(b"")); // empty
+    }
 
     // A miniature CHANGELOG mirroring the real format: em-dash date separator,
     // an `## [Unreleased]` section, a `# Changelog` preamble, and `### Added` sub-headings.

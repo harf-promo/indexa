@@ -147,6 +147,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/assets/fonts` via a local `@font-face`; the remote `<link>`/`@import` are gone. Verified: the
   served HTML/CSS contain zero `googleapis` references and the fonts serve locally. (Geist © The
   Geist Project Authors, SIL OFL 1.1 — license bundled under `assets/ui/fonts/`.)
+- **Self-update now verifies a signature before replacing the binary.** `indexa update` (and the
+  desktop's CLI refresh) previously downloaded a CLI binary and self-replaced after checking only
+  its Content-Length — so a compromised release host or MITM could swap the binary. Each CLI release
+  asset is now signed (minisign, the **same key** the desktop already verifies the app bundle with)
+  and the client verifies `<asset>.sig` against the embedded public key before install, plus a
+  Mach-O/ELF/PE magic-byte sanity check. Verification is **fail-open** for pre-signature releases (no
+  `.sig` published) so existing installs still update, but a signature that IS present and fails to
+  verify is a hard error. Download requests also gained connect/request timeouts.
 
 ## [0.76.0] — 2026-06-28
 
