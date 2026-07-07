@@ -3,6 +3,13 @@
 use super::Store;
 use anyhow::Result;
 
+/// Current schema version, stored in `PRAGMA user_version`. An open whose DB is already stamped at
+/// this value skips the (idempotent but not free) DDL + migration probes in [`Store::init_schema`].
+///
+/// **INVARIANT: bump this whenever the DDL or any migration in `init_schema` changes** — otherwise a
+/// DB stamped at the old value would skip the new migration and silently miss a column/table.
+pub(super) const SCHEMA_VERSION: i64 = 1;
+
 /// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
 /// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
 fn chunks_has_autoincrement(conn: &rusqlite::Connection) -> bool {
@@ -28,6 +35,9 @@ fn edges_allows_calls(conn: &rusqlite::Connection) -> bool {
 
 impl Store {
     pub(super) fn init_schema(&mut self) -> Result<()> {
+        // Connection-level PRAGMAs — these are per-connection (not persisted, except journal_mode
+        // which is a DB-header setting), so they MUST run on every open regardless of schema
+        // version. Cheap; kept out of the version-gated block below.
         self.conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
@@ -42,7 +52,25 @@ impl Store {
             -- so without a busy timeout a contended write fails immediately with SQLITE_BUSY.
             -- Block-and-retry for up to 5s instead.
             PRAGMA busy_timeout = 5000;
+            ",
+        )?;
 
+        // Fast path: a DB already stamped at the current version skips the idempotent-but-not-free
+        // DDL (~20 `CREATE … IF NOT EXISTS`) and the ~10 `pragma_table_info`/`sqlite_master`
+        // migration probes below. This runs on EVERY `Store::open` — MCP opens a fresh Store per
+        // tool call and qa per ask — so the probes were pure repeated cost. Any mismatch (a fresh
+        // DB reads 0, or an older/newer stamp) runs the full idempotent init and re-stamps, so old
+        // DBs still migrate. See [`SCHEMA_VERSION`]'s bump invariant.
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap_or(0);
+        if version == SCHEMA_VERSION {
+            return Ok(());
+        }
+
+        self.conn.execute_batch(
+            "
             -- Surface-scan entries (paths, sizes, surface hints)
             CREATE TABLE IF NOT EXISTS entries (
                 id          INTEGER PRIMARY KEY,
@@ -533,6 +561,11 @@ impl Store {
         // exempt too: a conversation is standing user state, not entry-keyed — see
         // store::sessions.)
 
+        // Stamp the schema version LAST — only after all DDL + migrations succeeded — so a future
+        // open can take the fast path above. A failure before here leaves user_version unchanged,
+        // so the next open retries the full init.
+        self.conn
+            .pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
     }
 }
