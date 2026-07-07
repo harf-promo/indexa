@@ -54,8 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
-- **Allocation-light brute-force dense search.** The cosine scan behind every `ask`/`search` (when the
-  ANN index is off — the default) previously decoded each chunk's embedding into a fresh `Vec<f32>`,
+- **Allocation-light brute-force dense search.** The cosine scan behind `ask`/`search` (the exact path
+  used below `ann_min_chunks` and for scoped queries) previously decoded each chunk's embedding into a fresh `Vec<f32>`,
   materialized its path string, recomputed the query norm for every row, and full-sorted *all* rows to
   take the top-k (~1 GB decoded per query at 300k chunks). It now hoists the query norm once, computes
   the dot product and row norm in a single pass directly over the stored bytes (no per-row vector),
@@ -74,6 +74,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gives each worker its own buffer merged once at the end, and classifies each directory a single time —
   a 2–3× scan speedup on many-core machines with identical output at any thread count (a new test asserts
   the entry set is thread-count-invariant).
+- **Fast dense retrieval on by default, now including MCP.** `[retrieval] ann` (the in-memory HNSW index)
+  now defaults to **on**, so large indexes get fast approximate dense retrieval automatically in the
+  long-lived `serve` and `mcp` servers — it only engages above `ann_min_chunks` (50 000) and falls back to
+  the exact brute-force scan below that and for scoped queries, so small indexes and one-shot CLI `ask` are
+  unchanged. The **MCP server** (the primary AI surface) previously *never* used the ANN index and
+  brute-force-scanned every `ask`/`search`/`explain_retrieval`; it now builds and caches the same
+  watermark-keyed index the web server does. Set `ann = false` to force exact brute-force everywhere.
 
 ### Fixed
 

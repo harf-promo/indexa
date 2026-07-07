@@ -45,7 +45,7 @@ use rmcp::{
 
 use indexa_core::{
     config::{Config, HybridMode},
-    store::Store,
+    store::{AnnIndex, Store},
 };
 use indexa_embed::Embedder;
 use indexa_llm::Generator;
@@ -76,6 +76,16 @@ pub use review::{
 /// Max bytes returned by `read_file` (L2 raw content).
 const READ_FILE_CAP: usize = 40 * 1024;
 
+/// The MCP server's cached ANN index plus the `(chunk_count, max_chunk_id)` watermark it was
+/// built at — a mismatch means a `deep`/`trigger_index` changed the chunks table and the index
+/// must be rebuilt. Mirrors the web server's `AnnCache` (which is `pub(crate)` to that crate, so
+/// it can't be shared here) so MCP — the primary AI surface — gets the same fast dense retrieval.
+#[derive(Default)]
+struct AnnCache {
+    index: Option<Arc<AnnIndex>>,
+    watermark: (i64, i64),
+}
+
 /// The Indexa MCP server handler. Holds only `Send + Sync` state. Each tool opens
 /// its own short-lived `Store` connection (a rusqlite `Connection` is `Send` but
 /// not `Sync`, so it can't be shared across the async tool futures) — mirroring
@@ -86,6 +96,11 @@ pub struct IndexaMcp {
     embedder: Arc<dyn Embedder + Send + Sync>,
     llm: Arc<dyn Generator + Send + Sync>,
     config: Arc<Config>,
+    /// Cached HNSW index for dense retrieval, shared across tool calls (the MCP server is
+    /// long-lived, so the build cost amortizes). Watermark-keyed so a re-index refreshes it.
+    ann: Arc<tokio::sync::RwLock<AnnCache>>,
+    /// Single-flight guard so concurrent cold/stale asks don't each build a full index.
+    ann_build_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 fn mcp_err(e: impl std::fmt::Display) -> ErrorData {
@@ -120,6 +135,8 @@ impl IndexaMcp {
             embedder,
             llm,
             config,
+            ann: Arc::new(tokio::sync::RwLock::new(AnnCache::default())),
+            ann_build_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -127,6 +144,82 @@ impl IndexaMcp {
     /// non-`Sync` rusqlite handle across the async tool futures).
     fn store(&self) -> Result<Store, ErrorData> {
         Store::open(&self.db_path).map_err(mcp_err)
+    }
+
+    /// Lazily build (and cache) the ANN index for dense retrieval, or return `None` to fall back
+    /// to the brute-force cosine scan. `None` when ANN is off (`[retrieval] ann`), the index is
+    /// below `ann_min_chunks`, or a build/read fails. Rebuilds when the chunk watermark
+    /// `(count, max_chunk_id)` changes, so a `deep`/`trigger_index` that adds or edits chunks
+    /// transparently refreshes the index on the next call. Ported from the web server's
+    /// `ensure_ann`; all store access uses fresh read connections so nothing is held across the
+    /// CPU-heavy build. `ann.as_deref()` at the call sites turns the returned `Arc` into the
+    /// `Option<&AnnIndex>` the query pipeline already threads end-to-end.
+    async fn ensure_ann(&self) -> Option<Arc<AnnIndex>> {
+        if !self.config.retrieval.ann {
+            return None;
+        }
+        let db_path = (*self.db_path).clone();
+        let min_chunks = self.config.retrieval.ann_min_chunks;
+
+        // Watermark = (chunk_count, max_chunk_id): AUTOINCREMENT ids are monotonic, so any
+        // insert/edit bumps max_id and any delete changes the count — a stale index is always
+        // detected.
+        let (count, max_id) = tokio::task::spawn_blocking({
+            let db_path = db_path.clone();
+            move || -> Option<(i64, i64)> {
+                let s = Store::open(&db_path).ok()?;
+                Some((s.chunk_count().ok()? as i64, s.max_chunk_id().ok()?))
+            }
+        })
+        .await
+        .ok()??;
+
+        if (count as usize) < min_chunks {
+            return None;
+        }
+
+        // Fast path: cached index still matches the watermark.
+        {
+            let cache = self.ann.read().await;
+            if let Some(idx) = &cache.index {
+                if cache.watermark == (count, max_id) {
+                    return Some(idx.clone());
+                }
+            }
+        }
+
+        // Single-flight: serialize builds; re-check after acquiring (another caller may have just
+        // built the current index).
+        let _build_guard = self.ann_build_lock.lock().await;
+        {
+            let cache = self.ann.read().await;
+            if let Some(idx) = &cache.index {
+                if cache.watermark == (count, max_id) {
+                    return Some(idx.clone());
+                }
+            }
+        }
+
+        // Build fresh (CPU-heavy → spawn_blocking; reads on its own connection).
+        let built = tokio::task::spawn_blocking(move || -> Option<AnnIndex> {
+            let s = Store::open(&db_path).ok()?;
+            let items = s.all_chunk_embeddings().ok()?;
+            let dim = items
+                .iter()
+                .find(|(_, v)| !v.is_empty())
+                .map(|(_, v)| v.len())?;
+            Some(AnnIndex::build(&items, dim))
+        })
+        .await
+        .ok()??;
+
+        let idx = Arc::new(built);
+        {
+            let mut cache = self.ann.write().await;
+            cache.index = Some(idx.clone());
+            cache.watermark = (count, max_id);
+        }
+        Some(idx)
     }
 
     /// Composed router over every tool family module — the single source of
@@ -327,6 +420,62 @@ mod tests {
             Arc::new(StubGenerator),
             Arc::new(Config::default()),
         )
+    }
+
+    #[tokio::test]
+    async fn ensure_ann_gates_on_config_threshold_and_caches() {
+        // D3: MCP's ANN cache mirrors the web server's. Verify the gates + the build/cache path
+        // hermetically (no Ollama — embeddings are written directly).
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let chunks: Vec<indexa_core::store::ChunkRecord> = (0..5)
+                .map(|i| indexa_core::store::ChunkRecord {
+                    entry_path: format!("/f{i}.rs"),
+                    seq: 0,
+                    heading: String::new(),
+                    text: format!("chunk {i}"),
+                    language: None,
+                    embedding: Some(vec![i as f32; 8]),
+                    embed_model: Some("t".to_owned()),
+                    content_hash: None,
+                })
+                .collect();
+            store.upsert_chunks(&chunks).unwrap();
+        }
+        let make = |cfg: Config| {
+            IndexaMcp::new(
+                dbpath.clone(),
+                Arc::new(StubEmbedder),
+                Arc::new(StubGenerator),
+                Arc::new(cfg),
+            )
+        };
+
+        // Default config: ANN on, but 5 chunks < ann_min_chunks (50k) → brute-force (None).
+        assert!(
+            make(Config::default()).ensure_ann().await.is_none(),
+            "below ann_min_chunks → None"
+        );
+
+        // ANN explicitly off → None even with the threshold lowered.
+        let mut off = Config::default();
+        off.retrieval.ann = false;
+        off.retrieval.ann_min_chunks = 1;
+        assert!(make(off).ensure_ann().await.is_none(), "ann = false → None");
+
+        // ANN on + threshold lowered → the index actually builds, and the second call reuses the
+        // watermark-cached Arc (no rebuild).
+        let mut on = Config::default();
+        on.retrieval.ann_min_chunks = 1;
+        let mcp = make(on);
+        let first = mcp.ensure_ann().await.expect("builds above threshold");
+        let second = mcp.ensure_ann().await.expect("cache hit");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "watermark-cached index is reused, not rebuilt"
+        );
     }
 
     #[tokio::test]

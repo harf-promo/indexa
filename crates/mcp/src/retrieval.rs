@@ -158,9 +158,20 @@ impl IndexaMcp {
             self.embedder.embed(&query).await.ok()
         };
 
+        // Use the cached ANN index for the dense arm when available (unscoped, large index);
+        // `hybrid_search_with_ann` falls back to brute-force otherwise, so results are unchanged.
+        let ann = self.ensure_ann().await;
         let mut store = self.store()?;
         let hits = store
-            .hybrid_search(&query, embedding.as_deref(), &mode, scope, limit, 60.0)
+            .hybrid_search_with_ann(
+                &query,
+                embedding.as_deref(),
+                &mode,
+                scope,
+                limit,
+                60.0,
+                ann.as_deref(),
+            )
             .map_err(mcp_err)?;
 
         if hits.is_empty() {
@@ -389,6 +400,12 @@ impl IndexaMcp {
         let history =
             load_session_history(&self.db_path, session_id.as_deref(), cfg.scope.as_deref());
 
+        // Build/cache the ANN index once for this call. MCP is long-lived, so the HNSW index
+        // amortizes across tool calls; `ensure_ann` returns `None` (→ brute-force) when ANN is off,
+        // the index is below `ann_min_chunks`, or the build fails. Threaded into every retrieval
+        // branch below (a scoped query falls back to brute-force inside the pipeline).
+        let ann = self.ensure_ann().await;
+
         // Catalog mode: return a scored file list with L0 abstracts — no chunk bodies,
         // no synthesis. Cheap progressive disclosure for capable caller models.
         if catalog {
@@ -398,7 +415,7 @@ impl IndexaMcp {
                 self.llm.as_ref(),
                 &question,
                 &cfg,
-                None,
+                ann.as_deref(),
                 &history,
             )
             .await
@@ -432,7 +449,7 @@ impl IndexaMcp {
                 self.llm.as_ref(),
                 &question,
                 &cfg,
-                None,
+                ann.as_deref(),
                 &history,
             )
             .await
@@ -456,7 +473,7 @@ impl IndexaMcp {
                 self.llm.as_ref(),
                 &question,
                 &cfg,
-                None,
+                ann.as_deref(),
                 &history,
             )
             .await

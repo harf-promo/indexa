@@ -345,9 +345,11 @@ to drain summaries in the background. (Roadmap: a native desktop app replaces le
 **Right-size for a small machine.** `indexa doctor` shows what fits; set `[resource] profile =
 "conservative"` and/or `mode = "summaries-only"`; keep `auto_select_model = true`.
 
-**Keep dense search fast on a huge index.** Past ~50K chunks, brute-force cosine starts to drag.
-Set `[retrieval] ann = true` to switch dense retrieval to an in-memory HNSW index (it only engages
-above `ann_min_chunks`, default 50 000 — below that brute-force is faster than building the index).
+**Dense search stays fast on a huge index.** Past ~50K chunks, brute-force cosine starts to drag, so
+`[retrieval] ann` is **on by default**: the long-lived `serve` and `mcp` servers switch dense retrieval
+to a cached in-memory HNSW index above `ann_min_chunks` (default 50 000 — below that, and for scoped
+queries, brute-force is exact and faster than building the index). Set `ann = false` to force exact
+brute-force everywhere.
 
 **Index in the background.** Leave `indexa worker` draining the summary queue, and `indexa watch <path>`
 re-embedding files as you save them — no foreground build to babysit. `indexa worker --auto-reindex`
