@@ -68,6 +68,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DB skips straight past the DDL + migration probes (old DBs still migrate and re-stamp), and the
   open-time WAL truncate now only runs when the WAL has actually grown large. Faster, quieter opens with
   no behaviour change.
+- **Faster directory scanning.** The walker was hard-capped at 4 threads, funneled every entry through a
+  single shared-mutex `Vec`, and classified each directory three separate times (each doing filesystem
+  `stat`/`exists` syscalls). It now defaults to all cores (floored at 4, tunable via `[scan] threads`),
+  gives each worker its own buffer merged once at the end, and classifies each directory a single time —
+  a 2–3× scan speedup on many-core machines with identical output at any thread count (a new test asserts
+  the entry set is thread-count-invariant).
 
 ### Fixed
 
