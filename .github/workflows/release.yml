@@ -100,6 +100,29 @@ jobs:
           merge-multiple: true
           path: artifacts/
 
+      # Sign each CLI binary with the SAME minisign key the desktop app bundle uses, so
+      # `indexa update` / the desktop CLI-refresh can verify the download before self-replace
+      # (crates/update::verify_asset_signature). Produces `<asset>.sig` next to each binary, which
+      # the release upload below picks up via `files: artifacts/*`. Guarded in-script (not a step
+      # `if:` — secrets in `if:` parse-fail the workflow): a missing key skips signing, and the
+      # client's signature check is fail-open for unsigned/pre-signature releases.
+      - name: Sign CLI binaries (minisign)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY not set — CLI assets unsigned (self-update verifies fail-open)."
+            exit 0
+          fi
+          npm install -g @tauri-apps/cli@2
+          for f in artifacts/indexa-*; do
+            case "$f" in *.sig) continue ;; esac
+            echo "Signing $f"
+            tauri signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$f"
+          done
+          ls -la artifacts/
+
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:

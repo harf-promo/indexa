@@ -17,3 +17,7 @@ reqwest = { workspace = true }
 semver = { workspace = true }
 self-replace = { workspace = true }
 tempfile = { workspace = true }
+# Verify the minisign signature of downloaded CLI assets before self-replace (pure-Rust, no
+# openssl). Same scheme + key the desktop's Tauri updater verifies the app bundle with.
+minisign-verify = "0.2"
+base64 = { workspace = true }

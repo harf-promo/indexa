@@ -2742,6 +2742,8 @@ name = "indexa-update"
 version = "0.76.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "minisign-verify",
  "reqwest 0.12.28",
  "self-replace",
  "semver",
