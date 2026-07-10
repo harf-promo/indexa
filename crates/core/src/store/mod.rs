@@ -54,8 +54,8 @@ pub use ann::AnnIndex;
 pub use communities::detect_communities;
 pub use dir_apps::DetectedApp;
 pub use edges::{
-    BlastRadius, ResolutionTier, ResolvedCaller, ResolvedRelatedFile, ScopedCodeGraph,
-    BARE_NAME_CAVEAT,
+    BlastRadius, DependencyClosure, ResolutionTier, ResolvedCaller, ResolvedRelatedFile,
+    ScopedCodeGraph, BARE_NAME_CAVEAT,
 };
 pub use entries::CoverageEntry;
 pub use insights::{DuplicateCluster, LanguageStat, LargestEntry, StaleEntry, WeeklyDiff};

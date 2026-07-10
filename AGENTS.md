@@ -19,7 +19,7 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 - **MCP server:** 47 tools across router modules in `crates/mcp` composed in `tool_router()` (NOT one lib.rs), + 4 resources (`indexa://…`) + 3 prompts. A pinned test (`doc_tool_count_matches_code`) keeps this number honest — update it when tools change.
 - **Retrieval:** hybrid BM25/FTS5 + dense embeddings, RRF fusion, archive/code-intent/recency boosts, rerank, MMR; eval-gated via `indexa eval` over `fixtures/self-golden.json`.
 - **Ask:** grounded RAG; `synthesize:false` returns the raw slice; conversational via `session_id`; `explain_retrieval` traces scoring.
-- **Context Packs** (create/add/remove/export/search, remote `add-url` opt-in; exports secret-redacted) · **code graph** (deps/who_imports/who_calls/blast_radius; 8 languages, 1-hop, case-sensitive) · **decision-review ledger** · **classification + importance weights** · **savings/impact accounting** (≈4 bytes/token estimate).
+- **Context Packs** (create/add/remove/export/search, remote `add-url` opt-in; exports secret-redacted) · **code graph** (deps/who_imports/who_calls/blast_radius; 8 languages, case-sensitive; `blast_radius` walks the caller direction and `dependencies`' `depth` param the callee direction, both multi-hop via `depth` up to 5 — not 1-hop) · **decision-review ledger** · **classification + importance weights** · **savings/impact accounting** (≈4 bytes/token estimate).
 - **Web UI** at :7620 · **Tauri desktop app** (in-app updater) · **CLI** (`index scan deep summarize … doctor eval`).
 - **Parsers:** ~84 formats incl. Office, PDF (+opt-in OCR), EPUB, email, iWork, archives, opt-in multimodal.
 

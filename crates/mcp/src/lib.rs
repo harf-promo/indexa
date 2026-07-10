@@ -761,6 +761,77 @@ mod tests {
         );
     }
 
+    /// G6: `dependencies`' additive `depth` param stays a no-op at the default (1) — the
+    /// exact pre-existing output — and surfaces the transitive callee closure once `depth`
+    /// is raised. Also proves the additive field is invisible to the golden tool-name list.
+    #[tokio::test]
+    async fn dependencies_depth_is_additive_and_surfaces_the_transitive_closure() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_edges(&[
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/p/a.rs".into(),
+                        kind: "calls".into(),
+                        to_ref: "helper".into(),
+                    },
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/p/b.rs".into(),
+                        kind: "defines".into(),
+                        to_ref: "helper".into(),
+                    },
+                ])
+                .unwrap();
+        }
+
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let default_depth = text_of(
+            mcp.dependencies(Parameters(DependenciesParams {
+                path: "/p/a.rs".into(),
+                depth: None,
+                strict: false,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            !default_depth.contains("Transitive callee closure"),
+            "depth 1 (default) must not surface the new section, got: {default_depth}"
+        );
+
+        let with_depth = text_of(
+            mcp.dependencies(Parameters(DependenciesParams {
+                path: "/p/a.rs".into(),
+                depth: Some(2),
+                strict: false,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            with_depth.contains("Transitive callee closure") && with_depth.contains("/p/b.rs"),
+            "depth 2 must surface b.rs (definer of the called symbol), got: {with_depth}"
+        );
+        // The base sections (unaffected by depth) must still be present.
+        assert!(with_depth.contains("Calls (1)"));
+
+        // Additive fields on an existing tool must not perturb the golden tool NAME list.
+        assert!(IndexaMcp::tool_router()
+            .list_all()
+            .iter()
+            .any(|t| t.name == "dependencies"));
+    }
+
     /// End-to-end over the review family: a seeded open question is listed
     /// with its options, and answering it projects onto the domain tables
     /// (the classification row is the proof the effects actually applied).

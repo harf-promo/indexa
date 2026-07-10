@@ -13,6 +13,19 @@ use crate::{mcp_err, ok_text, IndexaMcp};
 pub struct DependenciesParams {
     /// Absolute path of an indexed code file.
     pub path: String,
+    /// How many hops of transitive CALLEE reachability to follow: 1 (default) = today's
+    /// flat single-file edge dump only (imports/defines/calls of `path`). >1 additionally
+    /// walks the call graph forward from `path` — what it calls, and what those calls
+    /// call, up to this many hops — the inverse of `blast_radius`'s caller-direction
+    /// `depth` ("what would break if I change this" vs. "what does this depend on").
+    /// Clamped to 1..=5.
+    #[serde(default)]
+    pub depth: Option<usize>,
+    /// With `depth` > 1, drop bare-name (no import/same-dir evidence) transitive
+    /// resolutions instead of keeping them as a labeled fallback. Mirrors `blast_radius`'s
+    /// `strict`. No effect at `depth` 1.
+    #[serde(default)]
+    pub strict: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -71,9 +84,10 @@ pub struct CodeGraphParams {
 
 #[tool_router(router = router_graph, vis = "pub(crate)")]
 impl IndexaMcp {
-    /// List a code file's dependencies from the code graph (imports + defined symbols).
+    /// List a code file's dependencies from the code graph (imports + defined symbols),
+    /// optionally following the call graph transitively.
     #[tool(
-        description = "List a code file's dependencies from the code graph: the modules/paths it imports and the symbols (functions, types, classes) it defines. Requires an absolute path to a file indexed with `indexa deep`."
+        description = "List a code file's dependencies from the code graph: the modules/paths it imports and the symbols (functions, types, classes) it defines and calls. Requires an absolute path to a file indexed with `indexa deep`. Optional `depth` (1-5, default 1) extends this into a transitive CALLEE-direction closure — what the file calls, and what those calls call, up to `depth` hops (the inverse of `blast_radius`, which walks the CALLER direction: \"what would break if I change this\"). At `depth` 1 (default), output is unchanged."
     )]
     pub(crate) async fn dependencies(
         &self,
@@ -132,6 +146,26 @@ impl IndexaMcp {
                 out.push('\n');
             }
             out.push_str(&format!("\nCalls ({}):\n{}", calls.len(), line("↪", calls)));
+        }
+
+        // Additive: transitive callee-direction closure (depth > 1). Byte-identical to
+        // the above at the default depth 1 — this only appends a new section.
+        let depth = params.0.depth.unwrap_or(1).clamp(1, 5);
+        if depth > 1 {
+            let closure = store
+                .dependency_closure(&params.0.path, 200, params.0.strict, depth)
+                .map_err(mcp_err)?;
+            if !closure.files.is_empty() {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&format!(
+                    "\nTransitive callee closure (depth {depth}, {} scoped + {} bare-name):\n{}",
+                    closure.scoped,
+                    closure.bare,
+                    line("↳", closure.files.iter().map(String::as_str).collect())
+                ));
+            }
         }
         Ok(ok_text(out))
     }

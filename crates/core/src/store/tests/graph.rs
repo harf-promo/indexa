@@ -397,3 +397,92 @@ fn find_cycles_detects_an_scc() {
         .unwrap();
     assert!(store2.find_cycles("/", 400).unwrap().is_empty());
 }
+
+// ── Dependency closure (G6) — callee-direction inverse of blast_radius ────────────────
+
+#[test]
+fn dependency_closure_depth_controls_transitive_reach() {
+    let mut store = Store::open_in_memory().unwrap();
+    // A callee chain (all same dir, so each hop resolves cleanly):
+    //   a.rs calls helper()          → direct
+    //   helper defined in b.rs; b.rs calls inner()   → hop 2
+    //   inner defined in c.rs; c.rs calls leaf()      → hop 3
+    store
+        .upsert_edges(&[
+            edge("/p/a.rs", "calls", "helper"),
+            edge("/p/b.rs", "defines", "helper"),
+            edge("/p/b.rs", "calls", "inner"),
+            edge("/p/c.rs", "defines", "inner"),
+            edge("/p/c.rs", "calls", "leaf"),
+            edge("/p/d.rs", "defines", "leaf"),
+        ])
+        .unwrap();
+
+    // depth 1 = a.rs's own direct calls only.
+    let d1 = store.dependency_closure("/p/a.rs", 200, false, 1).unwrap();
+    assert_eq!(d1.files, vec!["/p/b.rs".to_string()]);
+    assert_eq!(d1.seeds, vec!["/p/a.rs".to_string()]);
+
+    // depth 2 = adds one more hop (reaches c.rs, not d.rs).
+    let d2 = store.dependency_closure("/p/a.rs", 200, false, 2).unwrap();
+    assert!(d2.files.contains(&"/p/b.rs".to_string()));
+    assert!(d2.files.contains(&"/p/c.rs".to_string()));
+    assert!(
+        !d2.files.contains(&"/p/d.rs".to_string()),
+        "d.rs is three hops out — excluded at depth 2"
+    );
+
+    // depth 3 = reaches d.rs through the full chain.
+    let d3 = store.dependency_closure("/p/a.rs", 200, false, 3).unwrap();
+    assert!(
+        d3.files.contains(&"/p/d.rs".to_string()),
+        "depth 3 reaches the far end of the chain"
+    );
+}
+
+#[test]
+fn dependency_closure_accepts_a_bare_symbol_name_as_the_starting_point() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_edges(&[
+            edge("/p/entry.rs", "defines", "entry_fn"),
+            edge("/p/entry.rs", "calls", "helper"),
+            edge("/p/helper.rs", "defines", "helper"),
+        ])
+        .unwrap();
+
+    // "entry_fn" is not a `from_path` in `edges` — it's a bare symbol, so the closure
+    // must resolve it to its definer file (/p/entry.rs) and start the walk there.
+    let closure = store.dependency_closure("entry_fn", 200, false, 1).unwrap();
+    assert_eq!(closure.seeds, vec!["/p/entry.rs".to_string()]);
+    assert_eq!(closure.files, vec!["/p/helper.rs".to_string()]);
+}
+
+#[test]
+fn dependency_closure_excludes_seed_files_and_terminates_on_a_cycle() {
+    let mut store = Store::open_in_memory().unwrap();
+    // Cycle: a.rs calls B (defined in b.rs); b.rs calls A (defined in a.rs).
+    store
+        .upsert_edges(&[
+            edge("/p/a.rs", "defines", "a_fn"),
+            edge("/p/a.rs", "calls", "b_fn"),
+            edge("/p/b.rs", "defines", "b_fn"),
+            edge("/p/b.rs", "calls", "a_fn"),
+        ])
+        .unwrap();
+
+    let closure = store.dependency_closure("/p/a.rs", 200, false, 5).unwrap();
+    // b.rs is a real dependency; a.rs (the seed) must never appear in its own closure,
+    // even though the cycle loops back to it — and a high depth must not hang.
+    assert_eq!(closure.files, vec!["/p/b.rs".to_string()]);
+}
+
+#[test]
+fn dependency_closure_on_unknown_target_returns_empty() {
+    let store = Store::open_in_memory().unwrap();
+    let closure = store
+        .dependency_closure("/nowhere.rs", 200, false, 2)
+        .unwrap();
+    assert!(closure.files.is_empty());
+    assert!(closure.seeds.is_empty());
+}
