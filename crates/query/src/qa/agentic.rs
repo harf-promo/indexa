@@ -15,6 +15,7 @@ use super::retrieve::{build_project_overview, is_broad_intent, retrieve};
 use super::rewrite::resolve_search_query;
 use super::synthesize::{
     build_prompt, no_match_answer, pack_context, split_history_budget, synthesize_from_hits,
+    StreamTrimmer,
 };
 use super::{Answer, AnswerChunk, PriorTurn, QaConfig};
 
@@ -136,17 +137,23 @@ pub async fn answer_agentic_stream_history(
     on_chunk(AnswerChunk::Sources(sources.clone()));
 
     let prompt = build_prompt(question, &context, &history_block);
-    let mut full = String::new();
+    let mut trimmer = StreamTrimmer::new();
     {
         let mut on_frag = |frag: String| {
-            full.push_str(&frag);
-            on_chunk(AnswerChunk::Fragment(frag));
+            let safe = trimmer.push(&frag);
+            if !safe.is_empty() {
+                on_chunk(AnswerChunk::Fragment(safe));
+            }
         };
         llm.generate_stream(&prompt, &mut on_frag).await?;
     }
+    let tail = trimmer.flush();
+    if !tail.is_empty() {
+        on_chunk(AnswerChunk::Fragment(tail));
+    }
     Ok(Answer {
         question: question.to_owned(),
-        answer: full.trim().to_owned(),
+        answer: trimmer.finish(),
         sources,
         confidence,
         synthesized: true,

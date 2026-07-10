@@ -84,6 +84,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Streamed answers now trim a hallucinated next-turn like the non-streaming path.** A base/instruct
+  model sometimes continues past the answer with an invented `QUESTION:/ANSWER:` turn; the
+  non-streaming path already cut it (`trim_continuation`), but the streaming path emitted every
+  fragment verbatim and returned an un-trimmed answer. A new `StreamTrimmer` withholds any trailing
+  text that might be the start of a continuation marker and stops emitting once a complete marker
+  appears, so the UI never flashes the fabricated turn and the final streamed answer matches the
+  non-streamed one. Applied to both the streaming synthesize and agentic paths.
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
   open to the LLM reranker for every user who enabled it: candle's DeBERTa loader read the transformer
   at the safetensors root, but HF `DebertaV2ForSequenceClassification` checkpoints nest it under a
