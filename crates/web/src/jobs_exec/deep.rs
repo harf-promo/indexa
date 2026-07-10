@@ -155,6 +155,9 @@ async fn flush_web_batch(
     headroom: u64,
     ctx_llm: Option<&(dyn Describer + Send + Sync)>,
     embed_model: &str,
+    done: &mut u64,
+    n_files: u64,
+    samples: &mut std::collections::VecDeque<(std::time::Instant, u64)>,
     chunks_written: &mut u64,
     hard_errors: &mut u64,
 ) {
@@ -191,6 +194,454 @@ async fn flush_web_batch(
             hard_errors,
         )
         .await;
+        *done += 1;
+        emit_progress(handle, samples, *done, n_files, c.meta.path_str.clone());
+    }
+}
+
+/// Emit one `JobEvent::Progress` (updating the rolling-throughput window) for a finalized
+/// file. `done` is the monotonic count of files whose terminal outcome (skipped / failed /
+/// upserted) has been recorded — so the bar advances in ~batch-size bursts at each flush.
+fn emit_progress(
+    handle: &Arc<JobHandle>,
+    samples: &mut std::collections::VecDeque<(std::time::Instant, u64)>,
+    done: u64,
+    n_files: u64,
+    current_path: String,
+) {
+    let now = std::time::Instant::now();
+    let cutoff = now - std::time::Duration::from_secs(5);
+    while samples.len() > 1 && samples.front().map(|(t, _)| *t < cutoff).unwrap_or(false) {
+        samples.pop_front();
+    }
+    samples.push_back((now, done));
+    let (rate, eta) = super::throughput_eta(samples, done, n_files);
+    push(
+        handle,
+        JobEvent::Progress {
+            current: done,
+            total: n_files,
+            note: None,
+            current_path: Some(current_path),
+            items_per_sec: rate,
+            eta_secs: eta,
+        },
+    );
+}
+
+/// A prepared file (or terminal outcome) sent from the parse/enrich producer to the
+/// embed/upsert consumer over the bounded pipeline channel. Every file yields exactly one
+/// `PipeMsg`, so the consumer emits exactly one progress event per file, in order.
+enum PipeMsg {
+    /// Parsed, cache-partitioned, enriched — feeds straight into `batcher.add_file`.
+    Ready {
+        cache_hits: Vec<Option<Vec<f32>>>,
+        miss_texts: Vec<(usize, String)>,
+        meta: WebFileMeta,
+    },
+    /// Already current (`unchanged: true`) or parsed to zero chunks (`unchanged: false`).
+    Skipped { path: String, unchanged: bool },
+    /// Parse error or parse-task panic; the consumer warns + counts it as a hard error.
+    Failed { path: String, warning: String },
+}
+
+/// Everything the producer needs to prepare one file, built once and shared (by reference)
+/// across every `prepare_file` call. Owns its own clones of the shared handles so the
+/// producer task is `'static`.
+struct PrepCtx {
+    store: Arc<tokio::sync::Mutex<indexa_core::store::Store>>,
+    registry: Arc<indexa_parsers::registry::Registry>,
+    handle: Arc<JobHandle>,
+    ctx_llm: Option<Arc<OllamaLlm>>,
+    captioner: Option<Arc<OllamaLlm>>,
+    cfg: indexa_core::config::DescriberConfig,
+    max_parse_bytes: u64,
+    image_caption: bool,
+    caption_model: String,
+    transcribe: bool,
+    transcribe_binary: String,
+    transcribe_model: Option<String>,
+    ocr_enabled: bool,
+    ocr_binary: String,
+    ocr_lang: Option<String>,
+    video_caption: bool,
+    video_ffmpeg: String,
+    video_model: String,
+    video_fps: f32,
+    video_max_frames: usize,
+}
+
+/// Prepare one file end-to-end on the producer side: skip-check, parse, media sub-passes
+/// (caption / transcribe / OCR / video), cache-partition, and contextual enrichment —
+/// returning the `PipeMsg` the consumer feeds to the embed accumulator. Runs concurrently
+/// with the consumer's batched embeds. The store lock is taken only for the two brief
+/// synchronous reads (skip-check, cache lookup), each dropped before the next `.await`, so it
+/// is never held across a channel send — the pipeline's key deadlock-avoidance invariant.
+async fn prepare_file(ctx: &PrepCtx, entry: &indexa_core::walker::Entry) -> PipeMsg {
+    let handle = &ctx.handle;
+    let path_str = entry.path.to_string_lossy().into_owned();
+
+    // Skip-if-unchanged: compare against the fresh on-disk mtime (the standalone Deep job
+    // skips the scan stage). Brief store read, guard dropped before any further await.
+    let mtime_secs = entry
+        .modified
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64);
+    let is_current = {
+        let store = ctx.store.lock().await;
+        match mtime_secs {
+            Some(m) => store
+                .chunks_current_for_mtime(&path_str, m)
+                .unwrap_or(false),
+            None => store.chunks_are_current(&path_str).unwrap_or(false),
+        }
+    };
+    if is_current {
+        return PipeMsg::Skipped {
+            path: path_str,
+            unchanged: true,
+        };
+    }
+
+    let ep = entry.path.clone();
+    let sz = entry.size;
+    let reg = ctx.registry.clone();
+    let max_parse_bytes = ctx.max_parse_bytes;
+    let mut extracted = match tokio::task::spawn_blocking(move || {
+        reg.parse_guarded(&ep, sz, max_parse_bytes)
+    })
+    .await
+    {
+        Ok(Ok(e)) => e,
+        Ok(Err(e)) => {
+            return PipeMsg::Failed {
+                path: path_str,
+                warning: format!("{e:#}"),
+            }
+        }
+        Err(e) => {
+            return PipeMsg::Failed {
+                path: path_str,
+                warning: format!("parse task panicked: {e}"),
+            }
+        }
+    };
+
+    // Image captioning (opt-in): append a vision-model caption chunk. Gate on `image_caption`
+    // specifically — the shared captioner handle is also built when only video captioning is
+    // enabled. No watchdog here (dropped in the pipeline): channel backpressure throttles the
+    // producer while the consumer's pre-embed watchdog is paused under memory pressure.
+    if ctx.image_caption {
+        if let Some(cap) = &ctx.captioner {
+            if extracted.mime.starts_with("image/") {
+                match indexa_llm::caption_image_file(cap, &ctx.caption_model, &entry.path).await {
+                    Ok(text) if !text.trim().is_empty() => {
+                        let seq = extracted.chunks.len();
+                        extracted.chunks.push(indexa_parsers::types::Chunk {
+                            source: entry.path.clone(),
+                            seq,
+                            heading: "caption".to_owned(),
+                            text,
+                            language: None,
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(e) => push(
+                        handle,
+                        JobEvent::Warning {
+                            stage: "deep".to_owned(),
+                            item_path: Some(path_str.clone()),
+                            message: format!("caption failed: {e:#}"),
+                            pressure: None,
+                        },
+                    ),
+                }
+            }
+        }
+    }
+
+    // Audio transcription (opt-in): append a whisper transcript. Blocking subprocess.
+    if ctx.transcribe && extracted.mime.starts_with("audio/") {
+        let bin = ctx.transcribe_binary.clone();
+        let model = ctx.transcribe_model.clone();
+        let p = entry.path.clone();
+        let res = tokio::task::spawn_blocking(move || {
+            indexa_parsers::media::transcribe_audio(&p, &bin, model.as_deref())
+        })
+        .await;
+        match res {
+            Ok(Ok(text)) if !text.trim().is_empty() => {
+                let seq = extracted.chunks.len();
+                extracted.chunks.push(indexa_parsers::types::Chunk {
+                    source: entry.path.clone(),
+                    seq,
+                    heading: "transcript".to_owned(),
+                    text,
+                    language: None,
+                });
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => push(
+                handle,
+                JobEvent::Warning {
+                    stage: "deep".to_owned(),
+                    item_path: Some(path_str.clone()),
+                    message: format!("transcription failed: {e:#}"),
+                    pressure: None,
+                },
+            ),
+            Err(e) => push(
+                handle,
+                JobEvent::Warning {
+                    stage: "deep".to_owned(),
+                    item_path: Some(path_str.clone()),
+                    message: format!("transcription task panicked: {e}"),
+                    pressure: None,
+                },
+            ),
+        }
+    }
+
+    // PDF OCR (opt-in): a scanned PDF with no text layer is rasterised + OCR'd.
+    if ctx.ocr_enabled && extracted.mime == "application/pdf" {
+        let layer_words: usize = extracted
+            .chunks
+            .iter()
+            .map(|c| c.text.split_whitespace().count())
+            .sum();
+        if layer_words < 10 {
+            let bin = ctx.ocr_binary.clone();
+            let lang = ctx.ocr_lang.clone();
+            let p = entry.path.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                indexa_parsers::pdf::ocr_pdf(&p, &bin, lang.as_deref())
+            })
+            .await;
+            match res {
+                Ok(Ok(text)) if !text.trim().is_empty() => {
+                    let seq = extracted.chunks.len();
+                    extracted.chunks.push(indexa_parsers::types::Chunk {
+                        source: entry.path.clone(),
+                        seq,
+                        heading: "ocr".to_owned(),
+                        text,
+                        language: None,
+                    });
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => push(
+                    handle,
+                    JobEvent::Warning {
+                        stage: "deep".to_owned(),
+                        item_path: Some(path_str.clone()),
+                        message: format!("OCR failed: {e:#}"),
+                        pressure: None,
+                    },
+                ),
+                Err(e) => push(
+                    handle,
+                    JobEvent::Warning {
+                        stage: "deep".to_owned(),
+                        item_path: Some(path_str.clone()),
+                        message: format!("OCR task panicked: {e}"),
+                        pressure: None,
+                    },
+                ),
+            }
+        }
+    }
+
+    // Video frame captioning (opt-in): extract frames via ffmpeg then caption each.
+    if ctx.video_caption && extracted.mime.starts_with("video/") {
+        let ff = ctx.video_ffmpeg.clone();
+        let fps = ctx.video_fps;
+        let max_fr = ctx.video_max_frames;
+        let p = entry.path.clone();
+        let frames_result = tokio::task::spawn_blocking(move || {
+            indexa_parsers::media::extract_video_frames(&p, &ff, fps, max_fr)
+        })
+        .await;
+        match frames_result {
+            Ok(Ok((_dir, frame_paths))) if !frame_paths.is_empty() => {
+                let mut captions: Vec<String> = Vec::new();
+                for (i, fp) in frame_paths.iter().enumerate() {
+                    match &ctx.captioner {
+                        Some(llm) => {
+                            match indexa_llm::caption_image_file(llm, &ctx.video_model, fp).await {
+                                Ok(c) if !c.trim().is_empty() => {
+                                    captions.push(format!("Frame {}: {c}", i + 1));
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    tracing::warn!("video frame caption failed: {e:#}");
+                                }
+                            }
+                        }
+                        None => {
+                            push(
+                                handle,
+                                JobEvent::Warning {
+                                    stage: "deep".to_owned(),
+                                    item_path: Some(path_str.clone()),
+                                    message: "video captioning is enabled but no vision \
+                                              model is available — set parsers.video.model \
+                                              and ensure Ollama is running"
+                                        .to_owned(),
+                                    pressure: None,
+                                },
+                            );
+                            break;
+                        }
+                    }
+                }
+                if !captions.is_empty() {
+                    let seq = extracted.chunks.len();
+                    extracted.chunks.push(indexa_parsers::types::Chunk {
+                        source: entry.path.clone(),
+                        seq,
+                        heading: "video captions".to_owned(),
+                        text: captions.join("\n"),
+                        language: None,
+                    });
+                }
+            }
+            Ok(Ok(_)) => {} // no frames extracted
+            Ok(Err(e)) => push(
+                handle,
+                JobEvent::Warning {
+                    stage: "deep".to_owned(),
+                    item_path: Some(path_str.clone()),
+                    message: format!("video frame extraction failed: {e:#}"),
+                    pressure: None,
+                },
+            ),
+            Err(e) => push(
+                handle,
+                JobEvent::Warning {
+                    stage: "deep".to_owned(),
+                    item_path: Some(path_str.clone()),
+                    message: format!("video frame task panicked: {e}"),
+                    pressure: None,
+                },
+            ),
+        }
+    }
+
+    if extracted.chunks.is_empty() {
+        return PipeMsg::Skipped {
+            path: path_str,
+            unchanged: false,
+        };
+    }
+
+    // Hash each chunk's ORIGINAL text (cache key; stays valid across contextual runs).
+    let chunk_hashes: Vec<String> = extracted
+        .chunks
+        .iter()
+        .map(|c| chunk_content_hash(&c.text))
+        .collect();
+
+    // Load cached embeddings for this file (hash → Vec<f32>). Brief store read.
+    let hash_cache = {
+        let store = ctx.store.lock().await;
+        store
+            .cached_embeddings_by_hash(&path_str)
+            .unwrap_or_default()
+    };
+
+    // Partition into cache-hits and misses.
+    let mut cache_hits: Vec<Option<Vec<f32>>> = vec![None; extracted.chunks.len()];
+    let mut miss_indices: Vec<usize> = Vec::new();
+    for (i, hash) in chunk_hashes.iter().enumerate() {
+        if let Some(v) = hash_cache.get(hash) {
+            cache_hits[i] = Some(v.clone());
+        } else {
+            miss_indices.push(i);
+        }
+    }
+
+    // Document-level context for contextual retrieval, built from the full file.
+    let doc_context: Option<String> = if ctx.ctx_llm.is_some() {
+        let texts: Vec<&str> = extracted.chunks.iter().map(|c| c.text.as_str()).collect();
+        Some(build_doc_context(&texts))
+    } else {
+        None
+    };
+
+    // Materialize embed text for cache-miss chunks only (optionally contextual-enriched).
+    let miss_raw_texts: Vec<&str> = miss_indices
+        .iter()
+        .map(|&i| extracted.chunks[i].text.as_str())
+        .collect();
+    let miss_embed_texts: Vec<String> = if !miss_raw_texts.is_empty() {
+        if let (Some(llm), Some(ref doc)) = (&ctx.ctx_llm, &doc_context) {
+            let ps = path_str.clone();
+            let model_name = ctx.cfg.file_model.clone();
+            let h = handle.clone();
+            contextual_embed_texts(
+                &**llm,
+                doc,
+                &miss_raw_texts,
+                None,
+                &path_str,
+                move |event| match event {
+                    ContextualEvent::BlurbFragment { fragment, .. } => {
+                        broadcast_only(
+                            &h,
+                            JobEvent::LlmFragment {
+                                item_path: ps.clone(),
+                                model: model_name.clone(),
+                                stage: "context_blurb".to_owned(),
+                                fragment,
+                            },
+                        );
+                    }
+                    ContextualEvent::BlurbFailed { error, .. } => {
+                        push(
+                            &h,
+                            JobEvent::Warning {
+                                stage: "deep".to_owned(),
+                                item_path: Some(ps.clone()),
+                                message: format!("context blurb failed: {error:#}"),
+                                pressure: None,
+                            },
+                        );
+                    }
+                },
+            )
+            .await
+        } else if ctx.cfg.contextual_prefix {
+            // Deterministic, local, no-LLM contextual prefix (mirrors the CLI deep path).
+            let all_raw: Vec<&str> = extracted.chunks.iter().map(|c| c.text.as_str()).collect();
+            let doc_ctx = build_doc_context(&all_raw);
+            let miss_headings: Vec<&str> = miss_indices
+                .iter()
+                .map(|&i| extracted.chunks[i].heading.as_str())
+                .collect();
+            indexa_query::contextual::contextual_prefix_texts(
+                &doc_ctx,
+                &miss_headings,
+                &miss_raw_texts,
+                &path_str,
+            )
+        } else {
+            miss_raw_texts.iter().map(|s| s.to_string()).collect()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let miss_texts: Vec<(usize, String)> = miss_indices.into_iter().zip(miss_embed_texts).collect();
+    let meta = WebFileMeta {
+        path_str,
+        chunks: std::mem::take(&mut extracted.chunks),
+        chunk_hashes,
+        edges: std::mem::take(&mut extracted.edges),
+    };
+    PipeMsg::Ready {
+        cache_hits,
+        miss_texts,
+        meta,
     }
 }
 
@@ -266,9 +717,13 @@ pub(crate) async fn run_deep_phase(
     let headroom = resource_cfg.effective_headroom_bytes();
 
     // Build a contextual-retrieval LLM if the feature is enabled.
-    let ctx_llm: Option<OllamaLlm> = if cfg.contextual_retrieval {
+    // Arc: the contextual LLM is used by the producer (enrichment) AND kept by the consumer
+    // (its watchdog unloads it under memory pressure), so both hold a clone.
+    let ctx_llm: Option<Arc<OllamaLlm>> = if cfg.contextual_retrieval {
         let base_url = OllamaLlm::resolve_base_url(Some(&cfg.base_url));
-        Some(OllamaLlm::new(&base_url, &cfg.file_model).with_num_ctx(cfg.num_ctx))
+        Some(Arc::new(
+            OllamaLlm::new(&base_url, &cfg.file_model).with_num_ctx(cfg.num_ctx),
+        ))
     } else {
         None
     };
@@ -281,12 +736,13 @@ pub(crate) async fn run_deep_phase(
     // (frames extracted, nothing captioned). The image caption model is used as the handle's
     // default; per-frame video calls pass `video_model` explicitly.
     let image_caption = state.config.parsers.image.caption;
-    let captioner: Option<OllamaLlm> = if image_caption || video_caption {
+    // Arc: moved into the producer (image + video captioning run there).
+    let captioner: Option<Arc<OllamaLlm>> = if image_caption || video_caption {
         let base_url = OllamaLlm::resolve_base_url(Some(&cfg.base_url));
-        Some(
+        Some(Arc::new(
             OllamaLlm::new(&base_url, state.config.parsers.image.caption_model())
                 .with_num_ctx(cfg.num_ctx),
-        )
+        ))
     } else {
         None
     };
@@ -327,444 +783,88 @@ pub(crate) async fn run_deep_phase(
         },
     ));
 
-    // Accumulate cache-miss embed-texts across files so each embed round-trip carries a full
-    // batch instead of one file's 1–3 chunks. Files upsert as their misses resolve (in a
-    // flush); the tail flush after the loop drains the rest.
+    // Cross-file embed accumulator: buffers cache-miss embed-texts so each embed round-trip
+    // carries a full batch instead of one file's 1–3 chunks. Fed by the consumer below.
     let mut batcher: MissBatcher<WebFileMeta> =
         MissBatcher::new(state.config.embedding.dim, indexa_embed::EMBED_BATCH_SIZE);
 
-    for entry in &files {
-        // Honor cancellation requested via DELETE /api/jobs/:id.
-        if handle.is_cancelled() {
-            // Flush what's already parsed + enriched — its (possibly LLM-costed) embed work
-            // is paid for, so finalize it rather than discarding it, then report cancelled.
-            if !batcher.is_empty() {
-                flush_web_batch(
-                    &mut batcher,
-                    state,
-                    handle,
-                    &mut wdog,
-                    &spec,
-                    headroom,
-                    ctx_llm
-                        .as_ref()
-                        .map(|l| l as &(dyn Describer + Send + Sync)),
-                    &embed_model,
-                    &mut chunks_written,
-                    &mut hard_errors,
-                )
-                .await;
+    // Parse→embed pipeline. A producer task prepares each file (parse + media + cache-partition
+    // + enrichment) one file ahead of the consumer, feeding prepared work through a small
+    // bounded channel; the consumer batches the embeds + upserts. This overlaps the producer's
+    // (possibly LLM-costed) prep with the consumer's batched embeds. Bound = 2: the producer
+    // stays ~1 file ahead; under memory pressure the consumer parks in its pre-embed watchdog,
+    // stops draining, the channel fills, and the producer blocks on `send` — natural backpressure.
+    let prep = PrepCtx {
+        store: state.store.clone(),
+        registry: registry.clone(),
+        handle: handle.clone(),
+        ctx_llm: ctx_llm.clone(),
+        captioner,
+        cfg,
+        max_parse_bytes,
+        image_caption,
+        caption_model,
+        transcribe,
+        transcribe_binary,
+        transcribe_model,
+        ocr_enabled,
+        ocr_binary,
+        ocr_lang,
+        video_caption,
+        video_ffmpeg,
+        video_model,
+        video_fps,
+        video_max_frames,
+    };
+    let owned_files: Vec<indexa_core::walker::Entry> = files.iter().copied().cloned().collect();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<PipeMsg>(2);
+    let producer = tokio::spawn(async move {
+        for entry in &owned_files {
+            // Stop promptly on cancel; dropping `tx` ends the consumer's drain.
+            if prep.handle.is_cancelled() {
+                break;
             }
-            finalize_cancelled(handle, done as usize);
-            return false;
+            let msg = prepare_file(&prep, entry).await;
+            if tx.send(msg).await.is_err() {
+                break;
+            }
         }
+        // `tx` drops here → the consumer's `rx.recv()` returns None.
+    });
 
-        let path_str = entry.path.to_string_lossy().into_owned();
-
-        // Compare against the fresh on-disk mtime from this walk, not the DB's
-        // possibly-stale `modified_s`: the standalone Deep job (run_deep_phase_standalone)
-        // skips the scan stage, so an edited file would otherwise be wrongly skipped.
-        // Mirrors `cmd_deep`; falls back to the stored check when no mtime is available.
-        let mtime_secs = entry
-            .modified
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64);
-        let is_current = {
-            let store = state.store.lock().await;
-            match mtime_secs {
-                Some(m) => store
-                    .chunks_current_for_mtime(&path_str, m)
-                    .unwrap_or(false),
-                None => store.chunks_are_current(&path_str).unwrap_or(false),
+    // Consumer: drain prepared files, batch their embeds, upsert + emit progress as each
+    // finalizes. Runs until the producer drops `tx` (all files sent, or it observed cancel).
+    // Never checks cancel itself — it keeps finalizing already-prepared work so paid enrichment
+    // isn't wasted; the producer stops feeding it on cancel.
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            PipeMsg::Skipped { path, unchanged } => {
+                if unchanged {
+                    skipped += 1;
+                }
+                done += 1;
+                emit_progress(handle, &mut samples, done, n_files, path);
             }
-        };
-        if is_current {
-            skipped += 1;
-            done += 1;
-        } else {
-            let ep = entry.path.clone();
-            let sz = entry.size;
-            let reg = registry.clone();
-            let mut extracted = match tokio::task::spawn_blocking(move || {
-                reg.parse_guarded(&ep, sz, max_parse_bytes)
-            })
-            .await
-            {
-                Ok(Ok(e)) => e,
-                Ok(Err(e)) => {
-                    push(
-                        handle,
-                        JobEvent::Warning {
-                            stage: "deep".to_owned(),
-                            item_path: Some(path_str.clone()),
-                            message: format!("{e:#}"),
-                            pressure: None,
-                        },
-                    );
-                    hard_errors += 1;
-                    done += 1;
-                    continue;
-                }
-                Err(e) => {
-                    push(
-                        handle,
-                        JobEvent::Warning {
-                            stage: "deep".to_owned(),
-                            item_path: Some(path_str.clone()),
-                            message: format!("parse task panicked: {e}"),
-                            pressure: None,
-                        },
-                    );
-                    hard_errors += 1;
-                    done += 1;
-                    continue;
-                }
-            };
-
-            // Image captioning (opt-in): append a vision-model caption chunk alongside the
-            // EXIF chunk. Watchdog-gated (the vision model is heavy); failure only warns.
-            // Gate on `image_caption` specifically: the shared `captioner` handle is also
-            // built when only video captioning is enabled, so without this guard images
-            // would be captioned without the user opting in.
-            if image_caption {
-                if let Some(cap) = &captioner {
-                    if extracted.mime.starts_with("image/") {
-                        run_watchdog_check(
-                            &mut wdog,
-                            &spec,
-                            headroom,
-                            handle,
-                            "deep",
-                            Some(state.embedder.as_ref()),
-                            Some(cap as &(dyn Describer + Send + Sync)),
-                        )
-                        .await;
-                        match indexa_llm::caption_image_file(cap, &caption_model, &entry.path).await
-                        {
-                            Ok(text) if !text.trim().is_empty() => {
-                                let seq = extracted.chunks.len();
-                                extracted.chunks.push(indexa_parsers::types::Chunk {
-                                    source: entry.path.clone(),
-                                    seq,
-                                    heading: "caption".to_owned(),
-                                    text,
-                                    language: None,
-                                });
-                            }
-                            Ok(_) => {}
-                            Err(e) => push(
-                                handle,
-                                JobEvent::Warning {
-                                    stage: "deep".to_owned(),
-                                    item_path: Some(path_str.clone()),
-                                    message: format!("caption failed: {e:#}"),
-                                    pressure: None,
-                                },
-                            ),
-                        }
-                    }
-                }
+            PipeMsg::Failed { path, warning } => {
+                push(
+                    handle,
+                    JobEvent::Warning {
+                        stage: "deep".to_owned(),
+                        item_path: Some(path.clone()),
+                        message: warning,
+                        pressure: None,
+                    },
+                );
+                hard_errors += 1;
+                done += 1;
+                emit_progress(handle, &mut samples, done, n_files, path);
             }
-
-            // Audio transcription (opt-in): append a whisper transcript chunk alongside the
-            // ffprobe metadata chunk. Blocking subprocess (can take minutes) → spawn_blocking
-            // so it never stalls the server's async runtime.
-            if transcribe && extracted.mime.starts_with("audio/") {
-                let bin = transcribe_binary.clone();
-                let model = transcribe_model.clone();
-                let p = entry.path.clone();
-                let res = tokio::task::spawn_blocking(move || {
-                    indexa_parsers::media::transcribe_audio(&p, &bin, model.as_deref())
-                })
-                .await;
-                match res {
-                    Ok(Ok(text)) if !text.trim().is_empty() => {
-                        let seq = extracted.chunks.len();
-                        extracted.chunks.push(indexa_parsers::types::Chunk {
-                            source: entry.path.clone(),
-                            seq,
-                            heading: "transcript".to_owned(),
-                            text,
-                            language: None,
-                        });
-                    }
-                    Ok(Ok(_)) => {}
-                    Ok(Err(e)) => push(
-                        handle,
-                        JobEvent::Warning {
-                            stage: "deep".to_owned(),
-                            item_path: Some(path_str.clone()),
-                            message: format!("transcription failed: {e:#}"),
-                            pressure: None,
-                        },
-                    ),
-                    Err(e) => push(
-                        handle,
-                        JobEvent::Warning {
-                            stage: "deep".to_owned(),
-                            item_path: Some(path_str.clone()),
-                            message: format!("transcription task panicked: {e}"),
-                            pressure: None,
-                        },
-                    ),
-                }
-            }
-
-            // PDF OCR (opt-in): a scanned PDF with no text layer is rasterised + OCR'd and the
-            // recognised text appended as a chunk. Blocking subprocess → spawn_blocking; fails open.
-            if ocr_enabled && extracted.mime == "application/pdf" {
-                let layer_words: usize = extracted
-                    .chunks
-                    .iter()
-                    .map(|c| c.text.split_whitespace().count())
-                    .sum();
-                if layer_words < 10 {
-                    let bin = ocr_binary.clone();
-                    let lang = ocr_lang.clone();
-                    let p = entry.path.clone();
-                    let res = tokio::task::spawn_blocking(move || {
-                        indexa_parsers::pdf::ocr_pdf(&p, &bin, lang.as_deref())
-                    })
-                    .await;
-                    match res {
-                        Ok(Ok(text)) if !text.trim().is_empty() => {
-                            let seq = extracted.chunks.len();
-                            extracted.chunks.push(indexa_parsers::types::Chunk {
-                                source: entry.path.clone(),
-                                seq,
-                                heading: "ocr".to_owned(),
-                                text,
-                                language: None,
-                            });
-                        }
-                        Ok(Ok(_)) => {}
-                        Ok(Err(e)) => push(
-                            handle,
-                            JobEvent::Warning {
-                                stage: "deep".to_owned(),
-                                item_path: Some(path_str.clone()),
-                                message: format!("OCR failed: {e:#}"),
-                                pressure: None,
-                            },
-                        ),
-                        Err(e) => push(
-                            handle,
-                            JobEvent::Warning {
-                                stage: "deep".to_owned(),
-                                item_path: Some(path_str.clone()),
-                                message: format!("OCR task panicked: {e}"),
-                                pressure: None,
-                            },
-                        ),
-                    }
-                }
-            }
-
-            // Video frame captioning (opt-in): extract frames via ffmpeg then caption
-            // each frame with a local vision model, appending the combined caption as a
-            // chunk. Blocking ffmpeg subprocess + async vision calls → spawn_blocking.
-            if video_caption && extracted.mime.starts_with("video/") {
-                let ff = video_ffmpeg.clone();
-                let fps = video_fps;
-                let max_fr = video_max_frames;
-                let p = entry.path.clone();
-                let frames_result = tokio::task::spawn_blocking(move || {
-                    indexa_parsers::media::extract_video_frames(&p, &ff, fps, max_fr)
-                })
-                .await;
-                match frames_result {
-                    Ok(Ok((_dir, frame_paths))) if !frame_paths.is_empty() => {
-                        let mut captions: Vec<String> = Vec::new();
-                        for (i, fp) in frame_paths.iter().enumerate() {
-                            match &captioner {
-                                Some(llm) => {
-                                    match indexa_llm::caption_image_file(llm, &video_model, fp)
-                                        .await
-                                    {
-                                        Ok(c) if !c.trim().is_empty() => {
-                                            captions.push(format!("Frame {}: {c}", i + 1));
-                                        }
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            tracing::warn!("video frame caption failed: {e:#}");
-                                        }
-                                    }
-                                }
-                                None => {
-                                    // Should not happen now that the captioner is built when
-                                    // video_caption is on — but warn loudly rather than silently
-                                    // dropping every frame if it ever does.
-                                    push(
-                                        handle,
-                                        JobEvent::Warning {
-                                            stage: "deep".to_owned(),
-                                            item_path: Some(path_str.clone()),
-                                            message: "video captioning is enabled but no vision \
-                                                      model is available — set parsers.video.model \
-                                                      and ensure Ollama is running"
-                                                .to_owned(),
-                                            pressure: None,
-                                        },
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                        if !captions.is_empty() {
-                            let seq = extracted.chunks.len();
-                            extracted.chunks.push(indexa_parsers::types::Chunk {
-                                source: entry.path.clone(),
-                                seq,
-                                heading: "video captions".to_owned(),
-                                text: captions.join("\n"),
-                                language: None,
-                            });
-                        }
-                    }
-                    Ok(Ok(_)) => {} // no frames extracted
-                    Ok(Err(e)) => push(
-                        handle,
-                        JobEvent::Warning {
-                            stage: "deep".to_owned(),
-                            item_path: Some(path_str.clone()),
-                            message: format!("video frame extraction failed: {e:#}"),
-                            pressure: None,
-                        },
-                    ),
-                    Err(e) => push(
-                        handle,
-                        JobEvent::Warning {
-                            stage: "deep".to_owned(),
-                            item_path: Some(path_str.clone()),
-                            message: format!("video frame task panicked: {e}"),
-                            pressure: None,
-                        },
-                    ),
-                }
-            }
-
-            if !extracted.chunks.is_empty() {
-                // Compute SHA-256 of each chunk's raw text for embedding cache lookup.
-                // Hash is over the ORIGINAL text (not enriched blurb) so it stays valid
-                // across contextual-retrieval runs on the same source.
-                let chunk_hashes: Vec<String> = extracted
-                    .chunks
-                    .iter()
-                    .map(|c| chunk_content_hash(&c.text))
-                    .collect();
-
-                // Load cached embeddings for this file (hash → Vec<f32>). Fail-open.
-                let hash_cache = {
-                    let store = state.store.lock().await;
-                    store
-                        .cached_embeddings_by_hash(&path_str)
-                        .unwrap_or_default()
-                };
-
-                // Partition into cache-hits and misses.
-                let mut cache_hits: Vec<Option<Vec<f32>>> = vec![None; extracted.chunks.len()];
-                let mut miss_indices: Vec<usize> = Vec::new();
-                for (i, hash) in chunk_hashes.iter().enumerate() {
-                    if let Some(v) = hash_cache.get(hash) {
-                        cache_hits[i] = Some(v.clone());
-                    } else {
-                        miss_indices.push(i);
-                    }
-                }
-
-                // Build a document-level context string for contextual retrieval.
-                // Uses the shared `build_doc_context` helper (single source of truth).
-                // Built from the full file regardless of which chunks are misses.
-                let doc_context: Option<String> = if ctx_llm.is_some() {
-                    let texts: Vec<&str> =
-                        extracted.chunks.iter().map(|c| c.text.as_str()).collect();
-                    Some(build_doc_context(&texts))
-                } else {
-                    None
-                };
-
-                // Phase 1 — materialize embed text for cache-miss chunks only. With contextual
-                // retrieval enabled, each miss chunk gets a situating blurb; otherwise the embed
-                // text is just the chunk text.
-                let miss_raw_texts: Vec<&str> = miss_indices
-                    .iter()
-                    .map(|&i| extracted.chunks[i].text.as_str())
-                    .collect();
-                let miss_embed_texts: Vec<String> = if !miss_raw_texts.is_empty() {
-                    if let (Some(ref llm), Some(ref doc)) = (&ctx_llm, &doc_context) {
-                        let ps = path_str.clone();
-                        let model_name = cfg.file_model.clone();
-                        let h = handle.clone();
-                        contextual_embed_texts(
-                            llm,
-                            doc,
-                            &miss_raw_texts,
-                            None,
-                            &path_str,
-                            move |event| match event {
-                                ContextualEvent::BlurbFragment { fragment, .. } => {
-                                    broadcast_only(
-                                        &h,
-                                        JobEvent::LlmFragment {
-                                            item_path: ps.clone(),
-                                            model: model_name.clone(),
-                                            stage: "context_blurb".to_owned(),
-                                            fragment,
-                                        },
-                                    );
-                                }
-                                ContextualEvent::BlurbFailed { error, .. } => {
-                                    push(
-                                        &h,
-                                        JobEvent::Warning {
-                                            stage: "deep".to_owned(),
-                                            item_path: Some(ps.clone()),
-                                            message: format!("context blurb failed: {error:#}"),
-                                            pressure: None,
-                                        },
-                                    );
-                                }
-                            },
-                        )
-                        .await
-                    } else if cfg.contextual_prefix {
-                        // Deterministic, local, no-LLM contextual prefix (mirrors the CLI deep
-                        // path). Prepend the file path, section heading, and a doc-context snippet
-                        // to each miss chunk's embed input; the stored/hashed text is untouched.
-                        let all_raw: Vec<&str> =
-                            extracted.chunks.iter().map(|c| c.text.as_str()).collect();
-                        let doc_ctx = build_doc_context(&all_raw);
-                        let miss_headings: Vec<&str> = miss_indices
-                            .iter()
-                            .map(|&i| extracted.chunks[i].heading.as_str())
-                            .collect();
-                        indexa_query::contextual::contextual_prefix_texts(
-                            &doc_ctx,
-                            &miss_headings,
-                            &miss_raw_texts,
-                            &path_str,
-                        )
-                    } else {
-                        miss_raw_texts.iter().map(|s| s.to_string()).collect()
-                    }
-                } else {
-                    Vec::new()
-                };
-
-                // Tag each miss with its chunk slot and hand the file to the accumulator,
-                // moving its chunks/hashes/edges in. The accumulator batches embeds across
-                // files and returns the file (to finalize) once all its misses resolve; a
-                // zero-miss file (all cache hits) completes immediately with no embed
-                // round-trip. The memory watchdog runs inside the flush, right before the
-                // batched embed — so a Critical-pressure unload precedes the big embed.
-                let miss_texts: Vec<(usize, String)> =
-                    miss_indices.into_iter().zip(miss_embed_texts).collect();
-                let meta = WebFileMeta {
-                    path_str: path_str.clone(),
-                    chunks: std::mem::take(&mut extracted.chunks),
-                    chunk_hashes,
-                    edges: std::mem::take(&mut extracted.edges),
-                };
+            PipeMsg::Ready {
+                cache_hits,
+                miss_texts,
+                meta,
+            } => {
+                // Zero-miss files (all cache hits) complete immediately, no embed round-trip.
                 if let AddOutcome::Complete(c) = batcher.add_file(cache_hits, miss_texts, meta) {
                     finalize_web_file(
                         state,
@@ -779,8 +879,9 @@ pub(crate) async fn run_deep_phase(
                         &mut hard_errors,
                     )
                     .await;
+                    done += 1;
+                    emit_progress(handle, &mut samples, done, n_files, c.meta.path_str.clone());
                 }
-
                 if batcher.is_full() {
                     flush_web_batch(
                         &mut batcher,
@@ -791,42 +892,23 @@ pub(crate) async fn run_deep_phase(
                         headroom,
                         ctx_llm
                             .as_ref()
-                            .map(|l| l as &(dyn Describer + Send + Sync)),
+                            .map(|l| &**l as &(dyn Describer + Send + Sync)),
                         &embed_model,
+                        &mut done,
+                        n_files,
+                        &mut samples,
                         &mut chunks_written,
                         &mut hard_errors,
                     )
                     .await;
                 }
             }
-            done += 1;
         }
-
-        // Update rolling throughput window (evict samples older than 5s).
-        let now = std::time::Instant::now();
-        let cutoff = now - std::time::Duration::from_secs(5);
-        while samples.len() > 1 && samples.front().map(|(t, _)| *t < cutoff).unwrap_or(false) {
-            samples.pop_front();
-        }
-        samples.push_back((now, done));
-
-        let (rate, eta) = super::throughput_eta(&samples, done, n_files);
-
-        push(
-            handle,
-            JobEvent::Progress {
-                current: done,
-                total: n_files,
-                note: None,
-                current_path: Some(path_str),
-                items_per_sec: rate,
-                eta_secs: eta,
-            },
-        );
     }
 
-    // Tail flush: embed any files still buffered below the batch threshold, then finalize
-    // them (upsert + edges). Their chunks count toward `chunks_written` here.
+    // Tail flush: embed any files still buffered below the batch threshold. This also finalizes
+    // whatever the producer had already enriched when cancellation stopped it — paid work isn't
+    // wasted. Their chunks count toward `chunks_written`.
     if !batcher.is_empty() {
         flush_web_batch(
             &mut batcher,
@@ -837,12 +919,24 @@ pub(crate) async fn run_deep_phase(
             headroom,
             ctx_llm
                 .as_ref()
-                .map(|l| l as &(dyn Describer + Send + Sync)),
+                .map(|l| &**l as &(dyn Describer + Send + Sync)),
             &embed_model,
+            &mut done,
+            n_files,
+            &mut samples,
             &mut chunks_written,
             &mut hard_errors,
         )
         .await;
+    }
+
+    // The producer has finished (all files sent, or it observed cancellation and dropped `tx`).
+    let _ = producer.await;
+
+    // Cancellation: the buffered work was finalized above; report cancelled.
+    if handle.is_cancelled() {
+        finalize_cancelled(handle, done as usize);
+        return false;
     }
 
     // M5: if there were files to process but nothing was written and nothing was
