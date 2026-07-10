@@ -84,6 +84,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Agentic Ask now reranks its merged pool, and conversational reranking uses the rewritten query.**
+  `--agentic` gathered hits across several hops but skipped the cross-encoder rerank the one-shot path
+  applies, so agentic answers never benefited from reranking even with it enabled — it now runs the
+  same rerank (via a shared `maybe_rerank` helper, fail-open). And for a conversational follow-up, the
+  rerank and broad-intent/overview-budget gates now key on the **rewritten standalone query** (what
+  retrieval actually used) instead of the raw "and why is that?" text. With no conversation history
+  the rewritten query equals the question, so single-shot behavior is unchanged.
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
   open to the LLM reranker for every user who enabled it: candle's DeBERTa loader read the transformer
   at the safetensors root, but HF `DebertaV2ForSequenceClassification` checkpoints nest it under a

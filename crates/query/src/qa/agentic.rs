@@ -14,7 +14,8 @@ use super::confidence::confidence_for;
 use super::retrieve::{build_project_overview, is_broad_intent, retrieve};
 use super::rewrite::resolve_search_query;
 use super::synthesize::{
-    build_prompt, no_match_answer, pack_context, split_history_budget, synthesize_from_hits,
+    build_prompt, maybe_rerank, no_match_answer, pack_context, split_history_budget,
+    synthesize_from_hits,
 };
 use super::{Answer, AnswerChunk, PriorTurn, QaConfig};
 
@@ -176,7 +177,9 @@ async fn agentic_retrieve(
     let mut seen_queries: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Conversational: the first hop searches the standalone-rewritten follow-up (history-gated,
     // fail-open). Subsequent hops are driven by the model's own SEARCH: follow-ups as before.
-    let mut current = resolve_search_query(llm, question, history).await;
+    // Keep the rewritten query for the final pool rerank + broad-intent (== `question` w/o history).
+    let search_query = resolve_search_query(llm, question, history).await;
+    let mut current = search_query.clone();
 
     for step in 0..max_steps {
         on_step(step + 1, &current);
@@ -216,17 +219,20 @@ async fn agentic_retrieve(
         }
     }
 
-    // Hits came from several searches; re-rank the merged pool before synthesis.
+    // Hits came from several searches from different queries; RRF-order the merged pool, then apply
+    // the same optional cross-encoder rerank the one-shot path uses (this loop previously skipped it
+    // entirely, so `--agentic` answers never saw the reranker even with it enabled). Fail-open.
     pool.sort_by(|a, b| {
         b.rrf_score
             .partial_cmp(&a.rrf_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    let pool = maybe_rerank(cfg, llm, &search_query, pool).await;
 
     // Build project overview from the merged pool — same logic as retrieve_and_rerank.
     // Open a fresh Store; the borrow is dropped before returning so the future stays Send.
     let overview = {
-        let overview_budget = if is_broad_intent(question) {
+        let overview_budget = if is_broad_intent(&search_query) {
             cfg.context_budget * 35 / 100
         } else {
             300
