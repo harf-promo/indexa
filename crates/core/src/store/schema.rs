@@ -52,6 +52,11 @@ impl Store {
             -- so without a busy timeout a contended write fails immediately with SQLITE_BUSY.
             -- Block-and-retry for up to 5s instead.
             PRAGMA busy_timeout = 5000;
+            -- Memory-map up to 256 MB of the DB so the blob-heavy dense scans (reading every
+            -- chunk's embedding) fault pages in instead of issuing a read() per row; and a 64 MB
+            -- page cache (negative = KiB). Both are per-connection and cheap to set on every open.
+            PRAGMA mmap_size = 268435456;
+            PRAGMA cache_size = -65536;
             ",
         )?;
 

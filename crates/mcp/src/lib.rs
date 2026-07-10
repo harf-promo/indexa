@@ -200,15 +200,19 @@ impl IndexaMcp {
             }
         }
 
-        // Build fresh (CPU-heavy → spawn_blocking; reads on its own connection).
+        // Build fresh (CPU-heavy → spawn_blocking; reads on its own connection). Stream the
+        // embeddings straight into the HNSW rather than materializing them all in a Vec first
+        // (halves transient build memory). Dim comes from the first stored vector (all stored
+        // vectors share it), so the built index matches the old collect-then-build set.
         let built = tokio::task::spawn_blocking(move || -> Option<AnnIndex> {
             let s = Store::open(&db_path).ok()?;
-            let items = s.all_chunk_embeddings().ok()?;
-            let dim = items
-                .iter()
-                .find(|(_, v)| !v.is_empty())
-                .map(|(_, v)| v.len())?;
-            Some(AnnIndex::build(&items, dim))
+            let dim = s.first_embedding_dim().ok()??;
+            let capacity = s.count_embedded_chunks().ok()?;
+            let idx = AnnIndex::build_from(dim, capacity, |insert| {
+                s.stream_chunk_embeddings(|id, v| insert(id, v))
+            })
+            .ok()?;
+            (!idx.is_empty()).then_some(idx)
         })
         .await
         .ok()??;

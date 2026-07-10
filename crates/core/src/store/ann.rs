@@ -57,6 +57,36 @@ impl AnnIndex {
         Self { hnsw, dim, len }
     }
 
+    /// Build by STREAMING `(id, embedding)` pairs through `feed` instead of collecting them into a
+    /// `Vec` first — halving transient memory during a build over a large index (the caller no
+    /// longer holds every embedding alongside the HNSW's internal copies). `capacity` sizes the
+    /// HNSW (a `COUNT(*)` is a fine hint); vectors whose length != `dim` are skipped, exactly like
+    /// [`build`](Self::build).
+    pub fn build_from(
+        dim: usize,
+        capacity: usize,
+        feed: impl FnOnce(&mut dyn FnMut(i64, &[f32])) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Self> {
+        let hnsw = Hnsw::<f32, DistCosine>::new(
+            MAX_NB_CONNECTION,
+            capacity.max(1),
+            MAX_LAYER,
+            EF_CONSTRUCTION,
+            DistCosine {},
+        );
+        let mut len = 0usize;
+        {
+            let mut insert = |id: i64, vec: &[f32]| {
+                if vec.len() == dim {
+                    hnsw.insert((vec, id as usize));
+                    len += 1;
+                }
+            };
+            feed(&mut insert)?;
+        }
+        Ok(Self { hnsw, dim, len })
+    }
+
     /// Number of vectors actually inserted.
     pub fn len(&self) -> usize {
         self.len
@@ -110,6 +140,40 @@ mod tests {
             near_x.first() == Some(&10) || near_x.first() == Some(&11),
             "top hit should be an x-axis chunk, got {near_x:?}"
         );
+    }
+
+    #[test]
+    fn build_from_streams_and_skips_wrong_dim() {
+        // The streaming builder inserts every dim-matching vector (parity with `build`) and skips
+        // wrong-dim ones, so both builders index the same set — just without the intermediate Vec.
+        let items = vec![
+            (10_i64, unit([1.0, 0.0, 0.0])),
+            (20, unit([0.0, 1.0, 0.0])),
+            (30, unit([0.0, 0.0, 1.0])),
+            (11, unit([0.9, 0.1, 0.0])),
+        ];
+        let streamed = AnnIndex::build_from(3, items.len(), |insert| {
+            for (id, v) in &items {
+                insert(*id, v);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(streamed.len(), AnnIndex::build(&items, 3).len());
+        assert_eq!(streamed.len(), 4);
+        let near = streamed.search(&[1.0, 0.05, 0.0], 1);
+        assert!(near.first() == Some(&10) || near.first() == Some(&11));
+
+        // Wrong-dim vectors are skipped, exactly like `build`.
+        let mixed: Vec<(i64, Vec<f32>)> = vec![(1, vec![1.0, 0.0, 0.0]), (2, vec![1.0, 0.0])];
+        let idx = AnnIndex::build_from(3, mixed.len(), |insert| {
+            for (id, v) in &mixed {
+                insert(*id, v);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(idx.len(), 1, "the dim-2 vector is skipped");
     }
 
     #[test]

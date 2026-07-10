@@ -79,6 +79,39 @@ impl Store {
         Ok(())
     }
 
+    /// Replace detected-app rows for MANY directories in ONE transaction — the batched form of
+    /// [`replace_apps_for_dir`]. `detect_directory_apps` rewrites every matched + newly-stale dir at
+    /// once (an empty `apps` slice deletes), so a whole-tree re-detect commits a single transaction
+    /// instead of N. Per-dir semantics are identical (delete-all-then-insert; `path` authoritative).
+    pub fn replace_apps_for_dirs(&mut self, dirs: &[(String, Vec<DetectedApp>)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut del = tx.prepare("DELETE FROM directory_apps WHERE path = ?1")?;
+            let mut ins = tx.prepare(
+                "INSERT INTO directory_apps
+                    (path, app_kind, app_name, family, specificity, is_primary, markers_json, source)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            for (path, apps) in dirs {
+                del.execute(params![path])?;
+                for a in apps {
+                    ins.execute(params![
+                        path,
+                        a.app_kind,
+                        a.app_name,
+                        a.family,
+                        a.specificity as i64,
+                        a.is_primary as i64,
+                        a.markers_json,
+                        a.source,
+                    ])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// All detected apps for one directory, primary first then most-specific.
     pub fn apps_for_dir(&self, path: &str) -> Result<Vec<DetectedApp>> {
         let mut stmt = self.conn.prepare(&format!(
