@@ -139,6 +139,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`indexa snapshot export` now redacts secrets from summary text.** A snapshot serialized the
+  AI-generated directory/file summaries verbatim to a portable JSON file — and summaries are derived
+  from file content, so a committed key/token could ride along into a document meant to be shared or
+  checked into a repo. Summary and one-line-abstract text now pass through the same `redact_secrets`
+  filter that pack and MCP-resource exports already use, so a snapshot can no longer leak a secret the
+  rest of the export surface would have scrubbed.
 - **Web server now rejects cross-origin and DNS-rebinding requests; LAN mode requires a token.** The
   local server (:7620) only had a `localhost` CORS layer — but the state-changing POSTs take query
   params (no JSON body), so they were CORS-"simple": a page you merely *visited* could fire

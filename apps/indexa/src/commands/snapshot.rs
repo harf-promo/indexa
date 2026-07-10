@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use indexa_core::store::{EdgeRecord, Store, SummaryRecord};
+use indexa_query::redact::redact_secrets;
 use serde::{Deserialize, Serialize};
 
 use super::helpers::{now_unix, require_index_db};
@@ -46,20 +47,15 @@ struct WeightDto {
     reason: Option<String>,
 }
 
-/// `indexa snapshot export` — serialize the summary tree + call graph + importance
-/// weights (the expensive-to-recompute AI layer) as a portable, versioned JSON document.
-/// Excludes raw chunks/embeddings (bulky + model-specific), so it's for sharing the
-/// *understanding* of an index, not its full searchable content.
-pub(crate) async fn cmd_snapshot_export(output: Option<String>) -> Result<()> {
-    let Some(db_path) = require_index_db()? else {
-        return Ok(());
-    };
-    let store = Store::open(&db_path)?;
+/// Build the (secret-redacted) snapshot document from an open store. Extracted from
+/// [`cmd_snapshot_export`] so the redaction contract is unit-testable without the real index path.
+/// Bails when the index has no summaries.
+fn build_snapshot(store: &Store) -> Result<Snapshot> {
     let summaries = store.all_summaries()?;
     if summaries.is_empty() {
         anyhow::bail!("nothing to snapshot — no summaries. Run `indexa summarize` first.");
     }
-    let snap = Snapshot {
+    Ok(Snapshot {
         version: SNAPSHOT_VERSION,
         generated_at: now_unix(),
         summaries: summaries
@@ -69,8 +65,11 @@ pub(crate) async fn cmd_snapshot_export(output: Option<String>) -> Result<()> {
                 kind: s.kind,
                 parent_path: s.parent_path,
                 depth: s.depth,
-                summary: s.summary,
-                summary_l0: s.summary_l0,
+                // Redact secrets from the AI-generated summary text before it leaves the machine —
+                // a snapshot is an export like packs/resources (which already redact), and summaries
+                // are derived from file content so they can echo a committed key/token.
+                summary: redact_secrets(&s.summary).0,
+                summary_l0: s.summary_l0.as_deref().map(|t| redact_secrets(t).0),
                 child_count: s.child_count,
                 byte_size: s.byte_size,
                 model: s.model,
@@ -97,7 +96,15 @@ pub(crate) async fn cmd_snapshot_export(output: Option<String>) -> Result<()> {
                 reason: w.reason,
             })
             .collect(),
+    })
+}
+
+pub(crate) async fn cmd_snapshot_export(output: Option<String>) -> Result<()> {
+    let Some(db_path) = require_index_db()? else {
+        return Ok(());
     };
+    let store = Store::open(&db_path)?;
+    let snap = build_snapshot(&store)?;
     let json = serde_json::to_string_pretty(&snap)?;
     if let Some(path) = output {
         std::fs::write(&path, &json).with_context(|| format!("writing snapshot to '{path}'"))?;
@@ -178,4 +185,49 @@ pub(crate) async fn cmd_snapshot_import(path: String) -> Result<()> {
         snap.weights.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use indexa_core::store::SummaryRecord;
+
+    #[test]
+    fn snapshot_export_redacts_secrets_in_summary_text() {
+        // A summary derived from file content can echo a committed secret. The exported snapshot
+        // must scrub it (same contract as pack/resource exports) — a snapshot is data leaving the box.
+        let dir = tempfile::tempdir().unwrap();
+        let dbpath = dir.path().join("idx.db");
+        let key = "AKIAIOSFODNN7EXAMPLE"; // AWS access-key-id shape
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_summary(&SummaryRecord {
+                    path: "/proj/config.rs".into(),
+                    kind: "file".into(),
+                    parent_path: Some("/proj".into()),
+                    depth: 1,
+                    summary: format!("Sets up AWS auth with key {key} and a client."),
+                    summary_l0: Some(format!("AWS auth ({key}).")),
+                    embedding: None,
+                    child_count: 0,
+                    byte_size: 100,
+                    model: "test".into(),
+                    source_hash: "h".into(),
+                    generated_at: 0,
+                })
+                .unwrap();
+        }
+        let store = Store::open(&dbpath).unwrap();
+        let snap = build_snapshot(&store).unwrap();
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+        assert!(
+            !json.contains(key),
+            "raw secret leaked into the exported snapshot JSON"
+        );
+        assert!(
+            json.contains("[REDACTED"),
+            "the secret should be replaced with a redaction marker, not dropped silently"
+        );
+    }
 }
