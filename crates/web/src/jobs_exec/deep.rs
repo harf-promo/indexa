@@ -7,13 +7,192 @@ use super::{finalize_cancelled, finalize_done, finalize_failed, walk_for_job};
 use crate::jobs::{broadcast_only, push, JobEvent, JobHandle};
 use crate::AppState;
 use indexa_core::{
-    resource::WatchdogState,
+    resource::{MachineSpec, WatchdogState},
     store::{chunk_content_hash, ChunkRecord, EdgeRecord},
     walker::EntryKind,
 };
+use indexa_embed::{AddOutcome, Completed, MissBatcher};
 use indexa_llm::{Describer, OllamaLlm};
 use indexa_query::contextual::{build_doc_context, contextual_embed_texts, ContextualEvent};
 use std::sync::Arc;
+
+/// Per-file payload the cross-file embed accumulator ([`MissBatcher`]) holds until every one
+/// of the file's cache-miss chunks has been embedded, then hands back so the deep loop builds
+/// + upserts its chunk records exactly once.
+struct WebFileMeta {
+    path_str: String,
+    chunks: Vec<indexa_parsers::types::Chunk>,
+    chunk_hashes: Vec<String>,
+    edges: Vec<indexa_parsers::types::Edge>,
+}
+
+/// Build the file's chunk records (secret-redacted for storage) + upsert them and its
+/// code-graph edges, updating the success/error counters. Shared by the zero-miss fast path
+/// and the batched-embed finalize path. Store lock is held only across the two synchronous
+/// upserts (no `.await` inside), so it never blocks a concurrent reader for long.
+#[allow(clippy::too_many_arguments)]
+async fn finalize_web_file(
+    state: &AppState,
+    handle: &Arc<JobHandle>,
+    embed_model: &str,
+    path_str: &str,
+    chunks: &[indexa_parsers::types::Chunk],
+    chunk_hashes: &[String],
+    edges: &[indexa_parsers::types::Edge],
+    embeddings: Vec<Option<Vec<f32>>>,
+    chunks_written: &mut u64,
+    hard_errors: &mut u64,
+) {
+    let mut chunk_records = Vec::with_capacity(chunks.len());
+    for ((chunk, embedding), hash) in chunks.iter().zip(embeddings).zip(chunk_hashes) {
+        chunk_records.push(ChunkRecord {
+            entry_path: path_str.to_string(),
+            seq: chunk.seq,
+            heading: chunk.heading.clone(),
+            // Redact secrets before storing (embed uses original text); shared choke point so
+            // web deep honors [scan] redact_at_index like the CLI.
+            text: indexa_query::redact::chunk_text_for_store(
+                &chunk.text,
+                state.config.scan.redact_at_index,
+            ),
+            language: chunk.language.clone(),
+            embedding,
+            embed_model: Some(embed_model.to_string()),
+            content_hash: Some(hash.clone()),
+        });
+    }
+    let mut store = state.store.lock().await;
+    match store.upsert_chunks(&chunk_records) {
+        Ok(()) => *chunks_written += chunk_records.len() as u64,
+        Err(e) => {
+            push(
+                handle,
+                JobEvent::Warning {
+                    stage: "deep".to_owned(),
+                    item_path: Some(path_str.to_string()),
+                    message: format!("upsert_chunks failed: {e:#}"),
+                    pressure: None,
+                },
+            );
+            *hard_errors += 1;
+        }
+    }
+    if !edges.is_empty() {
+        let edge_records: Vec<EdgeRecord> = edges
+            .iter()
+            .map(|e| EdgeRecord {
+                from_path: path_str.to_string(),
+                kind: e.kind.to_owned(),
+                to_ref: e.to.clone(),
+            })
+            .collect();
+        if let Err(e) = store.upsert_edges(&edge_records) {
+            push(
+                handle,
+                JobEvent::Warning {
+                    stage: "deep".to_owned(),
+                    item_path: Some(path_str.to_string()),
+                    message: format!("upsert_edges failed: {e:#}"),
+                    pressure: None,
+                },
+            );
+        }
+    }
+}
+
+/// Emit the per-file embed warnings (dim mismatch / embed failure) for a finalized file. The
+/// counts are re-attributed to their owning file by the accumulator even though a flush mixes
+/// files. Mirrors the pre-batching web warnings (dim-nulled vectors count toward the
+/// "failed to embed" total, matching the old post-`enforce_embedding_dim` count).
+fn emit_web_embed_warnings(
+    handle: &Arc<JobHandle>,
+    c: &Completed<WebFileMeta>,
+    configured_dim: usize,
+) {
+    if c.dim_mismatch > 0 {
+        push(
+            handle,
+            JobEvent::Warning {
+                stage: "deep".to_owned(),
+                item_path: Some(c.meta.path_str.clone()),
+                message: format!(
+                    "{} chunk(s) embedded at dim {} ≠ configured {} — stored text-only; \
+                     fix [embedding] model/dim and re-run deep",
+                    c.dim_mismatch,
+                    c.dim_sample.unwrap_or(0),
+                    configured_dim
+                ),
+                pressure: None,
+            },
+        );
+    }
+    let embed_failures = c.raw_failures + c.dim_mismatch;
+    if embed_failures > 0 {
+        push(
+            handle,
+            JobEvent::Warning {
+                stage: "deep".to_owned(),
+                item_path: Some(c.meta.path_str.clone()),
+                message: format!("{embed_failures}/{} chunks failed to embed", c.miss_count),
+                pressure: None,
+            },
+        );
+    }
+}
+
+/// Embed everything buffered in the accumulator (one `embed_all`, internally sub-batched at
+/// `EMBED_BATCH_SIZE`) and finalize each file whose misses are now resolved. The memory
+/// watchdog runs first — while the buffer is full — so a Critical-pressure unload of the
+/// embedder/LLM precedes the big batched embed. Used for the mid-loop flush (buffer full),
+/// the cancel-drain, and the end-of-run tail flush.
+#[allow(clippy::too_many_arguments)]
+async fn flush_web_batch(
+    batcher: &mut MissBatcher<WebFileMeta>,
+    state: &AppState,
+    handle: &Arc<JobHandle>,
+    wdog: &mut WatchdogState,
+    spec: &MachineSpec,
+    headroom: u64,
+    ctx_llm: Option<&(dyn Describer + Send + Sync)>,
+    embed_model: &str,
+    chunks_written: &mut u64,
+    hard_errors: &mut u64,
+) {
+    run_watchdog_check(
+        wdog,
+        spec,
+        headroom,
+        handle,
+        "deep",
+        Some(state.embedder.as_ref()),
+        ctx_llm,
+    )
+    .await;
+    let refs = batcher.batch_refs();
+    let out = indexa_embed::embed_all(
+        state.embedder.as_ref(),
+        &refs,
+        indexa_embed::EMBED_BATCH_SIZE,
+    )
+    .await;
+    drop(refs);
+    for c in batcher.scatter(out) {
+        emit_web_embed_warnings(handle, &c, state.config.embedding.dim);
+        finalize_web_file(
+            state,
+            handle,
+            embed_model,
+            &c.meta.path_str,
+            &c.meta.chunks,
+            &c.meta.chunk_hashes,
+            &c.meta.edges,
+            c.embeddings,
+            chunks_written,
+            hard_errors,
+        )
+        .await;
+    }
+}
 
 /// Standalone deep: walks, deep-indexes, then finalises the job as done.
 pub(crate) async fn run_deep_phase_standalone(
@@ -148,9 +327,34 @@ pub(crate) async fn run_deep_phase(
         },
     ));
 
+    // Accumulate cache-miss embed-texts across files so each embed round-trip carries a full
+    // batch instead of one file's 1–3 chunks. Files upsert as their misses resolve (in a
+    // flush); the tail flush after the loop drains the rest.
+    let mut batcher: MissBatcher<WebFileMeta> =
+        MissBatcher::new(state.config.embedding.dim, indexa_embed::EMBED_BATCH_SIZE);
+
     for entry in &files {
         // Honor cancellation requested via DELETE /api/jobs/:id.
         if handle.is_cancelled() {
+            // Flush what's already parsed + enriched — its (possibly LLM-costed) embed work
+            // is paid for, so finalize it rather than discarding it, then report cancelled.
+            if !batcher.is_empty() {
+                flush_web_batch(
+                    &mut batcher,
+                    state,
+                    handle,
+                    &mut wdog,
+                    &spec,
+                    headroom,
+                    ctx_llm
+                        .as_ref()
+                        .map(|l| l as &(dyn Describer + Send + Sync)),
+                    &embed_model,
+                    &mut chunks_written,
+                    &mut hard_errors,
+                )
+                .await;
+            }
             finalize_cancelled(handle, done as usize);
             return false;
         }
@@ -547,147 +751,52 @@ pub(crate) async fn run_deep_phase(
                     Vec::new()
                 };
 
-                // Watchdog: pause if memory is tight before the (batched) embeds below. On a
-                // Critical pause we unload the embedder (and the contextual-retrieval LLM, if
-                // enabled) so their RAM frees and the recovery check can resume us.
-                run_watchdog_check(
-                    &mut wdog,
-                    &spec,
-                    headroom,
-                    handle,
-                    "deep",
-                    Some(state.embedder.as_ref()),
-                    ctx_llm
-                        .as_ref()
-                        .map(|l| l as &(dyn Describer + Send + Sync)),
-                )
-                .await;
-
-                // Phase 2 — embed only the cache-miss chunks in batched round-trips.
-                let miss_refs: Vec<&str> = miss_embed_texts.iter().map(|s| s.as_str()).collect();
-                let mut miss_embeddings = if !miss_refs.is_empty() {
-                    indexa_embed::embed_all(
-                        state.embedder.as_ref(),
-                        &miss_refs,
-                        indexa_embed::EMBED_BATCH_SIZE,
-                    )
-                    .await
-                } else {
-                    Vec::new()
+                // Tag each miss with its chunk slot and hand the file to the accumulator,
+                // moving its chunks/hashes/edges in. The accumulator batches embeds across
+                // files and returns the file (to finalize) once all its misses resolve; a
+                // zero-miss file (all cache hits) completes immediately with no embed
+                // round-trip. The memory watchdog runs inside the flush, right before the
+                // batched embed — so a Critical-pressure unload precedes the big embed.
+                let miss_texts: Vec<(usize, String)> =
+                    miss_indices.into_iter().zip(miss_embed_texts).collect();
+                let meta = WebFileMeta {
+                    path_str: path_str.clone(),
+                    chunks: std::mem::take(&mut extracted.chunks),
+                    chunk_hashes,
+                    edges: std::mem::take(&mut extracted.edges),
                 };
-
-                // Drop any embedding whose dim ≠ the configured `[embedding] dim` (a model/config
-                // mismatch) — storing it would corrupt dense search. The chunk stays BM25-searchable.
-                let (dim_mismatch, sample_dim) = indexa_embed::enforce_embedding_dim(
-                    &mut miss_embeddings,
-                    state.config.embedding.dim,
-                );
-                if dim_mismatch > 0 {
-                    push(
+                if let AddOutcome::Complete(c) = batcher.add_file(cache_hits, miss_texts, meta) {
+                    finalize_web_file(
+                        state,
                         handle,
-                        JobEvent::Warning {
-                            stage: "deep".to_owned(),
-                            item_path: Some(path_str.clone()),
-                            message: format!(
-                                "{dim_mismatch} chunk(s) embedded at dim {} ≠ configured {} — stored \
-                                 text-only; fix [embedding] model/dim and re-run deep",
-                                sample_dim.unwrap_or(0),
-                                state.config.embedding.dim
-                            ),
-                            pressure: None,
-                        },
-                    );
+                        &embed_model,
+                        &c.meta.path_str,
+                        &c.meta.chunks,
+                        &c.meta.chunk_hashes,
+                        &c.meta.edges,
+                        c.embeddings,
+                        &mut chunks_written,
+                        &mut hard_errors,
+                    )
+                    .await;
                 }
-                let embed_failures = miss_embeddings.iter().filter(|e| e.is_none()).count();
-                if embed_failures > 0 {
-                    push(
+
+                if batcher.is_full() {
+                    flush_web_batch(
+                        &mut batcher,
+                        state,
                         handle,
-                        JobEvent::Warning {
-                            stage: "deep".to_owned(),
-                            item_path: Some(path_str.clone()),
-                            message: format!(
-                                "{embed_failures}/{} chunks failed to embed",
-                                miss_embeddings.len()
-                            ),
-                            pressure: None,
-                        },
-                    );
-                }
-
-                // Merge cache hits and fresh embeddings into one aligned vector.
-                let mut miss_iter = miss_embeddings.into_iter();
-                let mut all_embeddings: Vec<Option<Vec<f32>>> =
-                    Vec::with_capacity(extracted.chunks.len());
-                for slot in cache_hits.iter_mut().take(extracted.chunks.len()) {
-                    if slot.is_some() {
-                        all_embeddings.push(slot.take());
-                    } else {
-                        all_embeddings.push(miss_iter.next().unwrap_or(None));
-                    }
-                }
-
-                let mut chunk_records = Vec::with_capacity(extracted.chunks.len());
-                for ((chunk, embedding), hash) in extracted
-                    .chunks
-                    .iter()
-                    .zip(all_embeddings)
-                    .zip(chunk_hashes)
-                {
-                    chunk_records.push(ChunkRecord {
-                        entry_path: path_str.clone(),
-                        seq: chunk.seq,
-                        heading: chunk.heading.clone(),
-                        // Redact secrets before storing (embed uses original text); shared choke
-                        // point so web deep honors [scan] redact_at_index like the CLI.
-                        text: indexa_query::redact::chunk_text_for_store(
-                            &chunk.text,
-                            state.config.scan.redact_at_index,
-                        ),
-                        language: chunk.language.clone(),
-                        embedding,
-                        embed_model: Some(embed_model.clone()),
-                        content_hash: Some(hash),
-                    });
-                }
-                let mut store = state.store.lock().await;
-                match store.upsert_chunks(&chunk_records) {
-                    Ok(()) => chunks_written += chunk_records.len() as u64,
-                    Err(e) => {
-                        push(
-                            handle,
-                            JobEvent::Warning {
-                                stage: "deep".to_owned(),
-                                item_path: Some(path_str.clone()),
-                                message: format!("upsert_chunks failed: {e:#}"),
-                                pressure: None,
-                            },
-                        );
-                        hard_errors += 1;
-                    }
-                }
-                // Persist the file's code-graph edges (imports/defines), keyed on the same
-                // entry-path string as its chunks. Best-effort: a failure only warns.
-                if !extracted.edges.is_empty() {
-                    let edge_records: Vec<EdgeRecord> = extracted
-                        .edges
-                        .iter()
-                        .map(|e| EdgeRecord {
-                            from_path: path_str.clone(),
-                            kind: e.kind.to_owned(),
-                            to_ref: e.to.clone(),
-                        })
-                        .collect();
-                    if let Err(e) = store.upsert_edges(&edge_records) {
-                        push(
-                            handle,
-                            JobEvent::Warning {
-                                stage: "deep".to_owned(),
-                                item_path: Some(path_str.clone()),
-                                message: format!("upsert_edges failed: {e:#}"),
-                                pressure: None,
-                            },
-                        );
-                    }
+                        &mut wdog,
+                        &spec,
+                        headroom,
+                        ctx_llm
+                            .as_ref()
+                            .map(|l| l as &(dyn Describer + Send + Sync)),
+                        &embed_model,
+                        &mut chunks_written,
+                        &mut hard_errors,
+                    )
+                    .await;
                 }
             }
             done += 1;
@@ -714,6 +823,26 @@ pub(crate) async fn run_deep_phase(
                 eta_secs: eta,
             },
         );
+    }
+
+    // Tail flush: embed any files still buffered below the batch threshold, then finalize
+    // them (upsert + edges). Their chunks count toward `chunks_written` here.
+    if !batcher.is_empty() {
+        flush_web_batch(
+            &mut batcher,
+            state,
+            handle,
+            &mut wdog,
+            &spec,
+            headroom,
+            ctx_llm
+                .as_ref()
+                .map(|l| l as &(dyn Describer + Send + Sync)),
+            &embed_model,
+            &mut chunks_written,
+            &mut hard_errors,
+        )
+        .await;
     }
 
     // M5: if there were files to process but nothing was written and nothing was
