@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use indexa_core::{config::HybridMode, store::Store};
 
-use crate::{mcp_err, ok_text, IndexaMcp};
+use crate::{mcp_err, ok_text, record_usage, IndexaMcp};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetPackParams {
@@ -157,7 +157,7 @@ impl IndexaMcp {
             changed_since,
             category,
         } = params.0;
-        let store = self.store()?;
+        let mut store = self.store()?;
         let buf = export_pack_body(
             &store,
             &name,
@@ -167,6 +167,19 @@ impl IndexaMcp {
             changed_since.as_deref(),
             category.as_deref(),
         )?;
+        // Savings telemetry: the export (buf) vs. the counterfactual of reading every pack file
+        // whole. Best-effort — a failed lookup just records a zero counterfactual.
+        let counterfactual = store
+            .pack_by_name(&name)
+            .ok()
+            .flatten()
+            .map(|p| {
+                let paths = store.pack_paths(&p.id).unwrap_or_default();
+                let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+                store.counterfactual_bytes_for_paths(&refs).unwrap_or(0)
+            })
+            .unwrap_or(0);
+        record_usage(&mut store, "export_pack", buf.len(), counterfactual);
         Ok(ok_text(buf))
     }
 
@@ -268,7 +281,7 @@ impl IndexaMcp {
         let limit = limit.unwrap_or(20).min(100);
 
         let embedding = self.embedder.embed(&query).await.ok();
-        let store = self.store()?;
+        let mut store = self.store()?;
 
         let pack = store
             .pack_by_name(&name)
@@ -327,10 +340,13 @@ impl IndexaMcp {
             })
             .collect::<Vec<_>>()
             .join("\n\n");
-        Ok(ok_text(format!(
-            "{} result(s) in pack \"{name}\":\n\n{body}",
-            hits.len()
-        )))
+        let out = format!("{} result(s) in pack \"{name}\":\n\n{body}", hits.len());
+        // Savings telemetry: the snippets served vs. reading the matched files whole (same basis
+        // as the `search` tool). Best-effort; a lookup failure records a zero counterfactual.
+        let paths: Vec<&str> = hits.iter().map(|h| h.entry_path.as_str()).collect();
+        let counterfactual = store.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
+        record_usage(&mut store, "search_pack", out.len(), counterfactual);
+        Ok(ok_text(out))
     }
 }
 

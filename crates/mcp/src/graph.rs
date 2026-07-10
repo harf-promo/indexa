@@ -87,12 +87,22 @@ impl IndexaMcp {
                 params.0.path
             )));
         }
-        let line = |prefix: &str, items: Vec<&str>| {
-            items
+        // Cap each group so a generated/huge file (thousands of symbols or calls) can't flood the
+        // client's context; the header always reports the true total.
+        const MAX_PER_GROUP: usize = 100;
+        let group = |label: &str, prefix: &str, items: Vec<&str>| -> String {
+            let total = items.len();
+            let body = items
                 .iter()
+                .take(MAX_PER_GROUP)
                 .map(|s| format!("  {prefix} {s}"))
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join("\n");
+            if total > MAX_PER_GROUP {
+                format!("{label} ({total}, showing first {MAX_PER_GROUP}):\n{body}")
+            } else {
+                format!("{label} ({total}):\n{body}")
+            }
         };
         let imports: Vec<&str> = edges
             .iter()
@@ -109,31 +119,17 @@ impl IndexaMcp {
             .filter(|e| e.kind == "calls")
             .map(|e| e.to_ref.as_str())
             .collect();
-        let mut out = String::new();
+        let mut sections: Vec<String> = Vec::new();
         if !imports.is_empty() {
-            out.push_str(&format!(
-                "Imports ({}):\n{}\n",
-                imports.len(),
-                line("→", imports)
-            ));
+            sections.push(group("Imports", "→", imports));
         }
         if !defines.is_empty() {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&format!(
-                "Defines ({}):\n{}",
-                defines.len(),
-                line("•", defines)
-            ));
+            sections.push(group("Defines", "•", defines));
         }
         if !calls.is_empty() {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&format!("\nCalls ({}):\n{}", calls.len(), line("↪", calls)));
+            sections.push(group("Calls", "↪", calls));
         }
-        Ok(ok_text(out))
+        Ok(ok_text(sections.join("\n\n")))
     }
 
     /// Reverse dependency: which indexed files import a given module/path.

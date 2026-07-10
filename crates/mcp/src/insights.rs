@@ -59,8 +59,13 @@ impl IndexaMcp {
         if clusters.is_empty() {
             return Ok(ok_text("No duplicates found."));
         }
+        // Cap the clusters listed so a heavily-duplicated tree can't flood the client's context;
+        // report the true total and how many are shown.
+        const MAX_CLUSTERS: usize = 50;
+        let total = clusters.len();
         let lines: Vec<String> = clusters
             .iter()
+            .take(MAX_CLUSTERS)
             .enumerate()
             .map(|(i, c)| {
                 format!(
@@ -76,11 +81,12 @@ impl IndexaMcp {
                 )
             })
             .collect();
-        Ok(ok_text(format!(
-            "{} duplicate cluster(s):\n\n{}",
-            clusters.len(),
-            lines.join("\n\n")
-        )))
+        let header = if total > MAX_CLUSTERS {
+            format!("{total} duplicate cluster(s) (showing first {MAX_CLUSTERS}):")
+        } else {
+            format!("{total} duplicate cluster(s):")
+        };
+        Ok(ok_text(format!("{header}\n\n{}", lines.join("\n\n"))))
     }
 
     /// Find stale directories (not modified for a long time).
