@@ -54,6 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **Coverage/treemap queries are bounded deterministically at whole-computer scale.** The two flat
+  entry queries behind the coverage map capped at 500,000 rows with **no `ORDER BY`**, so past that
+  size they returned an *arbitrary* slice — silently wrong on a multi-million-file index. They now
+  order by size / chunk count DESC (keeping the visually dominant cells) behind a named
+  `TREEMAP_ROW_CAP`, and log a truncation warning when the cap bites.
+
 - **Allocation-light brute-force dense search.** The cosine scan behind `ask`/`search` (the exact path
   used below `ann_min_chunks` and for scoped queries) previously decoded each chunk's embedding into a fresh `Vec<f32>`,
   materialized its path string, recomputed the query norm for every row, and full-sorted *all* rows to
