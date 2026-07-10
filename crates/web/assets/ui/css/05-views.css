@@ -158,6 +158,13 @@
 /* "Broaden to folder" offer shown under a thin scoped answer (appended to the message). */
 .ask-broaden { margin-top: 10px; color: var(--muted); font-size: 13px; }
 
+/* "Save to pack" offer under every substantive answer — closes the notes write-back loop. */
+.ask-save-to-pack { margin-top: 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ask-save-pack-select {
+  font-size: 13px; padding: 3px 6px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+}
+
 /* "Context not built yet" banner (between the tab bar and the workspace views). */
 .context-notice {
   display: flex; align-items: center; gap: 12px;

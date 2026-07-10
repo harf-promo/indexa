@@ -392,6 +392,74 @@ async function doAsk() {
     }
   }
 
+  // Offer to save a substantive answer back into a Context Pack — closes the notes
+  // write-back loop (mirrors the MCP `add_note` tool, now reachable from the chat UI too).
+  // Built once and appended to `thinking` (like the "broaden" offer above) rather than
+  // inside `renderAnswer`, which repaints on every streamed fragment and would wipe it.
+  if (answerText.trim()) {
+    var saveWrap = document.createElement('div');
+    saveWrap.className = 'ask-save-to-pack';
+    var saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'btn-sm';
+    saveBtn.textContent = 'Save to pack';
+    saveBtn.addEventListener('click', function() {
+      saveBtn.disabled = true;
+      fetch('/api/packs')
+        .then(function(r) { return r.json(); })
+        .then(function(packs) {
+          saveWrap.innerHTML = '';
+          if (!packs || !packs.length) {
+            saveWrap.appendChild(document.createTextNode('No packs yet — create one in Context Packs first.'));
+            return;
+          }
+          var select = document.createElement('select');
+          select.className = 'ask-save-pack-select';
+          packs.forEach(function(p) {
+            var opt = document.createElement('option');
+            opt.value = p.name;
+            opt.textContent = p.name; // textContent, not innerHTML — pack names are user data
+            select.appendChild(opt);
+          });
+          var confirmBtn = document.createElement('button');
+          confirmBtn.type = 'button';
+          confirmBtn.className = 'btn-sm';
+          confirmBtn.textContent = 'Save';
+          confirmBtn.addEventListener('click', function() {
+            confirmBtn.disabled = true;
+            var packName = select.value;
+            fetch('/api/packs/' + encodeURIComponent(packName) + '/note', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ title: q, body: answerText }),
+            })
+              .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+              .then(function(res) {
+                if (res.ok) {
+                  if (typeof toast === 'function') toast('Saved to "' + packName + '"', 'info');
+                  saveWrap.remove();
+                } else {
+                  if (typeof toast === 'function') toast(res.d.error || 'Save failed', 'error');
+                  confirmBtn.disabled = false;
+                }
+              })
+              .catch(function(e) {
+                if (typeof toast === 'function') toast('Save error: ' + e.message, 'error');
+                confirmBtn.disabled = false;
+              });
+          });
+          saveWrap.appendChild(select);
+          saveWrap.appendChild(confirmBtn);
+        })
+        .catch(function() {
+          saveWrap.innerHTML = '';
+          saveWrap.appendChild(document.createTextNode('Could not load packs.'));
+        });
+    });
+    saveWrap.appendChild(saveBtn);
+    thinking.appendChild(saveWrap);
+  }
+
   sendBtn.disabled = false;
   sendBtn.textContent = 'Ask';
   qInput.focus();

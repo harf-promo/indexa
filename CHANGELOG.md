@@ -65,6 +65,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   live count in the XML header as `stale_files="N"`. The MCP `export_pack` tool gains an additive
   `refresh: bool` param that best-effort reindexes stale members before exporting (no new tool — count
   unchanged, 47).
+- **Notes write-back loop — save an answer straight back into its pack.** New `indexa note add <pack>
+  <title> <body>` (CLI) and `POST /api/packs/{name}/note` (web) attach a Markdown note to a Context
+  Pack and best-effort reindex it in-process, mirroring the MCP `add_note` tool that has had this
+  since v0.76 — the CLI and web were the two remaining surfaces without it. The chat UI gains a "Save
+  to pack" control under every substantive answer. The reindex never blocks or fails the durable save
+  (file written + registered as a pack member): a down embedder, or a full web job queue, just defers
+  indexing to the next `pack refresh`/deep pass. No MCP change — tool count stays 47.
 
 ### Performance
 
