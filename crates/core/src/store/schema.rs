@@ -501,7 +501,12 @@ impl Store {
                         to_ref    TEXT NOT NULL,
                         PRIMARY KEY (from_path, kind, to_ref)
                     ) WITHOUT ROWID;
-                    INSERT OR IGNORE INTO edges_new SELECT * FROM edges;
+                    -- Explicit columns, plain INSERT (like the chunks migration): every legacy row
+                    -- ('imports'/'defines', same PK) is valid under the wider CHECK, so this can't
+                    -- collide. A plain INSERT surfaces any unexpected violation loudly instead of
+                    -- silently dropping rows the way `INSERT OR IGNORE` would.
+                    INSERT INTO edges_new (from_path, kind, to_ref)
+                        SELECT from_path, kind, to_ref FROM edges;
                     DROP TABLE edges;
                     ALTER TABLE edges_new RENAME TO edges;
                     CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(kind, to_ref);
