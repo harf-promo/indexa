@@ -87,6 +87,100 @@ fn reconcile_entries_spares_prefix_sibling_root() {
 }
 
 #[test]
+fn reconcile_by_generation_removes_stale_leaves_no_orphans() {
+    // The streaming-scan reconcile: prune every row under the root NOT stamped with the current
+    // scan generation, cascading to the same child tables as reconcile_entries (no orphans).
+    let mut store = Store::open_in_memory().unwrap();
+    seed_full_entry(&mut store, "/proj/a.rs");
+    seed_full_entry(&mut store, "/proj/b.rs");
+    seed_full_entry(&mut store, "/proj/c.rs");
+
+    // A scan re-stamps only a.rs with the current generation; b.rs + c.rs keep their old (NULL) gen.
+    let gen = store.next_scan_generation().unwrap();
+    store
+        .upsert_entries_with_generation(
+            &[dummy_entry("/proj/a.rs", EntryKind::File, 100)],
+            Some(gen),
+        )
+        .unwrap();
+
+    let removed = store.reconcile_by_generation("/proj", gen).unwrap();
+    assert_eq!(removed, 2, "b.rs + c.rs are stale-generation ghosts");
+    assert_eq!(orphan_rows_for(&store, "/proj/b.rs"), 0);
+    assert_eq!(orphan_rows_for(&store, "/proj/c.rs"), 0);
+    assert!(
+        orphan_rows_for(&store, "/proj/a.rs") >= 6,
+        "the re-stamped file survives intact"
+    );
+    assert_eq!(store.entry_count().unwrap(), 1);
+}
+
+#[test]
+fn reconcile_by_generation_spares_prefix_sibling_root() {
+    // Same subtree-boundary contract as reconcile_entries: reconciling /proj must never prune
+    // /projector, even though its generation differs from the current scan's.
+    let mut store = Store::open_in_memory().unwrap();
+    seed_full_entry(&mut store, "/proj/a.rs");
+    seed_full_entry(&mut store, "/projector/x.rs"); // sibling sharing the string prefix
+
+    let gen = store.next_scan_generation().unwrap();
+    store
+        .upsert_entries_with_generation(
+            &[dummy_entry("/proj/a.rs", EntryKind::File, 100)],
+            Some(gen),
+        )
+        .unwrap();
+
+    let removed = store.reconcile_by_generation("/proj", gen).unwrap();
+    assert_eq!(
+        removed, 0,
+        "a.rs is re-stamped; /projector is not under /proj"
+    );
+    assert!(
+        orphan_rows_for(&store, "/projector/x.rs") >= 6,
+        "/projector must survive a /proj generation-reconcile"
+    );
+    assert_eq!(store.entry_count().unwrap(), 2);
+}
+
+#[test]
+fn interrupted_scan_ghosts_pruned_by_next_full_scan() {
+    // An interrupted scan upserts rows at generation N but never reconciles. The NEXT full scan
+    // (generation N+1) re-stamps live files and prunes everything still at the old generation,
+    // self-healing the partial state — no stale rows survive (the core interruption guarantee).
+    let mut store = Store::open_in_memory().unwrap();
+
+    // "Interrupted scan" at gen=g1: upsert three files, then get killed before reconcile.
+    let g1 = store.next_scan_generation().unwrap();
+    store
+        .upsert_entries_with_generation(
+            &[
+                dummy_entry("/proj/a.rs", EntryKind::File, 10),
+                dummy_entry("/proj/b.rs", EntryKind::File, 10),
+                dummy_entry("/proj/gone.rs", EntryKind::File, 10),
+            ],
+            Some(g1),
+        )
+        .unwrap();
+
+    // Next full scan at gen=g2: a.rs + b.rs still on disk (re-stamped); gone.rs deleted.
+    let g2 = store.next_scan_generation().unwrap();
+    assert_eq!(g2, g1 + 1, "generation is monotonic");
+    store
+        .upsert_entries_with_generation(
+            &[
+                dummy_entry("/proj/a.rs", EntryKind::File, 10),
+                dummy_entry("/proj/b.rs", EntryKind::File, 10),
+            ],
+            Some(g2),
+        )
+        .unwrap();
+    let removed = store.reconcile_by_generation("/proj", g2).unwrap();
+    assert_eq!(removed, 1, "gone.rs (stale gen=g1) is pruned");
+    assert_eq!(store.entry_count().unwrap(), 2, "a.rs + b.rs survive");
+}
+
+#[test]
 fn entries_for_summarization_spares_prefix_sibling_root() {
     // Same boundary bug on the summarize side: summarizing /proj must not enqueue /projector.
     // Bare entries (not seed_full_entry, which pre-enqueues and would be excluded).

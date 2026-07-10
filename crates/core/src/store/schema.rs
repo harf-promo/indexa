@@ -8,7 +8,7 @@ use anyhow::Result;
 ///
 /// **INVARIANT: bump this whenever the DDL or any migration in `init_schema` changes** — otherwise a
 /// DB stamped at the old value would skip the new migration and silently miss a column/table.
-pub(super) const SCHEMA_VERSION: i64 = 1;
+pub(super) const SCHEMA_VERSION: i64 = 2;
 
 /// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
 /// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
@@ -86,11 +86,18 @@ impl Store {
                 -- first_indexed_at (v0.10): original discovery time, never reset on rescan.
                 -- In the base DDL so fresh DBs skip the ALTER migration below — and so the
                 -- concurrent-open path never races on adding the column.
-                first_indexed_at INTEGER
+                first_indexed_at INTEGER,
+                -- scan_generation (D5): a monotonic id stamped on every row a scan upserts, so a
+                -- streaming scan prunes ghosts by generation-not-equal-current instead of holding a
+                -- full live-path HashSet. Nullable + in the base DDL so fresh DBs skip the ALTER
+                -- below; NULL means not-yet-stamped-by-a-scan (watch upsert / pre-migration row).
+                scan_generation INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_entries_parent ON entries(parent_path);
             CREATE INDEX IF NOT EXISTS idx_entries_kind   ON entries(kind);
             CREATE INDEX IF NOT EXISTS idx_entries_cat    ON entries(hint_cat);
+            -- idx_entries_generation is created after the scan_generation ALTER migration below, so
+            -- an upgraded DB (whose CREATE TABLE IF NOT EXISTS is a no-op) has the column first.
 
             -- Deep-scan chunks (text + embeddings).
             -- AUTOINCREMENT (not a bare rowid) so ids are never reused after a re-deep
@@ -383,6 +390,25 @@ impl Store {
                  UPDATE entries SET first_indexed_at = indexed_at WHERE first_indexed_at IS NULL;",
             )?;
         }
+
+        // Migration (D5): add entries.scan_generation for streaming-scan ghost pruning by
+        // generation (see the base DDL). Nullable, NO backfill — existing rows stay NULL until the
+        // next scan re-stamps live files; a NULL row under a scanned root that the scan does not
+        // re-see is pruned as a ghost (that's the intended semantics). Create the index here too,
+        // since an upgraded DB skips the base DDL's `CREATE INDEX`.
+        let has_scan_generation: bool = self
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'scan_generation'")?
+            .exists([])?;
+        if !has_scan_generation {
+            self.conn
+                .execute_batch("ALTER TABLE entries ADD COLUMN scan_generation INTEGER;")?;
+        }
+        // The column now exists (from the base DDL on a fresh DB, or the ALTER above on an upgraded
+        // one), so create its index unconditionally here — after the column is guaranteed present.
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_entries_generation ON entries(scan_generation);",
+        )?;
 
         // Migration: add summaries.summary_l0 (L0 one-line abstract) to databases
         // created before tiered summaries existed. SQLite has no ADD COLUMN IF NOT

@@ -2,7 +2,7 @@ use anyhow::Result;
 use indexa_core::{
     config::Config,
     store::Store,
-    walker::{walk, WalkConfig},
+    walker::{walk_streaming, WalkConfig},
 };
 
 use super::helpers::{check_huge_root_guard, index_db_path, resolve_target_roots};
@@ -24,20 +24,23 @@ pub(crate) async fn cmd_scan(paths: Vec<String>, all: bool, yes: bool, cfg: &Con
         ..Default::default()
     };
 
+    // One generation per scan run, stamped on every upserted row so the post-scan prune can drop
+    // rows this run didn't touch (removed from disk, or stale from an interrupted prior scan).
+    let generation = store.next_scan_generation()?;
     for root in &roots {
         println!("Scanning {}", root.display());
-        let entries = walk(root, &walk_cfg)?;
-        let live_paths: std::collections::HashSet<String> = entries
-            .iter()
-            .map(|e| e.path.to_string_lossy().into_owned())
-            .collect();
-
-        store.upsert_entries(&entries)?;
-
-        // Ghost-row cleanup: remove entries that were in the index but no longer on disk.
         let root_str = root.to_string_lossy().into_owned();
-        let removed = store.reconcile_entries(&root_str, &live_paths)?;
-        let count = live_paths.len();
+        // Stream the walk so a whole-computer scan stays bounded-memory: upsert each batch (stamped
+        // with this run's generation) as it arrives instead of collecting every entry up front.
+        let mut count = 0usize;
+        walk_streaming(root, &walk_cfg, |batch| {
+            count += batch.len();
+            store.upsert_entries_with_generation(&batch, Some(generation))
+        })?;
+
+        // Ghost-row cleanup: prune entries this scan did NOT re-stamp (removed from disk, or a
+        // stale generation left by an interrupted prior scan) — no live-path set held.
+        let removed = store.reconcile_by_generation(&root_str, generation)?;
         if removed > 0 {
             println!("  {count} entries, removed {removed} ghost rows");
         } else {

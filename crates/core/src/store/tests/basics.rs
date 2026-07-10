@@ -475,3 +475,51 @@ fn open_stamps_schema_version_and_reopen_is_safe() {
         .unwrap();
     assert!(!hits.is_empty(), "FTS index intact after fast-path open");
 }
+
+#[test]
+fn scan_generation_migration_adds_column_to_pre_d5_db() {
+    // D5: a pre-D5 database (schema v1, no scan_generation column) gains the column + index on the
+    // next open via the ALTER migration — the upgrade path that fresh in-memory DBs (base DDL
+    // already has the column) never exercise — and the generation machinery then works on it.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("pre-d5.db");
+    let has_col = |s: &Store| -> bool {
+        s.db_connection()
+            .prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'scan_generation'")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    };
+    {
+        let store = Store::open(&db).unwrap();
+        // Simulate a v1 DB: drop the index then the column (SQLite can't drop a column still used
+        // by an index), and roll user_version back so the next open re-runs the migration block.
+        store
+            .db_connection()
+            .execute_batch(
+                "DROP INDEX IF EXISTS idx_entries_generation;
+                 ALTER TABLE entries DROP COLUMN scan_generation;
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        assert!(!has_col(&store), "precondition: scan_generation removed");
+    }
+
+    // Reopen → init_schema sees version 1 != current and runs the ALTER migration.
+    let mut store = Store::open(&db).unwrap();
+    assert!(
+        has_col(&store),
+        "reopen must ADD scan_generation via the migration"
+    );
+    // The generation machinery works on the migrated DB.
+    let gen = store.next_scan_generation().unwrap();
+    store
+        .upsert_entries_with_generation(&[dummy_entry("/x/a.rs", EntryKind::File, 10)], Some(gen))
+        .unwrap();
+    assert_eq!(
+        store.reconcile_by_generation("/x", gen).unwrap(),
+        0,
+        "the just-stamped entry is not a ghost"
+    );
+    assert_eq!(store.entry_count().unwrap(), 1);
+}

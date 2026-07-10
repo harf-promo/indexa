@@ -76,33 +76,92 @@ fn delete_path_artifacts_exact(tx: &Transaction, paths: &[String]) -> rusqlite::
     Ok(removed)
 }
 
+/// Delete every artifact (chunks + FTS + edges + summaries + queue + classification + dir-apps +
+/// the entry itself) for rows under a root subtree whose `scan_generation` is NOT the current
+/// scan's — either an older generation or NULL (a watch upsert / pre-migration row this scan did
+/// not re-see). The streaming-scan analogue of [`delete_path_artifacts_exact`]; subquery-based (no
+/// materialized ghost-path list) so a mostly-deleted root stays bounded-memory. Returns the number
+/// of `entries` rows removed.
+///
+/// INVARIANT: this cascade table list MUST match `delete_path_artifacts_exact` (and the orphan-
+/// guard tests' `orphan_rows_for`) — a missing table leaves orphans (there is no FK cascade).
+fn delete_generation_ghosts(
+    tx: &Transaction,
+    exact: &str,
+    child_pattern: &str,
+    generation: i64,
+) -> rusqlite::Result<usize> {
+    // A ghost row's path: under the subtree, and not stamped with the current generation.
+    const GHOST_PATHS: &str = "SELECT path FROM entries \
+         WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\') \
+           AND (scan_generation IS NULL OR scan_generation != ?3)";
+    // (table, scoping column) — must match delete_path_artifacts_exact.
+    for (table, col) in [
+        ("chunks_fts", "entry_path"),
+        ("chunks", "entry_path"),
+        ("edges", "from_path"),
+        ("summaries", "path"),
+        ("summary_queue", "path"),
+        ("classifications", "path"),
+        ("directory_apps", "path"),
+    ] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE {col} IN ({GHOST_PATHS})"),
+            params![exact, child_pattern, generation],
+        )?;
+    }
+    // Delete the entry rows LAST, so the child-table subqueries above still resolve their paths.
+    tx.execute(
+        "DELETE FROM entries \
+         WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\') \
+           AND (scan_generation IS NULL OR scan_generation != ?3)",
+        params![exact, child_pattern, generation],
+    )
+}
+
 impl Store {
     // ── Surface-scan writes ───────────────────────────────────────────────────
 
-    /// Insert or update a batch of walker entries.
+    /// Insert or update a batch of walker entries WITHOUT stamping a scan generation. Used by the
+    /// watchers (per-event upserts) and tests; scans call [`upsert_entries_with_generation`].
+    pub fn upsert_entries(&mut self, entries: &[Entry]) -> Result<()> {
+        self.upsert_entries_with_generation(entries, None)
+    }
+
+    /// Insert or update a batch of walker entries, stamping `scan_generation` when `generation` is
+    /// `Some` (a scan run). `None` (a watch upsert) leaves an existing row's generation untouched
+    /// (via `COALESCE`), so a live-file change between scans doesn't make the row look ghost-stale
+    /// to the next generation-prune.
     ///
     /// Uses a non-destructive `ON CONFLICT … DO UPDATE` (not `INSERT OR REPLACE`) so an
     /// existing row keeps its identity across rescans: REPLACE would DELETE then INSERT,
     /// pointlessly churning the row (and resetting `first_indexed_at`). There is no FK
     /// `ON DELETE CASCADE` on the child tables — see the integrity note in `store::schema`.
-    pub fn upsert_entries(&mut self, entries: &[Entry]) -> Result<()> {
+    pub fn upsert_entries_with_generation(
+        &mut self,
+        entries: &[Entry],
+        generation: Option<i64>,
+    ) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
             // first_indexed_at is set once on INSERT and never overwritten on rescan.
+            // scan_generation (?9): stamped on INSERT; on UPDATE, COALESCE keeps the existing value
+            // when ?9 is NULL (watch upsert) and overwrites it when a scan supplies one.
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO entries
                  (path, parent_path, kind, size, modified_s, hint_label, hint_cat, deep_policy,
-                  first_indexed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch())
+                  scan_generation, first_indexed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, unixepoch())
                  ON CONFLICT(path) DO UPDATE SET
-                     parent_path = excluded.parent_path,
-                     kind        = excluded.kind,
-                     size        = excluded.size,
-                     modified_s  = excluded.modified_s,
-                     hint_label  = excluded.hint_label,
-                     hint_cat    = excluded.hint_cat,
-                     deep_policy = excluded.deep_policy,
-                     indexed_at  = unixepoch()",
+                     parent_path     = excluded.parent_path,
+                     kind            = excluded.kind,
+                     size            = excluded.size,
+                     modified_s      = excluded.modified_s,
+                     hint_label      = excluded.hint_label,
+                     hint_cat        = excluded.hint_cat,
+                     deep_policy     = excluded.deep_policy,
+                     scan_generation = COALESCE(excluded.scan_generation, scan_generation),
+                     indexed_at      = unixepoch()",
             )?;
 
             for e in entries {
@@ -134,11 +193,38 @@ impl Store {
                     label,
                     cat,
                     policy,
+                    generation,
                 ])?;
             }
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// The generation id to stamp on the next scan: one past the max already stored. Call once at
+    /// the start of a scan run and pass it to every `upsert_entries_with_generation` +
+    /// `reconcile_by_generation` in that run, so survivors carry it and ghosts keep the old one.
+    pub fn next_scan_generation(&self) -> Result<i64> {
+        let g: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(scan_generation), 0) + 1 FROM entries",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(g)
+    }
+
+    /// Prune ghost rows under `root_prefix`: entries (and all their artifacts) whose
+    /// `scan_generation` is not `generation` — i.e. everything the just-completed scan of this root
+    /// did NOT re-stamp. The generation-based replacement for [`Store::reconcile_entries`]'s
+    /// live-path HashSet diff; interruption-safe (a killed scan leaves stale-generation rows that
+    /// the next full scan prunes) and bounded-memory (no live-path set held). Subtree-scoped via
+    /// `subtree_match` so `/proj` never prunes `/projector`. Returns the count of `entries` removed.
+    pub fn reconcile_by_generation(&mut self, root_prefix: &str, generation: i64) -> Result<usize> {
+        let (exact, child_pattern) = subtree_match(root_prefix);
+        let tx = self.conn.transaction()?;
+        let removed = delete_generation_ghosts(&tx, &exact, &child_pattern, generation)?;
+        tx.commit()?;
+        Ok(removed)
     }
 
     // ── Queries ───────────────────────────────────────────────────────────────

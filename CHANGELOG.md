@@ -81,6 +81,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. The **MCP server** (the primary AI surface) previously *never* used the ANN index and
   brute-force-scanned every `ask`/`search`/`explain_retrieval`; it now builds and caches the same
   watermark-keyed index the web server does. Set `ann = false` to force exact brute-force everywhere.
+- **Streaming, bounded-memory directory scan.** A whole-computer `indexa scan` previously collected
+  every entry into one `Vec` (plus a parallel live-path `HashSet`) before writing — ~1.5 GB of RAM at
+  2M files. The scan now streams: a new `walk_streaming` emits entries in bounded batches (the
+  parallel walk runs on its own thread, backpressured by a small channel) and the CLI upserts each
+  batch as it arrives. Ghost rows (files deleted since the last scan) are pruned by a monotonic
+  `scan_generation` stamped on every upserted row — the post-scan sweep deletes whatever the current
+  scan did not re-stamp — instead of diffing a full live-path set. This is also **interruption-safe**:
+  a scan killed mid-way leaves stale-generation rows that the next full scan cleans up (a new nullable
+  schema column + idempotent migration; the schema version gate bumps to 2). The web index job keeps
+  collecting its entry list (the deep phase reuses it) but adopts the same generation-based reconcile.
 
 ### Fixed
 
