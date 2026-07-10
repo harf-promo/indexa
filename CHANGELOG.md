@@ -84,6 +84,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Web UI accessibility + watch surfacing.** The confirmation modal now returns focus to the element
+  that opened it, and pressing **Enter while Cancel is focused** cancels instead of firing the
+  destructive action (previously Enter always confirmed). The theme toggle now advertises its
+  `aria-pressed` state on load (not only after the first click). The sound toggle was **deduplicated**
+  — two copies with different `localStorage` keys existed and the later one silently shadowed the
+  other — into one implementation that updates its bell icon *and* `aria-pressed`/`aria-label`
+  together. The file-watch eye icon now surfaces live activity in its tooltip — how many changes were
+  re-indexed and how long it has been watching — from the `events_count` / `started_at` the status
+  API already returns.
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
   open to the LLM reranker for every user who enabled it: candle's DeBERTa loader read the transformer
   at the safetensors root, but HF `DebertaV2ForSequenceClassification` checkpoints nest it under a

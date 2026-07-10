@@ -50,7 +50,13 @@ const THEME_ICON_SUN = '<svg class="ui-ico" viewBox="0 0 24 24" fill="none" stro
   const saved = localStorage.getItem('indexa_theme') || 'dark';
   document.documentElement.setAttribute('data-theme', saved);
   const btn = document.getElementById('theme-toggle');
-  if (btn) btn.innerHTML = saved === 'light' ? THEME_ICON_SUN : THEME_ICON_MOON;
+  if (btn) {
+    btn.innerHTML = saved === 'light' ? THEME_ICON_SUN : THEME_ICON_MOON;
+    // Reflect the initial state to assistive tech too — previously aria-pressed was only set on
+    // the first toggle, so a screen reader saw no pressed state on load.
+    btn.setAttribute('aria-pressed', saved === 'light' ? 'true' : 'false');
+    btn.setAttribute('aria-label', saved === 'light' ? 'Switch to dark theme' : 'Switch to light theme');
+  }
 })();
 
 function toggleTheme() {
@@ -66,25 +72,9 @@ function toggleTheme() {
   }
 }
 
-// Sound-notification toggle — persists to localStorage; icon reflects muted state.
-(function initSound() {
-  var btn = document.getElementById('sound-toggle');
-  if (!btn) return;
-  var on = localStorage.getItem('indexa_sound') !== 'off';
-  btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-  btn.setAttribute('aria-label', on ? 'Mute sound notifications' : 'Unmute sound notifications');
-})();
-
-function toggleSound() {  // eslint-disable-line no-unused-vars
-  var on = localStorage.getItem('indexa_sound') !== 'off';
-  var next = !on;
-  localStorage.setItem('indexa_sound', next ? 'on' : 'off');
-  var btn = document.getElementById('sound-toggle');
-  if (btn) {
-    btn.setAttribute('aria-pressed', next ? 'true' : 'false');
-    btn.setAttribute('aria-label', next ? 'Mute sound notifications' : 'Unmute sound notifications');
-  }
-}
+// The sound-notification toggle lives in 08-util-palette-init.js next to playPing (which owns the
+// `indexa_sound_muted` key). A previous duplicate here used a second key (`indexa_sound`) and, being
+// earlier in the bundle, was shadowed by 08's copy — so it never ran. Removed to keep one behavior.
 
 /* ── Navigation ──
    'tree' | 'chat' | 'map'            → workspace views (in-place toggle)
