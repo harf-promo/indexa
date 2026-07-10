@@ -103,6 +103,22 @@ pub struct BlastRadius {
     pub bare_transitive: usize,
 }
 
+/// Result of [`Store::dependency_closure`]: files (transitively) called by the target,
+/// plus how the transitive hops resolved. Counts describe the pre-truncation set.
+#[derive(Debug, Clone, Default)]
+pub struct DependencyClosure {
+    /// Files defining symbols the target (transitively) calls, sorted, capped at `limit`.
+    /// Never includes a seed file itself.
+    pub files: Vec<String>,
+    /// The resolved starting file(s): the target itself if it was an indexed path, or the
+    /// definer file(s) if it was a bare symbol name.
+    pub seeds: Vec<String>,
+    /// Callee links that resolved (same-dir/import) to a definite target file.
+    pub scoped: usize,
+    /// Callee links kept on the bare-name fallback only (dropped when `strict`).
+    pub bare: usize,
+}
+
 /// A related file with the best resolution tier that linked it.
 #[derive(Debug, Clone)]
 pub struct ResolvedRelatedFile {
@@ -955,6 +971,113 @@ impl Store {
              SELECT DISTINCT from_path, to_ref FROM edges
               WHERE kind = 'calls'
                 AND to_ref IN (SELECT to_ref FROM caller_exports)
+              ORDER BY from_path, to_ref
+              LIMIT ?"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let cap_i = cap as i64;
+        let mut binds: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(frontier.len() + 1);
+        for f in frontier {
+            binds.push(f);
+        }
+        binds.push(&cap_i);
+        let rows = stmt.query_map(binds.as_slice(), |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Callee-direction transitive dependency closure: files (transitively) called by
+    /// `target` — the structural inverse of [`Self::blast_radius_resolved`] (which walks
+    /// caller direction: "what would break if I change this"). `target` may be an
+    /// absolute file path already present as a `from_path` in `edges`, or a bare symbol
+    /// name — a symbol resolves to its definer file(s) via `edges_to("defines", …)` first
+    /// (mirroring `definers_with_pin`). `depth` hops of callee reachability: `depth == 1`
+    /// is the seed file's(s') own direct calls (resolved to definer files), `depth == 2`
+    /// adds one more hop through those definers' own calls, and so on. `included` doubles
+    /// as the visited set so cycles terminate; a symbol with more than
+    /// [`Self::CODE_GRAPH_COMMON_SYMBOL_CAP`] definers is skipped as too ambiguous to
+    /// resolve usefully (mirrors the same guard in [`Self::find_related_files_resolved`]).
+    /// `strict` drops bare-tier resolutions (no import/same-dir evidence).
+    pub fn dependency_closure(
+        &self,
+        target: &str,
+        limit: usize,
+        strict: bool,
+        depth: usize,
+    ) -> Result<DependencyClosure> {
+        let seeds: Vec<String> = if !self.edges_from(target)?.is_empty() {
+            vec![target.to_string()]
+        } else {
+            self.edges_to("defines", target)?
+        };
+        if seeds.is_empty() {
+            return Ok(DependencyClosure::default());
+        }
+        let seed_set: HashSet<&str> = seeds.iter().map(String::as_str).collect();
+
+        let common_cap = Self::CODE_GRAPH_COMMON_SYMBOL_CAP as usize;
+        const TRANSITIVE_CANDIDATE_CAP: usize = 10_000;
+        let mut included: BTreeSet<String> = BTreeSet::new();
+        let mut def_cache: HashMap<String, DefinerIndex> = HashMap::new();
+        let mut import_cache: HashMap<String, ImportTargets> = HashMap::new();
+        let (mut scoped, mut bare) = (0usize, 0usize);
+
+        let mut frontier: Vec<String> = seeds.clone();
+        let mut hop = 1;
+        while hop <= depth && !frontier.is_empty() {
+            let candidates = self.calls_of(&frontier, TRANSITIVE_CANDIDATE_CAP)?;
+            let mut next: Vec<String> = Vec::new();
+            for (f, sym) in candidates {
+                if !import_cache.contains_key(&f) {
+                    let imports = self.imports_of(&f)?;
+                    import_cache.insert(f.clone(), import_targets(&f, &imports));
+                }
+                if !def_cache.contains_key(&sym) {
+                    def_cache.insert(
+                        sym.clone(),
+                        DefinerIndex::new(self.edges_to("defines", &sym)?),
+                    );
+                }
+                let defs = &def_cache[&sym];
+                if defs.all.is_empty() || defs.all.len() > common_cap {
+                    continue; // too ambiguous to resolve usefully
+                }
+                let (tier, targets) = resolve_call(&f, &import_cache[&f], defs);
+                match tier {
+                    ResolutionTier::Bare if strict => continue,
+                    ResolutionTier::Bare => bare += 1,
+                    _ => scoped += 1,
+                }
+                for t in targets {
+                    if t == f || seed_set.contains(t.as_str()) || included.contains(&t) {
+                        continue;
+                    }
+                    included.insert(t.clone());
+                    next.push(t);
+                }
+            }
+            frontier = next;
+            hop += 1;
+        }
+
+        Ok(DependencyClosure {
+            files: included.into_iter().take(limit).collect(),
+            seeds,
+            scoped,
+            bare,
+        })
+    }
+
+    /// Forward-direction analog of [`Self::callers_of_exports`]: `(from_path, to_ref)`
+    /// pairs of the `calls` edges originating in `frontier` — "what does the frontier
+    /// call" (vs. `callers_of_exports`'s "who calls the frontier's exports").
+    fn calls_of(&self, frontier: &[String], cap: usize) -> Result<Vec<(String, String)>> {
+        if frontier.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; frontier.len()].join(",");
+        let sql = format!(
+            "SELECT DISTINCT from_path, to_ref FROM edges
+              WHERE kind = 'calls' AND from_path IN ({placeholders})
               ORDER BY from_path, to_ref
               LIMIT ?"
         );

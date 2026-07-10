@@ -51,6 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ImpactBreakdown`/`ImpactItem` in `indexa_query`. Surfaced everywhere: web **"Show the math"** table
   under the answer, CLI `indexa ask --explain-savings` (and `--json` `savings`), and an opt-in MCP
   `ask` `explain_savings` param. MCP tool count unchanged (47).
+- **Code graph: callee-direction dependency closure.** New `Store::dependency_closure` computes
+  what a file (or symbol) transitively *calls*, up to N hops — the structural inverse of
+  `blast_radius` (which walks the *caller* direction: "what would break if I change this"). Exposed
+  as an additive `depth`/`strict` param pair on the existing MCP `dependencies` tool (unchanged
+  output at the default `depth` 1; `depth` 2-5 appends a "Transitive callee closure" section).
+  Accepts either an indexed file path or a bare symbol name as the starting point. No new tool —
+  count stays 47. Corrected the stale AGENTS.md "code graph … 1-hop" line: both `blast_radius` and
+  `dependencies` are now multi-hop via `depth`.
 
 ### Performance
 
