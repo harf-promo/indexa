@@ -981,6 +981,34 @@ pub enum PackAction {
         #[arg(long, value_name = "CAT")]
         category: Option<String>,
     },
+    /// Export a pack's definition (name, description, member paths) as JSON — for backup or
+    /// sharing with a teammate (via git, a file, however you like). Distinct from `pack export`,
+    /// which renders pack CONTENT (summaries/chunks) for pasting into an AI tool.
+    #[command(
+        name = "export-def",
+        after_help = "Examples:
+  indexa pack export-def \"Auth\" --output auth-pack.json"
+    )]
+    ExportDef {
+        /// Pack name.
+        name: String,
+        /// Write to a file instead of stdout.
+        #[arg(long, short)]
+        output: Option<String>,
+    },
+    /// Import a pack definition JSON (from `pack export-def`) — recreates the pack and its
+    /// member paths. Missing-on-disk paths are skipped with a warning, not registered as dead
+    /// members.
+    #[command(after_help = "Examples:
+  indexa pack import auth-pack.json
+  indexa pack import auth-pack.json --yes   # merge into an existing same-named pack")]
+    Import {
+        /// Path to a pack definition JSON file.
+        file: String,
+        /// Merge into an existing same-named pack instead of refusing.
+        #[arg(long, short)]
+        yes: bool,
+    },
     /// Rename a pack.
     Rename {
         /// Current pack name.

@@ -182,6 +182,10 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
+            PackAction::ExportDef { name, output } => {
+                commands::cmd_pack_export_def(name, output).await
+            }
+            PackAction::Import { file, yes } => commands::cmd_pack_import(file, yes).await,
             PackAction::Rename { name, new_name } => {
                 commands::cmd_pack_rename(name, new_name).await
             }

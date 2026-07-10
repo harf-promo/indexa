@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ImpactBreakdown`/`ImpactItem` in `indexa_query`. Surfaced everywhere: web **"Show the math"** table
   under the answer, CLI `indexa ask --explain-savings` (and `--json` `savings`), and an opt-in MCP
   `ask` `explain_savings` param. MCP tool count unchanged (47).
+- **Pack definition export/import (`indexa pack export-def`/`pack import`).** Distinct from
+  `pack export` (which renders pack *content* — summaries/chunks — as XML/MD/JSON): this serializes a
+  pack's *definition* — name, description, member paths — as portable JSON, for backup or sharing
+  with a teammate (via git, a file, however you like). `pack import <file>` recreates the pack;
+  member paths missing on the local disk are skipped with a warning rather than registered as dead
+  members. Re-importing into an existing same-named pack requires `--yes` and then merges paths in
+  (never deletes/recreates). CLI-only — no web/MCP surface, tool count unaffected (47).
 
 ### Performance
 
