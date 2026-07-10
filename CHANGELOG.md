@@ -84,6 +84,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Retrieval polish: byte-consistent project-overview budget + tighter code-intent trigger.** The
+  project-overview block was assembled with a byte-based budget guard but hard-capped by *character*
+  count, so for multibyte content it could overrun its byte budget (and the accounting that subtracts
+  it from the chunk budget); it's now byte-capped at a UTF-8 boundary. Separately, the bare locators
+  "where is" / "which file" no longer trigger the code-intent boost on their own — they're as common
+  for prose ("where is the budget spreadsheet") as for code, so they now require a co-occurring code
+  file extension (e.g. "where is parse in `retrieve.rs`"). Strong signals (`function`, `method`,
+  `struct`, a snake_case symbol, …) and the ×1.6 code boost + archive penalty are unchanged.
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
   open to the LLM reranker for every user who enabled it: candle's DeBERTa loader read the transformer
   at the safetensors root, but HF `DebertaV2ForSequenceClassification` checkpoints nest it under a
