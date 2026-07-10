@@ -84,6 +84,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MMR diversity re-ranking now normalizes relevance so it isn't dwarfed by the diversity term.**
+  MMR combined raw RRF relevance (~0.01–0.05) with a cosine similarity penalty (~0.3–0.9) on the same
+  `λ·rel − (1−λ)·sim` scale, so the diversity term dominated ~20× and MMR effectively ignored how
+  relevant a chunk was. Relevance is now min-max normalized into `[0,1]` across the candidate pool
+  before the trade-off, so a highly-relevant chunk is no longer demoted below a barely-relevant but
+  diverse one. First-pick-is-most-relevant and the fail-open early returns are unchanged.
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
   open to the LLM reranker for every user who enabled it: candle's DeBERTa loader read the transformer
   at the safetensors root, but HF `DebertaV2ForSequenceClassification` checkpoints nest it under a
