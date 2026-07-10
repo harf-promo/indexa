@@ -130,11 +130,21 @@ impl IndexaMcp {
                 "Pack \"{name}\" is empty. Add paths with: indexa pack add \"{name}\" <paths…>"
             )));
         }
-        Ok(ok_text(format!(
+        let mut out = format!(
             "Pack \"{name}\" ({} paths):\n\n{}",
             paths.len(),
             paths.join("\n")
-        )))
+        );
+        // Freshness: indexed member files whose stored content is out of date with the disk
+        // (best-effort — a stat failure must not fail the lookup).
+        let stale = store.stale_pack_paths(&pack.id).unwrap_or_default();
+        if !stale.is_empty() {
+            out.push_str(&format!(
+                "\n\n{} indexed file(s) are stale (changed on disk since last indexed).",
+                stale.len()
+            ));
+        }
+        Ok(ok_text(out))
     }
 
     /// Export a Context Pack as XML, Markdown, or JSON — ready to paste into any AI tool.
