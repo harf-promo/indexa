@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Ask: stop a streaming answer, and click a cited source to open it.** The Ask button now morphs
+  into **Stop** while an answer is streaming (it aborts the request via `AbortController`, keeping
+  whatever streamed so far), Enter no longer fires a second ask over an in-flight one, and each cited
+  **Source** is now clickable (and keyboard-activatable) to open that file's summary.
 - **Local contextualized-chunk embeddings — deterministic contextual prefix (`[describer]
   contextual_prefix`, default off).** The free, local sibling of Anthropic-style Contextual
   Retrieval: at index time each cache-miss chunk's *embed input* is prefixed with its file path,

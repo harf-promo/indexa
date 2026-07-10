@@ -111,7 +111,11 @@
 .source-item {
   background: var(--bg); border: 1px solid var(--border-subtle); border-radius: var(--r-0); /* Harf: sharp list item */
   padding: 8px 12px; margin-bottom: 6px; font-size: 12px;
+  cursor: pointer; /* a cited source opens its summary on click */
 }
+.source-item:hover, .source-item:focus-visible { border-color: var(--accent); outline: none; }
+/* The Ask button doubles as Stop while a stream is open. */
+#send.is-stopping { background: var(--red); border-color: var(--red); color: #fff; }
 .source-item .path { color: var(--accent); font-weight: 500; font-family: var(--font-mono); font-size: 11px; }
 .source-item .heading { color: var(--orange); margin-left: 8px; }
 .source-item .snippet { color: var(--muted); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
