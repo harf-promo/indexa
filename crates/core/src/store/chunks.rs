@@ -275,13 +275,20 @@ impl Store {
         if ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
+        // One batched `IN (…)` instead of N `query_row`s (mirrors `paths_for_ids`). `ids` is the
+        // MMR candidate pool — bounded by the retrieval limit — so it stays under SQLite's variable
+        // cap. Missing/invalid blobs are silently skipped (fail-open), same as the old loop; the
+        // result map is identical (HashMap, order-independent; duplicate input ids collapse).
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!("SELECT id, embedding FROM chunks WHERE id IN ({placeholders})");
+        let mut stmt = self.conn.prepare(&sql)?;
         let mut map = std::collections::HashMap::with_capacity(ids.len());
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT id, embedding FROM chunks WHERE id = ?1")?;
-        for &id in ids {
-            if let Ok(Some(blob)) = stmt.query_row(params![id], |r| r.get::<_, Option<Vec<u8>>>(1))
-            {
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<Vec<u8>>>(1)?))
+        })?;
+        for row in rows {
+            let (id, blob) = row?;
+            if let Some(blob) = blob {
                 if blob.len().is_multiple_of(4) && !blob.is_empty() {
                     map.insert(id, super::search::blob_to_embedding(&blob));
                 }

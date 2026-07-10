@@ -81,6 +81,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. The **MCP server** (the primary AI surface) previously *never* used the ANN index and
   brute-force-scanned every `ask`/`search`/`explain_retrieval`; it now builds and caches the same
   watermark-keyed index the web server does. Set `ann = false` to force exact brute-force everywhere.
+- **Cheaper index hot loops (no change in results).** Several per-row/per-call patterns collapsed to
+  batched or streamed forms: the MMR re-ranking pass fetches its candidate embeddings in one
+  `IN (…)` query instead of one round-trip per chunk id; directory-app detection writes every
+  directory in a single transaction instead of one per directory; and the in-memory ANN index builds
+  by streaming embeddings row-by-row rather than materializing every vector in a `Vec` first (halving
+  transient build memory on large indexes). Opening the DB now also sets `mmap_size` + `cache_size`
+  PRAGMAs to speed the blob-heavy dense scans.
 
 ### Fixed
 

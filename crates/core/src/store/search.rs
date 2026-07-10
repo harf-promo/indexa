@@ -831,6 +831,50 @@ impl Store {
         }
         Ok(out)
     }
+
+    /// Feed every `(chunk_id, embedding)` with a stored embedding to `f`, row by row — the
+    /// streaming input to [`AnnIndex::build_from`](super::AnnIndex::build_from) (no intermediate
+    /// Vec). Invalid-length blobs are skipped, matching [`all_chunk_embeddings`](Self::all_chunk_embeddings).
+    pub fn stream_chunk_embeddings(&self, mut f: impl FnMut(i64, &[f32])) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            if blob.len().is_multiple_of(4) {
+                f(id, &blob_to_embedding(&blob));
+            }
+        }
+        Ok(())
+    }
+
+    /// Count of chunks with a stored embedding — the HNSW capacity hint for a streaming ANN build.
+    pub fn count_embedded_chunks(&self) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// The dimension of any one stored embedding (all stored vectors share the configured dim) —
+    /// used to size a streaming ANN build without materializing every vector to peek at one.
+    /// `None` if no embeddings are stored yet.
+    pub fn first_embedding_dim(&self) -> Result<Option<usize>> {
+        use rusqlite::OptionalExtension;
+        let blob: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT embedding FROM chunks WHERE embedding IS NOT NULL LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(blob.map(|b| b.len() / 4))
+    }
 }
 
 #[cfg(test)]

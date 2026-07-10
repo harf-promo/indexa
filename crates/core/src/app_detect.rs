@@ -37,6 +37,9 @@ pub fn detect_directory_apps(store: &mut Store, defs: &[FingerprintDef]) -> Resu
     let matched: HashSet<String> = by_dir.keys().cloned().collect();
 
     let mut written = 0usize;
+    // Collect every dir's app set and write them in ONE transaction (`replace_apps_for_dirs`)
+    // instead of opening a transaction per directory.
+    let mut batch: Vec<(String, Vec<DetectedApp>)> = Vec::with_capacity(by_dir.len());
     for (dir, metas) in &by_dir {
         let mut metas = metas.clone();
         // Most-specific-wins: highest specificity, then name. Row 0 becomes the primary.
@@ -61,14 +64,15 @@ pub fn detect_directory_apps(store: &mut Store, defs: &[FingerprintDef]) -> Resu
             })
             .collect();
         written += apps.len();
-        store.replace_apps_for_dir(dir, &apps)?;
+        batch.push((dir.clone(), apps));
     }
 
     // Clear directories that no longer match any fingerprint (empty replace = delete).
     for stale in existing.difference(&matched) {
-        store.replace_apps_for_dir(stale, &[])?;
+        batch.push((stale.clone(), Vec::new()));
     }
 
+    store.replace_apps_for_dirs(&batch)?;
     Ok(written)
 }
 
