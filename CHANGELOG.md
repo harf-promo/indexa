@@ -84,6 +84,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Code-graph edges migration no longer risks silently dropping rows.** The one-time recreate that
+  widens the `edges.kind` CHECK to include `'calls'` copied rows with `INSERT OR IGNORE SELECT *`,
+  which would swallow any row that failed to insert. It now copies explicit columns with a plain
+  `INSERT` (like the `chunks` migration), so a legacy row is either preserved or the migration fails
+  loudly — never dropped in silence. Locked by a new upgrade test that builds a pre-`'calls'` `edges`
+  table and asserts every seeded row survives `Store::open`.
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
   open to the LLM reranker for every user who enabled it: candle's DeBERTa loader read the transformer
   at the safetensors root, but HF `DebertaV2ForSequenceClassification` checkpoints nest it under a

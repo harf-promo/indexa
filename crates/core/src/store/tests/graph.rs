@@ -397,3 +397,62 @@ fn find_cycles_detects_an_scc() {
         .unwrap();
     assert!(store2.find_cycles("/", 400).unwrap().is_empty());
 }
+
+#[test]
+fn migrates_legacy_edges_check_preserving_all_rows() {
+    // Pre-'calls' indexes had `edges.kind CHECK IN ('imports','defines')`. Store::open must widen
+    // the CHECK to include 'calls' AND preserve every legacy row — the table-recreate must not
+    // silently drop rows (the reason the copy is a plain explicit INSERT, not INSERT OR IGNORE).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pre_calls.db");
+    {
+        // Minimal legacy edges table with the OLD 2-value CHECK + seeded imports/defines rows.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE edges (
+                 from_path TEXT NOT NULL,
+                 kind      TEXT NOT NULL CHECK(kind IN ('imports','defines')),
+                 to_ref    TEXT NOT NULL,
+                 PRIMARY KEY (from_path, kind, to_ref)
+             ) WITHOUT ROWID;
+             INSERT INTO edges (from_path, kind, to_ref) VALUES
+                 ('/a.rs','imports','std::fs'),
+                 ('/a.rs','defines','parse'),
+                 ('/b.rs','defines','run'),
+                 ('/b.rs','imports','/a.rs');",
+        )
+        .unwrap();
+    }
+
+    // Store::open runs the CHECK-widening migration.
+    let mut store = Store::open(&path).expect("must open & migrate a pre-'calls' index");
+
+    // 1) Row parity: all four legacy rows survive.
+    let mut got: Vec<(String, String, String)> = store
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.from_path, e.kind, e.to_ref))
+        .collect();
+    got.sort();
+    let mut want: Vec<(String, String, String)> = vec![
+        ("/a.rs", "defines", "parse"),
+        ("/a.rs", "imports", "std::fs"),
+        ("/b.rs", "defines", "run"),
+        ("/b.rs", "imports", "/a.rs"),
+    ]
+    .into_iter()
+    .map(|(f, k, t)| (f.to_string(), k.to_string(), t.to_string()))
+    .collect();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "every legacy edge must survive the CHECK-widening migration"
+    );
+
+    // 2) The CHECK is now wide enough for 'calls' edges (the point of the migration).
+    store
+        .upsert_edges(&[edge("/c.rs", "calls", "parse")])
+        .expect("'calls' edges must be accepted after migration");
+    assert_eq!(store.all_edges().unwrap().len(), 5);
+}
