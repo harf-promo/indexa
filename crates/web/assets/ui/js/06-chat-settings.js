@@ -9,6 +9,8 @@ const sendBtn = document.getElementById('send');
    The scope rides as `scope` on /api/ask/stream, mirroring `indexa ask --scope`. */
 var askScope = null;       // current path prefix, or null for whole-index
 var lastAskQuestion = '';  // remembered for the "broaden to folder" retry
+var askInFlight = false;   // true while a stream is open — the Ask button morphs to "Stop"
+var askController = null;   // AbortController for the in-flight /api/ask/stream fetch
 
 /* ── Conversational Ask (multi-turn) ──────────────────────────────────────────
    Each conversation has a client-generated id sent as `session_id` on every ask.
@@ -112,16 +114,34 @@ function appendMsg(role, html) {
   return div;
 }
 
-/* Render the Sources block appended below an answer. */
+/* Render the Sources block appended below an answer. Each item carries data-path so the
+   delegated handler below can open its summary — clicking a cited source jumps to it. */
 function renderSources(sources) {
   if (!sources || !sources.length) return '';
   return '<div class="sources"><h4>Sources</h4>' +
     sources.map(function(s) {
-      return '<div class="source-item"><span class="path">' + escapeHtml(s.path) + '</span>' +
+      return '<div class="source-item" data-path="' + escapeAttr(s.path) + '" role="button" tabindex="0" ' +
+        'title="Open this file’s summary"><span class="path">' + escapeHtml(s.path) + '</span>' +
         (s.heading ? '<span class="heading">' + escapeHtml(s.heading) + '</span>' : '') +
         '<div class="snippet">' + escapeHtml(s.snippet) + '</div></div>';
     }).join('') + '</div>';
 }
+
+// Delegated: a cited source is clickable (and keyboard-activatable) → open its summary. Bound
+// once on the document because source items are re-painted during streaming.
+function openSourceFromEvent(e) {
+  var item = e.target && e.target.closest ? e.target.closest('.source-item[data-path]') : null;
+  if (!item) return;
+  var p = item.getAttribute('data-path');
+  if (p && typeof showSummary === 'function') { e.preventDefault(); showSummary(p); }
+}
+document.addEventListener('click', openSourceFromEvent);
+document.addEventListener('keydown', function (e) {
+  if ((e.key === 'Enter' || e.key === ' ') && e.target && e.target.classList &&
+      e.target.classList.contains('source-item')) {
+    openSourceFromEvent(e);
+  }
+});
 
 // Fetch + render the retrieval trace for the "Why these sources?" expander.
 async function loadExplain(body, btn) {
@@ -200,8 +220,13 @@ async function doAsk() {
   } catch(_) {} // ignore stats failure, proceed normally
 
   qInput.value = '';
-  sendBtn.disabled = true;
-  sendBtn.textContent = 'Asking…';
+  // Enter the in-flight state: the Ask button becomes an enabled "Stop" (its click aborts the
+  // stream, see the handler at the bottom of this file). AbortController cancels the fetch/reader.
+  askInFlight = true;
+  askController = new AbortController();
+  sendBtn.disabled = false;
+  sendBtn.textContent = 'Stop';
+  sendBtn.classList.add('is-stopping');
   switchTab('chat');
 
   appendMsg('user', escapeHtml(q));
@@ -209,6 +234,7 @@ async function doAsk() {
   const bubble = thinking.querySelector('.bubble');
 
   let answerText = '';
+  let stopped = false; // set when the user aborts via the Stop button
   let sources = [];
   let steps = []; // agentic per-hop queries (empty for one-shot ask)
   let confidence = null; // retrieval-shape confidence, from the terminal 'done' event
@@ -335,7 +361,8 @@ async function doAsk() {
     const r = await fetch('/api/ask/stream', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ question: q, agentic: agentic, scope: scopeForAsk, session_id: ensureAskSession() })
+      body: JSON.stringify({ question: q, agentic: agentic, scope: scopeForAsk, session_id: ensureAskSession() }),
+      signal: askController.signal
     });
     if (!r.ok || !r.body) throw new Error('Request failed (' + r.status + ')');
 
@@ -367,15 +394,23 @@ async function doAsk() {
     // Guard: a stream that closed without ever producing a fragment (e.g. empty answer).
     if (!answerText) repaint();
   } catch(err) {
-    // Keep any already-streamed answer; append the error beneath it rather than discarding.
-    const errHtml = '<div class="ask-error" role="alert" style="color:var(--red)">' + escapeHtml(err.message) + '</div>';
-    bubble.innerHTML = answerText ? renderAnswer() + errHtml : errHtml;
+    if (err && err.name === 'AbortError') {
+      // User pressed Stop — keep whatever streamed so far and note the stop; not an error.
+      stopped = true;
+      const stoppedHtml = '<div class="ask-stopped" style="color:var(--muted);font-size:12px;margin-top:6px">Stopped.</div>';
+      bubble.innerHTML = answerText ? renderAnswer() + stoppedHtml : stoppedHtml;
+    } else {
+      // Keep any already-streamed answer; append the error beneath it rather than discarding.
+      const errHtml = '<div class="ask-error" role="alert" style="color:var(--red)">' + escapeHtml(err.message) + '</div>';
+      bubble.innerHTML = answerText ? renderAnswer() + errHtml : errHtml;
+    }
   }
 
   // Few results under a single-file/folder scope? Offer to broaden one level up,
   // rather than silently falling back to a whole-index search (which re-introduces
-  // the noise scoping was meant to remove). The user stays in control.
-  if (scopeForAsk && (sources.length < 3 || (confidence && confidence.level === 'low'))) {
+  // the noise scoping was meant to remove). The user stays in control. Skipped when the
+  // user stopped the stream (the thin result is their choice, not a dead-end).
+  if (!stopped && scopeForAsk && (sources.length < 3 || (confidence && confidence.level === 'low'))) {
     var parent = scopeForAsk.replace(/\/[^/]+$/, '');
     if (parent && parent !== scopeForAsk) {
       var pName = parent.split('/').pop() || parent;
@@ -392,8 +427,12 @@ async function doAsk() {
     }
   }
 
+  // Leave the in-flight state and restore the Ask button.
+  askInFlight = false;
+  askController = null;
   sendBtn.disabled = false;
   sendBtn.textContent = 'Ask';
+  sendBtn.classList.remove('is-stopping');
   qInput.focus();
   chat.scrollTop = chat.scrollHeight;
 }
@@ -404,8 +443,13 @@ function broadenAskTo(path) {
   if (qInput) { qInput.value = lastAskQuestion; doAsk(); }
 }
 
-sendBtn.addEventListener('click', doAsk);
-qInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') doAsk(); });
+// The Ask button doubles as Stop while a stream is open: click aborts the in-flight fetch.
+sendBtn.addEventListener('click', function() {
+  if (askInFlight) { if (askController) askController.abort(); }
+  else doAsk();
+});
+// Enter starts an ask, but never a second one while one is already streaming.
+qInput.addEventListener('keydown', function(e) { if (e.key === 'Enter' && !askInFlight) doAsk(); });
 
 /* ── Settings ── */
 let settingsLoaded = false;
