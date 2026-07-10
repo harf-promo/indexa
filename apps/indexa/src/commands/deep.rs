@@ -18,6 +18,7 @@ pub(crate) async fn cmd_deep(
     paths: Vec<String>,
     embed_model_flag: Option<String>,
     dry_run: bool,
+    dry_run_exact: bool,
     mode: String,
     contextual: bool,
     contextual_prefix: bool,
@@ -58,32 +59,70 @@ pub(crate) async fn cmd_deep(
 
     if dry_run {
         println!("Dry run — nothing will be written to the index.\n");
-        let mut total_files = 0usize;
-        let mut total_chunks = 0usize;
-        let mut by_mime: std::collections::HashMap<String, usize> =
+        // Collect the file set (path + size) across roots; classify each file's family by
+        // extension (cheap — no parse).
+        let mut all_files: Vec<(std::path::PathBuf, u64)> = Vec::new();
+        let mut by_family: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
-
         for root in &roots {
             let entries = walk(root, &walk_cfg)?;
-            let files: Vec<_> = entries
+            for e in entries
                 .iter()
                 .filter(|e| e.kind == indexa_core::walker::EntryKind::File && !e.is_binary)
-                .collect();
-            total_files += files.len();
-            for entry in files {
-                if let Ok(ex) = registry.parse_guarded(&entry.path, entry.size, max_parse_bytes) {
-                    total_chunks += ex.chunks.len();
-                    let family = ex.mime.split('/').next().unwrap_or("other").to_owned();
-                    *by_mime.entry(family).or_default() += 1;
-                }
+            {
+                let family = indexa_core::surface::classify_file_by_extension(&e.path)
+                    .map(|h| h.label.to_owned())
+                    .unwrap_or_else(|| "other".to_owned());
+                *by_family.entry(family).or_default() += 1;
+                all_files.push((e.path.clone(), e.size));
             }
         }
+        let total_files = all_files.len();
 
-        println!("Would parse {total_files} files:");
-        let mut pairs: Vec<_> = by_mime.into_iter().collect();
+        // Chunk count. `--exact` parses every file (accurate, ~as slow as a real deep). Default:
+        // parse an evenly-spaced sample and extrapolate its chunks-per-byte to the whole set — a
+        // size-only guess is hopeless because code chunks per-function, far finer than prose. A
+        // tree of ≤ SAMPLE_MAX files samples all of them, so its count is exact.
+        const SAMPLE_MAX: usize = 64;
+        let (total_chunks, sampled) = if dry_run_exact || total_files <= SAMPLE_MAX {
+            let n: usize = all_files
+                .iter()
+                .filter_map(|(p, sz)| registry.parse_guarded(p, *sz, max_parse_bytes).ok())
+                .map(|ex| ex.chunks.len())
+                .sum();
+            (n, total_files)
+        } else {
+            let step = (total_files / SAMPLE_MAX).max(1);
+            let mut sample_chunks = 0usize;
+            let mut sample_bytes = 0u64;
+            let mut sampled = 0usize;
+            for (p, sz) in all_files.iter().step_by(step) {
+                if let Ok(ex) = registry.parse_guarded(p, *sz, max_parse_bytes) {
+                    sample_chunks += ex.chunks.len();
+                    sample_bytes += *sz;
+                }
+                sampled += 1;
+            }
+            let total_bytes: u64 = all_files.iter().map(|(_, sz)| *sz).sum();
+            let est = if sample_bytes == 0 {
+                0
+            } else {
+                ((sample_chunks as f64 / sample_bytes as f64) * total_bytes as f64).round() as usize
+            };
+            (est, sampled)
+        };
+
+        if dry_run_exact || total_files <= SAMPLE_MAX {
+            println!("Would parse {total_files} files:");
+        } else {
+            println!(
+                "Would parse {total_files} files (chunks estimated from a {sampled}-file sample):"
+            );
+        }
+        let mut pairs: Vec<_> = by_family.into_iter().collect();
         pairs.sort_by_key(|b| std::cmp::Reverse(b.1));
-        for (mime, n) in pairs {
-            println!("  {:>5}  {mime}", n);
+        for (family, n) in pairs {
+            println!("  {:>5}  {family}", n);
         }
         println!("\nEstimated embedding calls: {total_chunks} chunks");
         // Use the calibrated ETA table instead of the old hardcoded 300 chunks/min.

@@ -33,7 +33,8 @@ pub(crate) async fn cmd_index(
     cmd_deep(
         paths.clone(),
         embed_model,
-        false,
+        false, // never dry-run
+        false, // exact: only meaningful with --dry-run
         mode.clone(),
         contextual,
         contextual_prefix,

@@ -81,6 +81,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. The **MCP server** (the primary AI surface) previously *never* used the ANN index and
   brute-force-scanned every `ask`/`search`/`explain_retrieval`; it now builds and caches the same
   watermark-keyed index the web server does. Set `ann = false` to force exact brute-force everywhere.
+- **`deep --dry-run` estimates instead of fully parsing.** The dry-run preview parsed *every* file
+  just to count chunks — nearly a whole real deep minus the embedding. It now parses an
+  evenly-spaced sample and extrapolates chunks-per-byte to the whole tree (a tree at or below the
+  sample size is still parsed exactly, so its count is precise), making a preview of a large
+  directory fast — ~4% off exact on a 233-file real-code sample. Pass `--exact` to force the full
+  parse.
 
 ### Fixed
 

@@ -110,11 +110,13 @@ async fn main() -> Result<()> {
             contextual,
             contextual_prefix,
             no_embed,
+            exact,
         } => {
             commands::cmd_deep(
                 paths,
                 embed_model,
                 dry_run,
+                exact,
                 mode,
                 contextual,
                 contextual_prefix,

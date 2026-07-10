@@ -173,6 +173,12 @@ pub enum Commands {
         /// retrieval hermetically; also handy for a quick models-free index.
         #[arg(long)]
         no_embed: bool,
+
+        /// With `--dry-run`, fully parse every file for an EXACT chunk count instead of estimating
+        /// it from file size (accurate, but nearly as slow as a real deep). No effect without
+        /// `--dry-run`.
+        #[arg(long)]
+        exact: bool,
     },
 
     /// Generate hierarchical context summaries for indexed files and directories.
@@ -1342,6 +1348,21 @@ mod tests {
         let cli = Cli::try_parse_from(["indexa", "deep", "~/Documents", "--dry-run"]).unwrap();
         match cli.command {
             Commands::Deep { dry_run, .. } => assert!(dry_run),
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_deep_exact_flag() {
+        // --exact parses alongside --dry-run and otherwise defaults false.
+        let cli = Cli::try_parse_from(["indexa", "deep", "~/d", "--dry-run", "--exact"]).unwrap();
+        match cli.command {
+            Commands::Deep { exact, dry_run, .. } => assert!(exact && dry_run),
+            _ => panic!("wrong command"),
+        }
+        let d = Cli::try_parse_from(["indexa", "deep", "~/d", "--dry-run"]).unwrap();
+        match d.command {
+            Commands::Deep { exact, .. } => assert!(!exact, "exact defaults false"),
             _ => panic!("wrong command"),
         }
     }
