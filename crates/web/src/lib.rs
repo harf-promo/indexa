@@ -490,6 +490,46 @@ mod tests {
         assert!(UI_JS.contains("/api/ask"));
     }
 
+    /// Basenames referenced via `include_str!("../assets/ui/{subdir}/…")` in this file's source.
+    fn referenced_assets(src: &str, subdir: &str) -> std::collections::BTreeSet<String> {
+        let needle = format!("include_str!(\"../assets/ui/{subdir}/");
+        src.match_indices(&needle)
+            .filter_map(|(i, _)| {
+                let rest = &src[i + needle.len()..];
+                rest.find('"').map(|end| rest[..end].to_string())
+            })
+            .collect()
+    }
+
+    /// Load-bearing invariant (AGENTS.md): the web UI's JS/CSS are `include_str!`-concatenated in
+    /// `lib.rs`, and "a new NN-name.js/.css MUST be added to that concat list or it is dead." This
+    /// enforces it mechanically — a file added to `assets/ui/{js,css}` but forgotten in the concat
+    /// silently ships as dead code (and a concat entry with no file wouldn't even compile). Compares
+    /// the on-disk directory to the `include_str!` set parsed from this source file.
+    #[test]
+    fn every_ui_asset_is_wired_into_the_concat_bundle() {
+        use std::collections::BTreeSet;
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let src = std::fs::read_to_string(format!("{manifest}/src/lib.rs"))
+            .expect("read own source for the include_str! set");
+        for subdir in ["js", "css"] {
+            let on_disk: BTreeSet<String> =
+                std::fs::read_dir(format!("{manifest}/assets/ui/{subdir}"))
+                    .expect("read assets dir")
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n.ends_with(&format!(".{subdir}")))
+                    .collect();
+            let referenced = referenced_assets(&src, subdir);
+            assert_eq!(
+                on_disk, referenced,
+                "assets/ui/{subdir}: on-disk files must match the include_str! concat in lib.rs \
+                 EXACTLY — a file present on disk but missing from the concat ships DEAD, and a \
+                 concat entry with no file won't compile. Add/remove the include_str! line."
+            );
+        }
+    }
+
     // ── Test scaffolding ────────────────────────────────────────────────────────
     // Stub AI backends: the handlers exercised below (stats/search/keys) never call
     // them, but `AppState` requires concrete trait objects.
