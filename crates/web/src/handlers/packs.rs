@@ -362,6 +362,11 @@ pub(crate) async fn api_packs_search(
     };
     let limit = q.limit.unwrap_or(20).min(100);
 
+    // Embed the query BEFORE taking the store lock — the embed round-trip doesn't need the store,
+    // and holding the mutex across it would block every other request for the embed's duration.
+    // (api_packs_suggest already embeds before locking.)
+    let embedding = state.embedder.embed(&query).await.ok();
+
     let store = state.store.lock().await;
     let pack = match store.pack_by_name(&name) {
         Ok(Some(p)) => p,
@@ -375,9 +380,6 @@ pub(crate) async fn api_packs_search(
     if paths.is_empty() {
         return Json(serde_json::json!({ "hits": [] })).into_response();
     }
-
-    // Embed via the embedder in AppState; fall back to sparse on failure.
-    let embedding = state.embedder.embed(&query).await.ok();
 
     let per_scope = (limit * 2).max(10);
     let mut all_hits: Vec<indexa_core::store::SearchHit> = Vec::new();
