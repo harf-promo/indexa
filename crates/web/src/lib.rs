@@ -568,6 +568,111 @@ mod tests {
         }
     }
 
+    // ── D7 parse→embed pipeline (run_deep_phase) ─────────────────────────────────
+    // Hermetic: with contextual retrieval + captioning + transcribe + OCR all off (the
+    // Config::default() case), no LLM is constructed — only the StubEmbedder is exercised — so
+    // these verify the producer/consumer pipeline mechanics end-to-end without Ollama. (The
+    // StubEmbedder's dim (8) differs from the config default (768), so embeddings are stored
+    // text-only; irrelevant to what these check: that every file flows through the pipeline.)
+
+    /// Create a temp dir with `n` small text files and matching `Entry`s.
+    fn write_temp_files(tag: &str, n: usize) -> (PathBuf, Vec<Entry>) {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("indexa-deep-pipe-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut entries = Vec::new();
+        for i in 0..n {
+            let p = dir.join(format!("f{i}.txt"));
+            std::fs::write(&p, format!("file number {i} with several words to chunk")).unwrap();
+            entries.push(Entry {
+                path: p,
+                kind: EntryKind::File,
+                size: 42,
+                modified: None,
+                hint: None,
+                is_binary: false,
+            });
+        }
+        (dir, entries)
+    }
+
+    /// The `current` field of every `JobEvent::Progress`, in emission order.
+    fn progress_currents(h: &crate::jobs::JobHandle) -> Vec<u64> {
+        h.history_snapshot()
+            .into_iter()
+            .filter_map(|e| match e {
+                crate::jobs::JobEvent::Progress { current, .. } => Some(current),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deep_pipeline_indexes_every_file_one_progress_each() {
+        let db = temp_db_path("deep-pipe-all");
+        let state = state_with_db(Store::open(&db).unwrap(), db.clone());
+        let (dir, entries) = write_temp_files("all", 6);
+        let dir_str = dir.to_string_lossy().to_string();
+        let handle = Arc::new(crate::jobs::JobHandle::new("deep", dir_str.clone()));
+
+        let ok = crate::jobs_exec::run_deep_phase(&state, &dir_str, &entries, &handle).await;
+        assert!(ok, "deep phase should succeed");
+
+        let prog = progress_currents(&handle);
+        assert_eq!(prog.len(), 6, "exactly one progress event per file");
+        assert_eq!(*prog.last().unwrap(), 6, "final progress reaches n_files");
+        assert!(
+            prog.windows(2).all(|w| w[1] >= w[0]),
+            "progress `current` is monotonic"
+        );
+        assert_eq!(
+            state.store.lock().await.chunk_count().unwrap(),
+            6,
+            "every file's chunk was upserted through the pipeline"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deep_pipeline_backpressure_does_not_deadlock() {
+        let db = temp_db_path("deep-pipe-bp");
+        let state = state_with_db(Store::open(&db).unwrap(), db.clone());
+        let (dir, entries) = write_temp_files("bp", 50);
+        let dir_str = dir.to_string_lossy().to_string();
+        let handle = Arc::new(crate::jobs::JobHandle::new("deep", dir_str.clone()));
+
+        // 50 files through the bounded channel(2): a producer/consumer deadlock (e.g. a store
+        // guard held across `send`) would hang here — bound the wait so CI fails fast instead.
+        let ok = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            crate::jobs_exec::run_deep_phase(&state, &dir_str, &entries, &handle),
+        )
+        .await
+        .expect("pipeline must not deadlock under backpressure");
+        assert!(ok);
+        assert_eq!(state.store.lock().await.chunk_count().unwrap(), 50);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deep_pipeline_cancelled_finalizes_cleanly() {
+        let db = temp_db_path("deep-pipe-cancel");
+        let state = state_with_db(Store::open(&db).unwrap(), db.clone());
+        let (dir, entries) = write_temp_files("cancel", 5);
+        let dir_str = dir.to_string_lossy().to_string();
+        let handle = Arc::new(crate::jobs::JobHandle::new("deep", dir_str.clone()));
+        handle
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let ok = crate::jobs_exec::run_deep_phase(&state, &dir_str, &entries, &handle).await;
+        assert!(!ok, "a cancelled deep phase returns false (self-finalized)");
+        // The producer observed cancellation and sent nothing → nothing upserted, no hang/panic.
+        assert_eq!(state.store.lock().await.chunk_count().unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// GET `uri` through the real router; return (status, parsed-JSON-body).
     async fn get_json(app: Router, uri: &str) -> (StatusCode, serde_json::Value) {
         let resp = app

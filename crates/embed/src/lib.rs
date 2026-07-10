@@ -6,10 +6,12 @@
 //! - `llamacpp` — llama.cpp HTTP server (OpenAI-compatible `/v1/embeddings`)
 //! - `google`   — Google Gemini `/v1beta/models/:embedContent` (requires `GOOGLE_API_KEY`)
 
+pub mod batcher;
 pub mod google;
 pub mod ollama;
 pub mod openai;
 
+pub use batcher::{AddOutcome, Completed, MissBatcher};
 pub use google::GoogleEmbedder;
 pub use ollama::OllamaEmbedder;
 pub use openai::OpenAIEmbedder;

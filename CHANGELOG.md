@@ -81,6 +81,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. The **MCP server** (the primary AI surface) previously *never* used the ANN index and
   brute-force-scanned every `ask`/`search`/`explain_retrieval`; it now builds and caches the same
   watermark-keyed index the web server does. Set `ann = false` to force exact brute-force everywhere.
+- **Cross-file embed batching + a parse→embed pipeline for deep indexing.** Each file previously
+  embedded only its own 1–3 cache-miss chunks, so a deep index issued roughly one Ollama round-trip
+  *per file* (~100k for 100k files). A new cross-file accumulator (`MissBatcher`) now buffers cache-miss
+  embed-texts across files and flushes full `EMBED_BATCH_SIZE` batches, scattering results back to the
+  owning chunks and upserting each file once all its misses resolve — one round-trip per ~64 chunks
+  instead of per file. On the **web** server this runs as a bounded producer/consumer pipeline: a
+  producer task parses + enriches one file ahead of the consumer's batched embeds, overlapping the
+  two. Retrieval is unchanged — stored text and content hashes are byte-identical (pure functions of the
+  raw chunk text), and every consumer (brute-force cosine + the HNSW ANN index) is cosine and
+  scale-invariant, so *which* files' misses share a batch is rank-neutral. The memory watchdog still
+  unloads the embedder/LLM under pressure (now before each batched embed), and cancellation finalizes
+  already-enriched work rather than discarding it.
 
 ### Fixed
 
