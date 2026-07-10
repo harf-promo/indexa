@@ -170,16 +170,17 @@ impl CandleInner {
 /// queries). Fails open: if loading or scoring fails, `apply_rerank` returns the
 /// original order unchanged.
 pub(crate) struct CandleReranker {
-    /// Singleton model state — `OnceLock` so the 1–2 s load cost is paid once.
-    inner: &'static OnceLock<anyhow::Result<CandleInner>>,
+    /// Singleton model state. `OnceLock` so the 1–2 s load cost is paid once, and set ONLY on a
+    /// successful load — a transient failure (e.g. no network on first use) leaves the slot empty
+    /// so the next rerank retries, rather than being cached as a permanent error.
+    inner: &'static OnceLock<CandleInner>,
     /// HuggingFace repo id of the DeBERTa-v2 reranker (from `[retrieval] rerank_model`).
     model_id: String,
 }
 
-// One global slot. `rerank_model` comes from config, which is fixed for the process
-// lifetime, so the single slot correctly caches the one configured model — whichever id
-// wins the first `get_or_init` is the only one used, and it's always the same id.
-static CANDLE_INNER: OnceLock<anyhow::Result<CandleInner>> = OnceLock::new();
+// One global slot. `rerank_model` comes from config, which is fixed for the process lifetime, so
+// the single slot correctly caches the one configured model.
+static CANDLE_INNER: OnceLock<CandleInner> = OnceLock::new();
 
 impl CandleReranker {
     pub(crate) fn new(model_id: &str) -> Self {
@@ -188,42 +189,34 @@ impl CandleReranker {
             model_id: model_id.to_string(),
         }
     }
-
-    fn get_inner(&self) -> anyhow::Result<&CandleInner> {
-        let result = self.inner.get_or_init(|| CandleInner::load(&self.model_id));
-        match result {
-            Ok(inner) => Ok(inner),
-            Err(e) => anyhow::bail!("candle reranker unavailable: {e:#}"),
-        }
-    }
 }
-
-// CandleInner: DebertaV2SeqClassificationModel and Tokenizer are both Send + Sync on CPU.
-// SAFETY: candle CPU tensors + HF tokenizers are thread-safe for read-only inference.
-unsafe impl Send for CandleInner {}
-unsafe impl Sync for CandleInner {}
 
 #[async_trait::async_trait]
 impl CrossEncoder for CandleReranker {
     async fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<usize>> {
-        // Pair strings for the blocking closure.
+        // Own the inputs for the blocking closure. `slot` is `&'static`, so no pointer smuggling is
+        // needed — the model is loaded and used entirely on the blocking thread.
         let query = query.to_owned();
         let docs: Vec<String> = docs.iter().map(|s| s.to_string()).collect();
-
-        // Get or initialize the model. Wrapping in a Mutex is not needed because
-        // we own the &'static reference via OnceLock; &CandleInner is Send.
-        let inner = match self.get_inner() {
-            Ok(i) => i as *const CandleInner as usize, // raw pointer for Send boundary
-            Err(e) => {
-                tracing::warn!("candle reranker load failed, keeping original order: {e:#}");
-                return Ok(Vec::new()); // apply_rerank treats empty as "keep original"
-            }
-        };
+        let slot = self.inner;
+        let model_id = self.model_id.clone();
 
         tokio::task::spawn_blocking(move || {
-            // SAFETY: the pointer is valid for the entire process lifetime
-            // (stored in a `'static OnceLock`), and we only read from it.
-            let inner = unsafe { &*(inner as *const CandleInner) };
+            // Load (and cache) the model on THIS blocking thread — the ~85 MB HF fetch + mmap must
+            // never run on a tokio worker. Cached only on success (see `inner`'s doc), so a failed
+            // load falls open here and is retried on a later call.
+            let inner = match slot.get() {
+                Some(i) => i,
+                None => match CandleInner::load(&model_id) {
+                    Ok(loaded) => slot.get_or_init(|| loaded),
+                    Err(e) => {
+                        tracing::warn!(
+                            "candle reranker load failed, keeping original order: {e:#}"
+                        );
+                        return Vec::new(); // apply_rerank treats empty as "keep original"
+                    }
+                },
+            };
             let mut scored: Vec<(usize, f32)> = docs
                 .iter()
                 .enumerate()

@@ -84,6 +84,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cross-encoder reranker robustness.** The ~85 MB model load (HF fetch + mmap) now runs inside
+  `spawn_blocking` instead of on a tokio worker, so a cold first rerank can't stall the async runtime.
+  A failed load is no longer cached permanently — the `OnceLock` is set only on success, so a transient
+  failure (e.g. no network) is retried on the next call. Removed the `unsafe impl Send/Sync` and the
+  raw-pointer `usize` smuggle across the blocking boundary — the model is loaded and used entirely on
+  the blocking thread, and `CandleInner` is naturally `Send + Sync`.
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
   open to the LLM reranker for every user who enabled it: candle's DeBERTa loader read the transformer
   at the safetensors root, but HF `DebertaV2ForSequenceClassification` checkpoints nest it under a
