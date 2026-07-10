@@ -81,6 +81,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. The **MCP server** (the primary AI surface) previously *never* used the ANN index and
   brute-force-scanned every `ask`/`search`/`explain_retrieval`; it now builds and caches the same
   watermark-keyed index the web server does. Set `ann = false` to force exact brute-force everywhere.
+- **Web server latency + memory hygiene.** Pack search now embeds the query *before* taking the
+  store lock (it used to hold the mutex across the embed round-trip, serializing every other
+  request); a long deep's job history no longer stores one `Progress` event per file (consecutive
+  progress is coalesced, so an SSE reconnect doesn't re-clone thousands of them); `logs/tail` reads a
+  bounded window from the end of the day's log instead of the whole file; and the UI CSS/JS/HTML are
+  served with a content-hash `ETag`, so a repeat load gets a `304 Not Modified` instead of
+  re-downloading the bundle.
 
 ### Fixed
 

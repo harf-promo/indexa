@@ -58,8 +58,10 @@ pub(crate) async fn api_logs_tail(
         .iter()
         .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
 
+    // Read a bounded window from the END of the (possibly huge) day's log rather than the whole
+    // file just to return the last `lines`.
     let content = match best {
-        Some(entry) => std::fs::read_to_string(entry.path()).unwrap_or_default(),
+        Some(entry) => read_tail_window(&entry.path(), lines),
         None => String::new(),
     };
 
@@ -74,4 +76,32 @@ pub(crate) async fn api_logs_tail(
         .join("\n");
 
     Json(serde_json::json!({ "lines": tail }))
+}
+
+/// Read the last window of a file — enough for `lines` lines at a generous ~512 bytes/line, clamped
+/// to [4 KiB, 256 KiB] — by seeking from EOF instead of loading the whole file. A leading partial
+/// line (present when we start mid-file) is dropped. Fails open to an empty string.
+fn read_tail_window(path: &std::path::Path, lines: usize) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let window = (lines.saturating_mul(512)).clamp(4096, 256 * 1024) as u64;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(window);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    if f.read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    let mut s = String::from_utf8_lossy(&buf).into_owned();
+    // Drop the leading partial line when the window started mid-file.
+    if start > 0 {
+        if let Some(nl) = s.find('\n') {
+            s.drain(..=nl);
+        }
+    }
+    s
 }

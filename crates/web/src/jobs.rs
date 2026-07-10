@@ -169,23 +169,35 @@ pub const MAX_STORED_WARNINGS: usize = 500;
 pub fn push(handle: &Arc<JobHandle>, event: JobEvent) {
     {
         let mut history = handle.history.lock().unwrap_or_else(|e| e.into_inner());
-        // For Warning events: cap stored history to avoid unbounded growth.
-        if matches!(event, JobEvent::Warning { .. }) {
-            let warn_count = history
-                .iter()
-                .filter(|e| matches!(e, JobEvent::Warning { .. }))
-                .count();
-            if warn_count >= MAX_STORED_WARNINGS {
-                // Drop the oldest warning to make room.
-                if let Some(pos) = history
+        match &event {
+            // Cap stored Warnings so a noisy job can't grow history unboundedly.
+            JobEvent::Warning { .. } => {
+                let warn_count = history
                     .iter()
-                    .position(|e| matches!(e, JobEvent::Warning { .. }))
-                {
-                    history.remove(pos);
+                    .filter(|e| matches!(e, JobEvent::Warning { .. }))
+                    .count();
+                if warn_count >= MAX_STORED_WARNINGS {
+                    // Drop the oldest warning to make room.
+                    if let Some(pos) = history
+                        .iter()
+                        .position(|e| matches!(e, JobEvent::Warning { .. }))
+                    {
+                        history.remove(pos);
+                    }
                 }
+                history.push(event.clone());
             }
+            // Coalesce a run of Progress events (they're cumulative current/total): overwrite the
+            // last one in place instead of storing one-per-file, so a long deep doesn't keep — and
+            // re-clone on every SSE reconnect — thousands of Progress events. A Warning between two
+            // Progress breaks the run, so the surviving count is bounded by the warning cap.
+            JobEvent::Progress { .. }
+                if matches!(history.last(), Some(JobEvent::Progress { .. })) =>
+            {
+                *history.last_mut().unwrap() = event.clone();
+            }
+            _ => history.push(event.clone()),
         }
-        history.push(event.clone());
     }
     let _ = handle.tx.send(event);
 }
@@ -194,4 +206,72 @@ pub fn push(handle: &Arc<JobHandle>, event: JobEvent) {
 /// Use for high-volume streaming events (e.g. LlmFragment) to avoid memory bloat.
 pub fn broadcast_only(handle: &Arc<JobHandle>, event: JobEvent) {
     let _ = handle.tx.send(event);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn progress(current: u64) -> JobEvent {
+        JobEvent::Progress {
+            current,
+            total: 100,
+            note: None,
+            current_path: None,
+            items_per_sec: None,
+            eta_secs: None,
+        }
+    }
+    fn warning(msg: &str) -> JobEvent {
+        JobEvent::Warning {
+            stage: "deep".to_owned(),
+            item_path: None,
+            message: msg.to_owned(),
+            pressure: None,
+        }
+    }
+    fn count_progress(h: &JobHandle) -> usize {
+        h.history_snapshot()
+            .iter()
+            .filter(|e| matches!(e, JobEvent::Progress { .. }))
+            .count()
+    }
+
+    #[test]
+    fn push_coalesces_consecutive_progress() {
+        // A long deep emits one Progress per file; history must not grow with it.
+        let h = Arc::new(JobHandle::new("deep", "/x"));
+        for i in 1..=1000 {
+            push(&h, progress(i));
+        }
+        assert_eq!(
+            count_progress(&h),
+            1,
+            "1000 consecutive Progress collapse to one"
+        );
+        // The surviving Progress is the latest cumulative value.
+        match h
+            .history_snapshot()
+            .into_iter()
+            .rev()
+            .find(|e| matches!(e, JobEvent::Progress { .. }))
+            .unwrap()
+        {
+            JobEvent::Progress { current, .. } => assert_eq!(current, 1000),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn push_progress_run_broken_by_warning_is_bounded_by_warnings() {
+        // A Warning between two Progress runs keeps the boundary Progress, so the surviving Progress
+        // count tracks the (capped) warning count, not the file count.
+        let h = Arc::new(JobHandle::new("deep", "/x"));
+        push(&h, progress(1));
+        push(&h, progress(2)); // coalesces into progress(1)
+        push(&h, warning("w"));
+        push(&h, progress(3)); // new run after the warning
+        push(&h, progress(4)); // coalesces into progress(3)
+        assert_eq!(count_progress(&h), 2);
+    }
 }

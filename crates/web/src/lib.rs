@@ -594,6 +594,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ui_asset_sends_etag_and_304_on_match() {
+        use axum::http::header::{ETAG, IF_NONE_MATCH};
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        // First load → 200 with a content-hash ETag.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/app.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let etag = resp
+            .headers()
+            .get(ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            etag.starts_with('"') && etag.ends_with('"'),
+            "quoted ETag: {etag}"
+        );
+        // Repeat with a matching If-None-Match → 304 Not Modified (no bundle re-download).
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/app.js")
+                    .header(IF_NONE_MATCH, &etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
     async fn api_stats_counts_seeded_rows() {
         let mut store = Store::open_in_memory().unwrap();
         store
