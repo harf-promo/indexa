@@ -29,3 +29,6 @@ schemars = "1"
 tempfile = "3"
 # Stub Embedder/Generator impls in tests use the same async-trait the traits do.
 async-trait = { workspace = true }
+# Pins `indexed_at` directly for deterministic staleness fixtures (mirrors indexa-core's own
+# store tests), avoiding a real-time race in the export-header stale_files test.
+rusqlite = { workspace = true }

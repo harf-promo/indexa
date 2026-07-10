@@ -33,3 +33,6 @@ indexa-update = { path = "../update" }
 tower = { version = "0.5", features = ["util"] }
 # Stub Embedder/Generator impls in tests use the same async-trait the traits do.
 async-trait = { workspace = true }
+# Pins `indexed_at` directly for deterministic staleness fixtures (mirrors indexa-core's own
+# store tests), avoiding a real-time race in the export-header/refresh stale_files tests.
+rusqlite = { workspace = true }

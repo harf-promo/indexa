@@ -934,6 +934,13 @@ pub enum PackAction {
         /// Pack name.
         name: String,
     },
+    /// Reindex a pack's stale members (files changed on disk since last indexed).
+    #[command(after_help = "Examples:
+  indexa pack refresh \"Auth\"")]
+    Refresh {
+        /// Pack name.
+        name: String,
+    },
     /// Export a pack as XML, Markdown, or JSON — ready to paste into any AI tool.
     #[command(after_help = "Examples:
   indexa pack export \"Auth\" --format xml > auth.xml

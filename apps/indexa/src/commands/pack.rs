@@ -7,6 +7,7 @@ use indexa_query::{
     build_export_filter, build_tree, prune_tree, render_json, render_markdown, render_xml,
 };
 
+use super::cmd_deep;
 use super::helpers::{
     build_embedder, expand, finalize_export, index_db_path, now_unix, require_index_db, ExportSink,
 };
@@ -250,6 +251,58 @@ pub(crate) async fn cmd_pack_show(name: String) -> Result<()> {
     Ok(())
 }
 
+/// Reindex a pack's stale members (files changed on disk since last indexed). Unlike the
+/// fail-open freshness check `pack show`/`pack export` use, a `stale_pack_paths` error here
+/// propagates — refresh's whole job is to report accurately, so silently showing 0 would mislead.
+pub(crate) async fn cmd_pack_refresh(name: String, cfg: &Config) -> Result<()> {
+    let Some(db_path) = require_index_db()? else {
+        return Ok(());
+    };
+    cmd_pack_refresh_at(&db_path, name, cfg).await
+}
+
+/// `cmd_pack_refresh` with the DB path injected (rather than resolved via `require_index_db`),
+/// so it's hermetically testable — mirrors `resolve_target_roots_in`'s testability pattern.
+pub(crate) async fn cmd_pack_refresh_at(
+    db_path: &std::path::Path,
+    name: String,
+    cfg: &Config,
+) -> Result<()> {
+    let store = Store::open(db_path)?;
+    let pack = store
+        .pack_by_name(&name)?
+        .ok_or_else(|| anyhow::anyhow!("no pack named \"{name}\""))?;
+    let stale = store.stale_pack_paths(&pack.id)?;
+    if stale.is_empty() {
+        println!("Pack \"{name}\" has no stale files.");
+        return Ok(());
+    }
+    println!(
+        "Refreshing {} stale file{} in pack \"{name}\"…",
+        stale.len(),
+        if stale.len() == 1 { "" } else { "s" }
+    );
+    // Release the connection before `cmd_deep` opens its own.
+    drop(store);
+    // Each stale path is passed as its own root: `cmd_deep`/`walk()` (ignore::WalkBuilder) already
+    // handle a bare file root correctly, so this reindexes exactly the stale files — no rescan of
+    // the rest of the pack. Embed-only, same scope as the rest of G2: folder-rollup summaries still
+    // need a follow-up `indexa summarize`/worker pass, exactly as `pack show`'s hint text says.
+    cmd_deep(
+        stale,
+        None,
+        false,
+        "augment".to_string(),
+        false,
+        false,
+        false,
+        cfg,
+    )
+    .await?;
+    println!("Pack \"{name}\" refreshed.");
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn cmd_pack_export(
     name: String,
@@ -272,7 +325,45 @@ pub(crate) async fn cmd_pack_export(
     if !db_path.exists() {
         bail!("No index found. Run `indexa index <path>` first.");
     }
-    let store = Store::open(&db_path)?;
+    cmd_pack_export_at(
+        &db_path,
+        name,
+        format,
+        output,
+        depth,
+        include_weights,
+        signatures,
+        token_budget,
+        strict_budget,
+        clipboard,
+        strip_comments,
+        no_redact,
+        changed_since,
+        category,
+    )
+    .await
+}
+
+/// `cmd_pack_export` with the DB path injected, so it's hermetically testable — mirrors
+/// `resolve_target_roots_in`'s testability pattern.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn cmd_pack_export_at(
+    db_path: &std::path::Path,
+    name: String,
+    format: String,
+    output: Option<String>,
+    depth: Option<usize>,
+    include_weights: bool,
+    signatures: bool,
+    token_budget: Option<usize>,
+    strict_budget: bool,
+    clipboard: bool,
+    strip_comments: bool,
+    no_redact: bool,
+    changed_since: Option<String>,
+    category: Option<String>,
+) -> Result<()> {
+    let store = Store::open(db_path)?;
     let pack = store
         .pack_by_name(&name)?
         .ok_or_else(|| anyhow::anyhow!("no pack named \"{name}\""))?;
@@ -280,6 +371,8 @@ pub(crate) async fn cmd_pack_export(
     if paths.is_empty() {
         bail!("Pack \"{name}\" has no paths. Add paths first with `indexa pack add`.");
     }
+    // Freshness: same best-effort stat check `pack show` surfaces (a stat error must not fail export).
+    let stale_count = store.stale_pack_paths(&pack.id).unwrap_or_default().len();
 
     // Relational slice (v0.60): same `--changed-since` / `--category` filters as `indexa export`,
     // shared via `build_export_filter`. `None` ⇒ export the whole pack.
@@ -300,6 +393,8 @@ pub(crate) async fn cmd_pack_export(
         out_buf.push_str(&indexa_core::text::xml_escape_attr(&name));
         out_buf.push_str("\" generated=\"");
         out_buf.push_str(&now);
+        out_buf.push_str("\" stale_files=\"");
+        out_buf.push_str(&stale_count.to_string());
         out_buf.push_str("\">\n");
     }
 
@@ -417,4 +512,117 @@ pub(crate) async fn cmd_pack_delete(name: String) -> Result<()> {
     store.delete_pack(&pack.id)?;
     println!("Deleted pack \"{name}\". (Indexed files are untouched.)");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use indexa_core::store::ChunkRecord;
+
+    /// Mirrors `dummy_chunk_embedded` in `indexa-core`'s own store tests — a chunk with an
+    /// embedding present (so it counts toward `chunks_current_for_mtime`) and a non-null
+    /// `language` (so `code_chunks_under`, the `--signatures` export path, picks it up).
+    fn dummy_chunk_embedded(path: &str, text: &str) -> ChunkRecord {
+        ChunkRecord {
+            entry_path: path.to_owned(),
+            seq: 0,
+            heading: String::new(),
+            text: text.to_owned(),
+            language: Some("rust".to_owned()),
+            embedding: Some(vec![0.1, 0.2, 0.3]),
+            embed_model: Some("test".to_owned()),
+            content_hash: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn export_header_reports_stale_files_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.rs");
+        std::fs::write(&file, b"fn foo() {}").unwrap();
+        let file_s = file.to_string_lossy().to_string();
+
+        let db_path = dir.path().join("idx.db");
+        let mut store = Store::open(&db_path).unwrap();
+        store
+            .upsert_chunks(&[dummy_chunk_embedded(&file_s, "fn foo() {}")])
+            .unwrap();
+        // Pin indexed_at to the epoch — long before the file's real mtime — so it reads stale
+        // (mirrors `stale_pack_paths_flags_out_of_date_and_missing_members` in indexa-core).
+        store
+            .db_connection()
+            .execute(
+                "UPDATE chunks SET indexed_at = 1 WHERE entry_path = ?1",
+                rusqlite::params![file_s],
+            )
+            .unwrap();
+        let pack_id = store.create_pack("code", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, std::slice::from_ref(&file_s))
+            .unwrap();
+        drop(store);
+
+        let out_path = dir.path().join("out.xml");
+        cmd_pack_export_at(
+            &db_path,
+            "code".to_string(),
+            "xml".to_string(),
+            Some(out_path.to_string_lossy().to_string()),
+            None,
+            false,
+            true, // signatures — reads chunks directly, no summary fixture needed
+            None,
+            false,
+            false,
+            false,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let xml = std::fs::read_to_string(&out_path).unwrap();
+        assert!(
+            xml.contains("stale_files=\"1\""),
+            "expected stale_files=\"1\" in the export header, got: {xml}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_reports_no_stale_files_without_reindexing() {
+        // A pack whose only member is current (fresh mtime, freshly-indexed chunk) has nothing
+        // stale — refresh must report that and return WITHOUT calling `cmd_deep` (which would
+        // need a reachable Ollama in a real run).
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("b.rs");
+        std::fs::write(&file, b"fn bar() {}").unwrap();
+        let file_s = file.to_string_lossy().to_string();
+
+        let db_path = dir.path().join("idx.db");
+        let mut store = Store::open(&db_path).unwrap();
+        store
+            .upsert_chunks(&[dummy_chunk_embedded(&file_s, "fn bar() {}")])
+            .unwrap();
+        // Pin indexed_at far in the future — current relative to the file's real mtime.
+        store
+            .db_connection()
+            .execute(
+                "UPDATE chunks SET indexed_at = 4102444800 WHERE entry_path = ?1",
+                rusqlite::params![file_s],
+            )
+            .unwrap();
+        let pack_id = store.create_pack("clean", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, std::slice::from_ref(&file_s))
+            .unwrap();
+        drop(store);
+
+        let cfg = Config::default();
+        // No stale files ⇒ returns Ok before ever touching `cmd_deep`/Ollama — this call would
+        // hang/fail on the preflight if the "no stale" early return didn't fire first.
+        cmd_pack_refresh_at(&db_path, "clean".to_string(), &cfg)
+            .await
+            .unwrap();
+    }
 }

@@ -31,7 +31,7 @@ pub struct AddNoteParams {
 /// may be missing entirely or a different, older install, contradicting the "doctor/status/MCP are
 /// authoritative" contract this crate already enforces via `detect_skew`. Canonicalized so it
 /// survives symlinked installs (mirrors `commands::mcp_install`).
-fn indexa_exe() -> Result<std::path::PathBuf, ErrorData> {
+pub(crate) fn indexa_exe() -> Result<std::path::PathBuf, ErrorData> {
     let exe = std::env::current_exe()
         .map_err(|e| mcp_err(format!("cannot resolve the running indexa executable: {e}")))?;
     Ok(exe.canonicalize().unwrap_or(exe))

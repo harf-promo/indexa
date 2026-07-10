@@ -18,7 +18,7 @@ mod watchdog;
 // The deep phase + memory watchdog live in submodules (v0.61 split). Re-export the
 // externally-called `run_deep_phase_standalone` so `crate::jobs_exec::` callers are unchanged;
 // the rest are used internally by the orchestrator / summarize phase here.
-use deep::run_deep_phase;
+pub(crate) use deep::run_deep_phase;
 pub(crate) use deep::run_deep_phase_standalone;
 use watchdog::run_watchdog_check;
 

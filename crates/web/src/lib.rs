@@ -427,6 +427,7 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
                 .delete(api_packs_paths_remove),
         )
         .route("/api/packs/{name}/export", get(api_packs_export))
+        .route("/api/packs/{name}/refresh", post(api_packs_refresh))
         .route("/api/packs/{name}/search", get(api_packs_search))
         .route(
             "/api/weights",
@@ -913,6 +914,132 @@ mod tests {
         assert!(
             body.contains("[REDACTED-aws-key]"),
             "expected redaction marker in pack export, got: {body}"
+        );
+    }
+
+    /// A dedicated temp directory per test tag (mirrors `temp_db_path`'s style) — real files
+    /// are needed here since `stale_pack_paths` stats the live disk, unlike the in-memory DB.
+    fn temp_fixture_dir(tag: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "indexa-web-test-{}-{}-dir",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[tokio::test]
+    async fn api_packs_export_reports_stale_files_count() {
+        let dir = temp_fixture_dir("export-stale");
+        let file = dir.join("a.rs");
+        std::fs::write(&file, b"fn foo() {}").unwrap();
+        let file_s = file.to_string_lossy().to_string();
+
+        let mut store = Store::open_in_memory().unwrap();
+        // The web export route builds its tree from summaries (not chunks — unlike CLI/MCP's
+        // `--signatures`), so a summary is required for `exported > 0`.
+        store
+            .upsert_summary(&indexa_core::store::SummaryRecord {
+                path: file_s.clone(),
+                kind: "file".into(),
+                parent_path: Some(dir.to_string_lossy().into_owned()),
+                depth: 2,
+                summary: "a test file".into(),
+                summary_l0: None,
+                embedding: None,
+                child_count: 0,
+                byte_size: 10,
+                model: "test".into(),
+                source_hash: "H1".into(),
+                generated_at: 1,
+            })
+            .unwrap();
+        store
+            .upsert_chunks(&[ChunkRecord {
+                embedding: Some(vec![0.1, 0.2, 0.3]),
+                embed_model: Some("test".to_owned()),
+                language: Some("rust".to_owned()),
+                ..chunk(&file_s, 0, "fn foo() {}")
+            }])
+            .unwrap();
+        // Pin indexed_at to the epoch — long before the file's real mtime — so it reads stale.
+        store
+            .db_connection()
+            .execute(
+                "UPDATE chunks SET indexed_at = 1 WHERE entry_path = ?1",
+                rusqlite::params![file_s],
+            )
+            .unwrap();
+        let pack_id = store.create_pack("code", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, std::slice::from_ref(&file_s))
+            .unwrap();
+
+        let app = build_router(state_with(store), 7620);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/packs/code/export?format=xml")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            body.contains("stale_files=\"1\""),
+            "expected stale_files=\"1\" in the export header, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_packs_refresh_is_a_noop_when_nothing_stale() {
+        let dir = temp_fixture_dir("refresh-clean");
+        let file = dir.join("b.rs");
+        std::fs::write(&file, b"fn bar() {}").unwrap();
+        let file_s = file.to_string_lossy().to_string();
+
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_chunks(&[ChunkRecord {
+                embedding: Some(vec![0.1, 0.2, 0.3]),
+                embed_model: Some("test".to_owned()),
+                language: Some("rust".to_owned()),
+                ..chunk(&file_s, 0, "fn bar() {}")
+            }])
+            .unwrap();
+        // Pin indexed_at far in the future — current relative to the file's real mtime.
+        store
+            .db_connection()
+            .execute(
+                "UPDATE chunks SET indexed_at = 4102444800 WHERE entry_path = ?1",
+                rusqlite::params![file_s],
+            )
+            .unwrap();
+        let pack_id = store.create_pack("clean", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, std::slice::from_ref(&file_s))
+            .unwrap();
+
+        let app = build_router(state_with(store), 7620);
+        let (status, json) =
+            post_json(app, "/api/packs/clean/refresh", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json.get("stale_files").and_then(|v| v.as_i64()),
+            Some(0),
+            "expected {{stale_files: 0}} with no job started, got: {json}"
+        );
+        assert!(
+            json.get("job_id").is_none(),
+            "no job should start when nothing is stale, got: {json}"
         );
     }
 

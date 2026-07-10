@@ -58,6 +58,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ones no longer current per `chunks_current_for_mtime` — so it catches edits made without a rescan,
   which `entries.modified_s` (last-scan time) would miss. Computed only on single-pack views (not the
   pack list). Groundwork for `pack refresh`. MCP tool count unchanged (47).
+- **`pack refresh` — reindex a Context Pack's stale members.** New `indexa pack refresh <name>` (CLI)
+  and `POST /api/packs/{name}/refresh` (web, background job) reindex just the members
+  `stale_pack_paths` flags as out of date — no rescan of the rest of the pack. All three export
+  surfaces (MCP `export_pack`, CLI `pack export`, web `GET /api/packs/{name}/export`) now report the
+  live count in the XML header as `stale_files="N"`. The MCP `export_pack` tool gains an additive
+  `refresh: bool` param that best-effort reindexes stale members before exporting (no new tool — count
+  unchanged, 47).
 
 ### Performance
 
