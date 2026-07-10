@@ -37,12 +37,15 @@ impl IndexaMcp {
     // ── Insights (v0.10) ───────────────────────────────────────────────────────
 
     /// Find duplicate or near-duplicate files in the index.
-    #[tool(description = "Find duplicate files (v0.10 Insights). \
+    #[tool(
+        description = "Find duplicate files. \
                        With exact=true, groups files with identical content hashes. \
                        With exact=false (default), groups files with similar summary embeddings \
                        (approximate above ~2,000 files via LSH — borderline pairs may be \
                        missed; exact-duplicate grouping is exhaustive) \
-                       above the similarity threshold.")]
+                       above the similarity threshold.",
+        annotations(read_only_hint = true)
+    )]
     pub(crate) async fn insights_duplicates(
         &self,
         params: Parameters<InsightsDuplicatesParams>,
@@ -85,8 +88,9 @@ impl IndexaMcp {
 
     /// Find stale directories (not modified for a long time).
     #[tool(
-        description = "Find stale directories (v0.10 Insights) — not modified for more than \
-                       `days` days (default 365). Helps identify inactive projects to archive."
+        description = "Find stale directories — not modified for more than \
+                       `days` days (default 365). Helps identify inactive projects to archive.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn insights_stale(
         &self,
@@ -113,9 +117,10 @@ impl IndexaMcp {
 
     /// Show what was added or modified in the index over the past N days.
     #[tool(
-        description = "Show a diff of index changes (v0.10 Insights) — which files were newly \
+        description = "Show a diff of index changes — which files were newly \
                        discovered and which were modified on disk — over the past `days` days \
-                       (default 7)."
+                       (default 7).",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn insights_diff(
         &self,
@@ -159,7 +164,8 @@ impl IndexaMcp {
 
     /// Largest indexed files (bloat detection).
     #[tool(
-        description = "List the largest indexed files by on-disk size (bloat detection). `limit` defaults to 20."
+        description = "List the largest indexed files by on-disk size (bloat detection). `limit` defaults to 20.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn insights_largest(
         &self,
@@ -181,7 +187,8 @@ impl IndexaMcp {
 
     /// Language breakdown of indexed content.
     #[tool(
-        description = "Show the language breakdown of indexed content (chunk count per language). Only code chunks carry a language tag."
+        description = "Show the language breakdown of indexed content (chunk count per language). Only code chunks carry a language tag.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn insights_languages(&self) -> Result<CallToolResult, ErrorData> {
         let store = self.store()?;

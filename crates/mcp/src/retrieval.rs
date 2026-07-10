@@ -134,7 +134,8 @@ impl IndexaMcp {
     /// Returns matching chunks with their file path, heading, and a text snippet.
     /// Use `scope` to restrict to a subtree. For path-name browsing, prefer `browse_tree`.
     #[tool(
-        description = "Search indexed chunk content by keyword (BM25 + vector hybrid). Returns matching chunks with path, heading, and snippet — richer than path-name search. Each hit shows `#N`, the chunk seq — pass it to `get_chunk_context` to expand that chunk with its neighbors. Optionally scope to a path prefix."
+        description = "Search indexed chunk content by keyword (BM25 + vector hybrid). Returns matching chunks with path, heading, and snippet — richer than path-name search. Each hit shows `#N`, the chunk seq — pass it to `get_chunk_context` to expand that chunk with its neighbors. Optionally scope to a path prefix.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn search(
         &self,
@@ -202,7 +203,8 @@ impl IndexaMcp {
 
     /// List the direct children (with summary state) of a directory.
     #[tool(
-        description = "List the direct children of a directory in the index, with each child's kind and file/chunk counts. Empty path lists indexed roots."
+        description = "List the direct children of a directory in the index, with each child's kind and file/chunk counts. Empty path lists indexed roots.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn browse_tree(
         &self,
@@ -231,7 +233,8 @@ impl IndexaMcp {
 
     /// Get a node's summary at the requested tier (l0 abstract / l1 full / l2 raw).
     #[tool(
-        description = "Get a file or directory's summary. tier='l0' returns the one-line abstract (cheap, for scanning), 'l1' the full summary (default), 'l2' the raw file content. For directories, also lists child abstracts. The progressive-disclosure entry point."
+        description = "Get a file or directory's summary. tier='l0' returns the one-line abstract (cheap, for scanning), 'l1' the full summary (default), 'l2' the raw file content. For directories, also lists child abstracts. The progressive-disclosure entry point.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn get_summary(
         &self,
@@ -284,7 +287,8 @@ impl IndexaMcp {
 
     /// Read raw file content (L2).
     #[tool(
-        description = "Read the raw text content of an indexed file (truncated to ~40 KB). Pass `offset` (a byte offset) to page past the cap and read a later window of a large file."
+        description = "Read the raw text content of an indexed file (truncated to ~40 KB). Pass `offset` (a byte offset) to page past the cap and read a later window of a large file.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn read_file(
         &self,
@@ -298,7 +302,8 @@ impl IndexaMcp {
         description = "Return a file's indexed chunks (the exact text Indexa retrieves over), \
                        with seq number and heading. Pass `seq` (a search hit's position) to get \
                        that chunk plus `radius` neighbors on each side — the surrounding context \
-                       a snippet alone omits. Omit `seq` for the file's opening chunks."
+                       a snippet alone omits. Omit `seq` for the file's opening chunks.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn get_chunk_context(
         &self,
@@ -356,7 +361,8 @@ impl IndexaMcp {
 
     /// Answer a natural-language question against the index (grounded RAG).
     #[tool(
-        description = "Answer a natural-language question using the indexed context (hybrid retrieval + LOCAL LLM synthesis — e.g. ollama/gemma3:12b, NOT your model). Returns an answer with source paths. **If you are a capable model, prefer `synthesize: false`**: Indexa then runs the same retrieval pipeline but returns the packed context SLICE for YOU to answer with your own (stronger) model — better answers, and no local-model cost. Set `agentic: true` for compositional questions (a few extra model calls; ignored when `synthesize: false`). Optional `top_k` widens/narrows retrieval breadth."
+        description = "Answer a natural-language question using the indexed context (hybrid retrieval + LOCAL LLM synthesis — e.g. ollama/gemma3:12b, NOT your model). Returns an answer with source paths. **If you are a capable model, prefer `synthesize: false`**: Indexa then runs the same retrieval pipeline but returns the packed context SLICE for YOU to answer with your own (stronger) model — better answers, and no local-model cost. Set `agentic: true` for compositional questions (a few extra model calls; ignored when `synthesize: false`). Optional `top_k` widens/narrows retrieval breadth.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn ask(
         &self,

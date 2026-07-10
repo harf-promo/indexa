@@ -280,7 +280,7 @@ impl ServerHandler for IndexaMcp {
 
     // ── Resources (read-only index artifacts) ──────────────────────────────────
     // Hand-written (resources have no router macro); the inner methods live in
-    // `resources.rs`. Tools stay the source of truth for the 46-tool golden list —
+    // `resources.rs`. Tools stay the source of truth for the 47-tool golden list —
     // resources/prompts are a separate protocol surface and don't affect it.
 
     async fn list_resources(
@@ -636,6 +636,50 @@ mod tests {
              commit golden_tools.txt, and update the tool counts in README.md / CLAUDE.md / \
              docs/how-to/live-retrieval-over-mcp.md (doc_tool_count_matches_code enforces them)."
         );
+    }
+
+    /// Every tool must carry a read-only or destructive annotation (clients auto-approve reads and
+    /// gate writes). Locks the read/mutating split so a new tool can't silently ship unannotated.
+    #[test]
+    fn tools_carry_read_or_destructive_annotations() {
+        let mutating: std::collections::HashSet<&str> = [
+            "create_pack",
+            "add_pack_paths",
+            "remove_pack_paths",
+            "delete_pack",
+            "prune",
+            "add_note",
+            "trigger_index",
+            "confirm_classification",
+            "ignore_classification",
+            "set_weight",
+            "delete_weight",
+            "answer_decision",
+            "dismiss_decision",
+        ]
+        .into_iter()
+        .collect();
+        for tool in IndexaMcp::tool_router().list_all() {
+            let ann = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("tool '{}' has no annotations", tool.name));
+            if mutating.contains(tool.name.as_ref()) {
+                assert_eq!(
+                    ann.destructive_hint,
+                    Some(true),
+                    "mutating tool '{}' must set destructive_hint",
+                    tool.name
+                );
+            } else {
+                assert_eq!(
+                    ann.read_only_hint,
+                    Some(true),
+                    "read tool '{}' must set read_only_hint",
+                    tool.name
+                );
+            }
+        }
     }
 
     /// Every tool must carry a non-empty description — agents pick tools by it.

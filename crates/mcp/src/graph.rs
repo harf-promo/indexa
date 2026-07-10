@@ -73,7 +73,8 @@ pub struct CodeGraphParams {
 impl IndexaMcp {
     /// List a code file's dependencies from the code graph (imports + defined symbols).
     #[tool(
-        description = "List a code file's dependencies from the code graph: the modules/paths it imports and the symbols (functions, types, classes) it defines. Requires an absolute path to a file indexed with `indexa deep`."
+        description = "List a code file's dependencies from the code graph: the modules/paths it imports and the symbols (functions, types, classes) it defines. Requires an absolute path to a file indexed with `indexa deep`.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn dependencies(
         &self,
@@ -138,7 +139,8 @@ impl IndexaMcp {
 
     /// Reverse dependency: which indexed files import a given module/path.
     #[tool(
-        description = "Reverse dependency lookup over the code graph: which indexed files import a given module/path (as written in source). Use to find a module's dependents."
+        description = "Reverse dependency lookup over the code graph: which indexed files import a given module/path (as written in source). Use to find a module's dependents.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn who_imports(
         &self,
@@ -178,7 +180,8 @@ impl IndexaMcp {
     /// D2 — which files call a given function or method name, grouped by how each
     /// call resolved (same-file / same-dir / import / bare).
     #[tool(
-        description = "D2 code-graph: which indexed files contain a call to the given function or method name (bare, unqualified — e.g. `parse`, `render`, `connect`). Each caller is resolved against the name's definition sites (same-file → same-dir → import-matched → bare-name fallback) and the output is grouped by that tier; only the bare group is approximate. Requires `indexa deep` to have been run on source files. Returns up to 100 results."
+        description = "Which indexed files contain a call to the given function or method name (bare, unqualified — e.g. `parse`, `render`, `connect`). Each caller is resolved against the name's definition sites (same-file → same-dir → import-matched → bare-name fallback) and the output is grouped by that tier; only the bare group is approximate. Requires `indexa deep` to have been run on source files. Returns up to 100 results.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn who_calls(
         &self,
@@ -249,7 +252,8 @@ impl IndexaMcp {
     /// D2 — blast radius for a symbol: direct callers and transitive callers to `depth` hops,
     /// with each transitive hop resolved (scoped) where possible.
     #[tool(
-        description = "D2 code-graph: compute the blast radius of changing a function or method — returns the direct callers plus files whose call to a frontier caller's exported symbol resolves back to that caller (same-dir/import resolution; bare-name matches are kept as a labeled fallback). Use to answer 'what breaks if I change X?'. `depth` controls how many hops of caller reachability to follow: 1 = direct callers only, 2 = direct + one transitive hop (default), up to 5 for transitive reach through chains. Set `strict: true` to drop the bare-name fallback on the transitive hops. Returns up to 200 results."
+        description = "Compute the blast radius of changing a function or method — returns the direct callers plus files whose call to a frontier caller's exported symbol resolves back to that caller (same-dir/import resolution; bare-name matches are kept as a labeled fallback). Use to answer 'what breaks if I change X?'. `depth` controls how many hops of caller reachability to follow: 1 = direct callers only, 2 = direct + one transitive hop (default), up to 5 for transitive reach through chains. Set `strict: true` to drop the bare-name fallback on the transitive hops. Returns up to 200 results.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn blast_radius(
         &self,
@@ -309,7 +313,8 @@ impl IndexaMcp {
 
     /// File-to-file call graph for a scope (the v0.18 signature graph, as text).
     #[tool(
-        description = "Build the file-to-file call graph for files under a path scope: an edge 'A → B' means file A calls a function that file B defines. Each call is resolved against the symbol's definition sites (same-file → same-dir → import-matched); unresolvable calls fall back to bare-name matching and are labeled. Returns the heaviest edges (most shared symbols) as a 'caller → callee [weight]' list, the most central hub files by weighted PageRank (scored 0–100), plus node/edge/tier counts. Set `strict: true` to drop the bare-name fallback entirely, or `cycles: true` to report dependency cycles (circular call chains) instead of the edge/hub view. Languages: Rust, Python, JS, TS, Go, Java, C, C++."
+        description = "Build the file-to-file call graph for files under a path scope: an edge 'A → B' means file A calls a function that file B defines. Each call is resolved against the symbol's definition sites (same-file → same-dir → import-matched); unresolvable calls fall back to bare-name matching and are labeled. Returns the heaviest edges (most shared symbols) as a 'caller → callee [weight]' list, the most central hub files by weighted PageRank (scored 0–100), plus node/edge/tier counts. Set `strict: true` to drop the bare-name fallback entirely, or `cycles: true` to report dependency cycles (circular call chains) instead of the edge/hub view. Languages: Rust, Python, JS, TS, Go, Java, C, C++.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn code_graph(
         &self,
@@ -443,7 +448,8 @@ impl IndexaMcp {
 
     /// Files related to a file through the call graph, with resolution tiers.
     #[tool(
-        description = "Find files related to a given file through the call graph: files it calls into, or files that call into it, ranked by shared symbol count. Each relation is resolved (same-dir/import) where possible; unresolvable links fall back to bare-name matching and are labeled 'bare' (approximate). Use to discover what to read alongside a file."
+        description = "Find files related to a given file through the call graph: files it calls into, or files that call into it, ranked by shared symbol count. Each relation is resolved (same-dir/import) where possible; unresolvable links fall back to bare-name matching and are labeled 'bare' (approximate). Use to discover what to read alongside a file.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn related_files(
         &self,

@@ -72,7 +72,8 @@ impl IndexaMcp {
     #[tool(
         description = "List Smart classification records — auto-detected or user-confirmed \
                        category labels for files and directories. Filter by source: `auto`, \
-                       `user`, or `ignored`."
+                       `user`, or `ignored`.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn list_classifications(
         &self,
@@ -111,7 +112,8 @@ impl IndexaMcp {
         description = "List the files and directories classified under one category (e.g. \
                        `work`, `code`, `media`), highest-confidence first. Complements \
                        list_classifications (which filters by source): this answers \
-                       \"what is in category X?\" across auto and user sources."
+                       \"what is in category X?\" across auto and user sources.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn list_files_by_category(
         &self,
@@ -147,7 +149,8 @@ impl IndexaMcp {
     #[tool(
         description = "Confirm or correct a Smart classification. Sets the source to 'user' \
                        so it persists across re-classify runs. \
-                       A later auto pass will not overwrite a user decision."
+                       A later auto pass will not overwrite a user decision.",
+        annotations(destructive_hint = true)
     )]
     pub(crate) async fn confirm_classification(
         &self,
@@ -167,7 +170,8 @@ impl IndexaMcp {
     #[tool(
         description = "Suppress a Smart classification suggestion permanently. \
                        Sets source='ignored' — a tombstone that prevents the path from \
-                       being re-proposed on the next classify run."
+                       being re-proposed on the next classify run.",
+        annotations(destructive_hint = true)
     )]
     pub(crate) async fn ignore_classification(
         &self,
@@ -181,13 +185,14 @@ impl IndexaMcp {
         )))
     }
 
-    // ── Importance weights (v0.8) ──────────────────────────────────────────────
+    // ── Importance weights ──────────────────────────────────────────────
 
     /// List all importance weights stored in the index.
     #[tool(
-        description = "List all importance weights (v0.8). Each weight boosts or suppresses \
+        description = "List all importance weights. Each weight boosts or suppresses \
                        a file, directory, or classification category in search results. \
-                       weight > 1.0 = boost; weight < 1.0 = suppress; 1.0 = neutral."
+                       weight > 1.0 = boost; weight < 1.0 = suppress; 1.0 = neutral.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn list_weights(&self) -> Result<CallToolResult, ErrorData> {
         let store = self.store()?;
@@ -218,7 +223,8 @@ impl IndexaMcp {
         description = "List the user's saved searches: named, reusable ask queries (question + \
                        retrieval mode + optional path scope), managed via `indexa saved` or the \
                        web Ask bar. Re-run one by passing its question (and scope) to the `ask` \
-                       tool — use mode 'agentic' as agentic: true."
+                       tool — use mode 'agentic' as agentic: true.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn list_saved_queries(&self) -> Result<CallToolResult, ErrorData> {
         let store = self.store()?;
@@ -251,9 +257,10 @@ impl IndexaMcp {
 
     /// Set an importance weight for a file, directory, or category.
     #[tool(
-        description = "Set an importance weight (v0.8) for a file path, directory path, or \
+        description = "Set an importance weight for a file path, directory path, or \
                        classification category. weight=2.0 boosts; weight=0.1 suppresses. \
-                       Applied multiplicatively to search RRF scores."
+                       Applied multiplicatively to search RRF scores.",
+        annotations(destructive_hint = true)
     )]
     pub(crate) async fn set_weight(
         &self,
@@ -280,7 +287,8 @@ impl IndexaMcp {
     /// Remove an importance weight.
     #[tool(
         description = "Remove an importance weight for a file, directory, or category, \
-                       restoring it to neutral (1.0)."
+                       restoring it to neutral (1.0).",
+        annotations(destructive_hint = true)
     )]
     pub(crate) async fn delete_weight(
         &self,
