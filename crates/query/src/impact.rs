@@ -8,6 +8,19 @@ use serde::{Serialize, Serializer};
 
 use crate::qa::Answer;
 
+/// Canonical `tool_usage.served_basis` tags — what a row's `bytes_served` actually measured.
+/// The savings ledger blends surfaces that count differently, so each recording site tags its
+/// row with one of these so `status`/`get_stats` can reconcile per-surface (see
+/// [`Store::usage_by_basis`](indexa_core::store::Store::usage_by_basis)). Kept as `&str`
+/// constants (not an enum) because the value crosses into the core store layer as plain text.
+///
+/// The full rendered tool response (MCP `search`/`get_summary`/`get_chunk_context`/`ask`/`read_file`).
+pub const BASIS_RENDERED_RESPONSE: &str = "rendered_response";
+/// The answer text plus its delivered citations (web + CLI `ask`; see [`served_bytes`]).
+pub const BASIS_ANSWER_CITATIONS: &str = "answer_citations";
+/// The answer text only, without citation lines (MCP `ask_catalog`).
+pub const BASIS_ANSWER_TEXT: &str = "answer_text";
+
 /// The size of what an [`Answer`] actually delivered to the AI tool, versus the full size of
 /// the source files it cited. Both are byte counts; `counterfactual_bytes` is supplied by the
 /// caller (a `Store` lookup) because the store layer owns on-disk file sizes.
@@ -112,7 +125,14 @@ pub fn record_ask_impact(
     let paths: Vec<&str> = answer.sources.iter().map(|s| s.path.as_str()).collect();
     let counterfactual = store.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
     let served = served_bytes(answer);
-    if let Err(e) = store.record_tool_usage(surface, "ask", served, counterfactual, session_id) {
+    if let Err(e) = store.record_tool_usage_with_basis(
+        surface,
+        "ask",
+        served,
+        counterfactual,
+        session_id,
+        BASIS_ANSWER_CITATIONS,
+    ) {
         tracing::debug!("usage telemetry skipped: {e:#}");
     }
     AnswerImpact::new(served, counterfactual)

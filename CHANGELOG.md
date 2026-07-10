@@ -84,6 +84,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Savings ledger now records what each row *measured* (`served_basis`).** The `tool_usage` ledger
+  behind the "tokens saved" figures on `status` / MCP `get_stats` / `/api/stats` blended two different
+  accountings into one untagged column: MCP tools recorded the **full rendered response** they returned,
+  while web/CLI `ask` recorded **answer text + citations** — so the aggregate mixed bases and "show the
+  math" couldn't reconcile per-surface. Each recording site now tags its row with a `served_basis`
+  (`rendered_response` / `answer_citations` / `answer_text`; canonical `BASIS_*` constants in
+  `indexa_query::impact`), added as a migration-guarded `tool_usage` column (`SCHEMA_VERSION` bumped;
+  existing indexes migrate in place, legacy rows read as *unspecified*). `status` and `get_stats` show a
+  per-basis split when more than one basis contributed. No new MCP tool (count stays **47**); the
+  per-answer impact wire shape is unchanged.
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
   open to the LLM reranker for every user who enabled it: candle's DeBERTa loader read the transformer
   at the safetensors root, but HF `DebertaV2ForSequenceClassification` checkpoints nest it under a

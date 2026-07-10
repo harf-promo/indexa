@@ -78,9 +78,14 @@ pub(crate) async fn cmd_search(
     let record_usage = |store: &mut Store, served: usize| {
         let paths: Vec<&str> = hits.iter().map(|h| h.entry_path.as_str()).collect();
         let counterfactual = store.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
-        if let Err(e) =
-            store.record_tool_usage("cli", "search", served as u64, counterfactual, None)
-        {
+        if let Err(e) = store.record_tool_usage_with_basis(
+            "cli",
+            "search",
+            served as u64,
+            counterfactual,
+            None,
+            indexa_query::BASIS_RENDERED_RESPONSE,
+        ) {
             tracing::debug!("usage telemetry skipped: {e:#}");
         }
     };
