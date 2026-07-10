@@ -216,17 +216,23 @@ async fn run_scan_phase_with_entries(
         },
     );
 
-    let live_paths: std::collections::HashSet<String> = entries
-        .iter()
-        .map(|e| e.path.to_string_lossy().into_owned())
-        .collect();
-
     let mut store = state.store.lock().await;
-    if let Err(e) = store.upsert_entries(entries) {
+    // Stamp this scan's generation on every upserted row, then prune ghosts by generation
+    // (interruption-safe) instead of building a full live-path HashSet. This path keeps the entry
+    // `Vec` (the combined index job reuses it for the deep phase), so it isn't itself streamed —
+    // the CLI `scan` is the bounded-memory whole-computer entry point.
+    let generation = match store.next_scan_generation() {
+        Ok(g) => g,
+        Err(e) => {
+            finalize_failed(handle, "scan", &e);
+            return false;
+        }
+    };
+    if let Err(e) = store.upsert_entries_with_generation(entries, Some(generation)) {
         finalize_failed(handle, "scan", &e);
         return false;
     }
-    if let Err(e) = store.reconcile_entries(path, &live_paths) {
+    if let Err(e) = store.reconcile_by_generation(path, generation) {
         push(
             handle,
             JobEvent::Warning {
