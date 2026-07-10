@@ -84,6 +84,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`[chunking] strategy` no longer silently misleads.** `strategy` accepts `structure`/`fixed`/
+  `recursive`/`semantic`, but only structure-style word-chunking is built — `recursive` and `semantic`
+  (late chunking) silently fell back to it with no signal. `doctor` and MCP `query_config` now print a
+  note when the configured strategy is one of the unimplemented forward-looking values (so `size`/
+  `overlap` are honored, but the strategy itself isn't yet). No behavior change; the forward-looking
+  enum values stay for the future late-chunking slot.
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
   open to the LLM reranker for every user who enabled it: candle's DeBERTa loader read the transformer
   at the safetensors root, but HF `DebertaV2ForSequenceClassification` checkpoints nest it under a

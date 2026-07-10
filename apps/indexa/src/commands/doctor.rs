@@ -170,6 +170,16 @@ pub(crate) async fn cmd_doctor(
     }
     println!();
 
+    // ── Chunking-strategy honesty ──
+    // `recursive`/`semantic` are forward-looking config values that aren't built yet and silently
+    // fall back to structure chunking — surface that so a user isn't misled into thinking they took
+    // effect. Only prints when the configured strategy is one of the unimplemented ones.
+    if let Some(note) = cfg.chunking.strategy.unimplemented_note() {
+        println!("Chunking");
+        println!("  ⚠️   {note}");
+        println!();
+    }
+
     // ── Multimodal readiness (shared with `indexa multimodal`) ──
     // Reports which opt-in parsers (image caption, PDF OCR, audio transcribe, video frames) are
     // ready (their external tools + a vision model installed) and how to enable each.

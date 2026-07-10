@@ -163,6 +163,12 @@ impl IndexaMcp {
             c.parsers.audio.transcribe,
             c.parsers.video.caption,
         );
+        // Honesty note when the configured chunking strategy isn't actually honored (recursive /
+        // semantic fall back to structure) — so the reader isn't misled about what took effect.
+        let out = match c.chunking.strategy.unimplemented_note() {
+            Some(note) => format!("{out}\n⚠️  {note}"),
+            None => out,
+        };
         Ok(ok_text(out))
     }
 
