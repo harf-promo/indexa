@@ -18,8 +18,12 @@ async function fireJob(kind, path) {
     }
     const d = await r.json();
     subscribeJob(d.job_id, path, kind);
-    // Switch to jobs tab so user can watch progress
-    switchTab('jobs');
+    // Don't yank the user to the Activity tab — offer it as a toast action so they stay where
+    // they are (e.g. mid-browse) and jump only if they want to watch progress.
+    toast(kind.charAt(0).toUpperCase() + kind.slice(1) + ' started', 'info', {
+      label: 'View activity',
+      onClick: function() { switchTab('jobs'); }
+    });
   } catch (e) {
     toast('Network error starting job: ' + e.message, 'error');
   }
