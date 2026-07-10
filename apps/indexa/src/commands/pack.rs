@@ -238,6 +238,15 @@ pub(crate) async fn cmd_pack_show(name: String) -> Result<()> {
     for p in &paths {
         println!("  {p}");
     }
+    // Freshness: indexed member files whose stored content is out of date with the disk.
+    let stale = store.stale_pack_paths(&pack.id).unwrap_or_default();
+    if !stale.is_empty() {
+        println!(
+            "\n{} indexed file{} stale (changed since last index) — re-index with: indexa index <path>",
+            stale.len(),
+            if stale.len() == 1 { " is" } else { "s are" },
+        );
+    }
     Ok(())
 }
 

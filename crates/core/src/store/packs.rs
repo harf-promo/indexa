@@ -112,6 +112,56 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// A pack's indexed member files whose stored chunks are out of date with the file on disk —
+    /// the "stale" set behind `pack show`/`get_pack` and (later) `pack refresh`. Each member path
+    /// (a file or a directory prefix) is expanded to the *indexed* files at or under it (those with
+    /// chunks); each is then stat'd on the LIVE disk and kept when it is no longer current per
+    /// [`Store::chunks_current_for_mtime`] (missing/partial embeddings, or indexed before the file's
+    /// current mtime). A member that can't be stat'd (deleted/unreadable) counts as stale — it no
+    /// longer matches what was indexed. Returned sorted (BTreeSet), deduped across overlapping members.
+    ///
+    /// This deliberately touches the disk, unusually for the store: `entries.modified_s` reflects only
+    /// the last *scan*, so a file edited without a rescan would look fresh. `chunks_current_for_mtime`
+    /// is built for exactly this caller-supplied-live-mtime check.
+    pub fn stale_pack_paths(&self, pack_id: &str) -> Result<Vec<String>> {
+        use std::collections::BTreeSet;
+        let members = self.pack_paths(pack_id)?;
+
+        // Expand every member to the indexed files (those carrying chunks) at or under it.
+        let mut indexed: BTreeSet<String> = BTreeSet::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT entry_path FROM chunks
+                  WHERE entry_path = ?1 OR entry_path LIKE ?2 ESCAPE '\\'",
+            )?;
+            for member in &members {
+                let like =
+                    super::search::like_prefix(&format!("{}/", member.trim_end_matches('/')));
+                let rows = stmt.query_map(params![member, like], |r| r.get::<_, String>(0))?;
+                for p in rows {
+                    indexed.insert(p?);
+                }
+            }
+        }
+
+        let mut stale = Vec::new();
+        for path in indexed {
+            let live_mtime = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64);
+            let current = match live_mtime {
+                Some(m) => self.chunks_current_for_mtime(&path, m).unwrap_or(false),
+                None => false, // gone/unreadable → no longer matches what was indexed
+            };
+            if !current {
+                stale.push(path);
+            }
+        }
+        Ok(stale)
+    }
+
     /// Delete a pack and all its path associations.
     pub fn delete_pack(&mut self, pack_id: &str) -> Result<()> {
         self.conn

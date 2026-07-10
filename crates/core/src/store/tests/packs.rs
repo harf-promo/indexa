@@ -280,3 +280,61 @@ fn delete_entry_also_removes_edges() {
     assert!(store.edges_from("/gone.rs").unwrap().is_empty());
     assert!(store.edges_to("imports", "std::fs").unwrap().is_empty());
 }
+
+#[test]
+fn stale_pack_paths_flags_out_of_date_and_missing_members() {
+    // Real files on disk so `stale_pack_paths` can stat their live mtime.
+    let dir = tempfile::tempdir().unwrap();
+    let fresh = dir.path().join("fresh.txt");
+    let stale = dir.path().join("stale.txt");
+    std::fs::write(&fresh, b"fresh content").unwrap();
+    std::fs::write(&stale, b"stale content").unwrap();
+    let fresh_s = fresh.to_string_lossy().to_string();
+    let stale_s = stale.to_string_lossy().to_string();
+
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_chunks(&[
+            dummy_chunk_embedded(&fresh_s, 0, "fresh content"),
+            dummy_chunk_embedded(&stale_s, 0, "stale content"),
+        ])
+        .unwrap();
+    // Pin indexed_at deterministically (no timing race): fresh indexed FAR AFTER its
+    // mtime → current; stale indexed at the epoch, long before its mtime → out of date.
+    store
+        .db_connection()
+        .execute(
+            "UPDATE chunks SET indexed_at = 4102444800 WHERE entry_path = ?1", // year 2100
+            rusqlite::params![fresh_s],
+        )
+        .unwrap();
+    store
+        .db_connection()
+        .execute(
+            "UPDATE chunks SET indexed_at = 1 WHERE entry_path = ?1", // 1970
+            rusqlite::params![stale_s],
+        )
+        .unwrap();
+
+    // Pack references the DIRECTORY, exercising member→indexed-file prefix expansion.
+    let pid = store.create_pack("proj", None).unwrap();
+    store
+        .add_pack_paths(&pid, &[dir.path().to_string_lossy().to_string()])
+        .unwrap();
+    assert_eq!(
+        store.stale_pack_paths(&pid).unwrap(),
+        vec![stale_s.clone()],
+        "only the file indexed before its current mtime is stale"
+    );
+
+    // A pack whose only member is the fresh (current) file has nothing stale.
+    let clean = store.create_pack("fresh-only", None).unwrap();
+    store
+        .add_pack_paths(&clean, std::slice::from_ref(&fresh_s))
+        .unwrap();
+    assert!(store.stale_pack_paths(&clean).unwrap().is_empty());
+
+    // A member that no longer exists on disk can't be stat'd → counts as stale.
+    std::fs::remove_file(&stale).unwrap();
+    assert_eq!(store.stale_pack_paths(&pid).unwrap(), vec![stale_s]);
+}

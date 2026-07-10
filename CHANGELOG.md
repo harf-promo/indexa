@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ImpactBreakdown`/`ImpactItem` in `indexa_query`. Surfaced everywhere: web **"Show the math"** table
   under the answer, CLI `indexa ask --explain-savings` (and `--json` `savings`), and an opt-in MCP
   `ask` `explain_savings` param. MCP tool count unchanged (47).
+- **Context Pack staleness — see which members drifted.** `indexa pack show` and the MCP `get_pack`
+  tool now report how many of a pack's **indexed** member files are out of date with the copy on disk
+  (edited since they were last indexed, or deleted). Backed by a new `Store::stale_pack_paths`, which
+  expands each member (file or directory) to its indexed files, stats the live mtime, and keeps the
+  ones no longer current per `chunks_current_for_mtime` — so it catches edits made without a rescan,
+  which `entries.modified_s` (last-scan time) would miss. Computed only on single-pack views (not the
+  pack list). Groundwork for `pack refresh`. MCP tool count unchanged (47).
 
 ### Performance
 
