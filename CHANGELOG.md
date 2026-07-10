@@ -139,6 +139,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Stored XSS + dead buttons in the web UI's classify / weights / packs panels.** Those panels built
+  their action buttons as `onclick="fn(" + JSON.stringify(userPath) + ")"` — the JSON quotes broke out
+  of the double-quoted attribute, so a file/pack path containing `"` (or HTML) could inject markup that
+  ran when the panel rendered, and even benign paths left the buttons half-broken. The buttons are now
+  wired with `addEventListener` off `data-*` indices and the value pulled from the render closure, so no
+  user-controlled string ever enters an HTML attribute. `escapeAttr` also now escapes the single quote
+  (safe in both `'…'` and `"…"` attributes). Fixed alongside: classification **Confirm** always saved
+  "other" (the `<select>` id was built with `CSS.escape(path)` but looked up with a mismatched escape, so
+  the lookup returned null) — it now uses a stable id and saves the chosen category; and "Apply all
+  suggestions" no longer stuffs the entire suggestion array into an attribute.
 - **Web server now rejects cross-origin and DNS-rebinding requests; LAN mode requires a token.** The
   local server (:7620) only had a `localhost` CORS layer — but the state-changing POSTs take query
   params (no JSON body), so they were CORS-"simple": a page you merely *visited* could fire

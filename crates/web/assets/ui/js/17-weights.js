@@ -23,16 +23,23 @@ function renderWeightsList(weights) {
   }
   el.innerHTML = '<table style="width:100%;border-collapse:collapse">'
     + '<tr style="color:var(--muted);font-size:11px"><th style="text-align:left;padding:2px 6px">Kind</th><th style="text-align:right;padding:2px 6px">Weight</th><th style="text-align:left;padding:2px 6px">Target</th><th></th></tr>'
-    + weights.map(function (w) {
+    + weights.map(function (w, i) {
       var color = w.weight > 1 ? 'var(--green)' : w.weight < 1 ? 'var(--red)' : 'var(--muted)';
       return '<tr style="border-top:1px solid var(--border)">'
         + '<td style="padding:3px 6px;color:var(--muted)">' + escapeHtml(w.target_kind) + '</td>'
         + '<td style="padding:3px 6px;text-align:right;color:' + color + '">' + w.weight.toFixed(2) + '</td>'
-        + '<td style="padding:3px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:250px" title="' + escapeHtml(w.target) + '">' + escapeHtml(w.target) + '</td>'
-        + '<td style="padding:3px 6px"><button class="btn-sm btn-danger" style="font-size:10px;padding:1px 6px" title="Delete weight" aria-label="Delete weight" onclick="deleteWeight(' + JSON.stringify(w.target_kind) + ',' + JSON.stringify(w.target) + ')">✕</button></td>'
+        + '<td style="padding:3px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:250px" title="' + escapeAttr(w.target) + '">' + escapeHtml(w.target) + '</td>'
+        + '<td style="padding:3px 6px"><button class="btn-sm btn-danger" style="font-size:10px;padding:1px 6px" title="Delete weight" aria-label="Delete weight" data-del="' + i + '">✕</button></td>'
         + '</tr>';
     }).join('')
     + '</table>';
+  // Wire delete buttons from the closure by index — the target path never enters an attribute.
+  el.querySelectorAll('button[data-del]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var w = weights[parseInt(btn.getAttribute('data-del'), 10)];
+      if (w) deleteWeight(w.target_kind, w.target);
+    });
+  });
 }
 
 function setWeight() {  // eslint-disable-line no-unused-vars
@@ -85,7 +92,7 @@ function suggestWeights() {  // eslint-disable-line no-unused-vars
       var el = document.getElementById('weights-list');
       if (!el) return;
       if (statusEl) statusEl.textContent = suggestions.length + ' suggestion(s) — click Apply to set them.';
-      el.innerHTML = '<div style="margin-bottom:6px"><button class="btn-sm" onclick="applyWeightSuggestions(' + JSON.stringify(suggestions) + ')">Apply all suggestions</button></div>'
+      el.innerHTML = '<div style="margin-bottom:6px"><button class="btn-sm" id="apply-all-weights">Apply all suggestions</button></div>'
         + '<table style="width:100%;border-collapse:collapse">'
         + suggestions.map(function (s) {
           return '<tr style="border-top:1px solid var(--border)">'
@@ -93,6 +100,10 @@ function suggestWeights() {  // eslint-disable-line no-unused-vars
             + '<td style="padding:3px 6px;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:300px">' + escapeHtml(s.path) + '</td>'
             + '</tr>';
         }).join('') + '</table>';
+      // Carry the suggestions via the closure, not a giant JSON blob stuffed into an attribute
+      // (which broke on any path containing a quote and bloated the DOM).
+      var applyBtn = document.getElementById('apply-all-weights');
+      if (applyBtn) applyBtn.addEventListener('click', function () { applyWeightSuggestions(suggestions); });
     })
     .catch(function (e) { if (statusEl) statusEl.textContent = 'Error: ' + e.message; });
 }
