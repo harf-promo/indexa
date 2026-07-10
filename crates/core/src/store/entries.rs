@@ -11,6 +11,12 @@ use rusqlite::{params, OptionalExtension, Transaction};
 /// `(path, parent_path, is_dir, own_chunk_count, queue_state)`.
 pub type CoverageEntry = (String, String, bool, u64, Option<String>);
 
+/// Row cap for the flat treemap/coverage queries — a safety valve so a multi-million-file index
+/// can't materialize an unbounded Vec into a client visualization. Both queries `ORDER BY` a size/
+/// coverage measure DESC so, when the cap bites, they keep the visually dominant rows (not an
+/// arbitrary slice). Callers should treat a returned length at the cap as "truncated to the top N".
+pub(crate) const TREEMAP_ROW_CAP: usize = 500_000;
+
 /// Split a subtree `prefix` into `(exact, child_pattern)` so a delete matches the path
 /// itself and everything strictly under it — but NOT a sibling that merely shares the
 /// string prefix (`/proj` must not match `/projector`). `child_pattern` is wildcard-escaped
@@ -310,12 +316,15 @@ impl Store {
     }
 
     /// Flat list of all entries for building client-side tree visualisations (e.g. treemap).
-    /// Returns `(path, parent_path, is_dir, size_bytes)`. Capped at 500,000 rows.
+    /// Returns `(path, parent_path, is_dir, size_bytes)`. Capped at [`TREEMAP_ROW_CAP`] rows,
+    /// **largest first** — so at whole-computer scale the cap keeps the biggest (visually dominant)
+    /// entries deterministically instead of an arbitrary slice.
     pub fn all_entry_sizes(&self) -> Result<Vec<(String, String, bool, u64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT path, COALESCE(parent_path, ''), kind, size FROM entries LIMIT 500000",
+            "SELECT path, COALESCE(parent_path, ''), kind, size
+             FROM entries ORDER BY size DESC LIMIT ?1",
         )?;
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map([TREEMAP_ROW_CAP as i64], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -334,8 +343,10 @@ impl Store {
     ///   (the treemap builder propagates chunk counts up the tree).
     /// - `queue_state`: the entry's own row in `summary_queue` (`None` when absent).
     ///
-    /// Capped at 500,000 rows. The correlated chunk subquery is acceptable at typical
-    /// index sizes (thousands of files, each resolved in microseconds).
+    /// Capped at [`TREEMAP_ROW_CAP`] rows, **highest chunk count first** — so at whole-computer
+    /// scale the cap keeps the most-covered (visually dominant) cells deterministically instead of
+    /// an arbitrary slice. The correlated chunk subquery is acceptable at typical index sizes
+    /// (thousands of files, each resolved in microseconds).
     pub fn all_coverage_entries(&self) -> Result<Vec<CoverageEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT e.path,
@@ -347,9 +358,9 @@ impl Store {
                     sq.state
              FROM entries e
              LEFT JOIN summary_queue sq ON sq.path = e.path
-             LIMIT 500000",
+             ORDER BY chunk_count DESC LIMIT ?1",
         )?;
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map([TREEMAP_ROW_CAP as i64], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -358,7 +369,15 @@ impl Store {
                 r.get::<_, Option<String>>(4)?,
             ))
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let out: Vec<CoverageEntry> = rows.collect::<Result<Vec<_>, _>>()?;
+        if out.len() >= TREEMAP_ROW_CAP {
+            tracing::warn!(
+                cap = TREEMAP_ROW_CAP,
+                "coverage treemap truncated to the {TREEMAP_ROW_CAP} highest-chunk entries — the \
+                 index has more files than the cap"
+            );
+        }
+        Ok(out)
     }
 
     /// Aggregate coverage statistics for the coverage table view.

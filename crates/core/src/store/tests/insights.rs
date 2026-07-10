@@ -230,3 +230,53 @@ fn weekly_diff_reports_newly_added() {
     assert_eq!(diff.added_count, 1);
     assert!(diff.added.contains(&"/new.txt".to_owned()));
 }
+
+#[test]
+fn coverage_entries_ordered_by_chunk_count_desc() {
+    // G9: the treemap/coverage query orders by chunk count DESC so that, when the row cap bites at
+    // whole-computer scale, the visually dominant (most-covered) files are kept — not an arbitrary
+    // slice. Observable here with a small set: big(5) before mid(3) before small(1).
+    use crate::store::ChunkRecord;
+    let mut store = Store::open_in_memory().unwrap();
+    let now = std::time::SystemTime::now();
+    let files: [(&str, u64); 3] = [("/p/small.rs", 1), ("/p/big.rs", 5), ("/p/mid.rs", 3)];
+    let entries: Vec<Entry> = files
+        .iter()
+        .map(|(p, _)| Entry {
+            path: PathBuf::from(p),
+            kind: EntryKind::File,
+            size: 10,
+            modified: Some(now),
+            hint: None,
+            is_binary: false,
+        })
+        .collect();
+    store.upsert_entries(&entries).unwrap();
+    for (path, n) in files {
+        let chunks: Vec<ChunkRecord> = (0..n)
+            .map(|i| ChunkRecord {
+                entry_path: path.to_string(),
+                seq: i as usize,
+                heading: String::new(),
+                text: format!("c{i}"),
+                language: None,
+                embedding: None,
+                embed_model: None,
+                content_hash: None,
+            })
+            .collect();
+        store.upsert_chunks(&chunks).unwrap();
+    }
+    let file_counts: Vec<u64> = store
+        .all_coverage_entries()
+        .unwrap()
+        .into_iter()
+        .filter(|(_, _, is_dir, _, _)| !is_dir)
+        .map(|(_, _, _, c, _)| c)
+        .collect();
+    assert_eq!(
+        file_counts,
+        vec![5, 3, 1],
+        "coverage entries must come back highest chunk-count first"
+    );
+}
