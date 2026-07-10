@@ -79,7 +79,8 @@ impl IndexaMcp {
         params: Parameters<ListClassificationsParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let ListClassificationsParams { source, limit } = params.0;
-        let limit = limit.unwrap_or(200);
+        // Bound the request so a caller can't ask for an unbounded dump.
+        let limit = limit.unwrap_or(200).clamp(1, 500);
         let store = self.store()?;
         let recs = store
             .list_classifications(source.as_deref(), limit)
@@ -99,8 +100,16 @@ impl IndexaMcp {
                 )
             })
             .collect();
+        // A full page means more rows may exist beyond the cap; say so honestly.
+        let more = if recs.len() == limit {
+            format!(
+                "\n\n(Showing first {limit} — raise `limit` or filter by `source` to see more.)"
+            )
+        } else {
+            String::new()
+        };
         Ok(ok_text(format!(
-            "{} classification(s):\n\n{}",
+            "{} classification(s):\n\n{}{more}",
             recs.len(),
             lines.join("\n")
         )))
@@ -118,9 +127,11 @@ impl IndexaMcp {
         params: Parameters<ListFilesByCategoryParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let ListFilesByCategoryParams { category, limit } = params.0;
+        // Bound the request so a caller can't ask for an unbounded dump.
+        let limit = limit.unwrap_or(200).clamp(1, 500);
         let store = self.store()?;
         let recs = store
-            .classifications_in_category(&category, limit.unwrap_or(200))
+            .classifications_in_category(&category, limit)
             .map_err(mcp_err)?;
         if recs.is_empty() {
             return Ok(ok_text(format!("No files classified as \"{category}\".")));
@@ -136,8 +147,14 @@ impl IndexaMcp {
                 )
             })
             .collect();
+        // A full page means more rows may exist beyond the cap; say so honestly.
+        let more = if recs.len() == limit {
+            format!("\n\n(Showing first {limit} — raise `limit` to see more.)")
+        } else {
+            String::new()
+        };
         Ok(ok_text(format!(
-            "{} file(s) classified as \"{category}\":\n\n{}",
+            "{} file(s) classified as \"{category}\":\n\n{}{more}",
             recs.len(),
             lines.join("\n")
         )))

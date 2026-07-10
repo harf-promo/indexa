@@ -1000,6 +1000,55 @@ mod tests {
         assert!(mcp.get_prompt_inner("does-not-exist", None).is_err());
     }
 
+    #[tokio::test]
+    async fn get_chunk_context_clamps_radius_to_a_bounded_window() {
+        // FM-3: a huge `radius` must not dump the whole file — it's clamped to a bounded
+        // neighbor window (2*25 + 1 = 51 chunks around the center seq), not all 100.
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let chunks: Vec<indexa_core::store::ChunkRecord> = (0..100)
+                .map(|i| indexa_core::store::ChunkRecord {
+                    entry_path: "/big.rs".into(),
+                    seq: i,
+                    heading: String::new(),
+                    text: format!("chunk {i}"),
+                    language: None,
+                    embedding: None,
+                    embed_model: None,
+                    content_hash: None,
+                })
+                .collect();
+            store.upsert_chunks(&chunks).unwrap();
+        }
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+        let res = mcp
+            .get_chunk_context(Parameters(GetChunkContextParams {
+                path: "/big.rs".into(),
+                seq: Some(50),
+                radius: Some(9999),
+            }))
+            .await
+            .unwrap();
+        let text = res
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.starts_with("51 chunk(s) from /big.rs"),
+            "radius should clamp to a 51-chunk window; got first line: {:?}",
+            text.lines().next().unwrap_or("")
+        );
+    }
+
     #[test]
     fn summary_resource_redacts_secrets() {
         use indexa_core::store::SummaryRecord;

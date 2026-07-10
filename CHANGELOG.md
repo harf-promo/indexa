@@ -84,6 +84,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP tools could flood an agent's context and gave a few misleading responses.** `dependencies`,
+  `insights_duplicates`, `list_classifications`, and `list_files_by_category` now cap their output
+  (with a truthful "showing first N" / "N of M" header), and `get_chunk_context`'s `radius` is clamped
+  so a huge value can't dump an entire large file. Behavior fixes on `ask`: `catalog:true` now defers
+  to `synthesize:false` (the richer retrieval-only slice), matching its documented precedence instead
+  of silently winning; the "pass the same session_id to follow up" footer prints only when the turn is
+  actually recorded (synthesized answers), not on retrieval-only turns that store nothing; and `search`
+  with `mode:"dense"` returns an explicit "embedder unavailable" error instead of a misleading
+  "No results" when the embedder is down. `search_pack`/`export_pack` now record savings telemetry
+  like the other retrieval tools. Tool count unchanged (47).
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
   open to the LLM reranker for every user who enabled it: candle's DeBERTa loader read the transformer
   at the safetensors root, but HF `DebertaV2ForSequenceClassification` checkpoints nest it under a
