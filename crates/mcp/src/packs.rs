@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use indexa_core::{config::HybridMode, store::Store};
 
-use crate::{mcp_err, ok_text, IndexaMcp};
+use crate::{mcp_err, mcp_invalid, ok_text, IndexaMcp};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetPackParams {
@@ -123,7 +123,7 @@ impl IndexaMcp {
         let pack = store
             .pack_by_name(&name)
             .map_err(mcp_err)?
-            .ok_or_else(|| mcp_err(format!("no pack named \"{name}\"")))?;
+            .ok_or_else(|| mcp_invalid(format!("no pack named \"{name}\"")))?;
         let paths = store.pack_paths(&pack.id).map_err(mcp_err)?;
         if paths.is_empty() {
             return Ok(ok_text(format!(
@@ -157,11 +157,17 @@ impl IndexaMcp {
             changed_since,
             category,
         } = params.0;
+        let fmt = format.as_deref().unwrap_or("xml");
+        if !matches!(fmt, "xml" | "md" | "markdown" | "json") {
+            return Err(mcp_invalid(format!(
+                "invalid format '{fmt}' — expected one of: xml, md, markdown, json"
+            )));
+        }
         let store = self.store()?;
         let buf = export_pack_body(
             &store,
             &name,
-            format.as_deref().unwrap_or("xml"),
+            fmt,
             depth,
             signatures.unwrap_or(false),
             changed_since.as_deref(),
@@ -206,7 +212,7 @@ impl IndexaMcp {
         let pack = store
             .pack_by_name(&name)
             .map_err(mcp_err)?
-            .ok_or_else(|| mcp_err(format!("no pack named \"{name}\"")))?;
+            .ok_or_else(|| mcp_invalid(format!("no pack named \"{name}\"")))?;
         let count = paths.len();
         store.add_pack_paths(&pack.id, &paths).map_err(mcp_err)?;
         Ok(ok_text(format!(
@@ -227,7 +233,7 @@ impl IndexaMcp {
         let pack = store
             .pack_by_name(&name)
             .map_err(mcp_err)?
-            .ok_or_else(|| mcp_err(format!("no pack named \"{name}\"")))?;
+            .ok_or_else(|| mcp_invalid(format!("no pack named \"{name}\"")))?;
         let count = paths.len();
         store.remove_pack_paths(&pack.id, &paths).map_err(mcp_err)?;
         Ok(ok_text(format!(
@@ -248,7 +254,7 @@ impl IndexaMcp {
         let pack = store
             .pack_by_name(&name)
             .map_err(mcp_err)?
-            .ok_or_else(|| mcp_err(format!("no pack named \"{name}\"")))?;
+            .ok_or_else(|| mcp_invalid(format!("no pack named \"{name}\"")))?;
         store.delete_pack(&pack.id).map_err(mcp_err)?;
         Ok(ok_text(format!("Deleted pack \"{name}\".")))
     }
@@ -273,7 +279,7 @@ impl IndexaMcp {
         let pack = store
             .pack_by_name(&name)
             .map_err(mcp_err)?
-            .ok_or_else(|| mcp_err(format!("no pack named \"{name}\"")))?;
+            .ok_or_else(|| mcp_invalid(format!("no pack named \"{name}\"")))?;
         let paths = store.pack_paths(&pack.id).map_err(mcp_err)?;
         if paths.is_empty() {
             return Ok(ok_text(format!("Pack \"{name}\" is empty.")));

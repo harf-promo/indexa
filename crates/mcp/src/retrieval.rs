@@ -12,7 +12,8 @@ use indexa_core::{config::HybridMode, store::Store};
 use indexa_query::{PriorTurn, QaConfig};
 
 use crate::{
-    mcp_err, ok_text, parse_hybrid_mode, path_within_roots, record_usage, IndexaMcp, READ_FILE_CAP,
+    mcp_err, mcp_invalid, ok_text, parse_hybrid_mode, path_within_roots, record_usage, IndexaMcp,
+    READ_FILE_CAP,
 };
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -148,7 +149,7 @@ impl IndexaMcp {
         } = params.0;
         let limit = limit.unwrap_or(20).min(100);
         let scope = scope.as_deref().filter(|s| !s.is_empty());
-        let mode = parse_hybrid_mode(mode.as_deref());
+        let mode = parse_hybrid_mode(mode.as_deref())?;
 
         // Try to embed the query for the dense arm; fall back to sparse if the embedder is
         // unavailable or the index has no embeddings.
@@ -239,6 +240,11 @@ impl IndexaMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let GetSummaryParams { path, tier } = params.0;
         let tier = tier.as_deref().unwrap_or("l1").to_lowercase();
+        if !matches!(tier.as_str(), "l0" | "l1" | "l2") {
+            return Err(mcp_invalid(format!(
+                "invalid tier '{tier}' — expected one of: l0, l1, l2"
+            )));
+        }
 
         if tier == "l2" {
             return self.read_file_inner(&path, 0, "get_summary");
@@ -385,13 +391,18 @@ impl IndexaMcp {
             cfg.top_k = k.min(100);
         }
         if let Some(m) = mode.as_deref() {
-            cfg.mode = parse_hybrid_mode(Some(m));
+            cfg.mode = parse_hybrid_mode(Some(m))?;
         }
         cfg.scope = scope.filter(|s| !s.is_empty());
         if let Some(r) = rerank {
             cfg.rerank = r;
         }
         if let Some(b) = rerank_backend {
+            if !matches!(b.as_str(), "llm" | "cross-encoder") {
+                return Err(mcp_invalid(format!(
+                    "invalid rerank_backend '{b}' — expected one of: llm, cross-encoder"
+                )));
+            }
             cfg.rerank_backend = b;
         }
 

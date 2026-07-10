@@ -13,7 +13,7 @@ use serde::Deserialize;
 use indexa_core::decisions::{self, templates::render_question, DecisionType};
 use indexa_core::store::DecisionRecord;
 
-use crate::{mcp_err, ok_text, IndexaMcp};
+use crate::{mcp_err, mcp_invalid, ok_text, IndexaMcp};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListOpenDecisionsParams {
@@ -180,7 +180,7 @@ impl IndexaMcp {
         let d = store
             .decision_by_id(id)
             .map_err(mcp_err)?
-            .ok_or_else(|| mcp_err(format!("no decision with id {id}")))?;
+            .ok_or_else(|| mcp_invalid(format!("no decision with id {id}")))?;
         let mut out = format_question(&render_question(&d));
         out.push_str(&match d.status.as_str() {
             "open" => "Status: open — awaiting an answer.\n".to_owned(),

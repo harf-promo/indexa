@@ -84,6 +84,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP tools silently coerced unknown enum values to a default.** `ask`/`search`/`explain_retrieval`
+  `mode`, `get_summary` `tier`, `ask` `rerank_backend`, and `export_pack` `format` all fell through to
+  their default on any unrecognized value — so a `mode:"dnese"` typo ran a full RRF search the caller
+  never asked for, with no signal. Unknown values now return a JSON-RPC `-32602 invalid_params` naming
+  the accepted set. Internal failures also render their full `anyhow` cause chain (so an agent sees
+  *"open index: unable to open database file"* instead of just *"open index"*), and pack/decision
+  "not found" errors are reported as `invalid_params` (a caller mistake) rather than an internal error.
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
   open to the LLM reranker for every user who enabled it: candle's DeBERTa loader read the transformer
   at the safetensors root, but HF `DebertaV2ForSequenceClassification` checkpoints nest it under a
