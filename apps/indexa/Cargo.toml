@@ -40,3 +40,5 @@ indexa-update = { path = "../../crates/update" }
 # Already in the tree (via indexa-update et al.); named directly so the status
 # version-skew test can construct `semver::Version` values for `Skew` variants.
 semver = { workspace = true }
+# Temp on-disk index for command-level tests (e.g. the snapshot-export redaction test).
+tempfile = { workspace = true }
