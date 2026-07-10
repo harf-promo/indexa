@@ -79,9 +79,13 @@ function subscribeJob(jobId, path, kind) {
         // Post-completion guidance for deep/index jobs: toast + welcome-panel update.
         if (j.kind === 'deep' || j.kind === 'index') {
           var folderName = (j.path || '').split('/').pop() || j.path || 'folder';
-          toast('✓ Context ready for “' + escapeHtml(folderName) + '” — ' +
-            '<a href=”#” onclick=”switchTab(\'chat\');return false;” style=”color:var(--accent)”>Ask a question →</a>', 'info');
-          if (typeof onContextReady === 'function') onContextReady(folderName);
+          // Real action button (the old inline <a> used smart quotes AND was escaped by toast, so
+          // it rendered as inert text). Pass the folder name raw — toast escapes the message itself.
+          toast('✓ Context ready for “' + folderName + '”', 'info', {
+            label: 'Ask a question →',
+            onClick: function() { switchTab('chat'); }
+          });
+          if (typeof onContextReady === 'function') onContextReady(folderName, j.path);
         }
 
       } else if (ev.type === 'failed') {
@@ -129,7 +133,11 @@ function subscribeJob(jobId, path, kind) {
 
     fetch('/api/jobs/' + jobId).then(function(r) {
       if (r.status === 404) {
-        // Server evicted the job (60 s after done)
+        // Server evicted the job (60 s after it finished). It completed — mark it terminal and
+        // stop tracking it so the row doesn't hang on "reconnecting" forever.
+        if (j.status !== 'done' && j.status !== 'failed') j.status = 'done';
+        _removeActiveJob(jobId);
+        _markDirty(jobId);
         return;
       }
       const retries = j._retries || 0;

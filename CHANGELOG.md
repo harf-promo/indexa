@@ -84,6 +84,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Web UI onboarding / jobs / map papercuts.** The "Context ready" toast's "Ask a question →" link was
+  built with smart quotes *and* HTML-escaped by `toast()`, so it rendered as inert text — `toast()` now
+  takes an optional action button (a real element wired with `addEventListener`), used here and by the
+  "job started" toast (which no longer yanks you to the Activity tab — it offers "View activity"
+  instead). The first-run "Context ready" panel's **Export** button now exports the folder that just
+  finished (it exported nothing before), and its **dismiss** restores the welcome panel instead of
+  blanking it. An evicted job (404 after completion) is now marked terminal instead of hanging on
+  "reconnecting"; the treemap root-picker removes its stale row before re-rendering (pickers no longer
+  stack up); and the Coverage map resets its cache flag on a load error so it actually retries.
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
   open to the LLM reranker for every user who enabled it: candle's DeBERTa loader read the transformer
   at the safetensors root, but HF `DebertaV2ForSequenceClassification` checkpoints nest it under a

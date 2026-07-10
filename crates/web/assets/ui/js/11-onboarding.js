@@ -43,21 +43,32 @@ async function detectEmptyAndOnboard() {
    deep/index job finishes. Replaces the default welcome copy with action prompts.
    Called from the job SSE handler (04-jobs-views.js) on kind=deep/index done.
    Self-dismisses after 10 s or on any user action. */
-function onContextReady(folderName) {
+function onContextReady(folderName, folderPath) {
   var def = document.getElementById('welcome-default');
   if (!def || def.hidden) return; // already viewing something else or onboarding
+  // Restore the panel's real welcome content on dismiss, instead of leaving it blank.
+  var original = def.innerHTML;
+  var restore = function() {
+    var el = document.getElementById('welcome-default');
+    if (el) el.innerHTML = original;
+  };
   def.innerHTML =
     '<h2>Context ready! ✓</h2>' +
     '<p>Deep context for <strong>' + escapeHtml(folderName) + '</strong> is built.' +
     ' Try one of these:</p>' +
     '<div class="onboard-actions" style="flex-direction:column;align-items:flex-start;gap:8px">' +
-    '<button class="onboard-cta" onclick="switchTab(\'chat\');this.closest(\'#welcome-default\').innerHTML=\'\'" >' + ICO_CHAT + ' Ask a question about your files</button>' +
-    '<button class="btn-sm" onclick="doExport(\'\',\'xml\')" style="margin-left:0">' + ICO_DOWNLOAD + ' Export context for your AI tool</button>' +
-    '<button class="btn-sm" onclick="this.closest(\'#welcome-default\').innerHTML=\'\'" style="margin-left:0">Browse folders →</button>' +
+    '<button class="onboard-cta" data-act="ask">' + ICO_CHAT + ' Ask a question about your files</button>' +
+    '<button class="btn-sm" data-act="export" style="margin-left:0">' + ICO_DOWNLOAD + ' Export context for your AI tool</button>' +
+    '<button class="btn-sm" data-act="dismiss" style="margin-left:0">Browse folders →</button>' +
     '</div>';
-  // Auto-dismiss after 10 s (clear the completion copy, don't re-flash the full onboarding)
+  // Wire actions off the closure — the Export CTA exports THIS folder (not the whole index),
+  // and dismiss restores the welcome rather than blanking it.
+  def.querySelector('[data-act="ask"]').addEventListener('click', function() { switchTab('chat'); restore(); });
+  def.querySelector('[data-act="export"]').addEventListener('click', function() { doExport(folderPath || '', 'xml'); });
+  def.querySelector('[data-act="dismiss"]').addEventListener('click', restore);
+  // Auto-dismiss after 10 s: restore the welcome (don't re-flash the full onboarding).
   setTimeout(function() {
     var el = document.getElementById('welcome-default');
-    if (el && el.querySelector('.onboard-cta')) el.innerHTML = '';
+    if (el && el.querySelector('.onboard-cta')) restore();
   }, 10000);
 }
