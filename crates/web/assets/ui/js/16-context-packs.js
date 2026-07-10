@@ -31,17 +31,28 @@ function renderPackList(packs) {
     return;
   }
   if (empty) empty.style.display = 'none';
-  list.innerHTML = packs.map(function (p) {
+  list.innerHTML = packs.map(function (p, i) {
     var desc = p.description ? ' <span style="color:var(--muted);font-size:11px">— ' + escapeHtml(p.description) + '</span>' : '';
-    return '<div class="key-row" style="justify-content:space-between;flex-wrap:wrap;gap:4px" data-pack-name="' + escapeHtml(p.name) + '">'
+    return '<div class="key-row" style="justify-content:space-between;flex-wrap:wrap;gap:4px" data-pack-name="' + escapeAttr(p.name) + '">'
       + '<span style="font-size:13px"><strong>' + escapeHtml(p.name) + '</strong>' + desc + ' <span style="color:var(--muted);font-size:11px">(' + p.path_count + ' path' + (p.path_count === 1 ? '' : 's') + ')</span></span>'
       + '<span style="display:flex;gap:4px">'
-      + '<button class="btn-sm" style="font-size:11px" onclick="openPackEditor(' + JSON.stringify(p.name) + ')">Edit</button>'
-      + '<button class="btn-sm" style="font-size:11px" onclick="quickExportPack(' + JSON.stringify(p.name) + ')">Export</button>'
-      + '<button class="btn-sm btn-danger" style="font-size:11px" onclick="deletePack(' + JSON.stringify(p.name) + ')">Delete</button>'
+      + '<button class="btn-sm" style="font-size:11px" data-pack-act="edit" data-idx="' + i + '">Edit</button>'
+      + '<button class="btn-sm" style="font-size:11px" data-pack-act="export" data-idx="' + i + '">Export</button>'
+      + '<button class="btn-sm btn-danger" style="font-size:11px" data-pack-act="delete" data-idx="' + i + '">Delete</button>'
       + '</span>'
       + '</div>';
   }).join('');
+  // Wire pack actions from the closure by index — the pack name never enters an attribute.
+  list.querySelectorAll('button[data-pack-act]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var p = packs[parseInt(btn.getAttribute('data-idx'), 10)];
+      if (!p) return;
+      var act = btn.getAttribute('data-pack-act');
+      if (act === 'edit') openPackEditor(p.name);
+      else if (act === 'export') quickExportPack(p.name);
+      else if (act === 'delete') deletePack(p.name);
+    });
+  });
 }
 
 function createPack() {  // eslint-disable-line no-unused-vars
@@ -104,12 +115,19 @@ function refreshPackEditorPaths(name) {
         container.innerHTML = '<span style="color:var(--muted);font-size:12px">No paths yet — add one below.</span>';
         return;
       }
-      container.innerHTML = paths.map(function (p) {
+      container.innerHTML = paths.map(function (p, i) {
         return '<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;gap:4px">'
-          + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" title="' + escapeHtml(p) + '">' + escapeHtml(p) + '</span>'
-          + '<button class="btn-sm btn-danger" style="font-size:10px;padding:1px 6px;flex-shrink:0" title="Remove path" aria-label="Remove path" onclick="removePackPath(' + JSON.stringify(p) + ')">✕</button>'
+          + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" title="' + escapeAttr(p) + '">' + escapeHtml(p) + '</span>'
+          + '<button class="btn-sm btn-danger" style="font-size:10px;padding:1px 6px;flex-shrink:0" title="Remove path" aria-label="Remove path" data-remove-idx="' + i + '">✕</button>'
           + '</div>';
       }).join('');
+      // Wire remove buttons from the closure by index — the path never enters an attribute.
+      container.querySelectorAll('button[data-remove-idx]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var p = paths[parseInt(btn.getAttribute('data-remove-idx'), 10)];
+          if (p !== undefined) removePackPath(p);
+        });
+      });
     })
     .catch(function () {});
 }
