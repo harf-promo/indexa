@@ -40,7 +40,10 @@ fn indexa_exe() -> Result<std::path::PathBuf, ErrorData> {
 #[tool_router(router = router_admin, vis = "pub(crate)")]
 impl IndexaMcp {
     /// Index statistics (entry + chunk counts).
-    #[tool(description = "Return index statistics: total indexed entries and embedded chunks.")]
+    #[tool(
+        description = "Return index statistics: total indexed entries and embedded chunks.",
+        annotations(read_only_hint = true)
+    )]
     pub(crate) async fn get_stats(&self) -> Result<CallToolResult, ErrorData> {
         let store = self.store()?;
         let entries = store.entry_count().map_err(mcp_err)?;
@@ -96,7 +99,8 @@ impl IndexaMcp {
         description = "List the file formats Indexa understands, each with its support level \
                        (full = text extracted, metadata = listing/EXIF only, stub = recognised \
                        but not extracted, textfallback = sniffed as text) and MIME type. Lets an \
-                       agent check whether a file type will be indexed before adding it to scope."
+                       agent check whether a file type will be indexed before adding it to scope.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn list_supported_formats(&self) -> Result<CallToolResult, ErrorData> {
         let formats = indexa_parsers::registry::Registry::new().supported_formats();
@@ -121,7 +125,8 @@ impl IndexaMcp {
         description = "Return Indexa's effective configuration: embedding + describer models, \
                        retrieval defaults (mode, top_k, agentic), chunking, scan ignore rules, \
                        and parser caps. API keys are NEVER included. Read-only — use it to \
-                       understand how retrieval is tuned before asking or searching."
+                       understand how retrieval is tuned before asking or searching.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn query_config(&self) -> Result<CallToolResult, ErrorData> {
         let c = &self.config;
@@ -168,7 +173,8 @@ impl IndexaMcp {
 
     /// Garbage-collect orphaned rows (chunks/summaries left behind after a root was removed).
     #[tool(
-        description = "Garbage-collect orphaned index rows — chunks and summaries left behind after their files/roots were removed. Returns how many rows were pruned. Safe: only removes rows with no matching entry."
+        description = "Garbage-collect orphaned index rows — chunks and summaries left behind after their files/roots were removed. Returns how many rows were pruned. Safe: only removes rows with no matching entry.",
+        annotations(destructive_hint = true)
     )]
     pub(crate) async fn prune(&self) -> Result<CallToolResult, ErrorData> {
         let mut store = self.store()?;
@@ -189,7 +195,8 @@ impl IndexaMcp {
         description = "Start an `indexa index <path>` run: scan files, compute embeddings, \
                        and generate summaries. Runs as a background subprocess and returns \
                        when indexing is complete. Use before asking questions about new or \
-                       changed files."
+                       changed files.",
+        annotations(destructive_hint = true)
     )]
     pub(crate) async fn trigger_index(
         &self,
@@ -246,7 +253,8 @@ impl IndexaMcp {
                        to persist learned facts (design decisions, bug root-causes, meeting \
                        outcomes) that should survive the session. The pack must already exist \
                        — call `create_pack` first. Re-submitting the same title+body is \
-                       idempotent. Notes are redacted on `export_pack` like any other file."
+                       idempotent. Notes are redacted on `export_pack` like any other file.",
+        annotations(destructive_hint = true)
     )]
     pub(crate) async fn add_note(
         &self,

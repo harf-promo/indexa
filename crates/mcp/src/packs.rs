@@ -81,7 +81,8 @@ impl IndexaMcp {
         description = "List all Context Packs — named, cross-directory context bundles. \
                        Returns each pack's name, description, and path count. \
                        Use `get_pack` to see the paths inside a specific pack, \
-                       or `export_pack` to render its content for an AI tool."
+                       or `export_pack` to render its content for an AI tool.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn list_packs(&self) -> Result<CallToolResult, ErrorData> {
         let store = self.store()?;
@@ -112,7 +113,8 @@ impl IndexaMcp {
     /// Show the paths inside a named Context Pack.
     #[tool(
         description = "Show the file/directory paths contained in a named Context Pack. \
-                       Use `export_pack` to render the full summarised content."
+                       Use `export_pack` to render the full summarised content.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn get_pack(
         &self,
@@ -143,7 +145,8 @@ impl IndexaMcp {
                        also Markdown or JSON). Each path in the pack is rendered with its \
                        hierarchical summary tree. Optionally slice with `changed_since` \
                        (e.g. '7d') and/or `category` (e.g. 'code'). Ideal for giving an AI tool \
-                       focused context on a specific topic (e.g. 'Auth', 'Tax 2025', 'Client X')."
+                       focused context on a specific topic (e.g. 'Auth', 'Tax 2025', 'Client X').",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn export_pack(
         &self,
@@ -175,7 +178,8 @@ impl IndexaMcp {
     /// Create a new (empty) Context Pack.
     #[tool(
         description = "Create a new named Context Pack. Packs are cross-directory context \
-                       bundles you can populate with `add_pack_paths` and export for any AI tool."
+                       bundles you can populate with `add_pack_paths` and export for any AI tool.",
+        annotations(destructive_hint = true)
     )]
     pub(crate) async fn create_pack(
         &self,
@@ -195,7 +199,8 @@ impl IndexaMcp {
     /// Add paths to an existing Context Pack.
     #[tool(
         description = "Add one or more file or directory paths to a named Context Pack. \
-                       Duplicate paths are silently ignored (idempotent)."
+                       Duplicate paths are silently ignored (idempotent).",
+        annotations(destructive_hint = true)
     )]
     pub(crate) async fn add_pack_paths(
         &self,
@@ -216,8 +221,11 @@ impl IndexaMcp {
     }
 
     /// Remove paths from a Context Pack.
-    #[tool(description = "Remove specific paths from a named Context Pack. \
-                       Non-existent paths are silently ignored. Indexed files are not deleted.")]
+    #[tool(
+        description = "Remove specific paths from a named Context Pack. \
+                       Non-existent paths are silently ignored. Indexed files are not deleted.",
+        annotations(destructive_hint = true)
+    )]
     pub(crate) async fn remove_pack_paths(
         &self,
         params: Parameters<PackPathsParams>,
@@ -237,8 +245,11 @@ impl IndexaMcp {
     }
 
     /// Delete a Context Pack (indexed files are untouched).
-    #[tool(description = "Delete a Context Pack and all its path associations. \
-                       Does not remove indexed files from the index.")]
+    #[tool(
+        description = "Delete a Context Pack and all its path associations. \
+                       Does not remove indexed files from the index.",
+        annotations(destructive_hint = true)
+    )]
     pub(crate) async fn delete_pack(
         &self,
         params: Parameters<DeletePackMcpParams>,
@@ -258,7 +269,8 @@ impl IndexaMcp {
         description = "Search chunk content restricted to the file/directory paths inside a \
                        named Context Pack. Returns matching chunks with path, heading, and snippet; \
                        each hit shows `#N` (the chunk seq) to pass to `get_chunk_context`. \
-                       Ideal for querying focused topic bundles (e.g. 'Auth', 'Tax 2025')."
+                       Ideal for querying focused topic bundles (e.g. 'Auth', 'Tax 2025').",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn search_pack(
         &self,

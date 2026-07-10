@@ -103,7 +103,8 @@ impl IndexaMcp {
                        duplicate clusters needing a canonical copy). These are questions Indexa \
                        needs a human judgment on. You may relay a question to your user and \
                        answer on their behalf with answer_decision. Filter by decision_type: \
-                       `classification` or `duplicate`."
+                       `classification` or `duplicate`.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn list_open_decisions(
         &self,
@@ -169,7 +170,8 @@ impl IndexaMcp {
         description = "Show one Decision Ledger question in full: rendered title/detail, the \
                        options (answer with one of the `value` strings), current status, applied \
                        effects, and its revision-chain links (re-ask parent / superseding \
-                       revision)."
+                       revision).",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn get_decision(
         &self,
@@ -215,7 +217,8 @@ impl IndexaMcp {
                        The answer is recorded durably with provenance (source: user) and applies \
                        immediately — e.g. confirming a classification writes the category; \
                        picking a duplicate canonical down-weights the other copies to 0 in \
-                       search."
+                       search.",
+        annotations(destructive_hint = true)
     )]
     pub(crate) async fn answer_decision(
         &self,
@@ -236,7 +239,8 @@ impl IndexaMcp {
     #[tool(
         description = "Dismiss an open Decision Ledger question without answering it. Sticky \
                        for the same evidence: the question returns only if the evidence behind \
-                       it changes (e.g. the folder's contents shift)."
+                       it changes (e.g. the folder's contents shift).",
+        annotations(destructive_hint = true)
     )]
     pub(crate) async fn dismiss_decision(
         &self,
@@ -255,7 +259,8 @@ impl IndexaMcp {
     #[tool(
         description = "Show every Decision Ledger revision recorded for a subject (a path or \
                        duplicate-cluster key), chronological, with status and superseded \
-                       markers — the audit trail of how an answer evolved."
+                       markers — the audit trail of how an answer evolved.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn decision_history(
         &self,

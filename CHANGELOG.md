@@ -82,6 +82,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   brute-force-scanned every `ask`/`search`/`explain_retrieval`; it now builds and caches the same
   watermark-keyed index the web server does. Set `ann = false` to force exact brute-force everywhere.
 
+### Changed
+
+- **MCP tools now carry read-only / destructive annotations.** All 47 MCP tools declare a
+  `read_only_hint` (the retrieval / graph / insights / list tools) or `destructive_hint` (pack
+  create/add/remove/delete, `prune`, `add_note`, `trigger_index`, classification confirm/ignore,
+  weight set/delete, decision answer/dismiss) via rmcp's `ToolAnnotations`, so MCP clients can
+  auto-approve safe reads and gate writes. Version jargon ("v0.8", "v0.10", "D2 code-graph:") was
+  stripped from tool descriptions to save agent tokens. Tool count is unchanged (47).
+
 ### Fixed
 
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
