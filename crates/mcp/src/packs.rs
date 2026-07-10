@@ -38,6 +38,10 @@ pub struct ExportPackParams {
     /// Combine with `changed_since` to intersect. Omit for no category filter.
     #[serde(default)]
     pub category: Option<String>,
+    /// Reindex stale members (files changed on disk since last indexed) before exporting.
+    /// Best-effort: a reindex failure is noted in the response but does not fail the export.
+    #[serde(default)]
+    pub refresh: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -166,8 +170,26 @@ impl IndexaMcp {
             signatures,
             changed_since,
             category,
+            refresh,
         } = params.0;
         let store = self.store()?;
+        // Best-effort reindex of stale members before exporting. Fully non-fatal: any lookup or
+        // spawn failure here is silently skipped and `export_pack_body` below reports the real
+        // error (e.g. "no pack named") — the caller still gets a usable export either way.
+        if refresh.unwrap_or(false) {
+            if let Ok(Some(pack)) = store.pack_by_name(&name) {
+                let stale = store.stale_pack_paths(&pack.id).unwrap_or_default();
+                if !stale.is_empty() {
+                    if let Ok(exe) = crate::admin::indexa_exe() {
+                        let _ = tokio::process::Command::new(exe)
+                            .arg("index")
+                            .args(&stale)
+                            .output()
+                            .await;
+                    }
+                }
+            }
+        }
         let buf = export_pack_body(
             &store,
             &name,
@@ -378,6 +400,8 @@ pub(crate) fn export_pack_body(
             "pack \"{name}\" is empty — add paths first with: indexa pack add \"{name}\" <paths…>"
         )));
     }
+    // Freshness: same best-effort stat check `get_pack` surfaces (a stat error must not fail export).
+    let stale_count = store.stale_pack_paths(&pack.id).unwrap_or_default().len();
 
     // Relational slice (v0.58/v0.60): same filters as CLI `pack export` and web `/api/packs/:name/export`,
     // shared via build_export_filter. `None` ⇒ export the whole pack (byte-identical to before).
@@ -390,6 +414,8 @@ pub(crate) fn export_pack_body(
         buf.push_str(&indexa_core::text::xml_escape_attr(name));
         buf.push_str("\" generated=\"");
         buf.push_str(&now);
+        buf.push_str("\" stale_files=\"");
+        buf.push_str(&stale_count.to_string());
         buf.push_str("\">\n");
     }
 

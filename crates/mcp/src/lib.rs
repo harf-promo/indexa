@@ -280,7 +280,7 @@ impl ServerHandler for IndexaMcp {
 
     // ── Resources (read-only index artifacts) ──────────────────────────────────
     // Hand-written (resources have no router macro); the inner methods live in
-    // `resources.rs`. Tools stay the source of truth for the 46-tool golden list —
+    // `resources.rs`. Tools stay the source of truth for the 47-tool golden list —
     // resources/prompts are a separate protocol surface and don't affect it.
 
     async fn list_resources(
@@ -884,6 +884,77 @@ mod tests {
             }))
             .await;
         assert!(dup.is_err(), "duplicate pack name must be rejected");
+    }
+
+    /// Mirrors `dummy_chunk_embedded` in indexa-core's own store tests — embedded (so it counts
+    /// toward `chunks_current_for_mtime`) and non-null `language` (so `code_chunks_under`, the
+    /// `--signatures` export path, picks it up without needing a summary fixture).
+    fn dummy_chunk_embedded(path: &str, text: &str) -> indexa_core::store::ChunkRecord {
+        indexa_core::store::ChunkRecord {
+            entry_path: path.to_owned(),
+            seq: 0,
+            heading: String::new(),
+            text: text.to_owned(),
+            language: Some("rust".to_owned()),
+            embedding: Some(vec![0.1, 0.2, 0.3]),
+            embed_model: Some("test".to_owned()),
+            content_hash: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn export_pack_reports_stale_files_count_in_header() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        let dbpath = dbdir.path().join("idx.db");
+
+        let file = dbdir.path().join("a.rs");
+        std::fs::write(&file, b"fn foo() {}").unwrap();
+        let file_s = file.to_string_lossy().to_string();
+
+        let mut store = Store::open(&dbpath).unwrap();
+        store
+            .upsert_chunks(&[dummy_chunk_embedded(&file_s, "fn foo() {}")])
+            .unwrap();
+        // Pin indexed_at to the epoch — long before the file's real mtime — so it reads stale.
+        store
+            .db_connection()
+            .execute(
+                "UPDATE chunks SET indexed_at = 1 WHERE entry_path = ?1",
+                rusqlite::params![file_s],
+            )
+            .unwrap();
+        let pack_id = store.create_pack("code", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, std::slice::from_ref(&file_s))
+            .unwrap();
+        drop(store);
+
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let res = mcp
+            .export_pack(Parameters(ExportPackParams {
+                name: "code".into(),
+                format: None,
+                depth: None,
+                signatures: Some(true),
+                changed_since: None,
+                category: None,
+                refresh: None,
+            }))
+            .await;
+        assert!(res.is_ok(), "export should succeed: {res:?}");
+        let body = text_of(res.unwrap());
+        assert!(
+            body.contains("stale_files=\"1\""),
+            "expected stale_files=\"1\" in the export header, got: {body}"
+        );
     }
 
     #[tokio::test]
