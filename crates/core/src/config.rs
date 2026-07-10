@@ -242,6 +242,27 @@ pub enum ChunkStrategy {
     Semantic,
 }
 
+impl ChunkStrategy {
+    /// An honesty note when the configured strategy is **not actually honored** yet. `structure`
+    /// (default) and `fixed` both run the word-chunker with the configured size/overlap; `recursive`
+    /// (sentence/paragraph) and `semantic` (late chunking) are unbuilt and silently fall back to
+    /// structure chunking. Surfaced by `doctor` and MCP `query_config` so a user who sets one of the
+    /// forward-looking values isn't misled into thinking it took effect.
+    pub fn unimplemented_note(&self) -> Option<&'static str> {
+        match self {
+            ChunkStrategy::Structure | ChunkStrategy::Fixed => None,
+            ChunkStrategy::Recursive => Some(
+                "chunking strategy 'recursive' is not implemented yet — using structure chunking \
+                 (size/overlap still apply)",
+            ),
+            ChunkStrategy::Semantic => Some(
+                "chunking strategy 'semantic' (late chunking) is not implemented yet — using \
+                 structure chunking (size/overlap still apply)",
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChunkingConfig {
@@ -1055,5 +1076,14 @@ overlap = 50
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.chunking.strategy, ChunkStrategy::Fixed);
         assert_eq!(cfg.chunking.size, 500);
+    }
+
+    #[test]
+    fn chunk_strategy_unimplemented_note_only_flags_the_unbuilt_ones() {
+        // structure/fixed run the word-chunker (honored) → no note; recursive/semantic are unbuilt.
+        assert!(ChunkStrategy::Structure.unimplemented_note().is_none());
+        assert!(ChunkStrategy::Fixed.unimplemented_note().is_none());
+        assert!(ChunkStrategy::Recursive.unimplemented_note().is_some());
+        assert!(ChunkStrategy::Semantic.unimplemented_note().is_some());
     }
 }
