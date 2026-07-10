@@ -199,3 +199,108 @@ fn opens_pre_v069_index_missing_tool_usage_session_id() {
         "the existing pre-migration usage row must be preserved"
     );
 }
+
+#[test]
+fn usage_by_basis_separates_surfaces_and_groups_untagged_as_unspecified() {
+    // G8: `bytes_served` means different things per surface, so rows carry a `served_basis`
+    // tag and `usage_by_basis` splits the otherwise-blended weekly aggregate.
+    let mut store = Store::open_in_memory().unwrap();
+
+    // MCP-style rendered-response rows.
+    store
+        .record_tool_usage_with_basis("mcp", "search", 100, 4_000, None, "rendered_response")
+        .unwrap();
+    store
+        .record_tool_usage_with_basis("mcp", "ask", 200, 6_000, None, "rendered_response")
+        .unwrap();
+    // Web/CLI answer+citation row.
+    store
+        .record_tool_usage_with_basis("web", "ask", 50, 1_000, Some("s1"), "answer_citations")
+        .unwrap();
+    // An untagged row (via the delegating `record_tool_usage`) → "unspecified".
+    store
+        .record_tool_usage("cli", "search", 10, 100, None)
+        .unwrap();
+
+    let by_basis = store.usage_by_basis(USAGE_WEEK_SECS).unwrap();
+    // Three distinct bases; ordered by avoided bytes DESC (rendered saved the most).
+    assert_eq!(
+        by_basis.len(),
+        3,
+        "one group per distinct basis: {by_basis:?}"
+    );
+    assert_eq!(by_basis[0].0, "rendered_response");
+    assert_eq!(by_basis[0].1.calls, 2);
+    assert_eq!(by_basis[0].1.bytes_served, 300);
+    assert_eq!(by_basis[0].1.bytes_counterfactual, 10_000);
+
+    let ac = by_basis
+        .iter()
+        .find(|(b, _)| b == "answer_citations")
+        .unwrap();
+    assert_eq!(ac.1.calls, 1);
+    assert_eq!(ac.1.bytes_counterfactual, 1_000);
+
+    let un = by_basis.iter().find(|(b, _)| b == "unspecified").unwrap();
+    assert_eq!(
+        un.1.calls, 1,
+        "the delegating record_tool_usage row reads as unspecified"
+    );
+
+    // The per-basis calls reconcile back to the blended weekly aggregate.
+    let total: u64 = by_basis.iter().map(|(_, u)| u.calls).sum();
+    assert_eq!(total, store.usage_summary(USAGE_WEEK_SECS).unwrap().calls);
+}
+
+#[test]
+fn opens_pre_g8_index_missing_tool_usage_served_basis() {
+    // Regression: G8 added tool_usage.served_basis + bumped SCHEMA_VERSION. Opening a pre-G8
+    // index (table exists WITH session_id but WITHOUT served_basis) must migrate in place and
+    // preserve rows — the SCHEMA_VERSION bump forces init to re-run past the fast-path guard.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pre_g8.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tool_usage (
+                 id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                 surface              TEXT NOT NULL,
+                 tool                 TEXT NOT NULL,
+                 bytes_served         INTEGER NOT NULL DEFAULT 0,
+                 bytes_counterfactual INTEGER NOT NULL DEFAULT 0,
+                 at                   INTEGER NOT NULL DEFAULT (unixepoch()),
+                 session_id           TEXT
+             );
+             CREATE INDEX idx_tool_usage_at ON tool_usage(at);
+             INSERT INTO tool_usage (surface, tool, bytes_served, bytes_counterfactual)
+                 VALUES ('mcp', 'search', 100, 4000);",
+        )
+        .unwrap();
+        // Stamp an old-but-nonzero user_version so the fast-path guard doesn't short-circuit
+        // (any value != SCHEMA_VERSION runs the full idempotent init).
+        conn.pragma_update(None, "user_version", 1_i64).unwrap();
+    }
+
+    let mut store = Store::open(&path).expect("must open & migrate a pre-G8 index");
+
+    // served_basis column was added …
+    let has_col: bool = store
+        .db_connection()
+        .prepare("SELECT 1 FROM pragma_table_info('tool_usage') WHERE name = 'served_basis'")
+        .unwrap()
+        .exists([])
+        .unwrap();
+    assert!(has_col, "migration must add tool_usage.served_basis");
+
+    // … the pre-existing row survived (reads back as "unspecified") …
+    let by_basis = store.usage_by_basis(USAGE_WEEK_SECS).unwrap();
+    assert_eq!(by_basis.len(), 1);
+    assert_eq!(by_basis[0].0, "unspecified");
+    assert_eq!(by_basis[0].1.calls, 1);
+
+    // … and a newly-recorded tagged row lands under its basis.
+    store
+        .record_tool_usage_with_basis("mcp", "ask", 10, 100, None, "rendered_response")
+        .unwrap();
+    assert_eq!(store.usage_by_basis(USAGE_WEEK_SECS).unwrap().len(), 2);
+}

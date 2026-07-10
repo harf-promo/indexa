@@ -113,12 +113,26 @@ fn ok_text(s: impl Into<String>) -> CallToolResult {
 
 /// Best-effort token-savings telemetry — a recording failure must never fail
 /// the user's call, so this swallows errors at debug level instead of `?`.
-fn record_usage(store: &mut Store, tool: &str, bytes_served: usize, bytes_counterfactual: u64) {
+/// `served_basis` tags what `bytes_served` measured (a `BASIS_*` constant from
+/// `indexa_query`) so the blended ledger reconciles per-surface; most MCP tools
+/// record the full rendered response, `ask_catalog` records answer text only.
+fn record_usage(
+    store: &mut Store,
+    tool: &str,
+    bytes_served: usize,
+    bytes_counterfactual: u64,
+    served_basis: &str,
+) {
     // MCP calls aren't session-scoped for the savings ledger (the ledger is web-session
     // driven); pass None so these still record into the weekly aggregate.
-    if let Err(e) =
-        store.record_tool_usage("mcp", tool, bytes_served as u64, bytes_counterfactual, None)
-    {
+    if let Err(e) = store.record_tool_usage_with_basis(
+        "mcp",
+        tool,
+        bytes_served as u64,
+        bytes_counterfactual,
+        None,
+        served_basis,
+    ) {
         tracing::debug!("usage telemetry skipped ({tool}): {e:#}");
     }
 }

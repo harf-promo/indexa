@@ -87,6 +87,23 @@ impl IndexaMcp {
         {
             out.push('\n');
             out.push_str(&line);
+            // Per-basis reconciliation: `bytes_served` measures different things across
+            // surfaces (this MCP server records the full rendered response; web/CLI `ask`
+            // record answer+citations), so the figure above blends them. Show the split
+            // only when more than one basis contributed.
+            if let Ok(by_basis) = store.usage_by_basis(indexa_core::store::USAGE_WEEK_SECS) {
+                if by_basis.len() > 1 {
+                    out.push_str("\nBy served basis:");
+                    for (basis, u) in &by_basis {
+                        let saved = u.bytes_counterfactual.saturating_sub(u.bytes_served) / 4;
+                        out.push_str(&format!(
+                            "\n  {basis}: {} call{} · ~{saved} tokens saved",
+                            u.calls,
+                            if u.calls == 1 { "" } else { "s" },
+                        ));
+                    }
+                }
+            }
         }
         Ok(ok_text(out))
     }

@@ -74,9 +74,10 @@ fn human_count(n: u64) -> String {
 }
 
 impl Store {
-    /// Record one retrieval call. `surface` is 'mcp' | 'web' | 'cli' (no DB
-    /// CHECK — see the schema comment). Every ~1000th insert opportunistically
-    /// GCs rows past the retention window so the table can't grow unbounded.
+    /// Record one retrieval call, untagged. `surface` is 'mcp' | 'web' | 'cli'.
+    /// Delegates to [`record_tool_usage_with_basis`] with an empty `served_basis`
+    /// (kept for callers that don't distinguish a serving basis); the row reads
+    /// back as "unspecified" in [`usage_by_basis`].
     pub fn record_tool_usage(
         &mut self,
         surface: &str,
@@ -85,16 +86,43 @@ impl Store {
         bytes_counterfactual: u64,
         session_id: Option<&str>,
     ) -> Result<()> {
+        self.record_tool_usage_with_basis(
+            surface,
+            tool,
+            bytes_served,
+            bytes_counterfactual,
+            session_id,
+            "",
+        )
+    }
+
+    /// Record one retrieval call, tagging what `bytes_served` measured (`served_basis`).
+    /// Surfaces disagree — MCP records the full rendered tool response, web/CLI `ask`
+    /// record answer+citations — so an untagged blended ledger can't reconcile; the tag
+    /// (a `BASIS_*` constant from `indexa_query::impact`, `""` = unspecified) lets
+    /// [`usage_by_basis`] split the aggregate. Every ~1000th insert opportunistically
+    /// GCs rows past the retention window so the table can't grow unbounded.
+    pub fn record_tool_usage_with_basis(
+        &mut self,
+        surface: &str,
+        tool: &str,
+        bytes_served: u64,
+        bytes_counterfactual: u64,
+        session_id: Option<&str>,
+        served_basis: &str,
+    ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO tool_usage (surface, tool, bytes_served, bytes_counterfactual, session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO tool_usage
+                 (surface, tool, bytes_served, bytes_counterfactual, session_id, served_basis)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             // i64 at the SQL boundary: rusqlite has no u64 ToSql/FromSql.
             params![
                 surface,
                 tool,
                 bytes_served as i64,
                 bytes_counterfactual as i64,
-                session_id
+                session_id,
+                served_basis
             ],
         )?;
         if self.conn.last_insert_rowid() % 1000 == 0 {
@@ -118,6 +146,37 @@ impl Store {
               GROUP BY tool
               ORDER BY COALESCE(SUM(bytes_counterfactual), 0) - COALESCE(SUM(bytes_served), 0) DESC,
                        tool ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![since_secs], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    UsageSummary {
+                        calls: r.get::<_, i64>(1)? as u64,
+                        bytes_served: r.get::<_, i64>(2)? as u64,
+                        bytes_counterfactual: r.get::<_, i64>(3)? as u64,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Per-`served_basis` aggregate over the last `since_secs` seconds, most-saving first.
+    /// The savings ledger blends bases (MCP records the full rendered response; web/CLI `ask`
+    /// record answer+citations), so the single [`usage_summary`] figure mixes them; this splits
+    /// it so `status` / `get_stats` can reconcile per-surface. `NULL`/empty tags (legacy rows,
+    /// untagged callers) group under `"unspecified"`.
+    pub fn usage_by_basis(&self, since_secs: i64) -> Result<Vec<(String, UsageSummary)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(NULLIF(served_basis, ''), 'unspecified') AS basis,
+                    COUNT(*),
+                    COALESCE(SUM(bytes_served), 0),
+                    COALESCE(SUM(bytes_counterfactual), 0)
+               FROM tool_usage WHERE at >= unixepoch() - ?1
+              GROUP BY basis
+              ORDER BY COALESCE(SUM(bytes_counterfactual), 0) - COALESCE(SUM(bytes_served), 0) DESC,
+                       basis ASC",
         )?;
         let rows = stmt
             .query_map(params![since_secs], |r| {

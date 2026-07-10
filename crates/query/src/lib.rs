@@ -20,7 +20,7 @@ pub use export::{
 };
 pub use impact::{
     ask_impact_breakdown, record_ask_impact, served_bytes, AnswerImpact, ImpactBreakdown,
-    ImpactItem,
+    ImpactItem, BASIS_ANSWER_CITATIONS, BASIS_ANSWER_TEXT, BASIS_RENDERED_RESPONSE,
 };
 pub use indexa_core::config::HybridMode;
 pub use qa::{

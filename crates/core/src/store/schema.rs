@@ -8,7 +8,7 @@ use anyhow::Result;
 ///
 /// **INVARIANT: bump this whenever the DDL or any migration in `init_schema` changes** — otherwise a
 /// DB stamped at the old value would skip the new migration and silently miss a column/table.
-pub(super) const SCHEMA_VERSION: i64 = 1;
+pub(super) const SCHEMA_VERSION: i64 = 2;
 
 /// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
 /// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
@@ -301,7 +301,13 @@ impl Store {
                 at                   INTEGER NOT NULL DEFAULT (unixepoch()),
                 -- Conversational-Ask session this call belonged to (NULL for stateless
                 -- calls). Lets a session show its own cumulative savings; see store::usage.
-                session_id           TEXT
+                session_id           TEXT,
+                -- What `bytes_served` measured for this row: surfaces disagree (MCP records
+                -- the full rendered tool response; web/CLI `ask` record answer+citations).
+                -- NULL/'' = unspecified (legacy rows / untagged callers). Values are the
+                -- BASIS_* constants in indexa_query::impact; kept CHECK-free (Rust owns them,
+                -- same rule as `surface`). Lets the blended ledger reconcile per-surface.
+                served_basis         TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_tool_usage_at ON tool_usage(at);
             -- NOTE: the idx_tool_usage_session index is intentionally NOT created here. On a
@@ -440,6 +446,19 @@ impl Store {
         self.conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_tool_usage_session ON tool_usage(session_id);",
         )?;
+
+        // Migration: tool_usage.served_basis (G8 — tags what `bytes_served` measured so the
+        // blended savings ledger can reconcile per-surface). Fresh DBs get it from the base
+        // DDL; older DBs add it here. Nullable — pre-migration rows and untagged callers stay
+        // NULL/'', reported as "unspecified".
+        let has_served_basis: bool = self
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('tool_usage') WHERE name = 'served_basis'")?
+            .exists([])?;
+        if !has_served_basis {
+            self.conn
+                .execute_batch("ALTER TABLE tool_usage ADD COLUMN served_basis TEXT;")?;
+        }
 
         // Migration: give `chunks.id` AUTOINCREMENT on databases created before stable ids
         // (a bare rowid is reused after a delete, which would mis-attribute ANN results to a
