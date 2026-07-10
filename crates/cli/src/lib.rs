@@ -249,6 +249,16 @@ pub enum Commands {
         action: PackAction,
     },
 
+    /// Attach a note to a Context Pack — captures a grounded answer or idea back into the
+    /// searchable context that produced it.
+    #[command(after_help = "Examples:
+  indexa note add \"Auth\" \"Reset flow\" \"Users reset via a signed email link, see auth/reset.rs\"")]
+    #[command(display_order = 21)]
+    Note {
+        #[command(subcommand)]
+        action: NoteAction,
+    },
+
     /// Manage importance weights — boost or suppress files, folders, or categories in search.
     #[command(after_help = "Examples:
   indexa weight set ~/Work/activeproject 2.0   # boost an active project
@@ -999,6 +1009,23 @@ pub enum PackAction {
     Delete {
         /// Pack name.
         name: String,
+    },
+}
+
+/// Sub-commands for `indexa note`.
+#[derive(clap::Subcommand, Debug)]
+pub enum NoteAction {
+    /// Attach a Markdown note to a pack and index it immediately (best-effort — the note is
+    /// still saved and registered even if the embedder is unreachable).
+    #[command(after_help = "Examples:
+  indexa note add \"Auth\" \"Reset flow\" \"Users reset via a signed email link, see auth/reset.rs\"")]
+    Add {
+        /// Name of an existing pack to attach the note to.
+        pack: String,
+        /// Short title for the note (becomes the Markdown heading and the file slug).
+        title: String,
+        /// Markdown body of the note.
+        body: String,
     },
 }
 

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use indexa_cli::{
-    Cli, Commands, InsightsAction, McpAction, PackAction, ReviewAction, SavedAction,
+    Cli, Commands, InsightsAction, McpAction, NoteAction, PackAction, ReviewAction, SavedAction,
     SnapshotAction, WeightAction,
 };
 use indexa_core::config;
@@ -187,6 +187,11 @@ async fn main() -> Result<()> {
                 commands::cmd_pack_rename(name, new_name).await
             }
             PackAction::Delete { name } => commands::cmd_pack_delete(name).await,
+        },
+        Commands::Note { action } => match action {
+            NoteAction::Add { pack, title, body } => {
+                commands::cmd_note_add(pack, title, body, &cfg).await
+            }
         },
         Commands::Weight { action } => match action {
             WeightAction::Set {

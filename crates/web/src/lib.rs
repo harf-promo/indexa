@@ -428,6 +428,7 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         )
         .route("/api/packs/{name}/export", get(api_packs_export))
         .route("/api/packs/{name}/refresh", post(api_packs_refresh))
+        .route("/api/packs/{name}/note", post(api_packs_note))
         .route("/api/packs/{name}/search", get(api_packs_search))
         .route(
             "/api/weights",
@@ -1041,6 +1042,57 @@ mod tests {
             json.get("job_id").is_none(),
             "no job should start when nothing is stale, got: {json}"
         );
+    }
+
+    #[tokio::test]
+    async fn api_packs_note_saves_file_and_registers_pack_member() {
+        // `db_path` only needs to point at a real, writable directory — `write_note_file` derives
+        // `data_dir` from its parent — the store engine itself can stay in-memory.
+        let dir = temp_fixture_dir("note-add");
+        let db_path = dir.join("index.db");
+
+        let mut store = Store::open_in_memory().unwrap();
+        store.create_pack("MyPack", None).unwrap();
+
+        let app = build_router(state_with_db(store, db_path), 7620);
+        let (status, json) = post_json(
+            app,
+            "/api/packs/MyPack/note",
+            serde_json::json!({
+                "title": "Reset flow",
+                "body": "Users reset via a signed email link.",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json.get("saved").and_then(|v| v.as_bool()), Some(true));
+        let path = json
+            .get("path")
+            .and_then(|v| v.as_str())
+            .expect("path in response");
+        assert!(
+            std::path::Path::new(path).exists(),
+            "note file should exist on disk: {path}"
+        );
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("# Reset flow"));
+        assert!(content.contains("Users reset via a signed email link."));
+    }
+
+    #[tokio::test]
+    async fn api_packs_note_404s_on_unknown_pack() {
+        let dir = temp_fixture_dir("note-unknown-pack");
+        let db_path = dir.join("index.db");
+        let store = Store::open_in_memory().unwrap();
+
+        let app = build_router(state_with_db(store, db_path), 7620);
+        let (status, _json) = post_json(
+            app,
+            "/api/packs/Ghost/note",
+            serde_json::json!({ "title": "T", "body": "B" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     // ── WS8 additions: ask scope/agentic/empty, export empty/depth, stats summaries,

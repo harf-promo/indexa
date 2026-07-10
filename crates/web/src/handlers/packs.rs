@@ -9,6 +9,7 @@
 //!   DELETE /api/packs/:name/paths      — remove paths  { paths: [...] }
 //!   GET    /api/packs/:name/export     — export as XML/MD/JSON  ?format=&depth=
 //!   POST   /api/packs/:name/refresh    — reindex stale members as a background job
+//!   POST   /api/packs/:name/note       — attach a Markdown note { title, body }, best-effort indexed
 //!   GET    /api/packs/:name/search     — search chunk content within the pack  ?q=&limit=
 //!   POST   /api/packs/suggest          — suggest paths for a query { query, limit? }
 
@@ -55,6 +56,12 @@ pub(crate) struct ExportQuery {
     changed_since: Option<String>,
     /// Relational slice: only files in this classification category (e.g. `code`, `document`).
     category: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct NoteBody {
+    title: String,
+    body: String,
 }
 
 #[derive(Deserialize)]
@@ -362,6 +369,81 @@ pub(crate) async fn api_packs_refresh(
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
     Json(JobStartResponse { job_id: id }).into_response()
+}
+
+/// `POST /api/packs/:name/note` — attach a Markdown note to a pack: write it under
+/// `<data_dir>/notes/`, register it as a pack member, and best-effort reindex it as a background
+/// job. The durable part (file written + pack membership recorded) happens under a scoped store
+/// lock regardless of job capacity; the reindex is skipped (not failed) when the job cap is full —
+/// the note is still saved and picked up by the next `pack refresh`/deep pass.
+pub(crate) async fn api_packs_note(
+    Path(name): Path<String>,
+    State(s): State<AppState>,
+    Json(body): Json<NoteBody>,
+) -> Response {
+    let data_dir = match s.db_path.parent() {
+        Some(d) => d.to_path_buf(),
+        None => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "index db path has no parent directory",
+            )
+        }
+    };
+
+    let note_path = {
+        let mut store = s.store.lock().await;
+        let pack = match store.pack_by_name(&name) {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\""))
+            }
+            Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        };
+        let path =
+            match indexa_core::notes::write_note_file(&data_dir, &name, &body.title, &body.body) {
+                Ok(p) => p.to_string_lossy().into_owned(),
+                Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+            };
+        if let Err(e) = store.add_pack_paths(&pack.id, std::slice::from_ref(&path)) {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"));
+        }
+        path
+        // Lock dropped here, before any spawn — never held across an `.await`/`tokio::spawn`.
+    };
+
+    // Best-effort background reindex — skipped, not failed, when the job cap is full. The note is
+    // already durably saved and registered above, so a busy job queue must not undo that.
+    if job_slot_available(&s.jobs).await.is_none() {
+        let (id, handle) = register_job(&s.jobs, "pack_note", name.clone()).await;
+        let state = s.clone();
+        let path_for_job = note_path.clone();
+        tokio::spawn(async move {
+            // Same single-path walk-then-deep shape as `api_packs_refresh`'s loop body (here over
+            // just the one new note file): an empty `entries` still makes `run_deep_phase` report
+            // success, and `walk_for_job` already finalizes the job itself on a real walk failure
+            // (never call `finalize_done` after that — it would overwrite Failed with Done).
+            let mut entries = Vec::new();
+            if let Some(mut e) = walk_for_job(
+                &path_for_job,
+                &handle,
+                &state.walk_semaphore,
+                scan_walk_config(&state.config.scan),
+            )
+            .await
+            {
+                entries.append(&mut e);
+            }
+            if run_deep_phase(&state, &name, &entries, &handle).await {
+                finalize_done(&handle, "Note indexed");
+            }
+            schedule_cleanup(state.jobs.clone(), handle.id);
+        });
+        return Json(serde_json::json!({ "saved": true, "path": note_path, "job_id": id }))
+            .into_response();
+    }
+
+    Json(serde_json::json!({ "saved": true, "path": note_path })).into_response()
 }
 
 pub(crate) async fn api_packs_suggest(
