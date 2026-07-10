@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use indexa_core::{
     config::{Config, HybridMode},
     store::Store,
@@ -6,6 +6,8 @@ use indexa_core::{
 use indexa_query::{
     build_export_filter, build_tree, prune_tree, render_json, render_markdown, render_xml,
 };
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use super::helpers::{
     build_embedder, expand, finalize_export, index_db_path, now_unix, require_index_db, ExportSink,
@@ -381,6 +383,111 @@ pub(crate) async fn cmd_pack_export(
     )
 }
 
+/// Format version for `pack export-def`/`pack import` JSON. Import refuses anything it doesn't
+/// recognize (forward-safe), mirroring `snapshot.rs`'s `SNAPSHOT_VERSION` convention.
+const PACK_DEF_VERSION: u32 = 1;
+
+/// A pack's *definition* (name, description, member paths) — distinct from `pack export`'s
+/// rendered *content* (summaries/chunks). Portable JSON: back it up, check it into a repo, or
+/// hand it to a teammate to recreate the same pack on another machine/checkout.
+#[derive(Serialize, Deserialize)]
+struct PackDefinition {
+    version: u32,
+    name: String,
+    description: Option<String>,
+    generated_at: i64,
+    paths: Vec<String>,
+}
+
+pub(crate) async fn cmd_pack_export_def(name: String, output: Option<String>) -> Result<()> {
+    let Some(db_path) = require_index_db()? else {
+        return Ok(());
+    };
+    cmd_pack_export_def_at(&db_path, name, output)
+}
+
+/// `cmd_pack_export_def` with the DB path injected, so it's hermetically testable — mirrors the
+/// `_at(db_path, …)` pattern used throughout this file (`cmd_pack_export_at`, `cmd_pack_refresh_at`
+/// in later PRs).
+fn cmd_pack_export_def_at(db_path: &Path, name: String, output: Option<String>) -> Result<()> {
+    let store = Store::open(db_path)?;
+    let pack = store
+        .pack_by_name(&name)?
+        .ok_or_else(|| anyhow::anyhow!("no pack named \"{name}\""))?;
+    let paths = store.pack_paths(&pack.id)?;
+    let def = PackDefinition {
+        version: PACK_DEF_VERSION,
+        name: pack.name,
+        description: pack.description,
+        generated_at: now_unix(),
+        paths,
+    };
+    let json = serde_json::to_string_pretty(&def)?;
+    if let Some(path) = output {
+        std::fs::write(&path, &json).with_context(|| format!("writing {path}"))?;
+        eprintln!("Wrote pack definition for \"{name}\" to {path}");
+    } else {
+        println!("{json}");
+    }
+    Ok(())
+}
+
+pub(crate) async fn cmd_pack_import(file: String, yes: bool) -> Result<()> {
+    let Some(db_path) = require_index_db()? else {
+        return Ok(());
+    };
+    cmd_pack_import_at(&db_path, file, yes)
+}
+
+/// `cmd_pack_import` with the DB path injected, so it's hermetically testable.
+///
+/// Merge policy: an existing same-named pack requires `--yes` to proceed, and re-importing then
+/// MERGES member paths into it (`add_pack_paths` is idempotent) rather than deleting and
+/// recreating — destroying an existing pack just because a name collides would be needlessly
+/// destructive, and would drop its current description if the import's is absent.
+///
+/// A pack definition is portable JSON that may be imported on a different machine/checkout where
+/// the absolute member paths don't exist — each path is checked against the local disk; missing
+/// ones are skipped with a warning rather than registered as dead pack members. This does NOT
+/// reindex anything: it only restores the pack shell and membership. A path that's already
+/// indexed on this machine is immediately searchable; an un-indexed one waits for a normal
+/// `indexa index`/`pack refresh` pass, same scope separation as the rest of Context Packs.
+fn cmd_pack_import_at(db_path: &Path, file: String, yes: bool) -> Result<()> {
+    let raw = std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?;
+    let def: PackDefinition = serde_json::from_str(&raw).context("parsing pack definition JSON")?;
+    if def.version != PACK_DEF_VERSION {
+        bail!(
+            "pack definition version {} is not supported (expected {PACK_DEF_VERSION})",
+            def.version
+        );
+    }
+    let mut store = Store::open(db_path)?;
+    let pack_id = match store.pack_by_name(&def.name)? {
+        Some(_) if !yes => bail!(
+            "a pack named \"{}\" already exists — pass --yes to merge into it",
+            def.name
+        ),
+        Some(existing) => existing.id,
+        None => store.create_pack(&def.name, def.description.as_deref())?,
+    };
+    let (present, missing): (Vec<String>, Vec<String>) =
+        def.paths.into_iter().partition(|p| Path::new(p).exists());
+    for p in &missing {
+        println!("  ⚠ path not found on disk, skipping: {p}");
+    }
+    if !present.is_empty() {
+        store.add_pack_paths(&pack_id, &present)?;
+    }
+    println!(
+        "Imported pack \"{}\": {} path{} added, {} missing.",
+        def.name,
+        present.len(),
+        if present.len() == 1 { "" } else { "s" },
+        missing.len()
+    );
+    Ok(())
+}
+
 pub(crate) async fn cmd_pack_rename(name: String, new_name: String) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
@@ -408,4 +515,173 @@ pub(crate) async fn cmd_pack_delete(name: String) -> Result<()> {
     store.delete_pack(&pack.id)?;
     println!("Deleted pack \"{name}\". (Indexed files are untouched.)");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_def_round_trips_name_description_and_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_a = dir.path().join("a.rs");
+        let file_b = dir.path().join("b.rs");
+        std::fs::write(&file_a, b"fn a() {}").unwrap();
+        std::fs::write(&file_b, b"fn b() {}").unwrap();
+        let a_s = file_a.to_string_lossy().to_string();
+        let b_s = file_b.to_string_lossy().to_string();
+
+        let db_path = dir.path().join("idx.db");
+        let mut store = Store::open(&db_path).unwrap();
+        store
+            .create_pack("Auth", Some("Auth and session handling"))
+            .unwrap();
+        let pack = store.pack_by_name("Auth").unwrap().unwrap();
+        store
+            .add_pack_paths(&pack.id, &[a_s.clone(), b_s.clone()])
+            .unwrap();
+        drop(store);
+
+        let out_path = dir.path().join("def.json");
+        cmd_pack_export_def_at(
+            &db_path,
+            "Auth".to_string(),
+            Some(out_path.to_string_lossy().to_string()),
+        )
+        .unwrap();
+
+        let raw = std::fs::read_to_string(&out_path).unwrap();
+        let def: PackDefinition = serde_json::from_str(&raw).unwrap();
+        assert_eq!(def.version, PACK_DEF_VERSION);
+        assert_eq!(def.name, "Auth");
+        assert_eq!(
+            def.description.as_deref(),
+            Some("Auth and session handling")
+        );
+        assert_eq!(def.paths, vec![a_s, b_s]);
+    }
+
+    #[test]
+    fn export_def_errors_on_unknown_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("idx.db");
+        // Open once to create the DB file/schema, then close — no pack ever created.
+        drop(Store::open(&db_path).unwrap());
+
+        let err = cmd_pack_export_def_at(&db_path, "Ghost".to_string(), None).unwrap_err();
+        assert!(err.to_string().contains("no pack named \"Ghost\""));
+    }
+
+    #[test]
+    fn import_creates_new_pack_and_skips_missing_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_file = dir.path().join("real.rs");
+        std::fs::write(&real_file, b"fn real() {}").unwrap();
+        let real_s = real_file.to_string_lossy().to_string();
+        let missing_s = dir.path().join("missing.rs").to_string_lossy().into_owned();
+
+        let def = PackDefinition {
+            version: PACK_DEF_VERSION,
+            name: "Imported".to_string(),
+            description: Some("from a teammate".to_string()),
+            generated_at: 1,
+            paths: vec![real_s.clone(), missing_s],
+        };
+        let def_path = dir.path().join("def.json");
+        std::fs::write(&def_path, serde_json::to_string_pretty(&def).unwrap()).unwrap();
+
+        let db_path = dir.path().join("idx.db");
+        cmd_pack_import_at(&db_path, def_path.to_string_lossy().to_string(), false).unwrap();
+
+        let store = Store::open(&db_path).unwrap();
+        let pack = store.pack_by_name("Imported").unwrap().unwrap();
+        assert_eq!(pack.description.as_deref(), Some("from a teammate"));
+        let paths = store.pack_paths(&pack.id).unwrap();
+        assert_eq!(
+            paths,
+            vec![real_s],
+            "only the on-disk path should be registered"
+        );
+    }
+
+    #[test]
+    fn import_refuses_existing_pack_without_yes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("idx.db");
+        let mut store = Store::open(&db_path).unwrap();
+        store.create_pack("Auth", None).unwrap();
+        drop(store);
+
+        let def = PackDefinition {
+            version: PACK_DEF_VERSION,
+            name: "Auth".to_string(),
+            description: None,
+            generated_at: 1,
+            paths: vec![],
+        };
+        let def_path = dir.path().join("def.json");
+        std::fs::write(&def_path, serde_json::to_string_pretty(&def).unwrap()).unwrap();
+
+        let err = cmd_pack_import_at(&db_path, def_path.to_string_lossy().to_string(), false)
+            .unwrap_err();
+        assert!(err.to_string().contains("--yes"));
+    }
+
+    #[test]
+    fn import_merges_into_existing_pack_with_yes() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing_file = dir.path().join("existing.rs");
+        let new_file = dir.path().join("new.rs");
+        std::fs::write(&existing_file, b"fn existing() {}").unwrap();
+        std::fs::write(&new_file, b"fn new_fn() {}").unwrap();
+        let existing_s = existing_file.to_string_lossy().to_string();
+        let new_s = new_file.to_string_lossy().to_string();
+
+        let db_path = dir.path().join("idx.db");
+        let mut store = Store::open(&db_path).unwrap();
+        let pack_id = store.create_pack("Auth", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, std::slice::from_ref(&existing_s))
+            .unwrap();
+        drop(store);
+
+        let def = PackDefinition {
+            version: PACK_DEF_VERSION,
+            name: "Auth".to_string(),
+            description: None,
+            generated_at: 1,
+            paths: vec![new_s.clone()],
+        };
+        let def_path = dir.path().join("def.json");
+        std::fs::write(&def_path, serde_json::to_string_pretty(&def).unwrap()).unwrap();
+
+        cmd_pack_import_at(&db_path, def_path.to_string_lossy().to_string(), true).unwrap();
+
+        let store = Store::open(&db_path).unwrap();
+        let pack = store.pack_by_name("Auth").unwrap().unwrap();
+        let mut paths = store.pack_paths(&pack.id).unwrap();
+        paths.sort();
+        let mut expected = vec![existing_s, new_s];
+        expected.sort();
+        assert_eq!(
+            paths, expected,
+            "merge must keep the existing member AND add the new one"
+        );
+    }
+
+    #[test]
+    fn import_rejects_unsupported_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("idx.db");
+        let def_path = dir.path().join("def.json");
+        std::fs::write(
+            &def_path,
+            r#"{"version":999,"name":"Whatever","description":null,"generated_at":1,"paths":[]}"#,
+        )
+        .unwrap();
+
+        let err = cmd_pack_import_at(&db_path, def_path.to_string_lossy().to_string(), false)
+            .unwrap_err();
+        assert!(err.to_string().contains("version"));
+    }
 }
