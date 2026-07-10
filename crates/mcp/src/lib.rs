@@ -103,8 +103,19 @@ pub struct IndexaMcp {
     ann_build_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
+/// Map an internal failure (store/IO/embedder) to a JSON-RPC internal error (-32603).
+/// Uses `{:#}` so an `anyhow::Error`'s full cause chain reaches the agent instead of only
+/// the top-level context — e.g. `open index: unable to open database file` rather than just
+/// `open index`. For non-anyhow `Display` types the alternate flag is a harmless no-op.
 fn mcp_err(e: impl std::fmt::Display) -> ErrorData {
-    ErrorData::internal_error(e.to_string(), None)
+    ErrorData::internal_error(format!("{e:#}"), None)
+}
+
+/// Map a caller mistake (unknown enum value, out-of-range arg, not-found target) to a
+/// JSON-RPC invalid-params error (-32602) so agents can tell "I called it wrong" apart from
+/// "the server broke". Same `{:#}` cause-chain rendering as [`mcp_err`].
+fn mcp_invalid(e: impl std::fmt::Display) -> ErrorData {
+    ErrorData::invalid_params(format!("{e:#}"), None)
 }
 
 fn ok_text(s: impl Into<String>) -> CallToolResult {
@@ -347,12 +358,20 @@ pub async fn serve_mcp(
 }
 
 /// Parse a user-supplied mode string into a `HybridMode`.
-/// Accepts `"sparse"`, `"dense"`, `"rrf"` (default).
-fn parse_hybrid_mode(s: Option<&str>) -> HybridMode {
-    match s.unwrap_or("rrf").to_lowercase().as_str() {
-        "sparse" => HybridMode::Sparse,
-        "dense" => HybridMode::Dense,
-        _ => HybridMode::Rrf,
+/// `None` defaults to `"rrf"`; a present-but-unknown value is a caller error (rejected with
+/// invalid-params) rather than being silently coerced to `rrf` — the latter hid typos like
+/// `mode:"dnese"` behind a full-fusion search the caller didn't ask for.
+fn parse_hybrid_mode(s: Option<&str>) -> Result<HybridMode, ErrorData> {
+    match s {
+        None => Ok(HybridMode::Rrf),
+        Some(v) => match v.to_lowercase().as_str() {
+            "sparse" => Ok(HybridMode::Sparse),
+            "dense" => Ok(HybridMode::Dense),
+            "rrf" => Ok(HybridMode::Rrf),
+            other => Err(mcp_invalid(format!(
+                "invalid mode '{other}' — expected one of: sparse, dense, rrf"
+            ))),
+        },
     }
 }
 
@@ -998,6 +1017,74 @@ mod tests {
         assert!(mcp.get_prompt_inner("explain-file", Some(&args)).is_ok());
         // Unknown prompt → error.
         assert!(mcp.get_prompt_inner("does-not-exist", None).is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_enum_values_are_rejected_as_invalid_params() {
+        // FM-2: a present-but-unknown enum value is a caller error (-32602 invalid_params),
+        // not silently coerced to the default — so an agent's typo surfaces instead of running
+        // a search/tier/format it didn't ask for.
+        use rmcp::model::ErrorCode;
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+
+        // parse_hybrid_mode: None defaults to rrf; known values parse; unknown → invalid_params.
+        assert!(matches!(parse_hybrid_mode(None).unwrap(), HybridMode::Rrf));
+        assert!(matches!(
+            parse_hybrid_mode(Some("SPARSE")).unwrap(),
+            HybridMode::Sparse
+        ));
+        assert!(matches!(
+            parse_hybrid_mode(Some("dense")).unwrap(),
+            HybridMode::Dense
+        ));
+        assert_eq!(
+            parse_hybrid_mode(Some("dnese")).unwrap_err().code,
+            ErrorCode::INVALID_PARAMS
+        );
+
+        // get_summary: unknown tier → invalid_params (validation precedes any store access).
+        let e = mcp
+            .get_summary(Parameters(GetSummaryParams {
+                path: "/x".into(),
+                tier: Some("l9".into()),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::INVALID_PARAMS);
+
+        // export_pack: unknown format → invalid_params (before the pack is even looked up).
+        let e = mcp
+            .export_pack(Parameters(ExportPackParams {
+                name: "any".into(),
+                format: Some("yaml".into()),
+                depth: None,
+                signatures: None,
+                changed_since: None,
+                category: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::INVALID_PARAMS);
+
+        // ask: unknown rerank_backend → invalid_params (early, no Ollama needed).
+        let e = mcp
+            .ask(Parameters(AskParams {
+                question: "q".into(),
+                scope: None,
+                mode: None,
+                agentic: None,
+                rerank: None,
+                rerank_backend: Some("bogus".into()),
+                explain_savings: None,
+                session_id: None,
+                top_k: None,
+                synthesize: None,
+                catalog: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::INVALID_PARAMS);
     }
 
     #[test]

@@ -78,7 +78,7 @@ impl IndexaMcp {
         // `explain_retrieval` can't drift from what `ask` actually runs.
         let mut cfg = QaConfig::from_retrieval(&self.config.retrieval);
         if let Some(m) = mode.as_deref() {
-            cfg.mode = parse_hybrid_mode(Some(m));
+            cfg.mode = parse_hybrid_mode(Some(m))?;
         }
         cfg.scope = scope.filter(|s| !s.is_empty());
 
