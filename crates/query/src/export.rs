@@ -205,8 +205,15 @@ fn render_xml_node(node: &ExportNode, out: &mut String, indent: usize) {
         "{pad}  <abstract>{}</abstract>\n",
         xml_text(&node_abstract(node))
     ));
+    // Provenance attributes (1.4): SummaryRecord already carries model/generated_at/
+    // source_hash — every renderer used to drop them, so a consumer couldn't tell how stale
+    // a summary was or which model wrote it. Additive attributes; unknown/missing attributes
+    // on older exports are the OKF tolerant-consumer posture, not an error.
     out.push_str(&format!(
-        "{pad}  <summary>{}</summary>\n",
+        "{pad}  <summary model=\"{}\" generated_at=\"{}\" source_hash=\"{}\">{}</summary>\n",
+        xml_attr(&node.record.model),
+        node.record.generated_at,
+        xml_attr(&node.record.source_hash),
         xml_text(&node.record.summary)
     ));
     if !node.children.is_empty() {
@@ -246,6 +253,13 @@ fn render_md_node(node: &ExportNode, out: &mut String, level: usize) {
     };
     out.push_str(&format!("{prefix} {icon} {name}\n\n"));
     out.push_str(&format!("`{}`\n\n", node.record.path));
+    // Provenance (1.4), matching the notes.rs `<!-- indexa: … -->` comment convention:
+    // invisible in rendered Markdown, present in the raw export for a consumer to check
+    // staleness (source_hash vs. the live file) or which model wrote the summary.
+    out.push_str(&format!(
+        "<!-- indexa: model={} generated_at={} source_hash={} -->\n\n",
+        node.record.model, node.record.generated_at, node.record.source_hash
+    ));
     out.push_str(&format!("**Abstract:** {}\n\n", node_abstract(node)));
     out.push_str(&format!("{}\n\n", node.record.summary));
     for child in &node.children {
@@ -278,9 +292,22 @@ fn render_json_node(node: &ExportNode, out: &mut String, indent: usize) {
         "{inner}\"abstract\": {},\n",
         json_str(&node_abstract(node))
     ));
+    // Provenance fields (1.4) — see the XML renderer's comment for rationale.
     out.push_str(&format!(
-        "{inner}\"summary\": {}",
+        "{inner}\"summary\": {},\n",
         json_str(&node.record.summary)
+    ));
+    out.push_str(&format!(
+        "{inner}\"model\": {},\n",
+        json_str(&node.record.model)
+    ));
+    out.push_str(&format!(
+        "{inner}\"generated_at\": {},\n",
+        node.record.generated_at
+    ));
+    out.push_str(&format!(
+        "{inner}\"source_hash\": {}",
+        json_str(&node.record.source_hash)
     ));
     if !node.children.is_empty() {
         out.push_str(",\n");
@@ -614,10 +641,29 @@ mod tests {
         assert!(xml.ends_with("</index>\n"));
         assert!(xml.contains("<directory "));
         assert!(xml.contains("<file "));
-        assert!(xml.contains("<summary>"));
+        assert!(xml.contains("<summary "));
         assert!(xml.contains("</summary>"));
         // Token estimate is present on the root element.
         assert!(xml.contains("approx_tokens=\""));
+    }
+
+    #[test]
+    fn xml_json_markdown_carry_summary_provenance() {
+        // 1.4: SummaryRecord's model/generated_at/source_hash must survive into every
+        // renderer — a consumer can no longer tell provenance/staleness without them.
+        let tree = make_tree();
+
+        let xml = render_xml(&tree, "2026-05-28");
+        assert!(xml.contains(r#"model="test""#));
+        assert!(xml.contains(r#"generated_at="0""#));
+
+        let json = render_json(&tree);
+        assert!(json.contains(r#""model": "test""#));
+        assert!(json.contains(r#""generated_at": 0"#));
+        assert!(json.contains(r#""source_hash""#));
+
+        let md = render_markdown(&tree);
+        assert!(md.contains("<!-- indexa: model=test generated_at=0"));
     }
 
     #[test]
