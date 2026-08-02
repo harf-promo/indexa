@@ -914,6 +914,7 @@ mod tests {
                 limit: None,
                 strict: false,
                 cycles: false,
+                modules: false,
             }))
             .await
             .unwrap(),

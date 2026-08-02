@@ -386,6 +386,25 @@ compressed = false   # set true to index the DECOMPRESSED content of standalone 
 
 ---
 
+## Code graph
+
+```toml
+[graph]
+modules = false   # set true to expose the persisted architecture-map modules (4.6)
+```
+
+> **Off by default.** `modules` gates whether `code_graph`'s `modules: true` (MCP) and
+> `indexa graph --modules` (CLI) report the persisted architecture map instead of an empty
+> result — it does NOT control whether the map can be computed. Run `indexa graph
+> --compute-modules <path>` any time (regardless of this flag) to cluster the code graph
+> (Louvain, boosted by a same-directory prior) into named functional areas and label each with
+> a short local-LLM call (`[describer] dir_model`, e.g. gemma3:12b) from its members' one-line
+> summaries; a cluster too small or a label call that fails/rambles falls back to a
+> deterministic name instead of blocking the computation. The web UI's Map → Graph view has a
+> matching "Modules" toggle that reads the same persisted table.
+
+---
+
 ## Per-region overrides
 
 Apply different settings to different parts of your disk.

@@ -4,6 +4,7 @@ pub mod contextual;
 pub mod eval;
 pub mod export;
 pub mod impact;
+pub mod modules;
 pub mod predicates;
 pub mod qa;
 pub mod redact;

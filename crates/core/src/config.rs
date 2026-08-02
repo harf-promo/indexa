@@ -43,6 +43,9 @@ pub struct Config {
     /// MCP server settings (3.2): tool-surface profile.
     #[serde(default)]
     pub mcp: McpServerConfig,
+    /// Code-graph settings (4.6): persisted architecture-map modules.
+    #[serde(default)]
+    pub graph: GraphConfig,
 }
 
 /// Settings for opt-in remote-source ingestion (`indexa pack add-url`). Off by default — fetching
@@ -88,6 +91,19 @@ impl Default for McpServerConfig {
             tool_profile: "full".to_owned(),
         }
     }
+}
+
+/// Code-graph settings (4.6).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GraphConfig {
+    /// Persisted architecture-map modules: cluster the code graph (Louvain, directory-prior-
+    /// boosted) into named functional areas, labeled via a short local-LLM call per cluster from
+    /// member L0 abstracts. Populated by `indexa graph --compute-modules`, read by `code_graph`'s
+    /// `modules: true` and `indexa graph --modules`. Default false — spends local-LLM time at
+    /// compute time; this flag only gates whether those read surfaces report the persisted table
+    /// (empty/absent otherwise), not whether `--compute-modules` can be run manually.
+    pub modules: bool,
 }
 
 // ── Review (Decision Ledger) ──────────────────────────────────────────────────

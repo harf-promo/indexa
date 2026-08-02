@@ -154,6 +154,7 @@ pub(crate) const UI_CSS: &str = concat!(
     include_str!("../assets/ui/css/20-graph-layers.css"),
     include_str!("../assets/ui/css/21-graph-communities.css"),
     include_str!("../assets/ui/css/19-conversation.css"),
+    include_str!("../assets/ui/css/22-graph-modules.css"),
 );
 pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/00-auth-bootstrap.js"),
@@ -186,6 +187,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/27-health.js"),
     include_str!("../assets/ui/js/28-graph-layers.js"),
     include_str!("../assets/ui/js/29-graph-communities.js"),
+    include_str!("../assets/ui/js/30-graph-modules.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -376,6 +378,7 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/api/map", get(api_map))
         .route("/api/map/treemap", get(api_map_treemap))
         .route("/api/graph", get(api_graph))
+        .route("/api/graph/modules", get(api_graph_modules))
         .route("/api/roots", get(api_roots))
         .route("/api/search", get(api_search))
         .route("/api/fs/ls", get(api_fs_ls))

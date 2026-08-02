@@ -434,6 +434,20 @@ pub enum Commands {
         /// --include-co-change` picks up the result. Requires `path` to be inside a git repo.
         #[arg(long)]
         compute_co_change: bool,
+
+        /// Recompute the persisted architecture map (4.6) under `path`: cluster the code
+        /// graph (Louvain, directory-prior-boosted) into named functional areas and label
+        /// each with a short local-LLM call from member file summaries. Ignores every other
+        /// flag; spends local-LLM time (uses `[describer] dir_model`, e.g. gemma3:12b) —
+        /// run it deliberately, not on every `indexa deep`.
+        #[arg(long)]
+        compute_modules: bool,
+
+        /// Show the persisted architecture map (4.6) instead of the whole-scope graph —
+        /// named functional-area clusters with a cohesion score and member files. Empty
+        /// until `--compute-modules` has been run at least once.
+        #[arg(long)]
+        modules: bool,
     },
 
     /// Find files related to a file via the call graph (it calls them, or they call it).

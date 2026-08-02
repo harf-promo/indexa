@@ -8,7 +8,7 @@ use anyhow::Result;
 ///
 /// **INVARIANT: bump this whenever the DDL or any migration in `init_schema` changes** — otherwise a
 /// DB stamped at the old value would skip the new migration and silently miss a column/table.
-pub(super) const SCHEMA_VERSION: i64 = 4;
+pub(super) const SCHEMA_VERSION: i64 = 5;
 
 /// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
 /// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
@@ -276,6 +276,23 @@ impl Store {
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_co_change_a ON co_change(path_a);
             CREATE INDEX IF NOT EXISTS idx_co_change_b ON co_change(path_b);
+
+            -- Persisted architecture map (4.6): a whole-repo recompute (`indexa graph
+            -- --compute-modules`) clusters the code graph via Louvain (directory-prior-boosted)
+            -- and labels each cluster with a short local-LLM-generated name from its members'
+            -- L0 abstracts. One row per (module, member file); `label`/`cohesion` are repeated
+            -- per member row (denormalized — the whole table is replaced wholesale each
+            -- recompute, so there's no update-anomaly risk). Additive/inert until a reader
+            -- opts in (`code_graph`'s `modules: true`, `indexa graph --modules`).
+            CREATE TABLE IF NOT EXISTS graph_modules (
+                module_id   INTEGER NOT NULL,
+                label       TEXT NOT NULL,
+                cohesion    REAL NOT NULL DEFAULT 0.0,
+                member_path TEXT NOT NULL,
+                computed_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                PRIMARY KEY (module_id, member_path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_graph_modules_member ON graph_modules(member_path);
 
             -- Context Packs (v0.9): named, cross-directory context bundles.
             -- A pack is a user-curated set of paths that form a coherent topic

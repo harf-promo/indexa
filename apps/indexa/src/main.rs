@@ -293,8 +293,11 @@ async fn main() -> Result<()> {
             grouped,
             heritage,
             compute_co_change,
+            compute_modules,
+            modules,
         } => {
             commands::cmd_graph(
+                &cfg,
                 path,
                 limit,
                 strict,
@@ -304,6 +307,8 @@ async fn main() -> Result<()> {
                 grouped,
                 heritage,
                 compute_co_change,
+                compute_modules,
+                modules,
             )
             .await
         }
