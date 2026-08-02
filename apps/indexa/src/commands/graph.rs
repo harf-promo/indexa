@@ -1,5 +1,5 @@
 use anyhow::Result;
-use indexa_core::store::{ResolutionTier, Store};
+use indexa_core::store::{BlastRadius, ResolutionTier, Store};
 
 use super::helpers::{expand, require_index_db};
 
@@ -23,6 +23,7 @@ fn rel_to_scope(path: &str, scope: &str) -> String {
         .to_owned()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn cmd_graph(
     path: String,
     limit: usize,
@@ -30,6 +31,7 @@ pub(crate) async fn cmd_graph(
     cycles: bool,
     blast: Option<String>,
     depth: usize,
+    grouped: bool,
 ) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
@@ -54,8 +56,12 @@ pub(crate) async fn cmd_graph(
             radius.files.len()
         );
         println!("{}", "─".repeat(60));
-        for f in &radius.files {
-            println!("  {}", basename(f));
+        if grouped {
+            print_blast_radius_grouped(&radius);
+        } else {
+            for f in &radius.files {
+                println!("  {}", basename(f));
+            }
         }
         println!();
         println!(
@@ -195,4 +201,36 @@ same-file/import are structural)"
         );
     }
     Ok(())
+}
+
+/// Hop → risk label, matching GitNexus's `impact` contract: hop 1 = direct callers (will
+/// break immediately), hop 2 = one transitive step (likely affected), hop 3+ = further steps
+/// (worth testing but less certain to break).
+fn hop_risk_label(hop: usize) -> &'static str {
+    match hop {
+        1 => "WILL BREAK",
+        2 => "LIKELY AFFECTED",
+        _ => "MAY NEED TESTING",
+    }
+}
+
+/// Print a blast radius grouped by hop with a risk label per group, plus an overall
+/// LOW/MEDIUM/HIGH summary line — the `--grouped` rendering shared in spirit with the MCP
+/// `blast_radius` tool's `grouped: true` output (same [`BlastRadius::grouped_by_hop`] data).
+fn print_blast_radius_grouped(radius: &BlastRadius) {
+    println!(
+        "risk: {} ({} direct caller(s))",
+        radius.risk().as_str(),
+        radius.direct
+    );
+    for (hop, files) in radius.grouped_by_hop() {
+        println!(
+            "\n  hop {hop} — {} ({} file(s)):",
+            hop_risk_label(hop),
+            files.len()
+        );
+        for f in &files {
+            println!("    {}", basename(f));
+        }
+    }
 }

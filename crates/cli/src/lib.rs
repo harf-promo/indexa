@@ -414,6 +414,12 @@ pub enum Commands {
         /// transitive hop (default), up to 5 for transitive reach through chains.
         #[arg(long, default_value = "2")]
         depth: usize,
+
+        /// With --blast: group results by hop with a risk label (hop 1 "WILL BREAK", hop 2
+        /// "LIKELY AFFECTED", hop 3+ "MAY NEED TESTING") plus a LOW/MEDIUM/HIGH risk summary,
+        /// instead of a flat file list.
+        #[arg(long)]
+        grouped: bool,
     },
 
     /// Find files related to a file via the call graph (it calls them, or they call it).

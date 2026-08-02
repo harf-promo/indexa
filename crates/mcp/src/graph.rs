@@ -1,7 +1,7 @@
 //! Code-graph tools: `dependencies`, `who_imports`, `who_calls`,
 //! `blast_radius`, `code_graph`, and `related_files`.
 
-use indexa_core::store::ResolutionTier;
+use indexa_core::store::{BlastRadius, ResolutionTier};
 use rmcp::{
     handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router, ErrorData,
 };
@@ -41,6 +41,11 @@ pub struct BlastRadiusParams {
     /// through chains"). Clamped to 1..=5.
     #[serde(default)]
     pub depth: Option<usize>,
+    /// Group results by hop with a risk label (hop 1 "WILL BREAK", hop 2 "LIKELY AFFECTED",
+    /// hop 3+ "MAY NEED TESTING") plus a one-line LOW/MEDIUM/HIGH risk summary, instead of a
+    /// flat file list. Default false (flat output unchanged).
+    #[serde(default)]
+    pub grouped: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -249,7 +254,7 @@ impl IndexaMcp {
     /// D2 — blast radius for a symbol: direct callers and transitive callers to `depth` hops,
     /// with each transitive hop resolved (scoped) where possible.
     #[tool(
-        description = "D2 code-graph: compute the blast radius of changing a function or method — returns the direct callers plus files whose call to a frontier caller's exported symbol resolves back to that caller (same-dir/import resolution; bare-name matches are kept as a labeled fallback). Use to answer 'what breaks if I change X?'. `depth` controls how many hops of caller reachability to follow: 1 = direct callers only, 2 = direct + one transitive hop (default), up to 5 for transitive reach through chains. Set `strict: true` to drop the bare-name fallback on the transitive hops. Returns up to 200 results."
+        description = "D2 code-graph: compute the blast radius of changing a function or method — returns the direct callers plus files whose call to a frontier caller's exported symbol resolves back to that caller (same-dir/import resolution; bare-name matches are kept as a labeled fallback). Use to answer 'what breaks if I change X?'. `depth` controls how many hops of caller reachability to follow: 1 = direct callers only, 2 = direct + one transitive hop (default), up to 5 for transitive reach through chains. Set `strict: true` to drop the bare-name fallback on the transitive hops. Set `grouped: true` to group the file list by hop with a risk label (hop 1 'WILL BREAK', hop 2 'LIKELY AFFECTED', hop 3+ 'MAY NEED TESTING') plus a LOW/MEDIUM/HIGH risk summary, instead of a flat list. Returns up to 200 results."
     )]
     pub(crate) async fn blast_radius(
         &self,
@@ -268,12 +273,16 @@ impl IndexaMcp {
             )));
         }
         let total = radius.files.len();
-        let body = radius
-            .files
-            .iter()
-            .map(|p| format!("📄 {p}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let body = if params.0.grouped {
+            format_blast_radius_grouped(&radius)
+        } else {
+            radius
+                .files
+                .iter()
+                .map(|p| format!("📄 {p}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         let mut out = format!(
             "Blast radius of '{}' (depth {depth}, {total} file(s)):\n{body}\n\n\
              direct callers: {} · transitive: {} resolution-confirmed + {} bare-name{}",
@@ -481,4 +490,35 @@ impl IndexaMcp {
             params.0.path
         )))
     }
+}
+
+/// Hop → risk label (GitNexus's `impact` contract): hop 1 = direct callers (will break
+/// immediately), hop 2 = one transitive step (likely affected), hop 3+ = further steps.
+fn hop_risk_label(hop: usize) -> &'static str {
+    match hop {
+        1 => "WILL BREAK",
+        2 => "LIKELY AFFECTED",
+        _ => "MAY NEED TESTING",
+    }
+}
+
+/// Render a `blast_radius` result grouped by hop with a risk label per group, plus an
+/// overall LOW/MEDIUM/HIGH risk summary line — the `grouped: true` body.
+fn format_blast_radius_grouped(radius: &BlastRadius) -> String {
+    let mut out = format!(
+        "risk: {} ({} direct caller(s))",
+        radius.risk().as_str(),
+        radius.direct
+    );
+    for (hop, files) in radius.grouped_by_hop() {
+        out.push_str(&format!(
+            "\n\nhop {hop} — {} ({} file(s)):",
+            hop_risk_label(hop),
+            files.len()
+        ));
+        for f in &files {
+            out.push_str(&format!("\n📄 {f}"));
+        }
+    }
+    out
 }

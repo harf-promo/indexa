@@ -279,7 +279,8 @@ async fn main() -> Result<()> {
             cycles,
             blast,
             depth,
-        } => commands::cmd_graph(path, limit, strict, cycles, blast, depth).await,
+            grouped,
+        } => commands::cmd_graph(path, limit, strict, cycles, blast, depth, grouped).await,
         Commands::Related { path, limit, json } => commands::cmd_related(path, limit, json).await,
         Commands::Export {
             paths,
