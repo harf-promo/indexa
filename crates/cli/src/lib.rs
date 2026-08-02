@@ -960,6 +960,14 @@ pub enum PackAction {
         /// Append an importance-weights section (which files you've marked as important).
         #[arg(long)]
         include_weights: bool,
+        /// Append a call-graph section (which files relate to which) for the pack's paths,
+        /// capped at 200 heaviest edges. Format follows --graph-format.
+        #[arg(long)]
+        include_graph: bool,
+        /// With --include-graph: "text" (per-format list, default) or "mermaid" (a fenced
+        /// ```mermaid flowchart block — pure text, renders natively in most AI tools/viewers).
+        #[arg(long, default_value = "text")]
+        graph_format: String,
         /// Emit a code-skeleton view (symbol signatures, bodies elided) instead of summaries.
         #[arg(long)]
         signatures: bool,

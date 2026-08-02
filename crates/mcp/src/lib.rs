@@ -887,6 +887,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn export_pack_with_include_graph_appends_mermaid_section() {
+        // 1.6: export_pack's include_graph/graph_format params must append a fenced
+        // ```mermaid flowchart over the pack's call graph when graph_format is "mermaid".
+        use indexa_core::store::SummaryRecord;
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_summary(&SummaryRecord {
+                    path: "/proj".into(),
+                    kind: "dir".into(),
+                    parent_path: None,
+                    depth: 0,
+                    summary: "A small project.".into(),
+                    summary_l0: None,
+                    embedding: None,
+                    child_count: 0,
+                    byte_size: 0,
+                    model: "test".into(),
+                    source_hash: String::new(),
+                    generated_at: 0,
+                })
+                .unwrap();
+            store
+                .upsert_edges(&[
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/a.rs".into(),
+                        kind: "calls".into(),
+                        to_ref: "run".into(),
+                    },
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/b.rs".into(),
+                        kind: "defines".into(),
+                        to_ref: "run".into(),
+                    },
+                ])
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        mcp.create_pack(Parameters(CreatePackMcpParams {
+            name: "proj-pack".into(),
+            description: None,
+        }))
+        .await
+        .unwrap();
+        mcp.add_pack_paths(Parameters(PackPathsParams {
+            name: "proj-pack".into(),
+            paths: vec!["/proj".into()],
+        }))
+        .await
+        .unwrap();
+
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // Default (include_graph: false) — no mermaid section.
+        let flat = text_of(
+            mcp.export_pack(Parameters(ExportPackParams {
+                name: "proj-pack".into(),
+                format: Some("md".into()),
+                depth: None,
+                signatures: None,
+                changed_since: None,
+                category: None,
+                include_graph: false,
+                graph_format: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(!flat.contains("```mermaid"));
+
+        // include_graph + graph_format: mermaid — the fenced block appears.
+        let with_graph = text_of(
+            mcp.export_pack(Parameters(ExportPackParams {
+                name: "proj-pack".into(),
+                format: Some("md".into()),
+                depth: None,
+                signatures: None,
+                changed_since: None,
+                category: None,
+                include_graph: true,
+                graph_format: Some("mermaid".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(with_graph.contains("```mermaid"));
+        assert!(with_graph.contains("flowchart TD"));
+    }
+
+    #[tokio::test]
     async fn ask_with_session_id_records_a_conversation() {
         // Conversational Ask over MCP: two `ask` calls with the same session_id persist two
         // turns the next call can see (even over an empty index, which returns a graceful

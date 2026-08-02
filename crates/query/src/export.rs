@@ -443,6 +443,47 @@ pub fn render_graph(graph: &CodeGraph, format: &str) -> String {
     }
 }
 
+/// Escape a mermaid node label: `"` breaks the `["label"]` quoting, so replace it with the
+/// HTML-entity-style escape mermaid recognizes rather than trying to nest quotes.
+fn mermaid_escape(s: &str) -> String {
+    s.replace('"', "#quot;")
+}
+
+/// Render the file-to-file call graph as a fenced ```mermaid flowchart block (GitNexus's
+/// export-as-diagram idea) — pure text, no HTML, no library, renders natively in most AI
+/// tools and Markdown viewers (GitHub included). Node IDs are anonymized (`n0`, `n1`, …)
+/// since mermaid identifiers can't safely hold path characters (`/`, `.`, `-`); the file
+/// path becomes the node's label instead. Empty graph → "".
+pub fn render_graph_mermaid(graph: &CodeGraph) -> String {
+    if graph.edges.is_empty() {
+        return String::new();
+    }
+    let mut ids: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for e in &graph.edges {
+        let next = ids.len();
+        ids.entry(e.from.as_str()).or_insert(next);
+        let next = ids.len();
+        ids.entry(e.to.as_str()).or_insert(next);
+    }
+    let mut nodes: Vec<(&str, usize)> = ids.iter().map(|(&p, &id)| (p, id)).collect();
+    nodes.sort_by_key(|(_, id)| *id);
+
+    let mut out = String::from("```mermaid\nflowchart TD\n");
+    if graph.truncated {
+        out.push_str("  %% truncated — heaviest edges shown\n");
+    }
+    for (path, id) in &nodes {
+        out.push_str(&format!("  n{id}[\"{}\"]\n", mermaid_escape(path)));
+    }
+    for e in &graph.edges {
+        let from_id = ids[e.from.as_str()];
+        let to_id = ids[e.to.as_str()];
+        out.push_str(&format!("  n{from_id} -->|{}| n{to_id}\n", e.weight));
+    }
+    out.push_str("```\n");
+    out
+}
+
 // ── Signatures (code-skeleton) export ───────────────────────────────────────────
 
 /// Extract a compact signature from a code chunk's full body: leading doc/comment lines plus the
@@ -820,6 +861,48 @@ mod tests {
         assert!(render_graph(&graph, "json").contains("\"code_graph\""));
         // Empty inputs render nothing.
         assert_eq!(render_weights(&[], "xml"), "");
+    }
+
+    #[test]
+    fn mermaid_graph_renders_a_fenced_flowchart() {
+        use indexa_core::store::{CodeGraph, CodeGraphEdge, CodeGraphNode};
+        let graph = CodeGraph {
+            nodes: vec![CodeGraphNode {
+                path: "/r/main.rs".into(),
+                out_degree: 1,
+                in_degree: 0,
+                pagerank: 0.5,
+            }],
+            edges: vec![CodeGraphEdge {
+                from: "/r/main.rs".into(),
+                to: "/r/lib.rs".into(),
+                weight: 3,
+            }],
+            truncated: false,
+        };
+        let mmd = render_graph_mermaid(&graph);
+        assert!(mmd.starts_with("```mermaid\nflowchart TD\n"));
+        assert!(mmd.trim_end().ends_with("```"));
+        assert!(mmd.contains("n0[\"/r/main.rs\"]"));
+        assert!(mmd.contains("n1[\"/r/lib.rs\"]"));
+        assert!(mmd.contains("n0 -->|3| n1"));
+        // Empty graph renders nothing (matches render_graph's contract).
+        assert_eq!(
+            render_graph_mermaid(&CodeGraph {
+                nodes: vec![],
+                edges: vec![],
+                truncated: false,
+            }),
+            ""
+        );
+    }
+
+    #[test]
+    fn mermaid_escapes_double_quotes_in_labels() {
+        assert_eq!(
+            mermaid_escape(r#"a "quoted" path"#),
+            "a #quot;quoted#quot; path"
+        );
     }
 
     #[test]

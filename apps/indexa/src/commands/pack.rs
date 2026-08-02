@@ -4,7 +4,8 @@ use indexa_core::{
     store::Store,
 };
 use indexa_query::{
-    build_export_filter, build_tree, prune_tree, render_json, render_markdown, render_xml,
+    build_export_filter, build_tree, prune_tree, render_graph, render_graph_mermaid, render_json,
+    render_markdown, render_xml,
 };
 
 use super::helpers::{
@@ -248,6 +249,8 @@ pub(crate) async fn cmd_pack_export(
     output: Option<String>,
     depth: Option<usize>,
     include_weights: bool,
+    include_graph: bool,
+    graph_format: String,
     signatures: bool,
     token_budget: Option<usize>,
     strict_budget: bool,
@@ -348,6 +351,25 @@ pub(crate) async fn cmd_pack_export(
             &store.list_weights(None).unwrap_or_default(),
             &format,
         ));
+    }
+
+    // Optional call-graph section (1.6): a single pack path scopes the graph to it; multiple
+    // paths fall back to the whole-index scope ("/"), same precedent as `indexa export
+    // --include-graph`. Capped at 200 edges (the MCP `code_graph` tool's default).
+    if include_graph {
+        let scope = if paths.len() == 1 {
+            paths[0].clone()
+        } else {
+            "/".to_owned()
+        };
+        if let Ok(graph) = store.code_graph(&scope, 200, false) {
+            let section = if graph_format == "mermaid" {
+                render_graph_mermaid(&graph)
+            } else {
+                render_graph(&graph, &format)
+            };
+            out_buf.push_str(&section);
+        }
     }
 
     if is_xml {
