@@ -1,7 +1,11 @@
 //! Code-graph tools: `dependencies`, `who_imports`, `who_calls`,
-//! `blast_radius`, `code_graph`, and `related_files`.
+//! `blast_radius`, `code_graph`, `related_files`, and `changed_impact`.
 
-use indexa_core::store::{BlastRadius, ResolutionTier};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+
+use indexa_core::gitdiff::{self, DiffScope};
+use indexa_core::store::{BlastRadius, ResolutionTier, Store};
 use rmcp::{
     handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router, ErrorData,
 };
@@ -13,6 +17,11 @@ use crate::{mcp_err, ok_text, IndexaMcp};
 pub struct DependenciesParams {
     /// Absolute path of an indexed code file.
     pub path: String,
+    /// Also show `extends`/`implements` heritage edges (2.2) in an "Extends"/"Implements"
+    /// section — already stored, just hidden by default so the flat dump stays
+    /// byte-identical to before 2.2. Default false.
+    #[serde(default)]
+    pub include_heritage: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -46,6 +55,11 @@ pub struct BlastRadiusParams {
     /// flat file list. Default false (flat output unchanged).
     #[serde(default)]
     pub grouped: bool,
+    /// Also treat a file with an `extends`/`implements` edge to `symbol` as a direct hit
+    /// (2.2) — changing a base class/trait breaks its subclasses/implementors just as
+    /// directly as changing a called function breaks its callers. Default false.
+    #[serde(default)]
+    pub include_heritage: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -53,6 +67,56 @@ pub struct RelatedFilesParams {
     /// Absolute path of the file to find related files for.
     pub path: String,
     /// Max related files to return (default 15).
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Also show files that historically changed together with this one in git history
+    /// (2.7). Run `indexa graph --compute-co-change` first to populate this — empty until
+    /// then. Default false.
+    #[serde(default)]
+    pub include_co_change: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ChangedImpactParams {
+    /// Absolute path to the git repository root to diff. Defaults to the first indexed
+    /// root if omitted.
+    #[serde(default)]
+    pub root: Option<String>,
+    /// What to diff: `"unstaged"` (default — working tree vs the index), `"staged"`
+    /// (index vs HEAD), or a git ref (branch/tag/commit) to diff the working tree against.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Strict: drop the bare-name fallback on the transitive hops (same semantics as
+    /// `blast_radius`). Default false.
+    #[serde(default)]
+    pub strict: bool,
+    /// How many hops of caller reachability to follow per changed symbol (same semantics
+    /// as `blast_radius`). Default 2, clamped to 1..=5.
+    #[serde(default)]
+    pub depth: Option<usize>,
+    /// Also treat a class/trait's subclasses/implementors as direct hits when the diff
+    /// touched a heritage-carrying symbol (2.2 semantics). Default false.
+    #[serde(default)]
+    pub include_heritage: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TracePathParams {
+    /// Starting point: an absolute indexed file path, or a bare function/method/symbol
+    /// name (resolved to its definer file(s)).
+    pub from: String,
+    /// Destination: an absolute indexed file path, or a bare symbol name.
+    pub to: String,
+    /// Max hops to search. Default 10, clamped to 1..=10.
+    #[serde(default)]
+    pub max_depth: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SymbolContextParams {
+    /// Bare function, method, class, or type name to build a 360° view of.
+    pub symbol: String,
+    /// Max callers to list (default 25).
     #[serde(default)]
     pub limit: Option<usize>,
 }
@@ -78,7 +142,7 @@ pub struct CodeGraphParams {
 impl IndexaMcp {
     /// List a code file's dependencies from the code graph (imports + defined symbols).
     #[tool(
-        description = "List a code file's dependencies from the code graph: the modules/paths it imports and the symbols (functions, types, classes) it defines. Requires an absolute path to a file indexed with `indexa deep`."
+        description = "List a code file's dependencies from the code graph: the modules/paths it imports and the symbols (functions, types, classes) it defines. Set `include_heritage: true` to also list `extends`/`implements` edges (2.2) — the base classes/traits this file's types derive from. Requires an absolute path to a file indexed with `indexa deep`."
     )]
     pub(crate) async fn dependencies(
         &self,
@@ -138,6 +202,39 @@ impl IndexaMcp {
             }
             out.push_str(&format!("\nCalls ({}):\n{}", calls.len(), line("↪", calls)));
         }
+        if params.0.include_heritage {
+            let extends: Vec<&str> = edges
+                .iter()
+                .filter(|e| e.kind == "extends")
+                .map(|e| e.to_ref.as_str())
+                .collect();
+            let implements: Vec<&str> = edges
+                .iter()
+                .filter(|e| e.kind == "implements")
+                .map(|e| e.to_ref.as_str())
+                .collect();
+            if !extends.is_empty() {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&format!(
+                    "\nExtends ({}):\n{}",
+                    extends.len(),
+                    line("▲", extends)
+                ));
+            }
+            if !implements.is_empty() {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&format!(
+                    "\nImplements ({}):\n{}",
+                    implements.len(),
+                    line("◇", implements)
+                ));
+            }
+        }
+        out.push_str(&notes_section(&store, &params.0.path));
         Ok(ok_text(out))
     }
 
@@ -254,7 +351,7 @@ impl IndexaMcp {
     /// D2 — blast radius for a symbol: direct callers and transitive callers to `depth` hops,
     /// with each transitive hop resolved (scoped) where possible.
     #[tool(
-        description = "D2 code-graph: compute the blast radius of changing a function or method — returns the direct callers plus files whose call to a frontier caller's exported symbol resolves back to that caller (same-dir/import resolution; bare-name matches are kept as a labeled fallback). Use to answer 'what breaks if I change X?'. `depth` controls how many hops of caller reachability to follow: 1 = direct callers only, 2 = direct + one transitive hop (default), up to 5 for transitive reach through chains. Set `strict: true` to drop the bare-name fallback on the transitive hops. Set `grouped: true` to group the file list by hop with a risk label (hop 1 'WILL BREAK', hop 2 'LIKELY AFFECTED', hop 3+ 'MAY NEED TESTING') plus a LOW/MEDIUM/HIGH risk summary, instead of a flat list. Returns up to 200 results."
+        description = "D2 code-graph: compute the blast radius of changing a function or method — returns the direct callers plus files whose call to a frontier caller's exported symbol resolves back to that caller (same-dir/import resolution; bare-name matches are kept as a labeled fallback). Use to answer 'what breaks if I change X?'. `depth` controls how many hops of caller reachability to follow: 1 = direct callers only, 2 = direct + one transitive hop (default), up to 5 for transitive reach through chains. Set `strict: true` to drop the bare-name fallback on the transitive hops. Set `grouped: true` to group the file list by hop with a risk label (hop 1 'WILL BREAK', hop 2 'LIKELY AFFECTED', hop 3+ 'MAY NEED TESTING') plus a LOW/MEDIUM/HIGH risk summary, instead of a flat list. Set `include_heritage: true` to also treat a class/trait's subclasses/implementors as direct hits (2.2) — pass a class/trait/interface name as `symbol` to see what breaks if you change it. Returns up to 200 results."
     )]
     pub(crate) async fn blast_radius(
         &self,
@@ -264,7 +361,13 @@ impl IndexaMcp {
         // Clamp depth to a sane range; default to the legacy 2 (direct + one transitive hop).
         let depth = params.0.depth.unwrap_or(2).clamp(1, 5);
         let radius = store
-            .blast_radius_resolved(&params.0.symbol, 200, params.0.strict, depth)
+            .blast_radius_resolved(
+                &params.0.symbol,
+                200,
+                params.0.strict,
+                depth,
+                params.0.include_heritage,
+            )
             .map_err(mcp_err)?;
         if radius.files.is_empty() {
             return Ok(ok_text(format!(
@@ -313,6 +416,7 @@ impl IndexaMcp {
                 params.0.symbol
             ));
         }
+        out.push_str(&notes_section(&store, &params.0.symbol));
         Ok(ok_text(out))
     }
 
@@ -452,7 +556,7 @@ impl IndexaMcp {
 
     /// Files related to a file through the call graph, with resolution tiers.
     #[tool(
-        description = "Find files related to a given file through the call graph: files it calls into, or files that call into it, ranked by shared symbol count. Each relation is resolved (same-dir/import) where possible; unresolvable links fall back to bare-name matching and are labeled 'bare' (approximate). Use to discover what to read alongside a file."
+        description = "Find files related to a given file through the call graph: files it calls into, or files that call into it, ranked by shared symbol count. Each relation is resolved (same-dir/import) where possible; unresolvable links fall back to bare-name matching and are labeled 'bare' (approximate). Set `include_co_change: true` to also list files that historically changed together with this one in git history (2.7) — a behavioral-coupling signal invisible to static analysis; requires `indexa graph --compute-co-change` to have been run first. Use to discover what to read alongside a file."
     )]
     pub(crate) async fn related_files(
         &self,
@@ -463,32 +567,320 @@ impl IndexaMcp {
         let related = store
             .find_related_files_resolved(&params.0.path, limit)
             .map_err(mcp_err)?;
-        if related.is_empty() {
+        let co_change = if params.0.include_co_change {
+            store
+                .co_change_for(&params.0.path, limit)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if related.is_empty() && co_change.is_empty() {
             return Ok(ok_text(format!(
                 "No files related to '{}' (needs a deep-indexed code file with edges).",
                 params.0.path
             )));
         }
-        let bare = related
+        let mut out = String::new();
+        if !related.is_empty() {
+            let bare = related
+                .iter()
+                .filter(|r| r.tier == ResolutionTier::Bare)
+                .count();
+            let body = related
+                .iter()
+                .map(|r| format!("{} (shared: {}, {})", r.path, r.shared, r.tier.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            out.push_str(&format!(
+                "{} file(s) related to '{}':\n{body}",
+                related.len(),
+                params.0.path
+            ));
+            // Caveat only when a bare-tier relation is actually present.
+            if bare > 0 {
+                out.push_str(&format!(
+                    "\n\n⚠ {bare} relation(s) are bare-name matched (approximate)."
+                ));
+            }
+        }
+        if params.0.include_co_change {
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            if co_change.is_empty() {
+                out.push_str(
+                    "No co-change history (run `indexa graph --compute-co-change` first).",
+                );
+            } else {
+                out.push_str(&format!(
+                    "{} file(s) historically co-changed with '{}' (git history):\n{}",
+                    co_change.len(),
+                    params.0.path,
+                    co_change
+                        .iter()
+                        .map(|c| format!("{} (co-changed {} time(s))", c.path, c.count))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ));
+            }
+        }
+        Ok(ok_text(out))
+    }
+
+    /// 2.5 — 360° view of a symbol: definitions, callers, heritage, and the defining
+    /// file's own outgoing references, in one call (replaces who_calls + dependencies +
+    /// a manual heritage lookup).
+    #[tool(
+        description = "360° view of a function/method/class/type name in one call: where it's defined (file, kind, line range when available), who calls it (with resolution tier), who extends/implements it (heritage, 2.2), and what its defining file(s) also import/call (file-granularity approximation of 'outgoing references'). Replaces separately calling who_calls + dependencies + checking heritage by hand. When the name is ambiguous (defined in multiple files) and a `symbol_ambiguity` decision has been answered, the pinned definer is used and noted; otherwise all definers are listed with an ambiguity warning."
+    )]
+    pub(crate) async fn symbol_context(
+        &self,
+        params: Parameters<SymbolContextParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let store = self.store()?;
+        let symbol = &params.0.symbol;
+        let limit = params.0.limit.unwrap_or(25).clamp(1, 200);
+
+        let (definers, pinned) = store.definers_with_pin(symbol).map_err(mcp_err)?;
+        if definers.is_empty() {
+            return Ok(ok_text(format!(
+                "No indexed definition found for '{symbol}'. Run `indexa deep` on source \
+                 files first."
+            )));
+        }
+
+        let mut out = format!(
+            "Symbol context for '{symbol}':\n\nDefined in ({}):",
+            definers.len()
+        );
+        for d in &definers {
+            let syms = store.symbols_in_file(d).unwrap_or_default();
+            match syms.into_iter().find(|s| &s.name == symbol) {
+                Some(s) => out.push_str(&format!(
+                    "\n📄 {d}:{}-{} ({})",
+                    s.start_line, s.end_line, s.kind
+                )),
+                None => out.push_str(&format!("\n📄 {d}")),
+            }
+        }
+        if pinned {
+            out.push_str("\n(disambiguated via a decided symbol_ambiguity pin)");
+        } else if definers.len() > 1 {
+            out.push_str(&format!(
+                "\n⚠ '{symbol}' has {} definitions — ambiguous; answer the symbol_ambiguity \
+                 decision (list_open_decisions) to pin one.",
+                definers.len()
+            ));
+        }
+
+        let callers = store.who_calls_resolved(symbol, limit).map_err(mcp_err)?;
+        if callers.is_empty() {
+            out.push_str("\n\nCalled by: none found.");
+        } else {
+            out.push_str(&format!("\n\nCalled by ({}):", callers.len()));
+            for c in &callers {
+                out.push_str(&format!("\n  ↩ {} [{}]", c.path, c.tier.label()));
+            }
+        }
+
+        let extenders = store.edges_to("extends", symbol).map_err(mcp_err)?;
+        let implementers = store.edges_to("implements", symbol).map_err(mcp_err)?;
+        if !extenders.is_empty() {
+            out.push_str(&format!("\n\nExtended by ({}):", extenders.len()));
+            for e in &extenders {
+                out.push_str(&format!("\n  ▲ {e}"));
+            }
+        }
+        if !implementers.is_empty() {
+            out.push_str(&format!("\n\nImplemented by ({}):", implementers.len()));
+            for i in &implementers {
+                out.push_str(&format!("\n  ◇ {i}"));
+            }
+        }
+
+        let mut outgoing_imports: BTreeSet<String> = BTreeSet::new();
+        let mut outgoing_calls: BTreeSet<String> = BTreeSet::new();
+        for d in &definers {
+            for e in store.edges_from(d).unwrap_or_default() {
+                match e.kind.as_str() {
+                    "imports" => {
+                        outgoing_imports.insert(e.to_ref);
+                    }
+                    "calls" => {
+                        outgoing_calls.insert(e.to_ref);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !outgoing_imports.is_empty() {
+            out.push_str(&format!(
+                "\n\nDefining file also imports ({}):",
+                outgoing_imports.len()
+            ));
+            for i in outgoing_imports.iter().take(20) {
+                out.push_str(&format!("\n  → {i}"));
+            }
+        }
+        if !outgoing_calls.is_empty() {
+            out.push_str(&format!(
+                "\n\nDefining file also calls ({}):",
+                outgoing_calls.len()
+            ));
+            for c in outgoing_calls.iter().take(20) {
+                out.push_str(&format!("\n  ↪ {c}"));
+            }
+        }
+        out.push_str(&notes_section(&store, symbol));
+
+        Ok(ok_text(out))
+    }
+
+    /// 2.4 — BFS shortest callee-direction path between two symbols/files.
+    #[tool(
+        description = "Find the shortest call-graph path from one symbol/file to another — \"how does A reach B?\". `from`/`to` each accept an absolute indexed file path or a bare symbol name (resolved to its definer file(s)). Only structurally-confirmed edges (same-file/same-dir/import resolution) are traversed — bare-name matches are too unreliable to report as a concrete path, so no result found means 'no confirmed path within max_depth', not 'definitely unreachable'. Returns the ordered chain of files from `from` to `to`, each hop labeled with how it resolved. `max_depth` bounds the search (default 10, max 10)."
+    )]
+    pub(crate) async fn trace_path(
+        &self,
+        params: Parameters<TracePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let store = self.store()?;
+        let max_depth = params.0.max_depth.unwrap_or(10).clamp(1, 10);
+        let path = store
+            .trace_path(&params.0.from, &params.0.to, max_depth)
+            .map_err(mcp_err)?;
+        let Some(hops) = path else {
+            return Ok(ok_text(format!(
+                "No confirmed path found from '{}' to '{}' within {max_depth} hop(s). \
+                 Either it doesn't exist, exceeds the depth limit, or only resolves via \
+                 bare-name matching (not traversed as a concrete path).",
+                params.0.from, params.0.to
+            )));
+        };
+        let body = hops
             .iter()
-            .filter(|r| r.tier == ResolutionTier::Bare)
-            .count();
-        let body = related
-            .iter()
-            .map(|r| format!("{} (shared: {}, {})", r.path, r.shared, r.tier.as_str()))
+            .enumerate()
+            .map(|(i, h)| {
+                if i == 0 {
+                    format!("📄 {}", h.path)
+                } else {
+                    format!("  ↪ [{}] {}", h.tier.label(), h.path)
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n");
-        // Caveat only when a bare-tier relation is actually present.
-        let note = if bare > 0 {
-            format!("\n\n⚠ {bare} relation(s) are bare-name matched (approximate).")
-        } else {
-            String::new()
-        };
         Ok(ok_text(format!(
-            "{} file(s) related to '{}':\n{body}{note}",
-            related.len(),
-            params.0.path
+            "Path from '{}' to '{}' ({} hop(s)):\n{body}",
+            params.0.from,
+            params.0.to,
+            hops.len().saturating_sub(1)
         )))
+    }
+
+    /// 2.3 — diff → changed spans → symbols → blast radius, in one call.
+    #[tool(
+        description = "\"What did I just touch and what does it break?\" — diffs a git repo, maps the changed line ranges to symbols (via the symbols table, populated by `indexa deep`), and runs `blast_radius` on each changed symbol, merging the results (grouped by hop, same risk labeling as `blast_radius`'s `grouped: true`). Set `scope` to `\"unstaged\"` (default — working tree vs the index), `\"staged\"` (index vs HEAD), or a git ref (branch/tag/commit) to diff the working tree against that ref. `root` defaults to the first indexed root; pass it explicitly in a multi-root index. Changed files with no symbol-level data (non-code files, or not yet `indexa deep`-indexed) are reported separately via file-level related-files lookup. `strict`, `depth`, and `include_heritage` have the same meaning as on `blast_radius`."
+    )]
+    pub(crate) async fn changed_impact(
+        &self,
+        params: Parameters<ChangedImpactParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let store = self.store()?;
+        let root =
+            match params.0.root {
+                Some(r) => r,
+                None => match store.root_paths().map_err(mcp_err)?.into_iter().next() {
+                    Some(r) => r,
+                    None => return Ok(ok_text(
+                        "No indexed roots — run `indexa scan` first, or pass `root` explicitly.",
+                    )),
+                },
+            };
+        let scope_str = params.0.scope.clone().unwrap_or_default();
+        let scope = DiffScope::parse(&scope_str);
+        let hunks = gitdiff::changed_hunks(Path::new(&root), &scope).map_err(mcp_err)?;
+        if hunks.is_empty() {
+            return Ok(ok_text(format!(
+                "No changes found under '{root}' ({}).",
+                scope_label(&scope)
+            )));
+        }
+        let depth = params.0.depth.unwrap_or(2).clamp(1, 5);
+        let (changed_symbols, file_level) =
+            map_hunks_to_symbols(&store, &hunks).map_err(mcp_err)?;
+        let files_touched: BTreeSet<&str> = hunks.iter().map(|h| h.path.as_str()).collect();
+
+        let mut out = format!(
+            "Changed under '{root}' ({}): {} file(s), {} hunk(s)",
+            scope_label(&scope),
+            files_touched.len(),
+            hunks.len(),
+        );
+
+        if !changed_symbols.is_empty() {
+            let names: Vec<String> = changed_symbols.iter().map(|(_, n)| n.clone()).collect();
+            let radius = store
+                .changed_impact(
+                    &names,
+                    200,
+                    params.0.strict,
+                    depth,
+                    params.0.include_heritage,
+                )
+                .map_err(mcp_err)?;
+            out.push_str(&format!(
+                "\n\nChanged symbols ({}): {}",
+                changed_symbols.len(),
+                changed_symbols
+                    .iter()
+                    .map(|(f, n)| format!("{n} ({f})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            if radius.files.is_empty() {
+                out.push_str(
+                    "\n\nNo callers found for the changed symbols — nothing else appears \
+                     to depend on them.",
+                );
+            } else {
+                out.push_str(&format!("\n\n{}", format_blast_radius_grouped(&radius)));
+                if radius.bare_transitive > 0 {
+                    out.push_str(&format!(
+                        "\n⚠ {} transitive file(s) are approximate: {}.",
+                        radius.bare_transitive,
+                        indexa_core::store::BARE_NAME_CAVEAT
+                    ));
+                }
+            }
+        }
+
+        if !file_level.is_empty() {
+            out.push_str(&format!(
+                "\n\nChanged file(s) with no symbol-level detail ({}) — file-level related \
+                 files (approximate; run `indexa deep` for symbol-level precision):",
+                file_level.len()
+            ));
+            for f in &file_level {
+                let related = store.find_related_files_resolved(f, 10).unwrap_or_default();
+                if related.is_empty() {
+                    out.push_str(&format!("\n📄 {f} — no related files found"));
+                } else {
+                    out.push_str(&format!("\n📄 {f} →"));
+                    for r in &related {
+                        out.push_str(&format!("\n    {} ({})", r.path, r.tier.as_str()));
+                    }
+                }
+            }
+        }
+
+        if changed_symbols.is_empty() && file_level.is_empty() {
+            out.push_str(
+                "\n\nNo indexed changes to report — the changed files may not be code, or \
+                 `indexa deep` hasn't run since the edit.",
+            );
+        }
+
+        Ok(ok_text(out))
     }
 }
 
@@ -521,4 +913,67 @@ fn format_blast_radius_grouped(radius: &BlastRadius) -> String {
         }
     }
     out
+}
+
+/// Render a "Notes" section for anchored notes (2.6) on `anchor` — a code path or bare
+/// symbol name — or an empty string when none exist. Best-effort: a lookup error is
+/// swallowed (fails open) rather than failing the whole tool call over an optional extra.
+fn notes_section(store: &Store, anchor: &str) -> String {
+    let notes = store.note_anchors_for(anchor).unwrap_or_default();
+    if notes.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\n\nNotes ({}):", notes.len());
+    for n in &notes {
+        out.push_str(&format!(
+            "\n  📝 {} ({}) — {}",
+            n.title, n.pack, n.note_path
+        ));
+    }
+    out
+}
+
+/// Human label for a [`DiffScope`], for `changed_impact` output.
+fn scope_label(scope: &DiffScope) -> String {
+    match scope {
+        DiffScope::Unstaged => "unstaged".to_owned(),
+        DiffScope::Staged => "staged".to_owned(),
+        DiffScope::Ref(r) => format!("vs {r}"),
+    }
+}
+
+/// `(file, symbol name)` pairs found by mapping changed hunks to symbols.
+type ChangedSymbols = Vec<(String, String)>;
+
+/// Group `hunks` by file and map each file's changed line ranges to symbol names via
+/// [`Store::symbols_overlapping`]. Returns `(changed_symbols, file_level)`: symbols found
+/// (as `(file, name)` pairs, deduped per file) plus the files whose hunks matched no
+/// symbol at all (no symbol-level data — the caller falls back to file-level relations).
+fn map_hunks_to_symbols(
+    store: &Store,
+    hunks: &[gitdiff::ChangedHunk],
+) -> anyhow::Result<(ChangedSymbols, Vec<String>)> {
+    let mut by_file: BTreeMap<&str, Vec<(i64, i64)>> = BTreeMap::new();
+    for h in hunks {
+        by_file
+            .entry(h.path.as_str())
+            .or_default()
+            .push((h.start_line, h.end_line));
+    }
+    let mut changed_symbols = Vec::new();
+    let mut file_level = Vec::new();
+    for (file, ranges) in by_file {
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        for (start, end) in ranges {
+            for sym in store.symbols_overlapping(file, start, end)? {
+                names.insert(sym.name);
+            }
+        }
+        if names.is_empty() {
+            file_level.push(file.to_owned());
+        } else {
+            changed_symbols.extend(names.into_iter().map(|n| (file.to_owned(), n)));
+        }
+    }
+    Ok((changed_symbols, file_level))
 }

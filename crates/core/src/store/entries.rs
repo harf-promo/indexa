@@ -21,8 +21,8 @@ pub(super) fn subtree_match(prefix: &str) -> (String, String) {
     (exact, child_pattern)
 }
 
-/// Delete chunks (and their FTS5 entries + code-graph edges) for the file at `exact` and
-/// every file strictly under `child_pattern`. Shared by `delete_subtree` and
+/// Delete chunks (and their FTS5 entries + code-graph edges + symbols) for the file at
+/// `exact` and every file strictly under `child_pattern`. Shared by `delete_subtree` and
 /// `delete_chunks_for_subtree`. Matching the exact path too means deleting a single file's
 /// subtree (`/proj/a.rs`) still clears that file's own chunks.
 pub(super) fn delete_chunks_under_prefix(
@@ -36,6 +36,19 @@ pub(super) fn delete_chunks_under_prefix(
     )?;
     tx.execute(
         "DELETE FROM edges WHERE from_path = ?1 OR from_path LIKE ?2 ESCAPE '\\'",
+        params![exact, child_pattern],
+    )?;
+    tx.execute(
+        "DELETE FROM symbols WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+        params![exact, child_pattern],
+    )?;
+    tx.execute(
+        "DELETE FROM note_anchors WHERE note_path = ?1 OR note_path LIKE ?2 ESCAPE '\\'",
+        params![exact, child_pattern],
+    )?;
+    tx.execute(
+        "DELETE FROM co_change WHERE path_a = ?1 OR path_a LIKE ?2 ESCAPE '\\'
+                                    OR path_b = ?1 OR path_b LIKE ?2 ESCAPE '\\'",
         params![exact, child_pattern],
     )?;
     tx.execute(
@@ -58,6 +71,8 @@ fn delete_path_artifacts_exact(tx: &Transaction, paths: &[String]) -> rusqlite::
             ("chunks_fts", "entry_path"),
             ("chunks", "entry_path"),
             ("edges", "from_path"),
+            ("symbols", "path"),
+            ("note_anchors", "note_path"),
             ("summaries", "path"),
             ("summary_queue", "path"),
             ("classifications", "path"),
@@ -68,6 +83,12 @@ fn delete_path_artifacts_exact(tx: &Transaction, paths: &[String]) -> rusqlite::
                 rusqlite::params_from_iter(batch.iter()),
             )?;
         }
+        // co_change is keyed on a PAIR of paths — neither column alone matches the
+        // uniform single-column loop above.
+        tx.execute(
+            &format!("DELETE FROM co_change WHERE path_a IN ({ph}) OR path_b IN ({ph})",),
+            rusqlite::params_from_iter(batch.iter().chain(batch.iter())),
+        )?;
         removed += tx.execute(
             &format!("DELETE FROM entries WHERE path IN ({ph})"),
             rusqlite::params_from_iter(batch.iter()),
@@ -182,6 +203,15 @@ impl Store {
         // Drop the file's code-graph edges too — else `who_imports`/`dependencies` keep
         // listing a deleted file (this is the live watcher file-removal path).
         tx.execute("DELETE FROM edges WHERE from_path = ?1", params![path])?;
+        tx.execute("DELETE FROM symbols WHERE path = ?1", params![path])?;
+        tx.execute(
+            "DELETE FROM note_anchors WHERE note_path = ?1",
+            params![path],
+        )?;
+        tx.execute(
+            "DELETE FROM co_change WHERE path_a = ?1 OR path_b = ?1",
+            params![path],
+        )?;
         // Keep the summary tables symmetric with chunks/entries: leaving these behind
         // orphans summary rows and (worse) leaves a stale summary_queue row that
         // `entries_for_summarization` filters on, permanently blocking re-summarization.

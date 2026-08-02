@@ -4,6 +4,7 @@ answer_decision
 ask
 blast_radius
 browse_tree
+changed_impact
 code_graph
 confirm_classification
 create_pack
@@ -42,6 +43,8 @@ remove_pack_paths
 search
 search_pack
 set_weight
+symbol_context
+trace_path
 trigger_index
 who_calls
 who_imports

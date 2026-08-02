@@ -163,6 +163,15 @@ pub struct ResolvedRelatedFile {
     pub tier: ResolutionTier,
 }
 
+/// One file in a [`Store::trace_path`] result. `tier` is how the *previous* hop's call
+/// resolved into this file; the first hop (the resolved starting file) carries
+/// [`ResolutionTier::SameFile`] as a "start, no incoming edge" placeholder.
+#[derive(Debug, Clone)]
+pub struct TraceHop {
+    pub path: String,
+    pub tier: ResolutionTier,
+}
+
 // ── path helpers (lexical only — index paths may not exist on this machine) ──────
 
 fn parent_dir(path: &str) -> &str {
@@ -571,7 +580,7 @@ impl Store {
     /// (`who_calls`, `blast_radius`) consult the pin; the scope-wide
     /// `code_graph` deliberately does not (one ledger lookup per distinct
     /// name in a scope would be a per-render tax).
-    fn definers_with_pin(&self, symbol: &str) -> Result<(Vec<String>, bool)> {
+    pub fn definers_with_pin(&self, symbol: &str) -> Result<(Vec<String>, bool)> {
         let definers = self.edges_to("defines", symbol)?;
         if let Some(d) = self.latest_decided("symbol_ambiguity", symbol)? {
             if let Some(chosen) = d.chosen.as_deref() {
@@ -782,7 +791,9 @@ impl Store {
     /// at the default depth of 2 = direct callers + one transitive hop; same files, no tier
     /// breakdown).
     pub fn blast_radius(&self, symbol: &str, limit: usize, strict: bool) -> Result<Vec<String>> {
-        Ok(self.blast_radius_resolved(symbol, limit, strict, 2)?.files)
+        Ok(self
+            .blast_radius_resolved(symbol, limit, strict, 2, false)?
+            .files)
     }
 
     /// v0.25 — 1-hop blast radius with scoped resolution: direct callers of `symbol`
@@ -798,19 +809,28 @@ impl Store {
     /// adds one transitive hop (the legacy default), and higher depths keep expanding from
     /// each newly-reached frontier of caller files. `included` doubles as the visited set, so
     /// cycles terminate; results are capped at `limit`.
+    ///
+    /// `include_heritage` (2.2, default false): also treat a file with an `extends`/
+    /// `implements` edge to `symbol` as a direct (hop-1) hit — changing a base class/trait
+    /// breaks its subclasses/implementors just as directly as changing a called function
+    /// breaks its callers. Byte-identical to the pre-2.2 output when false.
     pub fn blast_radius_resolved(
         &self,
         symbol: &str,
         limit: usize,
         strict: bool,
         depth: usize,
+        include_heritage: bool,
     ) -> Result<BlastRadius> {
         let direct: Vec<String> = {
             let mut stmt = self.conn.prepare(
                 "SELECT DISTINCT from_path FROM edges
-                  WHERE kind = 'calls' AND to_ref = ?1 ORDER BY from_path",
+                  WHERE to_ref = ?1
+                    AND (kind = 'calls'
+                         OR (?2 AND kind IN ('extends', 'implements')))
+                  ORDER BY from_path",
             )?;
-            let rows = stmt.query_map(params![symbol], |r| r.get(0))?;
+            let rows = stmt.query_map(params![symbol, include_heritage], |r| r.get(0))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
         // A decided symbol_ambiguity answer pins the authoritative definition:
@@ -962,6 +982,173 @@ impl Store {
             bare_transitive,
             by_hop,
         })
+    }
+
+    /// `changed_impact` (2.3) — the blast radius of a whole set of changed symbols at once
+    /// (one call per distinct symbol name, merged): the union of every affected file, each
+    /// keyed by the **smallest** hop any changed symbol reached it at (the most direct —
+    /// and so most urgent — path wins when two changed symbols both affect the same file).
+    /// `direct`/`scoped_transitive`/`bare_transitive` are summed across symbols, so they
+    /// describe total caller-edges found, not distinct files (`files.len()` is that count).
+    /// Duplicate names in `symbols` are computed once. Empty input ⇒ an empty `BlastRadius`.
+    pub fn changed_impact(
+        &self,
+        symbols: &[String],
+        limit: usize,
+        strict: bool,
+        depth: usize,
+        include_heritage: bool,
+    ) -> Result<BlastRadius> {
+        let mut all_files: BTreeSet<String> = BTreeSet::new();
+        let mut hop_of: HashMap<String, usize> = HashMap::new();
+        let (mut direct, mut scoped_transitive, mut bare_transitive) = (0usize, 0usize, 0usize);
+        let mut seen: HashSet<&str> = HashSet::new();
+        for name in symbols {
+            if !seen.insert(name.as_str()) {
+                continue;
+            }
+            let r = self.blast_radius_resolved(name, limit, strict, depth, include_heritage)?;
+            direct += r.direct;
+            scoped_transitive += r.scoped_transitive;
+            bare_transitive += r.bare_transitive;
+            for (f, hop) in r.by_hop {
+                all_files.insert(f.clone());
+                hop_of
+                    .entry(f)
+                    .and_modify(|h| *h = (*h).min(hop))
+                    .or_insert(hop);
+            }
+        }
+        let files: Vec<String> = all_files.into_iter().take(limit).collect();
+        let by_hop: Vec<(String, usize)> = files
+            .iter()
+            .map(|f| (f.clone(), hop_of.get(f).copied().unwrap_or(1)))
+            .collect();
+        Ok(BlastRadius {
+            files,
+            direct,
+            scoped_transitive,
+            bare_transitive,
+            by_hop,
+        })
+    }
+
+    /// `trace_path` (2.4) — BFS shortest callee-direction path from `from` to `to`:
+    /// "how does A reach B". Each of `from`/`to` may be an absolute indexed file path or a
+    /// bare symbol name (resolved to its definer file(s), same either-form handling as
+    /// [`Self::definers_with_pin`]'s pin lookup). Only *scoped* (same-file/same-dir/import)
+    /// call resolutions are traversed — a bare-name match is too unreliable a link to
+    /// report as a concrete path — so `None` here means "no structurally-confirmed path",
+    /// not "definitely unreachable". `max_depth` bounds the search (recommended cap 10).
+    /// Symbols defined in more than [`Self::CODE_GRAPH_COMMON_SYMBOL_CAP`] files are
+    /// skipped as too ambiguous, mirroring the same guard elsewhere in this module.
+    pub fn trace_path(
+        &self,
+        from: &str,
+        to: &str,
+        max_depth: usize,
+    ) -> Result<Option<Vec<TraceHop>>> {
+        let resolve_seeds = |target: &str| -> Result<Vec<String>> {
+            if !self.edges_from(target)?.is_empty() {
+                Ok(vec![target.to_owned()])
+            } else {
+                self.edges_to("defines", target)
+            }
+        };
+        let seeds = resolve_seeds(from)?;
+        if seeds.is_empty() {
+            return Ok(None);
+        }
+        let targets: HashSet<String> = resolve_seeds(to)?.into_iter().collect();
+        if targets.is_empty() {
+            return Ok(None);
+        }
+        if let Some(s) = seeds.iter().find(|s| targets.contains(s.as_str())) {
+            return Ok(Some(vec![TraceHop {
+                path: s.clone(),
+                tier: ResolutionTier::SameFile,
+            }]));
+        }
+
+        let common_cap = Self::CODE_GRAPH_COMMON_SYMBOL_CAP as usize;
+        let mut visited: HashSet<String> = seeds.iter().cloned().collect();
+        let mut parent: HashMap<String, (String, ResolutionTier)> = HashMap::new();
+        let mut def_cache: HashMap<String, DefinerIndex> = HashMap::new();
+        let mut import_cache: HashMap<String, ImportTargets> = HashMap::new();
+        let mut frontier = seeds.clone();
+        let mut found: Option<String> = None;
+        let mut hop = 0usize;
+        'search: while hop < max_depth && !frontier.is_empty() {
+            let mut next: Vec<String> = Vec::new();
+            for f in &frontier {
+                let calls: Vec<String> = self
+                    .edges_from(f)?
+                    .into_iter()
+                    .filter(|e| e.kind == "calls")
+                    .map(|e| e.to_ref)
+                    .collect();
+                if !import_cache.contains_key(f) {
+                    let imports = self.imports_of(f)?;
+                    import_cache.insert(f.clone(), import_targets(f, &imports));
+                }
+                for sym in calls {
+                    if !def_cache.contains_key(&sym) {
+                        def_cache.insert(
+                            sym.clone(),
+                            DefinerIndex::new(self.edges_to("defines", &sym)?),
+                        );
+                    }
+                    let defs = &def_cache[&sym];
+                    if defs.all.is_empty() || defs.all.len() > common_cap {
+                        continue;
+                    }
+                    let (tier, resolved) = resolve_call(f, &import_cache[f], defs);
+                    if tier == ResolutionTier::Bare {
+                        continue; // unreliable — not traversed as a concrete path
+                    }
+                    for t in resolved {
+                        if visited.contains(&t) {
+                            continue;
+                        }
+                        visited.insert(t.clone());
+                        parent.insert(t.clone(), (f.clone(), tier));
+                        if targets.contains(&t) {
+                            found = Some(t);
+                            break 'search;
+                        }
+                        next.push(t);
+                    }
+                }
+            }
+            frontier = next;
+            hop += 1;
+        }
+
+        let Some(end) = found else {
+            return Ok(None);
+        };
+        let mut chain: Vec<TraceHop> = Vec::new();
+        let mut cur = end;
+        loop {
+            match parent.get(&cur) {
+                Some((p, tier)) => {
+                    chain.push(TraceHop {
+                        path: cur.clone(),
+                        tier: *tier,
+                    });
+                    cur = p.clone();
+                }
+                None => {
+                    chain.push(TraceHop {
+                        path: cur,
+                        tier: ResolutionTier::SameFile,
+                    });
+                    break;
+                }
+            }
+        }
+        chain.reverse();
+        Ok(Some(chain))
     }
 
     /// Classify whether candidate caller `f` (which calls exported symbol `y`) links into the

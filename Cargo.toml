@@ -59,6 +59,10 @@ notify-debouncer-full = "0.7"
 # Text encoding (UTF-16/BOM transcoding for the text-family parsers)
 encoding_rs = "0.8"
 
+# Subprocess timeout: kill a hung child instead of blocking indexing forever. Tiny
+# waitpid/WaitForSingleObject wrapper (MIT/Apache-2.0), no transitive deps.
+wait-timeout = "0.2"
+
 # Storage
 rusqlite = { version = "0.40", features = ["bundled"] }
 

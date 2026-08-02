@@ -34,6 +34,19 @@ pub struct EdgeRecord {
     pub to_ref: String,
 }
 
+/// One code symbol (2.1, the `symbols` table): a top-level definition's kind and 1-based
+/// inclusive line range, richer than a bare `defines` edge's name-only relation. `kind` is
+/// the compact cross-language vocabulary from `indexa_parsers::code::simplify_symbol_kind`
+/// (`"fn"`, `"struct"`, `"class"`, …).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolRecord {
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub start_line: i64,
+    pub end_line: i64,
+}
+
 /// Display facts for one indexed entry row, used by `indexa inspect`.
 #[derive(Debug, Clone)]
 pub struct EntryInfo {

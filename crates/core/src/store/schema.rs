@@ -8,7 +8,7 @@ use anyhow::Result;
 ///
 /// **INVARIANT: bump this whenever the DDL or any migration in `init_schema` changes** — otherwise a
 /// DB stamped at the old value would skip the new migration and silently miss a column/table.
-pub(super) const SCHEMA_VERSION: i64 = 1;
+pub(super) const SCHEMA_VERSION: i64 = 3;
 
 /// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
 /// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
@@ -27,6 +27,17 @@ fn chunks_has_autoincrement(conn: &rusqlite::Connection) -> bool {
 fn edges_allows_calls(conn: &rusqlite::Connection) -> bool {
     conn.query_row(
         "SELECT sql LIKE '%''calls''%' FROM sqlite_master WHERE type='table' AND name='edges'",
+        [],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(true)
+}
+
+/// Does the `edges` table's CHECK constraint already allow `'extends'` (2.2, heritage edges)?
+/// Returns `true` when the table is absent (fresh DB) — DDL below already includes it.
+fn edges_allows_heritage(conn: &rusqlite::Connection) -> bool {
+    conn.query_row(
+        "SELECT sql LIKE '%''extends''%' FROM sqlite_master WHERE type='table' AND name='edges'",
         [],
         |r| r.get::<_, bool>(0),
     )
@@ -204,21 +215,67 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_dirapps_primary ON directory_apps(path) WHERE is_primary = 1;
             CREATE INDEX IF NOT EXISTS idx_dirapps_kind    ON directory_apps(app_kind);
 
-            -- Code-relationship graph (D1 + D2). One row per edge from a code file:
-            --   kind='imports' → to_ref is an imported module/path
-            --   kind='defines' → to_ref is a symbol defined in the file
-            --   kind='calls'   → to_ref is a function/method name called by the file (D2)
+            -- Code-relationship graph (D1 + D2 + 2.2). One row per edge from a code file:
+            --   kind='imports'    → to_ref is an imported module/path
+            --   kind='defines'    → to_ref is a symbol defined in the file
+            --   kind='calls'      → to_ref is a function/method name called by the file (D2)
+            --   kind='extends'    → to_ref is the parent class/struct name (2.2, heritage)
+            --   kind='implements' → to_ref is the implemented trait/interface name (2.2)
             -- Composite PK dedups identical edges; idx_edges_to powers reverse lookups
             -- (who imports X / who defines Y / who calls Z). Re-deep of a file replaces
             -- its rows (delete-by-from_path then insert), mirroring chunks.
             CREATE TABLE IF NOT EXISTS edges (
                 from_path TEXT NOT NULL,
-                kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls')),
+                kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls','extends','implements')),
                 to_ref    TEXT NOT NULL,
                 PRIMARY KEY (from_path, kind, to_ref)
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_edges_to   ON edges(kind, to_ref);
             CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_path);
+
+            -- Symbols (2.1): kind + line range for every top-level code symbol a file
+            -- defines — richer than a bare `defines` edge (name only). One row per
+            -- (path, name, kind, start_line); re-deep of a file replaces its rows
+            -- (delete-by-path then insert), mirroring edges/chunks. Backs diff→symbol
+            -- mapping (changed_impact) and kind-aware graph-tool output.
+            CREATE TABLE IF NOT EXISTS symbols (
+                path       TEXT NOT NULL,
+                name       TEXT NOT NULL,
+                kind       TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line   INTEGER NOT NULL,
+                PRIMARY KEY (path, name, kind, start_line)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_symbols_path ON symbols(path);
+            CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
+
+            -- Note anchors (2.6): an `add_note` may optionally anchor itself to a code path
+            -- or bare symbol name, so graph tools (dependencies/blast_radius/symbol_context)
+            -- can surface a related-note hint inline. One row per note
+            -- (a note has at most one anchor); cheap indexed join by anchor value.
+            CREATE TABLE IF NOT EXISTS note_anchors (
+                note_path   TEXT PRIMARY KEY,
+                anchor      TEXT NOT NULL,
+                anchor_kind TEXT NOT NULL CHECK(anchor_kind IN ('path','symbol')),
+                title       TEXT NOT NULL,
+                pack        TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_note_anchors_anchor ON note_anchors(anchor);
+
+            -- Co-change edges (2.7): files that historically change together in git history —
+            -- behavioral coupling invisible to static analysis. Computed offline
+            -- (`indexa graph --compute-co-change`), symmetric pairs stored once with
+            -- path_a < path_b lexically so a lookup checks both columns. Additive/inert until
+            -- a reader opts in (`related_files`'s `include_co_change`).
+            CREATE TABLE IF NOT EXISTS co_change (
+                path_a       TEXT NOT NULL,
+                path_b       TEXT NOT NULL,
+                count        INTEGER NOT NULL DEFAULT 0,
+                computed_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                PRIMARY KEY (path_a, path_b)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_co_change_a ON co_change(path_a);
+            CREATE INDEX IF NOT EXISTS idx_co_change_b ON co_change(path_b);
 
             -- Context Packs (v0.9): named, cross-directory context bundles.
             -- A pack is a user-curated set of paths that form a coherent topic
@@ -498,6 +555,33 @@ impl Store {
                     CREATE TABLE edges_new (
                         from_path TEXT NOT NULL,
                         kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls')),
+                        to_ref    TEXT NOT NULL,
+                        PRIMARY KEY (from_path, kind, to_ref)
+                    ) WITHOUT ROWID;
+                    INSERT OR IGNORE INTO edges_new SELECT * FROM edges;
+                    DROP TABLE edges;
+                    ALTER TABLE edges_new RENAME TO edges;
+                    CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(kind, to_ref);
+                    ",
+                )?;
+            }
+            tx.commit()?;
+        }
+
+        // Migration: widen the edges.kind CHECK to include 'extends'/'implements' (2.2,
+        // heritage edges). Same copy-table pattern as the 'calls' widening above — SQLite
+        // can't ALTER a constraint. A fresh DB never hits this (base DDL above already
+        // includes both); a DB previously migrated to the 'calls'-only CHECK does.
+        if !edges_allows_heritage(&self.conn) {
+            let tx = self
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if !edges_allows_heritage(&tx) {
+                tx.execute_batch(
+                    "
+                    CREATE TABLE edges_new (
+                        from_path TEXT NOT NULL,
+                        kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls','extends','implements')),
                         to_ref    TEXT NOT NULL,
                         PRIMARY KEY (from_path, kind, to_ref)
                     ) WITHOUT ROWID;

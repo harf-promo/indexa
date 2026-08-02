@@ -8,7 +8,7 @@ use crate::jobs::{broadcast_only, push, JobEvent, JobHandle};
 use crate::AppState;
 use indexa_core::{
     resource::WatchdogState,
-    store::{chunk_content_hash, ChunkRecord, EdgeRecord},
+    store::{chunk_content_hash, ChunkRecord, EdgeRecord, SymbolRecord},
     walker::EntryKind,
 };
 use indexa_llm::{Describer, OllamaLlm};
@@ -687,6 +687,36 @@ pub(crate) async fn run_deep_phase(
                                 stage: "deep".to_owned(),
                                 item_path: Some(path_str.clone()),
                                 message: format!("upsert_edges failed: {e:#}"),
+                                pressure: None,
+                            },
+                        );
+                    }
+                }
+                // Symbols (2.1): kind + line range, extracted alongside `defines` edges.
+                // Same call-when-non-empty convention as the edges block above.
+                let symbol_records: Vec<SymbolRecord> = extracted
+                    .edges
+                    .iter()
+                    .filter(|e| e.kind == "defines")
+                    .filter_map(|e| {
+                        let (start, end) = e.line_range?;
+                        Some(SymbolRecord {
+                            path: path_str.clone(),
+                            name: e.to.clone(),
+                            kind: e.symbol_kind.unwrap_or("other").to_owned(),
+                            start_line: start as i64,
+                            end_line: end as i64,
+                        })
+                    })
+                    .collect();
+                if !symbol_records.is_empty() {
+                    if let Err(e) = store.upsert_symbols(&symbol_records) {
+                        push(
+                            handle,
+                            JobEvent::Warning {
+                                stage: "deep".to_owned(),
+                                item_path: Some(path_str.clone()),
+                                message: format!("upsert_symbols failed: {e:#}"),
                                 pressure: None,
                             },
                         );

@@ -178,7 +178,7 @@ fn blast_radius_strict_cuts_bare_transitive_hop() {
         .unwrap();
 
     let fuzzy = store
-        .blast_radius_resolved("target", 200, false, 2)
+        .blast_radius_resolved("target", 200, false, 2, false)
         .unwrap();
     assert!(fuzzy.files.contains(&"/a/mid.rs".to_string()));
     assert!(
@@ -187,7 +187,9 @@ fn blast_radius_strict_cuts_bare_transitive_hop() {
     );
     assert_eq!((fuzzy.direct, fuzzy.bare_transitive), (1, 1));
 
-    let strict = store.blast_radius_resolved("target", 200, true, 2).unwrap();
+    let strict = store
+        .blast_radius_resolved("target", 200, true, 2, false)
+        .unwrap();
     assert!(strict.files.contains(&"/a/mid.rs".to_string()));
     assert!(
         !strict.files.contains(&"/c/far.rs".to_string()),
@@ -216,7 +218,7 @@ fn blast_radius_scoped_resolution_filters_and_confirms_transitive_callers() {
         .unwrap();
 
     let fuzzy = store
-        .blast_radius_resolved("target", 200, false, 2)
+        .blast_radius_resolved("target", 200, false, 2, false)
         .unwrap();
     assert!(fuzzy.files.contains(&"/r/src/far/user.rs".to_string()));
     assert!(
@@ -226,7 +228,9 @@ fn blast_radius_scoped_resolution_filters_and_confirms_transitive_callers() {
     assert!(fuzzy.files.contains(&"/z/noimp.rs".to_string()));
     assert_eq!((fuzzy.scoped_transitive, fuzzy.bare_transitive), (1, 1));
 
-    let strict = store.blast_radius_resolved("target", 200, true, 2).unwrap();
+    let strict = store
+        .blast_radius_resolved("target", 200, true, 2, false)
+        .unwrap();
     assert!(
         strict.files.contains(&"/r/src/far/user.rs".to_string()),
         "an import-confirmed transitive caller survives strict"
@@ -253,14 +257,14 @@ fn blast_radius_depth_controls_transitive_reach() {
 
     // depth 1 = direct callers only.
     let d1 = store
-        .blast_radius_resolved("target", 200, false, 1)
+        .blast_radius_resolved("target", 200, false, 1, false)
         .unwrap();
     assert_eq!(d1.files, vec!["/p/a.rs".to_string()]);
     assert_eq!(d1.scoped_transitive + d1.bare_transitive, 0);
 
     // depth 2 = direct + one transitive hop (reaches b.rs, not c.rs).
     let d2 = store
-        .blast_radius_resolved("target", 200, false, 2)
+        .blast_radius_resolved("target", 200, false, 2, false)
         .unwrap();
     assert!(d2.files.contains(&"/p/a.rs".to_string()));
     assert!(d2.files.contains(&"/p/b.rs".to_string()));
@@ -271,7 +275,7 @@ fn blast_radius_depth_controls_transitive_reach() {
 
     // depth 3 = reaches c.rs through the chain.
     let d3 = store
-        .blast_radius_resolved("target", 200, false, 3)
+        .blast_radius_resolved("target", 200, false, 3, false)
         .unwrap();
     assert!(
         d3.files.contains(&"/p/c.rs".to_string()),
@@ -306,7 +310,7 @@ fn blast_radius_risk_scales_with_direct_caller_count() {
         .collect();
     store.upsert_edges(&edges).unwrap();
     let r = store
-        .blast_radius_resolved("target", 200, false, 1)
+        .blast_radius_resolved("target", 200, false, 1, false)
         .unwrap();
     assert_eq!(r.direct, 12);
     assert_eq!(r.risk(), crate::store::BlastRadiusRisk::High);
@@ -328,7 +332,7 @@ fn blast_radius_deep_terminates_on_cycle() {
         .unwrap();
     // A high depth must not loop forever.
     let r = store
-        .blast_radius_resolved("target", 200, false, 5)
+        .blast_radius_resolved("target", 200, false, 5, false)
         .unwrap();
     assert!(r.files.contains(&"/p/a.rs".to_string()));
     assert!(r.files.contains(&"/p/b.rs".to_string()));
@@ -429,4 +433,203 @@ fn find_cycles_detects_an_scc() {
         ])
         .unwrap();
     assert!(store2.find_cycles("/", 400).unwrap().is_empty());
+}
+
+#[test]
+fn heritage_edges_migration_widens_old_check_constraint() {
+    // 2.2: a DB previously migrated only as far as the 'calls'-widened CHECK (imports/
+    // defines/calls, no extends/implements) must widen further on the next open, without
+    // losing existing rows. Simulates that prior state directly, then re-runs init_schema
+    // (what a real Store::open on an old DB triggers).
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .conn
+        .execute_batch(
+            "DROP TABLE edges;
+             CREATE TABLE edges (
+                 from_path TEXT NOT NULL,
+                 kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls')),
+                 to_ref    TEXT NOT NULL,
+                 PRIMARY KEY (from_path, kind, to_ref)
+             ) WITHOUT ROWID;
+             INSERT INTO edges VALUES ('/a.rs', 'calls', 'foo');
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+
+    store.init_schema().unwrap();
+
+    // The pre-existing row survived the copy-table migration.
+    let preserved: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM edges WHERE from_path='/a.rs' AND kind='calls' AND to_ref='foo'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        preserved, 1,
+        "existing 'calls' row must survive the migration"
+    );
+
+    // The widened CHECK now accepts 'extends'/'implements'.
+    store
+        .conn
+        .execute("INSERT INTO edges VALUES ('/a.rs', 'extends', 'Base')", [])
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO edges VALUES ('/a.rs', 'implements', 'Trait')",
+            [],
+        )
+        .unwrap();
+}
+
+#[test]
+fn changed_impact_merges_blast_radii_across_symbols_keeping_the_smallest_hop() {
+    let mut store = Store::open_in_memory().unwrap();
+    // fileX is a direct (hop 1) caller of funcA, but only a transitive (hop 2) caller of
+    // funcB (via callerB's export) — the merge must keep the smaller of the two hops.
+    store
+        .upsert_edges(&[
+            edge("/p/callerB.rs", "calls", "funcB"),
+            edge("/p/callerB.rs", "defines", "expB"),
+            edge("/p/fileX.rs", "calls", "expB"),
+            edge("/p/fileX.rs", "calls", "funcA"),
+        ])
+        .unwrap();
+
+    let merged = store
+        .changed_impact(
+            &["funcA".to_string(), "funcB".to_string()],
+            200,
+            false,
+            2,
+            false,
+        )
+        .unwrap();
+    let hop_of_filex = merged
+        .by_hop
+        .iter()
+        .find(|(p, _)| p == "/p/fileX.rs")
+        .map(|(_, h)| *h);
+    assert_eq!(
+        hop_of_filex,
+        Some(1),
+        "fileX is hop 1 via funcA even though it's hop 2 via funcB — min wins"
+    );
+    assert!(merged.files.contains(&"/p/callerB.rs".to_string()));
+    assert_eq!(
+        merged.direct, 2,
+        "one direct caller of funcA + one of funcB"
+    );
+}
+
+#[test]
+fn changed_impact_dedupes_repeated_names_and_empty_input_is_empty() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_edges(&[edge("/p/a.rs", "calls", "target")])
+        .unwrap();
+    let once = store
+        .changed_impact(&["target".to_string()], 200, false, 2, false)
+        .unwrap();
+    let dup = store
+        .changed_impact(
+            &["target".to_string(), "target".to_string()],
+            200,
+            false,
+            2,
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        once.direct, dup.direct,
+        "a repeated symbol name must not double-count"
+    );
+
+    let empty = store.changed_impact(&[], 200, false, 2, false).unwrap();
+    assert!(empty.files.is_empty());
+}
+
+#[test]
+fn trace_path_finds_the_shortest_chain_through_a_scoped_call() {
+    let mut store = Store::open_in_memory().unwrap();
+    // handler.rs calls helper() (same-dir def in mid.rs); mid.rs imports and calls
+    // db_query() defined in db.rs. Path: handler.rs -> mid.rs -> db.rs.
+    store
+        .upsert_edges(&[
+            edge("/p/handler.rs", "calls", "helper"),
+            edge("/p/mid.rs", "defines", "helper"),
+            edge("/p/mid.rs", "calls", "db_query"),
+            edge("/p/mid.rs", "imports", "db"),
+            edge("/p/db.rs", "defines", "db_query"),
+        ])
+        .unwrap();
+
+    let path = store
+        .trace_path("/p/handler.rs", "/p/db.rs", 5)
+        .unwrap()
+        .expect("a path should be found");
+    let files: Vec<&str> = path.iter().map(|h| h.path.as_str()).collect();
+    assert_eq!(files, vec!["/p/handler.rs", "/p/mid.rs", "/p/db.rs"]);
+    // First hop is the start placeholder; the rest carry the resolving tier.
+    assert_eq!(path[0].tier, ResolutionTier::SameFile);
+    assert_eq!(path[1].tier, ResolutionTier::SameDir);
+}
+
+#[test]
+fn trace_path_from_and_to_accept_bare_symbol_names() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_edges(&[
+            edge("/p/a.rs", "defines", "start_sym"),
+            edge("/p/a.rs", "calls", "target_sym"),
+            edge("/p/b.rs", "defines", "target_sym"),
+        ])
+        .unwrap();
+
+    let path = store
+        .trace_path("start_sym", "target_sym", 5)
+        .unwrap()
+        .expect("a path should be found via bare symbol resolution");
+    let files: Vec<&str> = path.iter().map(|h| h.path.as_str()).collect();
+    assert_eq!(files, vec!["/p/a.rs", "/p/b.rs"]);
+}
+
+#[test]
+fn trace_path_returns_none_when_unreachable_or_depth_exceeded() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_edges(&[
+            edge("/p/isolated.rs", "defines", "lonely"),
+            edge("/p/other.rs", "defines", "elsewhere"),
+            // A long chain the depth cap must cut off.
+            edge("/p/a.rs", "calls", "b_sym"),
+            edge("/p/b.rs", "defines", "b_sym"),
+            edge("/p/b.rs", "calls", "c_sym"),
+            edge("/p/c.rs", "defines", "c_sym"),
+        ])
+        .unwrap();
+
+    assert!(store
+        .trace_path("/p/isolated.rs", "/p/other.rs", 5)
+        .unwrap()
+        .is_none());
+    // Reachable at depth 2 (a.rs -> b.rs -> c.rs) but not within depth 1.
+    assert!(store.trace_path("/p/a.rs", "/p/c.rs", 1).unwrap().is_none());
+    assert!(store.trace_path("/p/a.rs", "/p/c.rs", 2).unwrap().is_some());
+}
+
+#[test]
+fn trace_path_same_start_and_target_is_a_trivial_one_node_path() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_edges(&[edge("/p/a.rs", "calls", "whatever")])
+        .unwrap();
+    let path = store.trace_path("/p/a.rs", "/p/a.rs", 5).unwrap().unwrap();
+    assert_eq!(path.len(), 1);
+    assert_eq!(path[0].path, "/p/a.rs");
 }
