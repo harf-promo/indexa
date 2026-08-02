@@ -147,24 +147,41 @@ impl IndexaMcp {
             mode,
         } = params.0;
         let limit = limit.unwrap_or(20).min(100);
-        let scope = scope.as_deref().filter(|s| !s.is_empty());
         let mode = parse_hybrid_mode(mode.as_deref());
+
+        // Predicate grammar (1.8): `path:`/`ext:` tokens stripped from the query and mapped
+        // onto the existing scope filter / a post-hoc extension filter. Off by default — an
+        // explicit `scope` param always wins over a `path:` predicate; a predicate parse that
+        // would leave nothing to search on (the whole query was predicates) falls back to the
+        // original query text rather than searching on an empty string.
+        let predicates = self
+            .config
+            .retrieval
+            .query_predicates
+            .then(|| indexa_query::predicates::parse_predicates(&query))
+            .filter(|p| !p.text.trim().is_empty());
+        let search_text = predicates.as_ref().map_or(query.as_str(), |p| &p.text);
+        let scope = scope
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| predicates.as_ref().and_then(|p| p.path.as_deref()));
+        let ext_filter = predicates.as_ref().and_then(|p| p.ext.clone());
 
         // Try to embed the query for the dense arm; fall back to sparse if the embedder is
         // unavailable or the index has no embeddings.
         let embedding = if matches!(mode, HybridMode::Sparse) {
             None
         } else {
-            self.embedder.embed(&query).await.ok()
+            self.embedder.embed(search_text).await.ok()
         };
 
         // Use the cached ANN index for the dense arm when available (unscoped, large index);
         // `hybrid_search_with_ann` falls back to brute-force otherwise, so results are unchanged.
         let ann = self.ensure_ann().await;
         let mut store = self.store()?;
-        let hits = store
+        let mut hits = store
             .hybrid_search_with_ann(
-                &query,
+                search_text,
                 embedding.as_deref(),
                 &mode,
                 scope,
@@ -173,6 +190,10 @@ impl IndexaMcp {
                 ann.as_deref(),
             )
             .map_err(mcp_err)?;
+        if let Some(ext) = &ext_filter {
+            let suffix = format!(".{ext}");
+            hits.retain(|h| h.entry_path.ends_with(&suffix));
+        }
 
         if hits.is_empty() {
             return Ok(ok_text(format!("No results for '{query}'.")));
@@ -400,6 +421,19 @@ impl IndexaMcp {
         let catalog = catalog.unwrap_or(false);
         let synthesize = synthesize.unwrap_or(true);
         let agentic = agentic.unwrap_or(self.config.retrieval.agentic);
+        // Predicate grammar (1.8): only `path:` is honored for `ask` (it maps onto the
+        // existing pre-retrieval `scope` knob); `ext:` would need a post-retrieval,
+        // pre-synthesis hit filter the qa pipeline doesn't expose, so it's stripped from the
+        // question text (so it doesn't pollute retrieval/synthesis as a literal keyword) but
+        // has no filtering effect here — `search` is where `ext:` is fully honored.
+        let predicates = self
+            .config
+            .retrieval
+            .query_predicates
+            .then(|| indexa_query::predicates::parse_predicates(&question))
+            .filter(|p| !p.text.trim().is_empty());
+        let question = predicates.as_ref().map_or(question, |p| p.text.clone());
+        let predicate_path = predicates.and_then(|p| p.path);
         // Config-derived defaults from `[retrieval]`, then per-request overrides.
         let mut cfg = QaConfig::from_retrieval(&self.config.retrieval);
         if let Some(k) = top_k {
@@ -408,7 +442,7 @@ impl IndexaMcp {
         if let Some(m) = mode.as_deref() {
             cfg.mode = parse_hybrid_mode(Some(m));
         }
-        cfg.scope = scope.filter(|s| !s.is_empty());
+        cfg.scope = scope.filter(|s| !s.is_empty()).or(predicate_path);
         if let Some(r) = rerank {
             cfg.rerank = r;
         }

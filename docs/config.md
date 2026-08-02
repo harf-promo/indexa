@@ -170,6 +170,8 @@ graphrag_clusters    = false  # GraphRAG "Approach C": group a broad answer's hi
 graphrag_max_clusters = 4     # max clusters (also caps the per-cluster summary calls)
 graphrag_cluster_sim = 0.55   # cosine threshold to join a hit to a cluster (higher = more clusters)
 graphrag_summarize   = false  # also add a one-line LLM theme per cluster (extra calls; fail-open)
+staleness_flags      = true   # flag cited files whose on-disk mtime is newer than what's indexed
+query_predicates     = false  # recognize path:/ext: predicates in free-text search/ask queries
 ```
 
 > `broad_per_file_cap` (v0.69+) only acts on broad/thematic, **unscoped** questions — focused and
@@ -192,6 +194,22 @@ graphrag_summarize   = false  # also add a one-line LLM theme per cluster (extra
 > per call (`indexa ask --agentic`, MCP `agentic: true`, or the web chat's "Agentic" checkbox); set
 > `agentic = true` here to make it the default. It **fails open** to one-shot retrieval if the model
 > won't emit the loop's actions. See [methodology.md](methodology.md#agentic-retrieval-opt-in).
+
+> **Staleness attestation** (`staleness_flags`, default on): a cited file whose on-disk mtime is
+> newer than what's indexed is flagged — "(stale: modified since indexed)" in `ask`/MCP text output,
+> "(stale)" plus a footer count in `search`, a `stale: bool` field per source in the web JSON API.
+> Annotation-only (never changes retrieval scores or which chunks are cited); each check is one
+> `fs::metadata` call per cited file, fail-open on any I/O error.
+
+> **Query predicates** (`query_predicates`, default off): recognize `path:<prefix>` and
+> `ext:<extension>` tokens in a free-text `search`/`ask` query and strip them out as filters instead
+> of searching for them literally — e.g. `ext:md path:crates/core auth flow` searches "auth flow"
+> scoped to `.md` files under `crates/core`. `path:` maps onto the existing scope filter (both
+> `search` and `ask`); `ext:` is a post-hoc hit filter (`search` only — `ask` synthesizes before a
+> hit-level filter could apply, so `ext:` is stripped from the question but not enforced there). Off
+> by default because it changes query interpretation; an unrecognized `field:value`-shaped token
+> (anything not `path`/`ext`) always passes through as ordinary text, so turning this on is safe even
+> for queries that happen to contain a colon.
 
 ### Hybrid modes
 

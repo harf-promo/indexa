@@ -402,6 +402,12 @@ pub struct RetrievalConfig {
     /// `true` by default; set `false` to disable the extra per-citation `fs::metadata` check.
     #[serde(default = "default_true")]
     pub staleness_flags: bool,
+    /// Recognize `path:`/`ext:` predicates in free-text `search`/`ask` queries (1.8) — e.g.
+    /// `ext:md path:crates/core auth flow`. `path:` maps onto the existing scope filter;
+    /// `ext:` is a post-hoc hit filter (search only). Off by default: it changes query
+    /// interpretation, so it's eval-gated before flipping the default.
+    #[serde(default)]
+    pub query_predicates: bool,
 }
 
 fn default_true() -> bool {
@@ -459,6 +465,7 @@ impl Default for RetrievalConfig {
             graphrag_cluster_sim: default_graphrag_cluster_sim(),
             graphrag_summarize: false,
             staleness_flags: true,
+            query_predicates: false,
         }
     }
 }

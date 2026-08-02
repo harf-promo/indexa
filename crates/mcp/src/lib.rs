@@ -1065,6 +1065,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_honors_ext_predicate_when_enabled() {
+        // 1.8: with query_predicates on, "ext:rs" restricts hits to .rs files and is stripped
+        // from the searched text.
+        use indexa_core::store::ChunkRecord;
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let chunk = |path: &str| ChunkRecord {
+                entry_path: path.to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: "a widget function definition".to_owned(),
+                language: None,
+                embedding: None,
+                embed_model: None,
+                content_hash: None,
+            };
+            store
+                .upsert_chunks(&[chunk("/proj/widget.rs"), chunk("/proj/widget.md")])
+                .unwrap();
+        }
+        let mut cfg = Config::default();
+        cfg.retrieval.query_predicates = true;
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(cfg),
+        );
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let out = text_of(
+            mcp.search(Parameters(SearchParams {
+                query: "ext:rs widget".into(),
+                limit: None,
+                scope: None,
+                mode: Some("sparse".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(out.contains("/proj/widget.rs"), "{out}");
+        assert!(
+            !out.contains("/proj/widget.md"),
+            "ext:rs must exclude the .md file: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_predicates_are_a_noop_when_disabled() {
+        // The default (query_predicates: false) must searchd the literal query text,
+        // predicates and all — behavior-neutral for anyone not opting in.
+        use indexa_core::store::ChunkRecord;
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_chunks(&[ChunkRecord {
+                    entry_path: "/proj/widget.rs".into(),
+                    seq: 0,
+                    heading: String::new(),
+                    text: "ext:rs widget marker text".to_owned(),
+                    language: None,
+                    embedding: None,
+                    embed_model: None,
+                    content_hash: None,
+                }])
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // Searching the literal token "ext:rs" must still hit the chunk whose FTS-indexed
+        // text contains it verbatim, proving the predicate grammar never engaged.
+        let out = text_of(
+            mcp.search(Parameters(SearchParams {
+                query: "ext:rs".into(),
+                limit: None,
+                scope: None,
+                mode: Some("sparse".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(out.contains("/proj/widget.rs"), "{out}");
+    }
+
+    #[tokio::test]
     async fn ask_with_session_id_records_a_conversation() {
         // Conversational Ask over MCP: two `ask` calls with the same session_id persist two
         // turns the next call can see (even over an empty index, which returns a graceful
