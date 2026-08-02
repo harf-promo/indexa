@@ -2695,6 +2695,7 @@ dependencies = [
  "globset",
  "htmd",
  "kamadak-exif",
+ "libc",
  "mail-parser",
  "mime_guess",
  "object",

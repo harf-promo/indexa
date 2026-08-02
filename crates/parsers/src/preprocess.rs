@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use globset::{Glob, GlobMatcher};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 /// One `[[parsers.preprocessor]]` rule, parsers-crate-local — converted from
@@ -71,6 +71,16 @@ impl PreprocessorParser {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        // New process group (Unix only) so a timeout can kill the WHOLE tree, not just this
+        // direct child — a shell wrapper (e.g. a shebang script) may fork a grandchild for its
+        // last command rather than exec-replacing itself; killing only the shell then leaves
+        // that grandchild alive, still holding the stdout pipe's write end open, so the reader
+        // thread below would block on read_to_end() until the orphan exits on its own.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
         let mut child = cmd.spawn().ok()?;
 
         if let Some(mut stdin) = child.stdin.take() {
@@ -91,8 +101,7 @@ impl PreprocessorParser {
         let status = match wait_with_timeout(&mut child, self.timeout) {
             Some(status) => status,
             None => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_process_tree(&mut child);
                 let _ = out_reader.join();
                 return None; // timeout ⇒ fall through
             }
@@ -103,6 +112,27 @@ impl PreprocessorParser {
         }
         Some(String::from_utf8_lossy(&stdout).into_owned())
     }
+}
+
+/// Kill `child` and everything it spawned. On Unix, `child` was placed in its own process
+/// group (`process_group(0)` at spawn time) — signaling the negated pid kills that whole group
+/// in one call, reaching orphaned grandchildren a plain `Child::kill()` (which only signals the
+/// direct child) would miss. Falls back to the plain single-process kill elsewhere.
+#[cfg(unix)]
+fn kill_process_tree(child: &mut Child) {
+    // SAFETY: `child.id()` is the pid of a process we just spawned into its own group
+    // (`process_group(0)`), which is always a small positive integer — negating it to target
+    // the group is the standard `killpg` idiom, not a raw/unchecked pointer or memory op.
+    unsafe {
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn kill_process_tree(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Wait for `child` to exit, up to `timeout`. A hand-rolled `try_wait()` poll loop rather than
