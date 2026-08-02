@@ -354,6 +354,8 @@ fn extract_calls(
                         from: path.to_path_buf(),
                         kind: "calls",
                         to: name,
+                        symbol_kind: None,
+                        line_range: None,
                     });
                 }
             }
@@ -454,14 +456,46 @@ fn extract_defines(
         if kinds.contains(&child.kind()) {
             let name = symbol_name(&child, source);
             if name != child.kind() && seen.insert(name.clone()) {
+                // 1-based, inclusive line range (tree-sitter positions are 0-based rows).
+                let start_line = child.start_position().row + 1;
+                let end_line = child.end_position().row + 1;
                 edges.push(Edge {
                     from: path.to_path_buf(),
                     kind: "defines",
                     to: name,
+                    symbol_kind: Some(simplify_symbol_kind(child.kind())),
+                    line_range: Some((start_line, end_line)),
                 });
             }
         }
         extract_defines(child, source, path, kinds, edges, seen);
+    }
+}
+
+/// Map a tree-sitter top-level node kind to a compact, cross-language symbol-kind vocabulary
+/// (2.1) — every `top_level_kinds` entry across the 8 supported languages is covered
+/// explicitly; an unmapped kind (a future grammar/language addition) falls back to `"other"`
+/// rather than leaking a grammar-specific node-kind string into the `symbols` table.
+pub(crate) fn simplify_symbol_kind(node_kind: &str) -> &'static str {
+    match node_kind {
+        "function_item" | "function_definition" | "function_declaration" => "fn",
+        "method_declaration" => "method",
+        "impl_item" => "impl",
+        "struct_item" | "struct_specifier" => "struct",
+        "enum_item" | "enum_specifier" | "enum_declaration" => "enum",
+        "union_specifier" => "union",
+        "trait_item" => "trait",
+        "class_declaration" | "class_definition" | "class_specifier" => "class",
+        "interface_declaration" => "interface",
+        "mod_item" | "namespace_definition" => "module",
+        "type_alias" | "type_alias_declaration" | "type_declaration" | "type_definition" => "type",
+        "const_item" | "const_declaration" => "const",
+        "static_item" => "static",
+        "var_declaration" | "variable_declaration" | "lexical_declaration" => "var",
+        "template_declaration" => "template",
+        "preproc_def" | "preproc_function_def" => "macro",
+        "declaration" => "declaration",
+        _ => "other",
     }
 }
 
@@ -478,6 +512,8 @@ fn extract_imports(node: Node, source: &str, path: &Path, kinds: &[&str], edges:
                         from: path.to_path_buf(),
                         kind: "imports",
                         to: target,
+                        symbol_kind: None,
+                        line_range: None,
                     });
                 }
             }
@@ -761,6 +797,100 @@ impl Greeter {
         assert!(defines.contains(&"Widget"), "defines: {defines:?}");
         // Every edge originates at the parsed file.
         assert!(ex.edges.iter().all(|e| e.from == p));
+    }
+
+    #[test]
+    fn defines_edges_carry_symbol_kind_and_line_range() {
+        // 2.1: `defines` edges now carry a compact symbol kind + 1-based line range;
+        // imports/calls edges carry neither.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("lib.rs");
+        std::fs::write(
+            &p,
+            "use std::fmt;\n\npub fn run() {\n    helper();\n}\n\npub struct Widget {\n    x: i32,\n}\n",
+        )
+        .unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+
+        let run_edge = ex
+            .edges
+            .iter()
+            .find(|e| e.kind == "defines" && e.to == "run")
+            .expect("run defines edge");
+        assert_eq!(run_edge.symbol_kind, Some("fn"));
+        // `pub fn run() {` starts on line 3, its closing `}` is line 5 (1-based).
+        assert_eq!(run_edge.line_range, Some((3, 5)));
+
+        let widget_edge = ex
+            .edges
+            .iter()
+            .find(|e| e.kind == "defines" && e.to == "Widget")
+            .expect("Widget defines edge");
+        assert_eq!(widget_edge.symbol_kind, Some("struct"));
+        assert_eq!(widget_edge.line_range, Some((7, 9)));
+
+        // Imports and calls never carry symbol metadata.
+        assert!(ex
+            .edges
+            .iter()
+            .filter(|e| e.kind != "defines")
+            .all(|e| e.symbol_kind.is_none() && e.line_range.is_none()));
+    }
+
+    #[test]
+    fn simplify_symbol_kind_covers_every_top_level_kind() {
+        // Every top_level_kinds entry across all 8 languages must map to something other
+        // than the "other" fallback — this pins the mapping table against silent gaps
+        // when a language's top_level_kinds list changes.
+        const ALL_TOP_LEVEL_KINDS: &[&str] = &[
+            // Rust
+            "function_item",
+            "impl_item",
+            "struct_item",
+            "enum_item",
+            "trait_item",
+            "mod_item",
+            "type_alias",
+            "const_item",
+            "static_item",
+            // Python
+            "function_definition",
+            "class_definition",
+            // JS/TS/TSX
+            "function_declaration",
+            "class_declaration",
+            "lexical_declaration",
+            "variable_declaration",
+            "interface_declaration",
+            "type_alias_declaration",
+            // Go
+            "method_declaration",
+            "type_declaration",
+            "const_declaration",
+            "var_declaration",
+            // Java
+            "enum_declaration",
+            // C/C++
+            "struct_specifier",
+            "enum_specifier",
+            "union_specifier",
+            "type_definition",
+            "preproc_def",
+            "preproc_function_def",
+            "class_specifier",
+            "namespace_definition",
+            "template_declaration",
+            "declaration",
+        ];
+        for kind in ALL_TOP_LEVEL_KINDS {
+            assert_ne!(
+                simplify_symbol_kind(kind),
+                "other",
+                "unmapped top_level_kinds entry: {kind}"
+            );
+        }
+        // A genuinely unknown kind still falls back gracefully.
+        assert_eq!(simplify_symbol_kind("some_future_grammar_node"), "other");
     }
 
     #[test]

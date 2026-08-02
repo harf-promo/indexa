@@ -14,6 +14,7 @@
 //! - [`weights`] — importance weight CRUD + search boost (v0.8).
 //! - [`insights`] — duplicate/stale/diff analysis (v0.10).
 //! - [`usage`] — token-savings telemetry (v0.23; the counterfactual definition lives there).
+//! - [`symbols`] — code symbol (kind + line range) writes and queries (2.1).
 //! - [`types`] — the public record structs.
 
 use anyhow::{Context, Result};
@@ -41,6 +42,7 @@ mod search;
 mod semantic_edges;
 mod sessions;
 mod summaries;
+mod symbols;
 mod types;
 mod usage;
 mod weights;
@@ -68,8 +70,8 @@ pub use search::is_stub_chunk;
 pub use types::{
     chunk_content_hash, ChunkRecord, ClassificationRecord, CodeGraph, CodeGraphEdge, CodeGraphNode,
     DecisionRecord, EdgeRecord, EntryInfo, FailedQueueItem, HealthStats, NewDecision, PackRecord,
-    QueueItem, QueueStats, RegionSummary, RelatedFile, SearchHit, SummaryRecord, TreeNode,
-    WeightRecord,
+    QueueItem, QueueStats, RegionSummary, RelatedFile, SearchHit, SummaryRecord, SymbolRecord,
+    TreeNode, WeightRecord,
 };
 pub use usage::{UsageSummary, USAGE_WEEK_SECS};
 

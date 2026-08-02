@@ -8,7 +8,7 @@ use anyhow::Result;
 ///
 /// **INVARIANT: bump this whenever the DDL or any migration in `init_schema` changes** — otherwise a
 /// DB stamped at the old value would skip the new migration and silently miss a column/table.
-pub(super) const SCHEMA_VERSION: i64 = 1;
+pub(super) const SCHEMA_VERSION: i64 = 2;
 
 /// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
 /// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
@@ -219,6 +219,22 @@ impl Store {
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_edges_to   ON edges(kind, to_ref);
             CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_path);
+
+            -- Symbols (2.1): kind + line range for every top-level code symbol a file
+            -- defines — richer than a bare `defines` edge (name only). One row per
+            -- (path, name, kind, start_line); re-deep of a file replaces its rows
+            -- (delete-by-path then insert), mirroring edges/chunks. Backs diff→symbol
+            -- mapping (changed_impact) and kind-aware graph-tool output.
+            CREATE TABLE IF NOT EXISTS symbols (
+                path       TEXT NOT NULL,
+                name       TEXT NOT NULL,
+                kind       TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line   INTEGER NOT NULL,
+                PRIMARY KEY (path, name, kind, start_line)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_symbols_path ON symbols(path);
+            CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 
             -- Context Packs (v0.9): named, cross-directory context bundles.
             -- A pack is a user-curated set of paths that form a coherent topic

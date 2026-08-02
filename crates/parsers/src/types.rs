@@ -17,13 +17,20 @@ pub struct Chunk {
 }
 
 /// A code-relationship-graph edge emitted by a parser (currently only the code parser):
-/// `from` imports a module / defines a symbol named `to`. `kind` is `"imports"` or
-/// `"defines"`.
+/// `from` imports a module / defines a symbol / calls a function named `to`. `kind` is
+/// `"imports"`, `"defines"`, or `"calls"`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edge {
     pub from: PathBuf,
     pub kind: &'static str,
     pub to: String,
+    /// For `kind == "defines"` only (2.1): the symbol's kind in a compact, cross-language
+    /// vocabulary (`"fn"`, `"struct"`, `"class"`, …) — see `code::simplify_symbol_kind`.
+    /// `None` for imports/calls edges.
+    pub symbol_kind: Option<&'static str>,
+    /// For `kind == "defines"` only (2.1): the symbol's 1-based, inclusive
+    /// `(start_line, end_line)` in its source file. `None` for imports/calls edges.
+    pub line_range: Option<(usize, usize)>,
 }
 
 /// Output of a parser run on one file.
