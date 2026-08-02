@@ -133,6 +133,9 @@ pub struct ScanConfig {
     /// walk is I/O/syscall-bound, so this scales past the core count. Set a number to cap on a
     /// shared host (leave cores for other tenants) or raise it on a fast local NVMe machine.
     pub threads: Option<usize>,
+    /// Honor `.indexaignore` files (highest-precedence ignore layer, above `.gitignore`/`.ignore`,
+    /// supports `!` re-includes) during the walk. Default on; set `false` to disable entirely.
+    pub custom_ignore: bool,
 }
 
 impl Default for ScanConfig {
@@ -145,6 +148,7 @@ impl Default for ScanConfig {
             redact_at_index: true,
             skip_binary: false,
             threads: None,
+            custom_ignore: true,
         }
     }
 }

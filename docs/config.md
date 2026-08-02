@@ -86,6 +86,7 @@ respect_gitignore = true   # honor the scan root's .gitignore (its patterns, anc
 ignore            = []     # extra gitignore-style patterns, e.g. ["build/", "*.log", "vendor/"]
 auto_reindex      = "off"  # "off" | "7d" | "30d" | "12h" … staleness interval for `worker --auto-reindex`
 skip_binary       = false  # NUL-sniff files during deep; skip binaries (executables/images/blobs) from parsing
+custom_ignore     = true   # honor .indexaignore files (see below); set false to disable entirely
 # threads         = 8      # walker worker threads; omit = all cores (min 4). Lower on a shared host.
 ```
 
@@ -93,6 +94,23 @@ skip_binary       = false  # NUL-sniff files during deep; skip binaries (executa
 > files are not separately loaded. `ignore` patterns use gitignore syntax (globs, `dir/`, `!negation`).
 > Anything skipped here is never walked, so it can't be indexed or summarized. Use
 > [`indexa prune`](#) to clean rows left from content that *was* indexed before you ignored it.
+
+### `.indexaignore` — tune indexing without touching git behavior
+
+Drop a `.indexaignore` file (gitignore syntax) anywhere in the tree to add the **highest-precedence**
+ignore layer — above `.gitignore` and `.ignore`, nested per directory like both. Because it's a
+separate file, you can tune what Indexa indexes without changing what git tracks:
+
+```gitignore
+# .indexaignore
+fixtures/          # exclude a noisy, committed fixtures dir from the index
+!docs/generated/    # re-include a gitignored-but-valuable generated-docs dir
+```
+
+`!`-prefixed lines re-include a path even if `.gitignore`/`.ignore` excludes it — but this can never
+re-include a sensitive credential store (`.ssh`, `.gnupg`, Keychains, browser profiles, …); that
+prune is a separate, unconditional check. Gated on `respect_gitignore`; disable entirely with
+`[scan] custom_ignore = false`.
 
 ### Scheduled / auto re-index
 

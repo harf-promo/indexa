@@ -113,6 +113,7 @@ pub(crate) fn scan_walk_config(scan: &indexa_core::config::ScanConfig) -> WalkCo
         include_sensitive: scan.include_sensitive,
         sniff_binary: scan.skip_binary,
         threads: scan.threads,
+        custom_ignore: scan.custom_ignore,
         ..WalkConfig::default()
     }
 }

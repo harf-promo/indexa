@@ -48,6 +48,7 @@ pub(crate) async fn cmd_deep(
         // so the loops below can skip binaries without opening them for a parse attempt.
         sniff_binary: cfg.scan.skip_binary,
         threads: cfg.scan.threads,
+        custom_ignore: cfg.scan.custom_ignore,
         ..Default::default()
     };
 

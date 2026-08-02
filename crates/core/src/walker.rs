@@ -49,6 +49,12 @@ pub struct WalkConfig {
     /// is I/O-bound — classification does `stat`/`exists` syscalls — so it scales past the core
     /// count). Set via `[scan] threads` to cap on a shared host or raise on a fast NVMe machine.
     pub threads: Option<usize>,
+    /// Honor `.indexaignore` files (root AND nested, gitignore-style) as the highest-precedence
+    /// ignore layer — above `.gitignore` and `.ignore`, including `!`-prefixed re-includes (e.g.
+    /// `!docs/generated/` to index a gitignored-but-valuable dir without touching git behavior).
+    /// Gated on `respect_gitignore` like `.ignore` — turning that off disables every ignore-file
+    /// layer. Default on; a tree with no `.indexaignore` file is byte-identical to before.
+    pub custom_ignore: bool,
 }
 
 /// Default scan-time per-file size cap (8 MiB). Skips blobs that are almost
@@ -67,6 +73,7 @@ impl Default for WalkConfig {
             include_sensitive: false,
             sniff_binary: false,
             threads: None,
+            custom_ignore: true,
         }
     }
 }
@@ -144,14 +151,27 @@ pub fn is_sensitive_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Build a gitignore matcher for `root` combining the root `.gitignore` (when `respect_gitignore`)
-/// and the `[scan] ignore` config patterns, both anchored at `root`. Returns `None` when there are
-/// no rules. Shared by the walker prune callback and the watchers' per-event
-/// [`should_index_file`] check, so file selection can't drift between a scan and a live watch.
+/// Highest-precedence per-directory ignore filename (ripgrep's `.rgignore` pattern) — lets a user
+/// tune indexing without touching git behavior, including `!`-prefixed re-includes of paths
+/// `.gitignore`/`.ignore` exclude. Registered with `WalkBuilder::add_custom_ignore_filename`,
+/// which the `ignore` crate documents as taking precedence over `.gitignore`/`.ignore`/global
+/// gitignore at every directory level.
+pub const CUSTOM_IGNORE_FILENAME: &str = ".indexaignore";
+
+/// Build a gitignore matcher for `root` combining the root `.gitignore`, the `[scan] ignore`
+/// config patterns, and the root [`CUSTOM_IGNORE_FILENAME`] (when `respect_gitignore &&
+/// custom_ignore`), anchored at `root`. Added last so its rules — including `!` re-includes —
+/// take precedence, matching `.indexaignore`'s status as the highest-precedence layer in the
+/// walker. Returns `None` when there are no rules. Shared by the walker prune callback and the
+/// watchers' per-event [`should_index_file`] check, so file selection can't drift between a scan
+/// and a live watch. Note: unlike the walker (which honors *nested* `.indexaignore`/`.gitignore`
+/// via `ignore` crate machinery), this helper only loads the *root* file — the same documented
+/// asymmetry the root `.gitignore` load already has, for standalone/non-git directories.
 pub fn build_ignore_matcher(
     root: &Path,
     respect_gitignore: bool,
     ignore: &[String],
+    custom_ignore: bool,
 ) -> Option<ignore::gitignore::Gitignore> {
     let mut gb = ignore::gitignore::GitignoreBuilder::new(root);
     let mut has_rules = false;
@@ -166,6 +186,13 @@ pub fn build_ignore_matcher(
         let _ = gb.add_line(None, pat); // fail-open: a bad pattern is silently skipped
         has_rules = true;
     }
+    if respect_gitignore && custom_ignore {
+        let root_custom = root.join(CUSTOM_IGNORE_FILENAME);
+        if root_custom.is_file() {
+            let _ = gb.add(&root_custom); // fail-open: a bad file is silently skipped
+            has_rules = true;
+        }
+    }
     if has_rules {
         gb.build().ok()
     } else {
@@ -179,11 +206,13 @@ pub fn build_scan_matchers(
     roots: &[PathBuf],
     respect_gitignore: bool,
     ignore: &[String],
+    custom_ignore: bool,
 ) -> Vec<(PathBuf, ignore::gitignore::Gitignore)> {
     roots
         .iter()
         .filter_map(|r| {
-            build_ignore_matcher(r, respect_gitignore, ignore).map(|gi| (r.clone(), gi))
+            build_ignore_matcher(r, respect_gitignore, ignore, custom_ignore)
+                .map(|gi| (r.clone(), gi))
         })
         .collect()
 }
@@ -299,7 +328,8 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
     // Root `.gitignore` + `[scan] ignore` patterns, anchored at root — shared with the watchers'
     // per-event `should_index_file` so a scan and a live watch select the same files.
     let combined_matcher: Option<Arc<ignore::gitignore::Gitignore>> =
-        build_ignore_matcher(root, cfg.respect_gitignore, &cfg.ignore).map(Arc::new);
+        build_ignore_matcher(root, cfg.respect_gitignore, &cfg.ignore, cfg.custom_ignore)
+            .map(Arc::new);
 
     let mut b = WalkBuilder::new(root);
     b.threads(threads)
@@ -317,6 +347,12 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
         .hidden(cfg.skip_hidden)
         // Scan-time size cap: files above this are not yielded by the walker.
         .max_filesize(cfg.max_filesize);
+
+    // `.indexaignore` — highest-precedence ignore layer, nested per directory (see
+    // CUSTOM_IGNORE_FILENAME doc comment). Gated on respect_gitignore, matching `.ignore`.
+    if cfg.respect_gitignore && cfg.custom_ignore {
+        b.add_custom_ignore_filename(CUSTOM_IGNORE_FILENAME);
+    }
 
     if let Some(d) = cfg.max_depth {
         b.max_depth(Some(d));
@@ -665,7 +701,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let roots = vec![root.clone()];
-        let matchers = build_scan_matchers(&roots, true, &["*.log".to_string()]);
+        let matchers = build_scan_matchers(&roots, true, &["*.log".to_string()], true);
 
         let write = |p: &Path| {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -755,7 +791,7 @@ mod tests {
         let link = root.join("link.rs");
         symlink(&target, &link).unwrap();
         let roots = vec![root.clone()];
-        let matchers = build_scan_matchers(&roots, false, &[]);
+        let matchers = build_scan_matchers(&roots, false, &[], true);
         let cap = Some(DEFAULT_MAX_FILESIZE);
         assert!(should_index_file(&target, &roots, false, cap, &matchers));
         assert!(!should_index_file(&link, &roots, false, cap, &matchers));
@@ -855,6 +891,79 @@ mod tests {
         )));
         // A normal code dir is not sensitive.
         assert!(!is_sensitive_dir(&PathBuf::from("/Users/x/projects/myapp")));
+    }
+
+    #[test]
+    fn indexaignore_excludes_matched_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("keep.txt"), "keep").unwrap();
+        std::fs::write(dir.path().join("noisy.txt"), "noise").unwrap();
+        std::fs::write(dir.path().join(CUSTOM_IGNORE_FILENAME), "noisy.txt\n").unwrap();
+
+        let entries = walk(dir.path(), &WalkConfig::default()).unwrap();
+        assert!(entries.iter().any(|e| e.path.ends_with("keep.txt")));
+        assert!(
+            !entries.iter().any(|e| e.path.ends_with("noisy.txt")),
+            ".indexaignore patterns must exclude matched files"
+        );
+    }
+
+    #[test]
+    fn indexaignore_reincludes_gitignored_path() {
+        // The killer use case: `!` re-include a path .gitignore excludes, without touching git
+        // behavior. .indexaignore is added last (highest precedence) so its `!` line wins.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "generated/\n").unwrap();
+        let gen_dir = dir.path().join("generated");
+        std::fs::create_dir(&gen_dir).unwrap();
+        std::fs::write(gen_dir.join("docs.md"), "generated docs").unwrap();
+        std::fs::write(
+            dir.path().join(CUSTOM_IGNORE_FILENAME),
+            "!generated/\n!generated/docs.md\n",
+        )
+        .unwrap();
+
+        let entries = walk(dir.path(), &WalkConfig::default()).unwrap();
+        assert!(
+            entries.iter().any(|e| e.path.ends_with("docs.md")),
+            ".indexaignore `!` re-include must beat .gitignore's exclusion"
+        );
+    }
+
+    #[test]
+    fn indexaignore_never_reincludes_sensitive_dirs() {
+        // Sensitive-dir pruning (is_sensitive_dir) is a separate, unconditional gate in the walk
+        // callback — a `.indexaignore` re-include of a credential store must NOT resurrect it.
+        // `Library/Keychains` is matched by substring (path_contains), unlike `.ssh`/`.gnupg`
+        // (home_subdir, which only fires for the REAL home dir — unusable under a tempdir).
+        let dir = tempfile::tempdir().unwrap();
+        let keychains = dir.path().join("Library").join("Keychains");
+        std::fs::create_dir_all(&keychains).unwrap();
+        std::fs::write(keychains.join("login.keychain"), "fake keychain").unwrap();
+        std::fs::write(dir.path().join(CUSTOM_IGNORE_FILENAME), "!Library/\n").unwrap();
+
+        let entries = walk(dir.path(), &WalkConfig::default()).unwrap();
+        assert!(
+            !entries.iter().any(|e| e.path.ends_with("login.keychain")),
+            ".indexaignore must not be able to re-include a sensitive dir"
+        );
+    }
+
+    #[test]
+    fn indexaignore_disabled_by_custom_ignore_false() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("noisy.txt"), "noise").unwrap();
+        std::fs::write(dir.path().join(CUSTOM_IGNORE_FILENAME), "noisy.txt\n").unwrap();
+
+        let cfg = WalkConfig {
+            custom_ignore: false,
+            ..Default::default()
+        };
+        let entries = walk(dir.path(), &cfg).unwrap();
+        assert!(
+            entries.iter().any(|e| e.path.ends_with("noisy.txt")),
+            "custom_ignore = false must disable .indexaignore entirely"
+        );
     }
 
     #[test]

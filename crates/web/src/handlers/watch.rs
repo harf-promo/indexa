@@ -90,6 +90,7 @@ pub(crate) async fn api_watch_start(
         std::slice::from_ref(&watch_root),
         state.config.scan.respect_gitignore,
         &state.config.scan.ignore,
+        state.config.scan.custom_ignore,
     );
     let include_sensitive = state.config.scan.include_sensitive;
     let redact_at_index = state.config.scan.redact_at_index;
