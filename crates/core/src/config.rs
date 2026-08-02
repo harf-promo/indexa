@@ -40,6 +40,9 @@ pub struct Config {
     /// Opt-in remote-source ingestion (v0.32): pull a web page / GitHub issue|PR into a pack.
     #[serde(default)]
     pub sources: SourcesConfig,
+    /// MCP server settings (3.2): tool-surface profile.
+    #[serde(default)]
+    pub mcp: McpServerConfig,
 }
 
 /// Settings for opt-in remote-source ingestion (`indexa pack add-url`). Off by default — fetching
@@ -62,6 +65,27 @@ impl Default for SourcesConfig {
             enabled: false,
             timeout_secs: 30,
             max_retries: 2,
+        }
+    }
+}
+
+/// MCP server settings (3.2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpServerConfig {
+    /// Tool-surface profile: `"full"` (default — every tool advertised and callable) or
+    /// `"core"` (a small task-focused subset — `search`/`ask`/`dependencies`/`who_calls`/
+    /// `blast_radius`/`list_packs`/`search_pack`/`export_pack`/`add_note`/
+    /// `list_open_decisions`; the rest un-advertised and un-callable). Cuts the per-session
+    /// tool-schema token cost for subagents doing bounded work. Unrecognized values fall
+    /// open to `"full"`. The `indexa mcp --tool-profile` flag overrides this per-invocation.
+    pub tool_profile: String,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            tool_profile: "full".to_owned(),
         }
     }
 }

@@ -689,6 +689,12 @@ pub enum Commands {
         // that invocation is what every client config points at.
         #[command(subcommand)]
         action: Option<McpAction>,
+
+        /// Tool-surface profile for this run (3.2): `full` (default — every tool) or `core`
+        /// (a small task-focused subset; the rest un-advertised and un-callable). Overrides
+        /// `[mcp] tool_profile` in config.toml when set.
+        #[arg(long)]
+        tool_profile: Option<String>,
     },
 
     /// Show context store statistics.
