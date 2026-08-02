@@ -285,10 +285,27 @@ async fn main() -> Result<()> {
             depth,
             grouped,
             heritage,
+            compute_co_change,
         } => {
-            commands::cmd_graph(path, limit, strict, cycles, blast, depth, grouped, heritage).await
+            commands::cmd_graph(
+                path,
+                limit,
+                strict,
+                cycles,
+                blast,
+                depth,
+                grouped,
+                heritage,
+                compute_co_change,
+            )
+            .await
         }
-        Commands::Related { path, limit, json } => commands::cmd_related(path, limit, json).await,
+        Commands::Related {
+            path,
+            limit,
+            json,
+            include_co_change,
+        } => commands::cmd_related(path, limit, json, include_co_change).await,
         Commands::Export {
             paths,
             format,

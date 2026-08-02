@@ -56,8 +56,8 @@ pub use curation::{
     ListClassificationsParams, ListFilesByCategoryParams, SetWeightParams,
 };
 pub use graph::{
-    BlastRadiusParams, CodeGraphParams, DependenciesParams, RelatedFilesParams, WhoCallsParams,
-    WhoImportsParams,
+    BlastRadiusParams, ChangedImpactParams, CodeGraphParams, DependenciesParams,
+    RelatedFilesParams, SymbolContextParams, TracePathParams, WhoCallsParams, WhoImportsParams,
 };
 pub use insights::{InsightsDaysParams, InsightsDuplicatesParams, InsightsLargestParams};
 pub use packs::{
@@ -759,6 +759,218 @@ mod tests {
             caveated.contains("No call edges") || caveated.contains("bare-name"),
             "code_graph must either report emptiness or carry the bare-name caveat, got: {caveated}"
         );
+    }
+
+    /// 2.4 — `trace_path` end-to-end: a scoped call chain resolves through one hop and
+    /// the response names every file in the chain plus its resolving tier.
+    #[tokio::test]
+    async fn trace_path_reports_the_resolved_hop_chain() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_edges(&[
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/handler.rs".into(),
+                        kind: "calls".into(),
+                        to_ref: "helper".into(),
+                    },
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/db.rs".into(),
+                        kind: "defines".into(),
+                        to_ref: "helper".into(),
+                    },
+                ])
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let text = mcp
+            .trace_path(Parameters(TracePathParams {
+                from: "/proj/handler.rs".into(),
+                to: "/proj/db.rs".into(),
+                max_depth: None,
+            }))
+            .await
+            .unwrap();
+        let body = text
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("/proj/handler.rs"), "got: {body}");
+        assert!(body.contains("/proj/db.rs"), "got: {body}");
+        assert!(body.contains("1 hop"), "got: {body}");
+    }
+
+    /// 2.4 — no confirmed path reports the specific "not found" phrasing, not an error.
+    #[tokio::test]
+    async fn trace_path_reports_no_path_when_unreachable() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        let text = mcp
+            .trace_path(Parameters(TracePathParams {
+                from: "/proj/a.rs".into(),
+                to: "/proj/b.rs".into(),
+                max_depth: None,
+            }))
+            .await
+            .unwrap();
+        let body = text
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("No confirmed path"), "got: {body}");
+    }
+
+    /// 2.5 — `symbol_context` end-to-end: definitions (kind + line range from the
+    /// symbols table), callers, and an anchored note (2.6) all appear in one response.
+    #[tokio::test]
+    async fn symbol_context_reports_definition_callers_and_anchored_notes() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_edges(&[
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/lib.rs".into(),
+                        kind: "defines".into(),
+                        to_ref: "run".into(),
+                    },
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/main.rs".into(),
+                        kind: "calls".into(),
+                        to_ref: "run".into(),
+                    },
+                ])
+                .unwrap();
+            store
+                .upsert_symbols(&[indexa_core::store::SymbolRecord {
+                    path: "/proj/lib.rs".into(),
+                    name: "run".into(),
+                    kind: "fn".into(),
+                    start_line: 10,
+                    end_line: 20,
+                }])
+                .unwrap();
+            store
+                .upsert_note_anchor(
+                    "/notes/run-gotcha.md",
+                    "run",
+                    "symbol",
+                    "Watch the retry loop",
+                    "eng",
+                )
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let text = mcp
+            .symbol_context(Parameters(SymbolContextParams {
+                symbol: "run".into(),
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        let body = text
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("/proj/lib.rs:10-20 (fn)"), "got: {body}");
+        assert!(body.contains("/proj/main.rs"), "got: {body}");
+        assert!(body.contains("Watch the retry loop"), "got: {body}");
+    }
+
+    /// 2.3 — `changed_impact` end-to-end against a REAL git repo: an unstaged edit to a
+    /// symbol's line range maps through the actual `git diff` subprocess to the symbol,
+    /// then to its caller via `blast_radius`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn changed_impact_maps_a_real_git_diff_to_the_touched_symbol_and_its_caller() {
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "t"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("lib.rs"), "fn target_fn() {\n    1\n}\n").unwrap();
+        run(&["add", "lib.rs"]);
+        run(&["commit", "-q", "-m", "init"]);
+        // Edit within target_fn's line range (1-3), unstaged.
+        std::fs::write(root.join("lib.rs"), "fn target_fn() {\n    2\n}\n").unwrap();
+
+        let lib_path = root.join("lib.rs").to_string_lossy().into_owned();
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_entries(&[indexa_core::walker::Entry {
+                    path: root.to_path_buf(),
+                    kind: indexa_core::walker::EntryKind::Dir,
+                    size: 0,
+                    modified: None,
+                    hint: None,
+                    is_binary: false,
+                }])
+                .unwrap();
+            store
+                .upsert_symbols(&[indexa_core::store::SymbolRecord {
+                    path: lib_path.clone(),
+                    name: "target_fn".into(),
+                    kind: "fn".into(),
+                    start_line: 1,
+                    end_line: 3,
+                }])
+                .unwrap();
+            store
+                .upsert_edges(&[
+                    indexa_core::store::EdgeRecord {
+                        from_path: lib_path.clone(),
+                        kind: "defines".into(),
+                        to_ref: "target_fn".into(),
+                    },
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/caller.rs".into(),
+                        kind: "calls".into(),
+                        to_ref: "target_fn".into(),
+                    },
+                ])
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let text = mcp
+            .changed_impact(Parameters(ChangedImpactParams {
+                root: Some(root.to_string_lossy().into_owned()),
+                scope: None,
+                strict: false,
+                depth: None,
+                include_heritage: false,
+            }))
+            .await
+            .unwrap();
+        let body = text
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("target_fn"), "got: {body}");
+        assert!(body.contains("/proj/caller.rs"), "got: {body}");
     }
 
     /// End-to-end over the review family: a seeded open question is listed

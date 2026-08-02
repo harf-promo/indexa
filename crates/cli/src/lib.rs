@@ -427,6 +427,13 @@ pub enum Commands {
         /// doesn't render heritage edges yet).
         #[arg(long)]
         heritage: bool,
+
+        /// Recompute co-change edges (2.7) from git history under `path` and store them —
+        /// files that historically change together, from `git log --name-only`. Ignores
+        /// every other flag; run this once after cloning/pulling, then `indexa related
+        /// --include-co-change` picks up the result. Requires `path` to be inside a git repo.
+        #[arg(long)]
+        compute_co_change: bool,
     },
 
     /// Find files related to a file via the call graph (it calls them, or they call it).
@@ -443,6 +450,10 @@ pub enum Commands {
         /// Emit as JSON.
         #[arg(long)]
         json: bool,
+        /// Also show files that historically changed together with this one in git
+        /// history (2.7) — run `indexa graph --compute-co-change` first to populate this.
+        #[arg(long)]
+        include_co_change: bool,
     },
 
     /// Export the hierarchical summary tree as XML, Markdown, or JSON for use as AI context.

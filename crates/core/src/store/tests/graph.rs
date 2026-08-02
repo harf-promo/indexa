@@ -486,3 +486,150 @@ fn heritage_edges_migration_widens_old_check_constraint() {
         )
         .unwrap();
 }
+
+#[test]
+fn changed_impact_merges_blast_radii_across_symbols_keeping_the_smallest_hop() {
+    let mut store = Store::open_in_memory().unwrap();
+    // fileX is a direct (hop 1) caller of funcA, but only a transitive (hop 2) caller of
+    // funcB (via callerB's export) — the merge must keep the smaller of the two hops.
+    store
+        .upsert_edges(&[
+            edge("/p/callerB.rs", "calls", "funcB"),
+            edge("/p/callerB.rs", "defines", "expB"),
+            edge("/p/fileX.rs", "calls", "expB"),
+            edge("/p/fileX.rs", "calls", "funcA"),
+        ])
+        .unwrap();
+
+    let merged = store
+        .changed_impact(
+            &["funcA".to_string(), "funcB".to_string()],
+            200,
+            false,
+            2,
+            false,
+        )
+        .unwrap();
+    let hop_of_filex = merged
+        .by_hop
+        .iter()
+        .find(|(p, _)| p == "/p/fileX.rs")
+        .map(|(_, h)| *h);
+    assert_eq!(
+        hop_of_filex,
+        Some(1),
+        "fileX is hop 1 via funcA even though it's hop 2 via funcB — min wins"
+    );
+    assert!(merged.files.contains(&"/p/callerB.rs".to_string()));
+    assert_eq!(
+        merged.direct, 2,
+        "one direct caller of funcA + one of funcB"
+    );
+}
+
+#[test]
+fn changed_impact_dedupes_repeated_names_and_empty_input_is_empty() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_edges(&[edge("/p/a.rs", "calls", "target")])
+        .unwrap();
+    let once = store
+        .changed_impact(&["target".to_string()], 200, false, 2, false)
+        .unwrap();
+    let dup = store
+        .changed_impact(
+            &["target".to_string(), "target".to_string()],
+            200,
+            false,
+            2,
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        once.direct, dup.direct,
+        "a repeated symbol name must not double-count"
+    );
+
+    let empty = store.changed_impact(&[], 200, false, 2, false).unwrap();
+    assert!(empty.files.is_empty());
+}
+
+#[test]
+fn trace_path_finds_the_shortest_chain_through_a_scoped_call() {
+    let mut store = Store::open_in_memory().unwrap();
+    // handler.rs calls helper() (same-dir def in mid.rs); mid.rs imports and calls
+    // db_query() defined in db.rs. Path: handler.rs -> mid.rs -> db.rs.
+    store
+        .upsert_edges(&[
+            edge("/p/handler.rs", "calls", "helper"),
+            edge("/p/mid.rs", "defines", "helper"),
+            edge("/p/mid.rs", "calls", "db_query"),
+            edge("/p/mid.rs", "imports", "db"),
+            edge("/p/db.rs", "defines", "db_query"),
+        ])
+        .unwrap();
+
+    let path = store
+        .trace_path("/p/handler.rs", "/p/db.rs", 5)
+        .unwrap()
+        .expect("a path should be found");
+    let files: Vec<&str> = path.iter().map(|h| h.path.as_str()).collect();
+    assert_eq!(files, vec!["/p/handler.rs", "/p/mid.rs", "/p/db.rs"]);
+    // First hop is the start placeholder; the rest carry the resolving tier.
+    assert_eq!(path[0].tier, ResolutionTier::SameFile);
+    assert_eq!(path[1].tier, ResolutionTier::SameDir);
+}
+
+#[test]
+fn trace_path_from_and_to_accept_bare_symbol_names() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_edges(&[
+            edge("/p/a.rs", "defines", "start_sym"),
+            edge("/p/a.rs", "calls", "target_sym"),
+            edge("/p/b.rs", "defines", "target_sym"),
+        ])
+        .unwrap();
+
+    let path = store
+        .trace_path("start_sym", "target_sym", 5)
+        .unwrap()
+        .expect("a path should be found via bare symbol resolution");
+    let files: Vec<&str> = path.iter().map(|h| h.path.as_str()).collect();
+    assert_eq!(files, vec!["/p/a.rs", "/p/b.rs"]);
+}
+
+#[test]
+fn trace_path_returns_none_when_unreachable_or_depth_exceeded() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_edges(&[
+            edge("/p/isolated.rs", "defines", "lonely"),
+            edge("/p/other.rs", "defines", "elsewhere"),
+            // A long chain the depth cap must cut off.
+            edge("/p/a.rs", "calls", "b_sym"),
+            edge("/p/b.rs", "defines", "b_sym"),
+            edge("/p/b.rs", "calls", "c_sym"),
+            edge("/p/c.rs", "defines", "c_sym"),
+        ])
+        .unwrap();
+
+    assert!(store
+        .trace_path("/p/isolated.rs", "/p/other.rs", 5)
+        .unwrap()
+        .is_none());
+    // Reachable at depth 2 (a.rs -> b.rs -> c.rs) but not within depth 1.
+    assert!(store.trace_path("/p/a.rs", "/p/c.rs", 1).unwrap().is_none());
+    assert!(store.trace_path("/p/a.rs", "/p/c.rs", 2).unwrap().is_some());
+}
+
+#[test]
+fn trace_path_same_start_and_target_is_a_trivial_one_node_path() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_edges(&[edge("/p/a.rs", "calls", "whatever")])
+        .unwrap();
+    let path = store.trace_path("/p/a.rs", "/p/a.rs", 5).unwrap().unwrap();
+    assert_eq!(path.len(), 1);
+    assert_eq!(path[0].path, "/p/a.rs");
+}

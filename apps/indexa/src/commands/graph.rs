@@ -33,12 +33,36 @@ pub(crate) async fn cmd_graph(
     depth: usize,
     grouped: bool,
     heritage: bool,
+    compute_co_change: bool,
 ) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };
-    let store = Store::open(&db_path)?;
     let scope = expand(&path);
+
+    // --compute-co-change: recompute the co_change table from git history and return —
+    // every other flag is ignored in this mode (2.7).
+    if compute_co_change {
+        let mut store = Store::open(&db_path)?;
+        let root = std::path::Path::new(&scope);
+        let pairs = indexa_core::cochange::co_change_pairs(
+            root,
+            indexa_core::cochange::DEFAULT_COMMIT_LIMIT,
+        )?;
+        if pairs.is_empty() {
+            println!(
+                "No co-change pairs found under \"{scope}\" (not a git repo, no history, or every commit touched only one file)."
+            );
+            return Ok(());
+        }
+        let pair_count = pairs.len();
+        store.replace_co_change(&pairs)?;
+        println!("Computed {pair_count} co-change pair(s) under \"{scope}\" and stored them.");
+        println!("Run `indexa related --include-co-change <file>` to see them.");
+        return Ok(());
+    }
+
+    let store = Store::open(&db_path)?;
 
     // --blast <symbol>: "what breaks if I change this?" — the caller reachability set to
     // `depth` hops, instead of the whole-scope graph. `path` is ignored in this mode.
