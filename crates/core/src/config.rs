@@ -40,6 +40,9 @@ pub struct Config {
     /// Opt-in remote-source ingestion (v0.32): pull a web page / GitHub issue|PR into a pack.
     #[serde(default)]
     pub sources: SourcesConfig,
+    /// MCP server settings (3.2): tool-surface profile.
+    #[serde(default)]
+    pub mcp: McpServerConfig,
 }
 
 /// Settings for opt-in remote-source ingestion (`indexa pack add-url`). Off by default — fetching
@@ -62,6 +65,27 @@ impl Default for SourcesConfig {
             enabled: false,
             timeout_secs: 30,
             max_retries: 2,
+        }
+    }
+}
+
+/// MCP server settings (3.2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpServerConfig {
+    /// Tool-surface profile: `"full"` (default — every tool advertised and callable) or
+    /// `"core"` (a small task-focused subset — `search`/`ask`/`dependencies`/`who_calls`/
+    /// `blast_radius`/`list_packs`/`search_pack`/`export_pack`/`add_note`/
+    /// `list_open_decisions`; the rest un-advertised and un-callable). Cuts the per-session
+    /// tool-schema token cost for subagents doing bounded work. Unrecognized values fall
+    /// open to `"full"`. The `indexa mcp --tool-profile` flag overrides this per-invocation.
+    pub tool_profile: String,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            tool_profile: "full".to_owned(),
         }
     }
 }
@@ -111,10 +135,12 @@ pub struct ScanConfig {
     pub respect_gitignore: bool,
     /// Extra gitignore-style patterns to skip (e.g. `["build/", "*.log", "vendor/"]`).
     pub ignore: Vec<String>,
-    /// Re-index interval for `indexa worker --auto-reindex`: `"off"` (default) or a duration
-    /// like `"7d"` / `"30d"` / `"12h"`. When set, the worker re-runs scan→deep→summarize for
-    /// any indexed root whose newest content is older than this. The `--auto-reindex` flag must
-    /// still be passed to activate it (so an expensive rebuild never starts implicitly).
+    /// Re-index interval for `indexa worker --auto-reindex`: `"off"` (default), a duration
+    /// like `"7d"` / `"30d"` / `"12h"` (a one-shot pre-drain staleness check), or `"git-poll"`
+    /// (3.3 — continuously watch each indexed git root's HEAD/working-tree state at an
+    /// adaptive interval and re-index on change; non-git roots fall back to the interval
+    /// check). The `--auto-reindex` flag must still be passed to activate any of these (so an
+    /// expensive rebuild never starts implicitly).
     pub auto_reindex: String,
     /// Descend into sensitive credential directories (`.ssh`, `.gnupg`, `.aws`, browser profiles,
     /// macOS Keychains, password managers). Defaults to `false` — these are never walked unless

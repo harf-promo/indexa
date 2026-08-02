@@ -396,12 +396,22 @@ async fn main() -> Result<()> {
         } => commands::cmd_serve(port, host, embed_model, llm_model, &cfg).await,
         // Bare `indexa mcp` must keep running the stdio server — every client
         // config written by `mcp install` points at exactly that invocation.
-        Commands::Mcp { action } => match action {
-            None => commands::cmd_mcp(&cfg).await,
+        Commands::Mcp {
+            action,
+            tool_profile,
+        } => match action {
+            None => commands::cmd_mcp(&cfg, tool_profile).await,
             Some(McpAction::Install { client, dry_run }) => {
                 commands::cmd_mcp_install(client, dry_run).await
             }
         },
+        Commands::InstallHooks {
+            write,
+            with_pretooluse,
+        } => commands::cmd_install_hooks(write, with_pretooluse).await,
+        Commands::McpHook { event } => {
+            commands::cmd_mcp_hook(commands::HookEvent::parse(&event)?).await
+        }
         Commands::Status {
             unknown,
             deep,

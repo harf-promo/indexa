@@ -689,6 +689,41 @@ pub enum Commands {
         // that invocation is what every client config points at.
         #[command(subcommand)]
         action: Option<McpAction>,
+
+        /// Tool-surface profile for this run (3.2): `full` (default — every tool) or `core`
+        /// (a small task-focused subset; the rest un-advertised and un-callable). Overrides
+        /// `[mcp] tool_profile` in config.toml when set.
+        #[arg(long)]
+        tool_profile: Option<String>,
+    },
+
+    /// Print (or install) Claude Code hook config that injects Indexa context automatically (3.1).
+    ///
+    /// A SessionStart hook injects a short freshness summary (entry/chunk counts, indexed
+    /// roots, last-indexed time) at the start of every session — fail-open, context-only,
+    /// never blocking. Prints the resulting `.claude/settings.json` by default; pass
+    /// `--write` to actually apply it (a `.bak` of the original is kept). Project-scoped only
+    /// — never touches your global `~/.claude/settings.json`. Claude Code only.
+    #[command(after_help = "Examples:
+  indexa install-hooks                    # preview what would be written
+  indexa install-hooks --write            # apply to ./.claude/settings.json
+  indexa install-hooks --write --with-pretooluse")]
+    #[command(display_order = 52)]
+    InstallHooks {
+        /// Apply the hook config to ./.claude/settings.json (default: preview only).
+        #[arg(long)]
+        write: bool,
+        /// Also install a PreToolUse hook on Grep that surfaces related indexed context for
+        /// the search pattern (sparse/BM25 only — no local model dependency).
+        #[arg(long)]
+        with_pretooluse: bool,
+    },
+
+    /// Internal: the hook script `install-hooks` wires up. Not meant to be run by hand.
+    #[command(hide = true)]
+    McpHook {
+        /// `session-start` or `pre-tool-use`.
+        event: String,
     },
 
     /// Show context store statistics.

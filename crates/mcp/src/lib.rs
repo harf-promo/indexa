@@ -86,6 +86,46 @@ struct AnnCache {
     watermark: (i64, i64),
 }
 
+/// MCP tool-surface profile (3.2) — `core` un-advertises AND un-calls (via rmcp's
+/// `disable_route`, not a filtered listing) every tool outside a small task-focused subset,
+/// cutting the per-session schema token cost for subagents that only need retrieval + basic
+/// graph/pack/decision access. `full` (the default) is byte-identical to pre-3.2 behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolProfile {
+    #[default]
+    Full,
+    Core,
+}
+
+impl ToolProfile {
+    /// Parse a `--tool-profile`/`[mcp] tool_profile` value. Fail-open: anything other than
+    /// exactly `"core"` (including unrecognized values) resolves to `Full` — an unrecognized
+    /// profile must never accidentally hide tools from an agent that needs them.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "core" => ToolProfile::Core,
+            _ => ToolProfile::Full,
+        }
+    }
+}
+
+/// The `core` profile's tool set — retrieval plus the minimum graph/pack/decision surface for
+/// a subagent doing focused, bounded work. Subset-only by construction: every name here must
+/// also appear in [`IndexaMcp::tool_router`]'s full set, enforced by
+/// `core_profile_is_a_subset_of_the_full_tool_set`.
+const CORE_TOOL_NAMES: &[&str] = &[
+    "search",
+    "ask",
+    "dependencies",
+    "who_calls",
+    "blast_radius",
+    "list_packs",
+    "search_pack",
+    "export_pack",
+    "add_note",
+    "list_open_decisions",
+];
+
 /// The Indexa MCP server handler. Holds only `Send + Sync` state. Each tool opens
 /// its own short-lived `Store` connection (a rusqlite `Connection` is `Send` but
 /// not `Sync`, so it can't be shared across the async tool futures) — mirroring
@@ -96,6 +136,7 @@ pub struct IndexaMcp {
     embedder: Arc<dyn Embedder + Send + Sync>,
     llm: Arc<dyn Generator + Send + Sync>,
     config: Arc<Config>,
+    tool_profile: ToolProfile,
     /// Cached HNSW index for dense retrieval, shared across tool calls (the MCP server is
     /// long-lived, so the build cost amortizes). Watermark-keyed so a re-index refreshes it.
     ann: Arc<tokio::sync::RwLock<AnnCache>>,
@@ -124,17 +165,31 @@ fn record_usage(store: &mut Store, tool: &str, bytes_served: usize, bytes_counte
 }
 
 impl IndexaMcp {
+    /// `full` tool profile (byte-identical to pre-3.2 behavior). See
+    /// [`Self::new_with_profile`] for `--tool-profile core`.
     pub fn new(
         db_path: PathBuf,
         embedder: Arc<dyn Embedder + Send + Sync>,
         llm: Arc<dyn Generator + Send + Sync>,
         config: Arc<Config>,
     ) -> Self {
+        Self::new_with_profile(db_path, embedder, llm, config, ToolProfile::Full)
+    }
+
+    /// 3.2 — construct with an explicit tool profile.
+    pub fn new_with_profile(
+        db_path: PathBuf,
+        embedder: Arc<dyn Embedder + Send + Sync>,
+        llm: Arc<dyn Generator + Send + Sync>,
+        config: Arc<Config>,
+        tool_profile: ToolProfile,
+    ) -> Self {
         Self {
             db_path: Arc::new(db_path),
             embedder,
             llm,
             config,
+            tool_profile,
             ann: Arc::new(tokio::sync::RwLock::new(AnnCache::default())),
             ann_build_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -223,8 +278,9 @@ impl IndexaMcp {
     }
 
     /// Composed router over every tool family module — the single source of
-    /// truth for the tool surface, used by both the `#[tool_handler]` dispatch
-    /// below and the contract tests.
+    /// truth for the FULL tool surface (contract tests, golden list, doc counts). The
+    /// `#[tool_handler]` dispatch below uses [`Self::active_tool_router`] instead, which
+    /// applies the instance's profile on top of this.
     pub(crate) fn tool_router() -> ToolRouter<Self> {
         Self::router_retrieval()
             + Self::router_graph()
@@ -235,9 +291,26 @@ impl IndexaMcp {
             + Self::router_admin()
             + Self::router_query_extras()
     }
+
+    /// 3.2 — the router that actually serves THIS instance's requests: the full router with
+    /// every tool outside the active profile disabled via rmcp's `disable_route` (un-advertised
+    /// in `list_tools` AND rejected by `call_tool` — not merely filtered from a listing).
+    /// `Full` (the default) is the unmodified full router, so profile-off behavior is
+    /// byte-identical to pre-3.2.
+    fn active_tool_router(&self) -> ToolRouter<Self> {
+        let mut router = Self::tool_router();
+        if self.tool_profile == ToolProfile::Core {
+            for tool in router.clone().list_all() {
+                if !CORE_TOOL_NAMES.contains(&tool.name.as_ref()) {
+                    router.disable_route(tool.name);
+                }
+            }
+        }
+        router
+    }
 }
 
-#[tool_handler(router = Self::tool_router())]
+#[tool_handler(router = self.active_tool_router())]
 impl ServerHandler for IndexaMcp {
     fn get_info(&self) -> ServerInfo {
         // Identify as "indexa" (from_build_env() bakes in rmcp's own name/version).
@@ -333,14 +406,17 @@ impl ServerHandler for IndexaMcp {
 /// Run the Indexa MCP server over stdio until the client disconnects.
 ///
 /// Logging must already be configured to stderr by the caller — stdout is the
-/// JSON-RPC channel.
+/// JSON-RPC channel. `tool_profile` is 3.2's `--tool-profile`/`[mcp] tool_profile`
+/// surface — `ToolProfile::Full` (the default) is byte-identical to pre-3.2 behavior.
 pub async fn serve_mcp(
     db_path: PathBuf,
     embedder: Arc<dyn Embedder + Send + Sync>,
     llm: Arc<dyn Generator + Send + Sync>,
     config: Config,
+    tool_profile: ToolProfile,
 ) -> Result<()> {
-    let handler = IndexaMcp::new(db_path, embedder, llm, Arc::new(config));
+    let handler =
+        IndexaMcp::new_with_profile(db_path, embedder, llm, Arc::new(config), tool_profile);
     let service = handler.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
@@ -636,6 +712,93 @@ mod tests {
              commit golden_tools.txt, and update the tool counts in README.md / CLAUDE.md / \
              docs/how-to/live-retrieval-over-mcp.md (doc_tool_count_matches_code enforces them)."
         );
+    }
+
+    /// 3.2 — every name in the `core` profile must be a real tool: a typo here would silently
+    /// disable nothing for that name while still hiding it from the caller's expectations.
+    #[test]
+    fn core_profile_is_a_subset_of_the_full_tool_set() {
+        let full: std::collections::HashSet<String> = IndexaMcp::tool_router()
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        for name in CORE_TOOL_NAMES {
+            assert!(
+                full.contains(*name),
+                "CORE_TOOL_NAMES has '{name}', which is not a real tool — typo?"
+            );
+        }
+    }
+
+    /// 3.2 — `core` profile: `list_tools` advertises only the core subset, and calling a
+    /// non-core tool is rejected (not merely unlisted) while a core tool still works.
+    #[tokio::test]
+    async fn tool_profile_core_hides_and_blocks_non_core_tools() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        let _ = Store::open(&dbpath).unwrap();
+        let mcp = IndexaMcp::new_with_profile(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+            ToolProfile::Core,
+        );
+
+        let router = mcp.active_tool_router();
+        let listed: std::collections::HashSet<String> = router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert_eq!(
+            listed,
+            CORE_TOOL_NAMES.iter().map(|s| s.to_string()).collect(),
+            "core profile must advertise exactly the core set"
+        );
+
+        // A non-core tool (e.g. `code_graph`) is rejected outright, not just unlisted.
+        assert!(
+            router.get("code_graph").is_none(),
+            "a disabled tool must not resolve via get() either"
+        );
+
+        // A core tool still works end-to-end through the profile-filtered router.
+        let text = mcp.list_packs().await.unwrap();
+        let body = text
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!body.is_empty(), "list_packs must still respond directly");
+    }
+
+    /// 3.2 — the default (unset) profile is `Full` and must be byte-identical to pre-3.2
+    /// behavior: every tool listed, none disabled.
+    #[test]
+    fn tool_profile_default_is_full_and_unfiltered() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        assert_eq!(mcp.tool_profile, ToolProfile::Full);
+        let router = mcp.active_tool_router();
+        assert_eq!(
+            router.list_all().len(),
+            IndexaMcp::tool_router().list_all().len()
+        );
+    }
+
+    /// `ToolProfile::parse` fails open: only the exact string `"core"` narrows the surface,
+    /// everything else (empty, unset, typo'd) falls back to `Full` — a misconfigured profile
+    /// must never accidentally hide tools an agent needs.
+    #[test]
+    fn tool_profile_parse_fails_open_to_full() {
+        assert_eq!(ToolProfile::parse("core"), ToolProfile::Core);
+        assert_eq!(ToolProfile::parse("full"), ToolProfile::Full);
+        assert_eq!(ToolProfile::parse(""), ToolProfile::Full);
+        assert_eq!(ToolProfile::parse("Core"), ToolProfile::Full);
+        assert_eq!(ToolProfile::parse("bogus"), ToolProfile::Full);
     }
 
     /// Every tool must carry a non-empty description — agents pick tools by it.

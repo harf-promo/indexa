@@ -10,6 +10,7 @@ mod fingerprint;
 mod formats;
 mod graph;
 mod helpers;
+mod hooks;
 mod index;
 mod insights;
 mod inspect;
@@ -47,6 +48,7 @@ pub(crate) use export::cmd_export;
 pub(crate) use fingerprint::cmd_fingerprint;
 pub(crate) use formats::cmd_formats;
 pub(crate) use graph::cmd_graph;
+pub(crate) use hooks::{cmd_install_hooks, cmd_mcp_hook, HookEvent};
 pub(crate) use index::cmd_index;
 pub(crate) use insights::{
     cmd_insights_diff, cmd_insights_duplicates, cmd_insights_languages, cmd_insights_largest,
