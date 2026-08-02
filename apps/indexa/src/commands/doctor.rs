@@ -125,8 +125,29 @@ pub(crate) async fn cmd_doctor(
     println!();
 
     // Load config once for the probes below (Ollama liveness + Claude provider).
-    let cfg =
-        indexa_core::config::load(&indexa_core::config::default_config_path()).unwrap_or_default();
+    let config_path = indexa_core::config::default_config_path();
+    let cfg = indexa_core::config::load(&config_path).unwrap_or_default();
+
+    // ── Config observability (ripgrep's `--debug` config reporting) ──
+    println!("Config");
+    if config_path.exists() {
+        println!("  File     {}", config_path.display());
+    } else {
+        println!(
+            "  File     {} (not found — using built-in defaults)",
+            config_path.display()
+        );
+    }
+    let non_default = indexa_core::config::non_default_keys(&cfg);
+    if non_default.is_empty() {
+        println!("  Active settings: all defaults");
+    } else {
+        println!("  Active settings (non-default):");
+        for (key, value) in &non_default {
+            println!("    {key} = {value}");
+        }
+    }
+    println!();
 
     // Blocking prerequisites for "can I index right now?" — filled by the Ollama probe.
     let mut readiness_issues: Vec<String> = Vec::new();
