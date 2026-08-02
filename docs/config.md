@@ -285,6 +285,11 @@ keep_alive_secs = 0            # 0 = use the profile default; how long Ollama ke
 Fine-tune how specific file types are handled.
 
 ```toml
+[parsers]
+encoding = "auto"     # "auto" (default) transcodes UTF-16 (BOM-detected) to UTF-8 and lossy-
+                       # decodes anything else; "utf-8" restores the old strict behavior (errors
+                       # on invalid UTF-8) — see below.
+
 [parsers.image]
 caption = false       # set true to caption images with a local vision model (opt-in)
 model   = "gemma3:4b" # vision model to caption with (default: reuses the gemma3 summary model — no extra download)
@@ -313,6 +318,15 @@ ocr_lang   = "eng"    # optional tesseract language hint, e.g. "eng" or "eng+ara
 > crate (no native dependency) by default. Scanned / image-only PDFs have no text layer, so they
 > yield little or no text under `backend = "text"`; set `backend = "ocr"` (and install poppler +
 > tesseract) to recognise them.
+
+> **Encoding (`[parsers] encoding`):** the plain-text and Markdown parsers previously required
+> strict UTF-8 — a UTF-16 file (a common Windows artifact: PowerShell redirects, Notepad "Save as
+> UTF-16", `.resx`, some logs/CSVs) failed to parse and was silently skipped. `encoding = "auto"`
+> (the default) BOM-sniffs the file and transcodes UTF-16 to UTF-8 (lossy — invalid sequences
+> become `U+FFFD`), falling back to lossy UTF-8 decoding for anything without a recognized BOM.
+> A valid-UTF-8 file decodes identically either way, so `auto` only changes outcomes for files
+> that previously errored. Set `encoding = "utf-8"` to restore the old strict behavior if you'd
+> rather a malformed file be skipped than silently patched.
 
 ---
 

@@ -567,6 +567,18 @@ pub struct ParsersConfig {
     /// `0` disables the cap.
     #[serde(default = "default_max_file_mb")]
     pub max_file_mb: u64,
+    /// Text-file encoding detection (1.3): `"auto"` (default) BOM-sniffs UTF-16 and transcodes
+    /// it to UTF-8 (lossy — invalid sequences become U+FFFD), falling back to lossy UTF-8 for
+    /// everything else — a valid-UTF-8 file decodes identically to the old strict read, so this
+    /// only changes outcomes for files that previously errored/were skipped. `"utf-8"` restores
+    /// the old strict behavior (errors on invalid UTF-8) for callers who want a bad file
+    /// detected rather than silently patched.
+    #[serde(default = "default_encoding")]
+    pub encoding: String,
+}
+
+fn default_encoding() -> String {
+    "auto".to_owned()
 }
 
 impl Default for ParsersConfig {
@@ -577,6 +589,7 @@ impl Default for ParsersConfig {
             audio: AudioParserConfig::default(),
             video: VideoParserConfig::default(),
             max_file_mb: default_max_file_mb(),
+            encoding: default_encoding(),
         }
     }
 }

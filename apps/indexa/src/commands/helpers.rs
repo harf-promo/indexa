@@ -467,6 +467,7 @@ pub(crate) fn chunk_registry(cfg: &Config) -> indexa_parsers::registry::Registry
     indexa_parsers::registry::Registry::with_chunk(indexa_parsers::types::ChunkParams {
         size: cfg.chunking.size,
         overlap: cfg.chunking.overlap,
+        encoding: indexa_parsers::types::TextEncoding::from_config_str(&cfg.parsers.encoding),
     })
 }
 

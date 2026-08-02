@@ -223,9 +223,11 @@ fn dispatch(
 }
 
 /// Cheap heuristic: read the first ~8 KB and decide whether the file is text.
-/// True when there is no NUL byte and the bytes are valid UTF-8 (allowing only a
-/// final multi-byte char to be cut off by the 8 KB read). Genuinely binary files
-/// (NUL bytes, non-UTF-8) return false so they still `bail!` upstream.
+/// A UTF-16 BOM (1.3) short-circuits to true — extensionless/unrecognized-extension UTF-16
+/// files would otherwise always fail the NUL check below (every other byte is 0 for ASCII-range
+/// content). Otherwise: true when there is no NUL byte and the bytes are valid UTF-8 (allowing
+/// only a final multi-byte char to be cut off by the 8 KB read). Genuinely binary files (NUL
+/// bytes, non-UTF-8, no BOM) return false so they still `bail!` upstream.
 fn looks_like_text(path: &Path) -> bool {
     use std::io::Read;
     let Ok(mut f) = std::fs::File::open(path) else {
@@ -239,6 +241,11 @@ fn looks_like_text(path: &Path) -> bool {
         return true; // empty file: harmless to treat as (empty) text
     }
     let slice = &buf[..n];
+    if encoding_rs::Encoding::for_bom(slice)
+        .is_some_and(|(enc, _)| enc == encoding_rs::UTF_16LE || enc == encoding_rs::UTF_16BE)
+    {
+        return true;
+    }
     if slice.contains(&0) {
         return false; // NUL byte → binary
     }
@@ -317,6 +324,15 @@ mod tests {
     }
 
     #[test]
+    fn looks_like_text_accepts_utf16_bom() {
+        // 1.3: an extensionless UTF-16LE file ("hi") is NUL-dense but is legitimate text.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("README"); // no extension → sniff path
+        std::fs::write(&p, [0xFF, 0xFE, 0x68, 0x00, 0x69, 0x00]).unwrap();
+        assert!(looks_like_text(&p), "UTF-16 BOM must be recognized as text");
+    }
+
+    #[test]
     fn parse_indexes_extensionless_text_via_sniff() {
         // LICENSE/NOTICE/Cargo.lock map to octet-stream in mime_guess; the sniff
         // fallback must parse them as text rather than bail "no parser".
@@ -360,6 +376,7 @@ mod tests {
         let small = Registry::with_chunk(ChunkParams {
             size: 5,
             overlap: 0,
+            ..Default::default()
         });
         let small_chunks = small.parse(&p).unwrap().chunks.len();
 
