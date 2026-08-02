@@ -615,6 +615,12 @@ pub struct ParsersConfig {
     /// their own config file. Empty by default (no hooks configured).
     #[serde(default)]
     pub preprocessor: Vec<PreprocessorConfig>,
+    /// Transparent gzip content indexing (4.5, ripgrep `-z`): index the decompressed
+    /// content of standalone `.gz` files (`README.md.gz`, rotated `.log.gz`, man pages) —
+    /// `.tar.gz`/`.tgz` are unaffected (always handled by the archive parser). Default
+    /// `false`: without it, a `.gz` file is metadata-only, same as today.
+    #[serde(default)]
+    pub compressed: bool,
 }
 
 /// One `[[parsers.preprocessor]]` entry.
@@ -669,6 +675,7 @@ impl Default for ParsersConfig {
             max_file_mb: default_max_file_mb(),
             encoding: default_encoding(),
             preprocessor: Vec::new(),
+            compressed: false,
         }
     }
 }

@@ -150,6 +150,9 @@ pub(crate) async fn run_deep_phase(
             ),
         });
     registry_inner.register_preprocessors(&crate::preprocessor_specs(&state.config));
+    if state.config.parsers.compressed {
+        registry_inner.enable_compressed();
+    }
     let registry = std::sync::Arc::new(registry_inner);
 
     for entry in &files {

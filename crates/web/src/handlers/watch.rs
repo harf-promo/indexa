@@ -86,6 +86,9 @@ pub(crate) async fn api_watch_start(
             ),
         });
     registry.register_preprocessors(&crate::preprocessor_specs(&state.config));
+    if state.config.parsers.compressed {
+        registry.enable_compressed();
+    }
     let watch_root = PathBuf::from(&path);
     let watch_root2 = watch_root.clone();
     // Same per-event file-selection policy the scan walker uses (skip artifacts/sensitive/oversized/

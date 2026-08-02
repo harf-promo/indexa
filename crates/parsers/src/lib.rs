@@ -3,6 +3,7 @@
 pub mod archive;
 pub mod binary;
 pub mod code;
+pub mod compressed;
 pub mod email;
 pub mod epub;
 pub mod html;

@@ -471,6 +471,9 @@ pub(crate) fn chunk_registry(cfg: &Config) -> indexa_parsers::registry::Registry
             encoding: indexa_parsers::types::TextEncoding::from_config_str(&cfg.parsers.encoding),
         });
     registry.register_preprocessors(&preprocessor_specs(cfg));
+    if cfg.parsers.compressed {
+        registry.enable_compressed();
+    }
     registry
 }
 

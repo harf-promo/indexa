@@ -127,6 +127,15 @@ impl Registry {
         }
     }
 
+    /// Enable transparent gzip content indexing (4.5, `[parsers] compressed`, default off).
+    /// Registered like any other custom parser (takes priority for `.gz`, but not
+    /// `.tar.gz`/`.tgz` — see `CompressedParser::accepts_path`), so call this AFTER
+    /// [`Self::register_preprocessors`] if both are used, so a user's own preprocessor hook
+    /// for a `.gz`-suffixed glob (unusual, but not disallowed) still wins.
+    pub fn enable_compressed(&mut self) {
+        self.register(Box::new(crate::compressed::CompressedParser));
+    }
+
     /// Parse `path` using the first matching parser in the registry.
     pub fn parse(&self, path: &Path) -> Result<Extracted> {
         let mime = mime_guess::from_path(path)

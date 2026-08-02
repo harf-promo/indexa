@@ -368,6 +368,22 @@ max_output_mb  = 16          # cap on how much of its stdout is read
 > broken or misconfigured hook never blanks a file a native parser could still extract from.
 > `indexa doctor` lists any preprocessor hooks in effect.
 
+### Transparent gzip content indexing (`[parsers] compressed`)
+
+```toml
+[parsers]
+compressed = false   # set true to index the DECOMPRESSED content of standalone .gz files
+```
+
+> **Off by default.** When enabled, a standalone `.gz` file (`README.md.gz`, a rotated
+> `access.log.gz`, a gzipped man page) is decompressed and its content routed through the normal
+> parser dispatch by its inner extension (`notes.md.gz` → `.md` → the Markdown parser), instead of
+> being indexed as an opaque binary blob. `.tar.gz`/`.tgz` are unaffected either way — those are
+> always handled by the archive parser. gzip only (`flate2`, already in the dependency tree);
+> zstd/xz/brotli are not supported. Decompression is capped at the same size limit as zip archive
+> entries — an oversized `.gz` falls back to metadata-only rather than exhausting memory, and a
+> file that turns out not to actually be gzip (despite the `.gz` name) also falls back cleanly.
+
 ---
 
 ## Per-region overrides
