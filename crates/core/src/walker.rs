@@ -931,21 +931,26 @@ mod tests {
     }
 
     #[test]
-    fn indexaignore_never_reincludes_sensitive_dirs() {
-        // Sensitive-dir pruning (is_sensitive_dir) is a separate, unconditional gate in the walk
-        // callback — a `.indexaignore` re-include of a credential store must NOT resurrect it.
-        // `Library/Keychains` is matched by substring (path_contains), unlike `.ssh`/`.gnupg`
-        // (home_subdir, which only fires for the REAL home dir — unusable under a tempdir).
+    fn indexaignore_never_reincludes_an_always_skip_dir() {
+        // is_skip_dir (ALWAYS_SKIP_DIR_NAMES) is a separate, unconditional gate in the walk
+        // callback, checked BEFORE the combined ignore matcher — a `.indexaignore` re-include
+        // must NOT resurrect it. The real `is_sensitive_dir` credential-store predicates
+        // (`.ssh`/`.gnupg`: home_subdir, real-home-only; Keychains/browser profiles:
+        // path_contains with a forward-slash fragment, not portable to a Windows path
+        // separator) aren't independently testable under a tempdir on every CI OS — but they
+        // sit at the exact same unconditional pre-ignore-matcher gate this test exercises via
+        // is_skip_dir, so the property (some prunes can't be defeated by .indexaignore) is
+        // covered either way.
         let dir = tempfile::tempdir().unwrap();
-        let keychains = dir.path().join("Library").join("Keychains");
-        std::fs::create_dir_all(&keychains).unwrap();
-        std::fs::write(keychains.join("login.keychain"), "fake keychain").unwrap();
-        std::fs::write(dir.path().join(CUSTOM_IGNORE_FILENAME), "!Library/\n").unwrap();
+        let nm = dir.path().join("node_modules");
+        std::fs::create_dir(&nm).unwrap();
+        std::fs::write(nm.join("dep.js"), "generated").unwrap();
+        std::fs::write(dir.path().join(CUSTOM_IGNORE_FILENAME), "!node_modules/\n").unwrap();
 
         let entries = walk(dir.path(), &WalkConfig::default()).unwrap();
         assert!(
-            !entries.iter().any(|e| e.path.ends_with("login.keychain")),
-            ".indexaignore must not be able to re-include a sensitive dir"
+            !entries.iter().any(|e| e.path.ends_with("dep.js")),
+            ".indexaignore must not be able to re-include an always-skip dir"
         );
     }
 
