@@ -114,6 +114,7 @@
 }
 .source-item .path { color: var(--accent); font-weight: 500; font-family: var(--font-mono); font-size: 11px; }
 .source-item .heading { color: var(--orange); margin-left: 8px; }
+.source-item .stale-badge { color: var(--orange); margin-left: 8px; font-weight: 500; }
 .source-item .snippet { color: var(--muted); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thinking { color: var(--muted); font-style: italic; animation: pulse 1.5s ease-in-out infinite; }
 .input-bar {

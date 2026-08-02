@@ -1088,6 +1088,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_ask_flags_a_stale_source() {
+        // 1.2: a cited source whose on-disk mtime is newer than what's indexed comes back
+        // with `stale: true` in the JSON response.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("widget.rs");
+        std::fs::write(&file, "fn widget_gadget() {}").unwrap();
+        let path = file.to_str().unwrap().to_owned();
+
+        let db = temp_db_path("stale-source");
+        {
+            let mut store = Store::open(&db).unwrap();
+            store
+                .upsert_chunks(&[ChunkRecord {
+                    entry_path: path.clone(),
+                    seq: 0,
+                    heading: String::new(),
+                    text: "a widget gadget function".to_owned(),
+                    language: None,
+                    embedding: Some(vec![0.1_f32; 8]),
+                    embed_model: Some("test".to_owned()),
+                    content_hash: None,
+                }])
+                .unwrap();
+            store
+                .db_connection()
+                .execute(
+                    "UPDATE chunks SET indexed_at = 1 WHERE entry_path = ?1",
+                    rusqlite::params![path],
+                )
+                .unwrap();
+        }
+        let app = build_router(state_with_db(Store::open(&db).unwrap(), db.clone()), 7620);
+        let (status, json) = post_json(
+            app,
+            "/api/ask",
+            serde_json::json!({ "question": "widget gadget", "synthesize": false }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let sources = json["sources"].as_array().expect("sources array");
+        assert!(!sources.is_empty(), "expected at least one cited source");
+        assert!(
+            sources.iter().any(|s| s["stale"] == true),
+            "expected a source flagged stale: {json}"
+        );
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[tokio::test]
     async fn api_export_empty_index_is_not_found() {
         let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
         let (status, json) = get_json(app, "/api/export").await;

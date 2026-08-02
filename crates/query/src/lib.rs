@@ -7,6 +7,7 @@ pub mod impact;
 pub mod qa;
 pub mod redact;
 pub mod rerank;
+pub mod staleness;
 pub mod summarize;
 pub mod worker;
 

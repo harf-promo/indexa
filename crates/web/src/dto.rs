@@ -492,6 +492,9 @@ pub(crate) struct AskSource {
     pub(crate) path: String,
     pub(crate) heading: String,
     pub(crate) snippet: String,
+    /// True when this source's on-disk mtime is newer than what's indexed (1.2) — the answer
+    /// may be citing stale text. `false` when `[retrieval] staleness_flags` is off.
+    pub(crate) stale: bool,
 }
 
 #[derive(Deserialize)]

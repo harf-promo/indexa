@@ -134,7 +134,7 @@ impl IndexaMcp {
     /// Returns matching chunks with their file path, heading, and a text snippet.
     /// Use `scope` to restrict to a subtree. For path-name browsing, prefer `browse_tree`.
     #[tool(
-        description = "Search indexed chunk content by keyword (BM25 + vector hybrid). Returns matching chunks with path, heading, and snippet — richer than path-name search. Each hit shows `#N`, the chunk seq — pass it to `get_chunk_context` to expand that chunk with its neighbors. Optionally scope to a path prefix."
+        description = "Search indexed chunk content by keyword (BM25 + vector hybrid). Returns matching chunks with path, heading, and snippet — richer than path-name search. Each hit shows `#N`, the chunk seq — pass it to `get_chunk_context` to expand that chunk with its neighbors. A result whose on-disk mtime is newer than what's indexed is marked '(stale)'. Optionally scope to a path prefix."
     )]
     pub(crate) async fn search(
         &self,
@@ -178,6 +178,12 @@ impl IndexaMcp {
             return Ok(ok_text(format!("No results for '{query}'.")));
         }
 
+        // Staleness attestation (1.2): flag hits whose on-disk mtime is newer than what's
+        // indexed. Fail-open — a store error just means no annotations, never a failed search.
+        let staleness = self.config.retrieval.staleness_flags.then(|| {
+            let paths = hits.iter().map(|h| h.entry_path.as_str());
+            indexa_query::staleness::stale_paths(&store, paths)
+        });
         let body = hits
             .iter()
             .map(|h| {
@@ -187,11 +193,26 @@ impl IndexaMcp {
                     format!(" [{}]", h.heading)
                 };
                 let snippet: String = h.text.chars().take(120).collect();
-                format!("{}{} #{}\n  {}", h.entry_path, heading, h.seq, snippet)
+                let flag = staleness
+                    .as_ref()
+                    .is_some_and(|(stale, ..)| stale.contains(&h.entry_path));
+                let stale_note = if flag { " (stale)" } else { "" };
+                format!(
+                    "{}{}{} #{}\n  {}",
+                    h.entry_path, heading, stale_note, h.seq, snippet
+                )
             })
             .collect::<Vec<_>>()
             .join("\n\n");
-        let out = format!("{} result(s):\n\n{body}", hits.len());
+        let mut out = format!("{} result(s):\n\n{body}", hits.len());
+        if let Some((_, stale_count, total)) = &staleness {
+            if *stale_count > 0 {
+                out.push_str(&format!(
+                    "\n\n({stale_count} of {total} result file(s) changed on disk since \
+                     indexing — re-run `indexa deep` to refresh)"
+                ));
+            }
+        }
 
         let paths: Vec<&str> = hits.iter().map(|h| h.entry_path.as_str()).collect();
         let counterfactual = store.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
@@ -356,7 +377,7 @@ impl IndexaMcp {
 
     /// Answer a natural-language question against the index (grounded RAG).
     #[tool(
-        description = "Answer a natural-language question using the indexed context (hybrid retrieval + LOCAL LLM synthesis — e.g. ollama/gemma3:12b, NOT your model). Returns an answer with source paths. **If you are a capable model, prefer `synthesize: false`**: Indexa then runs the same retrieval pipeline but returns the packed context SLICE for YOU to answer with your own (stronger) model — better answers, and no local-model cost. Set `agentic: true` for compositional questions (a few extra model calls; ignored when `synthesize: false`). Optional `top_k` widens/narrows retrieval breadth."
+        description = "Answer a natural-language question using the indexed context (hybrid retrieval + LOCAL LLM synthesis — e.g. ollama/gemma3:12b, NOT your model). Returns an answer with source paths; a cited file whose on-disk mtime is newer than what's indexed is marked '(stale: modified since indexed)'. **If you are a capable model, prefer `synthesize: false`**: Indexa then runs the same retrieval pipeline but returns the packed context SLICE for YOU to answer with your own (stronger) model — better answers, and no local-model cost. Set `agentic: true` for compositional questions (a few extra model calls; ignored when `synthesize: false`). Optional `top_k` widens/narrows retrieval breadth."
     )]
     pub(crate) async fn ask(
         &self,
@@ -503,8 +524,34 @@ impl IndexaMcp {
         };
         if !answer.sources.is_empty() {
             out.push_str("\n\nSources:\n");
+            // Staleness attestation (1.2): flag citations whose on-disk mtime is newer than
+            // what's indexed, so the answer admits when it may be serving stale text. Fail-open
+            // (store errors just mean no annotations) — never blocks or alters the answer.
+            let staleness = if self.config.retrieval.staleness_flags {
+                self.store().ok().map(|store| {
+                    let paths = answer.sources.iter().map(|s| s.path.as_str());
+                    indexa_query::staleness::stale_paths(&store, paths)
+                })
+            } else {
+                None
+            };
             for s in &answer.sources {
-                out.push_str(&format!("- {}\n", s.path));
+                let flag = staleness
+                    .as_ref()
+                    .is_some_and(|(stale, ..)| stale.contains(&s.path));
+                if flag {
+                    out.push_str(&format!("- {} (stale: modified since indexed)\n", s.path));
+                } else {
+                    out.push_str(&format!("- {}\n", s.path));
+                }
+            }
+            if let Some((_, stale_count, total)) = &staleness {
+                if *stale_count > 0 {
+                    out.push_str(&format!(
+                        "({stale_count} of {total} cited file(s) changed on disk since indexing \
+                         — re-run `indexa deep` to refresh)\n"
+                    ));
+                }
             }
         }
         if agentic && steps.len() > 1 {

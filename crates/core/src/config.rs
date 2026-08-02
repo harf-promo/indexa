@@ -396,6 +396,16 @@ pub struct RetrievalConfig {
     /// so clustering can be used without the added latency. `false` by default.
     #[serde(default)]
     pub graphrag_summarize: bool,
+    /// Annotate cited files whose on-disk mtime is newer than what's indexed (1.2) —
+    /// "(stale: modified since indexed)" per source, plus a footer summary. Annotation-only:
+    /// never changes retrieval scores or which chunks are cited, so it needs no eval gate.
+    /// `true` by default; set `false` to disable the extra per-citation `fs::metadata` check.
+    #[serde(default = "default_true")]
+    pub staleness_flags: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Default cluster cap for [`RetrievalConfig::graphrag_max_clusters`].
@@ -448,6 +458,7 @@ impl Default for RetrievalConfig {
             graphrag_max_clusters: default_graphrag_max_clusters(),
             graphrag_cluster_sim: default_graphrag_cluster_sim(),
             graphrag_summarize: false,
+            staleness_flags: true,
         }
     }
 }

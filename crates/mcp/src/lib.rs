@@ -985,6 +985,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_flags_a_stale_result_and_summarizes_in_footer() {
+        // 1.2: a cited file whose on-disk mtime is newer than what's indexed gets a "(stale)"
+        // marker inline and a footer summary; a fresh file gets neither.
+        use indexa_core::store::ChunkRecord;
+        let root = tempfile::tempdir().unwrap();
+        let fresh = root.path().join("fresh.rs");
+        let stale = root.path().join("stale.rs");
+        std::fs::write(&fresh, "fn widget_alpha() {}").unwrap();
+        std::fs::write(&stale, "fn widget_beta() {}").unwrap();
+        let fresh_path = fresh.to_str().unwrap().to_owned();
+        let stale_path = stale.to_str().unwrap().to_owned();
+
+        let dbdir = tempfile::tempdir().unwrap();
+        {
+            let mut store = Store::open(&dbdir.path().join("idx.db")).unwrap();
+            let chunk = |path: &str| ChunkRecord {
+                entry_path: path.to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: "a widget function definition".to_owned(),
+                language: None,
+                // Embedded — chunks_current_for_mtime also requires every chunk to carry an
+                // embedding; without one both rows would read "stale" regardless of indexed_at,
+                // masking the mtime comparison this test targets.
+                embedding: Some(vec![0.1, 0.2, 0.3]),
+                embed_model: Some("test".to_owned()),
+                content_hash: None,
+            };
+            store
+                .upsert_chunks(&[chunk(&fresh_path), chunk(&stale_path)])
+                .unwrap();
+            // Fresh: indexed far in the future relative to disk mtime. Stale: indexed long ago.
+            store
+                .db_connection()
+                .execute(
+                    "UPDATE chunks SET indexed_at = ?1 WHERE entry_path = ?2",
+                    rusqlite::params![i64::MAX / 2, fresh_path],
+                )
+                .unwrap();
+            store
+                .db_connection()
+                .execute(
+                    "UPDATE chunks SET indexed_at = ?1 WHERE entry_path = ?2",
+                    rusqlite::params![1_i64, stale_path],
+                )
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let out = text_of(
+            mcp.search(Parameters(SearchParams {
+                query: "widget".into(),
+                limit: None,
+                scope: None,
+                mode: Some("sparse".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            out.contains(&format!("{stale_path} (stale)")),
+            "stale result must be marked inline: {out}"
+        );
+        assert!(
+            !out.contains(&format!("{fresh_path} (stale)")),
+            "fresh result must not be marked stale: {out}"
+        );
+        assert!(
+            out.contains("1 of 2 result file(s) changed on disk since indexing"),
+            "footer summary missing: {out}"
+        );
+    }
+
+    #[tokio::test]
     async fn ask_with_session_id_records_a_conversation() {
         // Conversational Ask over MCP: two `ask` calls with the same session_id persist two
         // turns the next call can see (even over an empty index, which returns a graceful
