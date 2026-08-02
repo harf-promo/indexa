@@ -135,10 +135,12 @@ pub struct ScanConfig {
     pub respect_gitignore: bool,
     /// Extra gitignore-style patterns to skip (e.g. `["build/", "*.log", "vendor/"]`).
     pub ignore: Vec<String>,
-    /// Re-index interval for `indexa worker --auto-reindex`: `"off"` (default) or a duration
-    /// like `"7d"` / `"30d"` / `"12h"`. When set, the worker re-runs scan→deep→summarize for
-    /// any indexed root whose newest content is older than this. The `--auto-reindex` flag must
-    /// still be passed to activate it (so an expensive rebuild never starts implicitly).
+    /// Re-index interval for `indexa worker --auto-reindex`: `"off"` (default), a duration
+    /// like `"7d"` / `"30d"` / `"12h"` (a one-shot pre-drain staleness check), or `"git-poll"`
+    /// (3.3 — continuously watch each indexed git root's HEAD/working-tree state at an
+    /// adaptive interval and re-index on change; non-git roots fall back to the interval
+    /// check). The `--auto-reindex` flag must still be passed to activate any of these (so an
+    /// expensive rebuild never starts implicitly).
     pub auto_reindex: String,
     /// Descend into sensitive credential directories (`.ssh`, `.gnupg`, `.aws`, browser profiles,
     /// macOS Keychains, password managers). Defaults to `false` — these are never walked unless
