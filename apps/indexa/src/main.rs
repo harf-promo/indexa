@@ -192,6 +192,11 @@ async fn main() -> Result<()> {
                 commands::cmd_pack_rename(name, new_name).await
             }
             PackAction::Delete { name } => commands::cmd_pack_delete(name).await,
+            PackAction::Import {
+                bundle_dir,
+                force,
+                name,
+            } => commands::cmd_pack_import(bundle_dir, force, name).await,
         },
         Commands::Weight { action } => match action {
             WeightAction::Set {

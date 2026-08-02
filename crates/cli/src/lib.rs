@@ -1066,6 +1066,27 @@ pub enum PackAction {
         /// Pack name.
         name: String,
     },
+    /// Reconstruct a pack from an OKF bundle's manifest.json (4.3 — round-trip a
+    /// `pack export --format okf` bundle). Same-machine / migration scope, not team
+    /// sharing: every path must already be indexed on THIS machine.
+    #[command(after_help = "Examples:
+  indexa pack import ./auth-bundle
+  indexa pack import ./auth-bundle --name \"Auth (restored)\"
+  indexa pack import ./auth-bundle --force   # import despite content-hash drift since export")]
+    Import {
+        /// Path to a directory previously written by `pack export --format okf --out <dir>`.
+        bundle_dir: String,
+        /// Import an item even if its current content hash no longer matches the manifest's
+        /// recorded hash (the file changed since export). Without this, any such drift fails
+        /// the whole import (fix it or re-export first). Never overrides the unconditional
+        /// checks that a path is indexed and under an indexed root.
+        #[arg(long)]
+        force: bool,
+        /// Pack name to create (default: the name recorded in manifest.json). Required if the
+        /// manifest's name is already taken by an existing pack.
+        #[arg(long)]
+        name: Option<String>,
+    },
 }
 
 /// Sub-commands for `indexa weight`.

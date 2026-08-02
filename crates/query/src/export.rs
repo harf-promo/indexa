@@ -384,6 +384,45 @@ fn flatten_tree<'a>(node: &'a ExportNode, out: &mut Vec<&'a ExportNode>) {
     }
 }
 
+/// One entry in `manifest.json` (4.3): the indexed path a bundle item came from, its
+/// content hash at export time, and the concept filename it round-trips to. `pack_import`
+/// compares `hash` against the path's CURRENT `source_hash` to detect drift since export.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ManifestItem {
+    pub path: String,
+    pub hash: String,
+    pub filename: String,
+    /// Whether this item was one of the PACK's own top-level `pack_paths` entries (the
+    /// `roots` passed to `render_okf_bundle`), as opposed to a descendant reached only by
+    /// walking a root's summary tree. `pack_import` must re-add ONLY the roots — re-adding
+    /// every descendant too would give the reconstructed pack a different (more granular)
+    /// shape than the original, and a later export would then double-list descendants (once
+    /// as their own top-level tree, once as a child of the root's tree). `#[serde(default)]`
+    /// so a hand-edited or older manifest without this field defaults to `false` (safe: it
+    /// just means nothing imports, rather than importing a wrong shape).
+    #[serde(default)]
+    pub is_root: bool,
+}
+
+/// `manifest.json` (4.3): everything `pack import` needs to reconstruct the pack without
+/// re-parsing every concept file's frontmatter. `#[serde(default)]` on every field make this
+/// tolerant to read even if a future/older writer omits one — OKF's "never reject unknown
+/// fields, preserve what you don't understand" contract, applied to imports of Indexa's own
+/// bundles too. Unknown top-level JSON keys are ignored by `serde_json` by default (no
+/// `deny_unknown_fields` here) — the same tolerant-consumer semantics for fields THIS struct
+/// doesn't know about.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+pub struct PackManifest {
+    #[serde(default)]
+    pub pack_format_version: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub items: Vec<ManifestItem>,
+}
+
 /// Render an OKF v0.1 bundle for a pack (4.2): one Markdown file per summarized node (file or
 /// directory) with YAML frontmatter, a progressive-disclosure `index.md` (one line per
 /// item — the token-savings pitch made physical), and a `log.md` changelog built from the
@@ -402,10 +441,12 @@ pub fn render_okf_bundle(
     for root in roots {
         flatten_tree(root, &mut nodes);
     }
+    let root_paths: HashSet<&str> = roots.iter().map(|r| r.record.path.as_str()).collect();
 
     let mut used_names: HashSet<String> = HashSet::new();
     let mut files: Vec<(String, String)> = Vec::new();
     let mut index_lines: Vec<String> = Vec::new();
+    let mut manifest_items: Vec<ManifestItem> = Vec::new();
 
     for node in &nodes {
         let rec = &node.record;
@@ -438,6 +479,12 @@ pub fn render_okf_bundle(
         let frontmatter = serde_yaml::to_string(&fm).unwrap_or_default();
         let body = format!("{frontmatter}---\n\n# {title}\n\n{}\n", rec.summary);
         index_lines.push(format!("* [{title}]({filename}) - {description}"));
+        manifest_items.push(ManifestItem {
+            path: rec.path.clone(),
+            hash: rec.source_hash.clone(),
+            filename: filename.clone(),
+            is_root: root_paths.contains(rec.path.as_str()),
+        });
         files.push((filename, body));
     }
 
@@ -465,9 +512,18 @@ pub fn render_okf_bundle(
         }
     }
 
+    let manifest = PackManifest {
+        pack_format_version: "0.1".to_owned(),
+        name: pack_name.to_owned(),
+        description: None,
+        items: manifest_items,
+    };
+    let manifest_json = serde_json::to_string_pretty(&manifest).unwrap_or_else(|_| "{}".to_owned());
+
     let mut out = vec![
         ("index.md".to_owned(), index_md),
         ("log.md".to_owned(), log_md),
+        ("manifest.json".to_owned(), manifest_json),
     ];
     out.extend(files);
     out
@@ -1205,11 +1261,39 @@ mod tests {
         let names: Vec<&str> = bundle.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"index.md"));
         assert!(names.contains(&"log.md"));
+        assert!(names.contains(&"manifest.json"));
         // One concept file per node (root dir + its one child file).
         assert_eq!(
             bundle.len(),
-            4,
-            "index.md + log.md + 2 nodes, got: {names:?}"
+            5,
+            "index.md + log.md + manifest.json + 2 nodes, got: {names:?}"
+        );
+
+        let (_, manifest_json) = bundle.iter().find(|(n, _)| n == "manifest.json").unwrap();
+        let manifest: PackManifest = serde_json::from_str(manifest_json).unwrap();
+        assert_eq!(manifest.pack_format_version, "0.1");
+        assert_eq!(manifest.name, "proj");
+        assert_eq!(manifest.items.len(), 2);
+        assert!(manifest.items.iter().any(|i| i.path == "/root/a.rs"
+            && i.hash == "bbbbbbbbbbbb"
+            && i.filename.starts_with("a-")));
+        // 4.3: only the top-level root (the ExportNode passed in, not its descendants) is
+        // flagged is_root — pack_import must re-add only this as a pack_path, never every
+        // summarized descendant too (that would give the reconstructed pack a different,
+        // more granular shape than the original).
+        let root_item = manifest.items.iter().find(|i| i.path == "/root").unwrap();
+        assert!(
+            root_item.is_root,
+            "the top-level node must be flagged is_root"
+        );
+        let child_item = manifest
+            .items
+            .iter()
+            .find(|i| i.path == "/root/a.rs")
+            .unwrap();
+        assert!(
+            !child_item.is_root,
+            "a descendant reached only via the tree walk must not be flagged is_root"
         );
 
         let (_, index) = bundle.iter().find(|(n, _)| n == "index.md").unwrap();
