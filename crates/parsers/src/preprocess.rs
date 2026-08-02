@@ -19,9 +19,8 @@ use anyhow::{Context, Result};
 use globset::{Glob, GlobMatcher};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::Duration;
-use wait_timeout::ChildExt;
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 /// One `[[parsers.preprocessor]]` rule, parsers-crate-local — converted from
 /// `indexa_core::config`'s raw TOML fields at the call site (this crate has no dependency on
@@ -89,7 +88,7 @@ impl PreprocessorParser {
             buf
         });
 
-        let status = match child.wait_timeout(self.timeout).ok()? {
+        let status = match wait_with_timeout(&mut child, self.timeout) {
             Some(status) => status,
             None => {
                 let _ = child.kill();
@@ -103,6 +102,33 @@ impl PreprocessorParser {
             return None; // nonzero exit / empty output ⇒ fall through
         }
         Some(String::from_utf8_lossy(&stdout).into_owned())
+    }
+}
+
+/// Wait for `child` to exit, up to `timeout`. A hand-rolled `try_wait()` poll loop rather than
+/// the `wait-timeout` crate's signal-based mechanism: that crate's global SIGCHLD handling was
+/// observed to occasionally miss a short (sub-second) deadline entirely under concurrent test
+/// load on GitHub's macOS runners — the timed wait never fired and the call blocked until the
+/// child exited naturally, defeating the whole point of a preprocessor timeout. A plain poll
+/// loop has no shared signal state to race on, at the cost of up to `POLL_INTERVAL` of slop on
+/// the deadline — acceptable for a feature whose whole timeout is measured in seconds.
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+fn wait_with_timeout(child: &mut std::process::Child, timeout: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(
+                    POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(_) => return None,
+        }
     }
 }
 
