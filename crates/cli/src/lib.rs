@@ -993,20 +993,26 @@ pub enum PackAction {
         /// Pack name.
         name: String,
     },
-    /// Export a pack as XML, Markdown, or JSON — ready to paste into any AI tool.
+    /// Export a pack as XML, Markdown, JSON, or an OKF bundle — ready to paste into any AI
+    /// tool, or (OKF) to hand to any OKF-aware tool (Obsidian, Knowledge Catalog, ...).
     #[command(after_help = "Examples:
   indexa pack export \"Auth\" --format xml > auth.xml
   indexa pack export \"Auth\" --format md
-  indexa pack export \"Auth\" --format json --output auth.json")]
+  indexa pack export \"Auth\" --format json --output auth.json
+  indexa pack export \"Auth\" --format okf --out ./auth-bundle")]
     Export {
         /// Pack name.
         name: String,
-        /// Output format: xml (default), md, json.
+        /// Output format: xml (default), md, json, or okf (4.2 — a directory bundle;
+        /// requires --out).
         #[arg(long, default_value = "xml")]
         format: String,
         /// Write to a file instead of stdout.
         #[arg(long, short)]
         output: Option<String>,
+        /// With --format okf: directory to write the bundle into (created if missing).
+        #[arg(long)]
+        out: Option<String>,
         /// Maximum tree depth per path (0 = top summary only).
         #[arg(long)]
         depth: Option<usize>,

@@ -247,6 +247,7 @@ pub(crate) async fn cmd_pack_export(
     name: String,
     format: String,
     output: Option<String>,
+    out: Option<String>,
     depth: Option<usize>,
     include_weights: bool,
     include_graph: bool,
@@ -273,6 +274,56 @@ pub(crate) async fn cmd_pack_export(
     let paths = store.pack_paths(&pack.id)?;
     if paths.is_empty() {
         bail!("Pack \"{name}\" has no paths. Add paths first with `indexa pack add`.");
+    }
+
+    // 4.2 — OKF bundle export is a directory of files, not a single blob: handled entirely
+    // separately from the xml/md/json rendering path below (no --output/--clipboard/
+    // --token-budget — those are single-artifact concepts that don't apply to a bundle).
+    if format == "okf" {
+        let Some(out_dir) = out else {
+            bail!("--format okf requires --out <dir> (a directory to write the bundle into).");
+        };
+        let out_dir = expand(&out_dir);
+        let mut roots = Vec::new();
+        for root_path in &paths {
+            match build_tree(&store, root_path, depth)? {
+                Some(tree) => roots.push(tree),
+                None => eprintln!(
+                    "  \u{26a0} No summary for {root_path} — run `indexa summarize {root_path}` first."
+                ),
+            }
+        }
+        if roots.is_empty() {
+            bail!("No paths in pack \"{name}\" have summaries yet. Run `indexa summarize <path>` or `indexa index <path>` first.");
+        }
+        let events: Vec<(String, Option<String>, i64)> = store
+            .pack_events(&pack.id)?
+            .into_iter()
+            .map(|e| (e.event, e.detail, e.at))
+            .collect();
+        let bundle = indexa_query::render_okf_bundle(&name, &roots, &events);
+
+        std::fs::create_dir_all(&out_dir)
+            .map_err(|e| anyhow::anyhow!("cannot create {out_dir}: {e}"))?;
+        for (rel_path, content) in &bundle {
+            let content = if no_redact {
+                content.clone()
+            } else {
+                indexa_query::redact::redact_secrets(content).0
+            };
+            let file_path = std::path::Path::new(&out_dir).join(rel_path);
+            std::fs::write(&file_path, content)
+                .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", file_path.display()))?;
+        }
+        println!(
+            "Wrote OKF v0.1 bundle for pack \"{name}\" to {out_dir} ({} file(s): index.md, log.md, {} concept file(s)).",
+            bundle.len(),
+            bundle.len() - 2
+        );
+        if let Err(e) = store.record_pack_exported(&pack.id, "okf") {
+            tracing::debug!("pack event (exported) not recorded: {e:#}");
+        }
+        return Ok(());
     }
 
     // Relational slice (v0.60): same `--changed-since` / `--category` filters as `indexa export`,

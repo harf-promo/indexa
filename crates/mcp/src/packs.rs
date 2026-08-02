@@ -20,7 +20,11 @@ pub struct GetPackParams {
 pub struct ExportPackParams {
     /// Name of the Context Pack to export (case-insensitive).
     pub name: String,
-    /// Output format: `xml` (default), `md`, or `json`.
+    /// Output format: `xml` (default), `md`, `json`, or `okf` (4.2 — an OKF v0.1 knowledge
+    /// bundle: one Markdown file per summarized item with YAML frontmatter, plus
+    /// `index.md`/`log.md`, concatenated here with `--- file: <path> ---` separators since
+    /// this tool returns one string — for a real directory bundle use the CLI
+    /// `indexa pack export --format okf --out <dir>`).
     #[serde(default)]
     pub format: Option<String>,
     /// Maximum tree depth per path (0 = top summary only). Omit for full depth.
@@ -145,15 +149,21 @@ impl IndexaMcp {
         )))
     }
 
-    /// Export a Context Pack as XML, Markdown, or JSON — ready to paste into any AI tool.
+    /// Export a Context Pack as XML, Markdown, JSON, or an OKF bundle — ready to paste into
+    /// any AI tool, or hand to any OKF-aware tool.
     #[tool(
         description = "Export a Context Pack as a self-contained context file (XML by default, \
                        also Markdown or JSON). Each path in the pack is rendered with its \
                        hierarchical summary tree. Optionally slice with `changed_since` \
                        (e.g. '7d') and/or `category` (e.g. 'code'). Set `include_graph: true` \
                        to append a call-graph section (`graph_format: \"mermaid\"` for a fenced \
-                       diagram block instead of a per-format list). Ideal for giving an AI tool \
-                       focused context on a specific topic (e.g. 'Auth', 'Tax 2025', 'Client X')."
+                       diagram block instead of a per-format list). Set `format: \"okf\"` for an \
+                       OKF v0.1 knowledge bundle (one Markdown file per item with YAML \
+                       frontmatter, plus an index.md/log.md changelog) consumable by other \
+                       OKF-aware tools — concatenated here with `--- file: <path> ---` \
+                       separators (for a real directory bundle, use the CLI `indexa pack \
+                       export --format okf --out <dir>`). Ideal for giving an AI tool focused \
+                       context on a specific topic (e.g. 'Auth', 'Tax 2025', 'Client X')."
     )]
     pub(crate) async fn export_pack(
         &self,
@@ -390,6 +400,39 @@ pub(crate) fn export_pack_body(
         return Err(mcp_err(format!(
             "pack \"{name}\" is empty — add paths first with: indexa pack add \"{name}\" <paths…>"
         )));
+    }
+
+    // 4.2 — OKF bundle: a directory-shaped artifact doesn't fit the single-string return of
+    // every other format, so the MCP surface concatenates it with `--- file: <path> ---`
+    // separators (documented in the tool description) instead of a real directory write —
+    // that's the CLI's job (`indexa pack export --format okf --out <dir>`).
+    if format == "okf" {
+        let mut roots = Vec::new();
+        for root_path in &paths {
+            if let Some(tree) = build_tree(store, root_path, depth).map_err(mcp_err)? {
+                roots.push(tree);
+            }
+        }
+        if roots.is_empty() {
+            return Err(mcp_err(format!(
+                "no paths in pack \"{name}\" have summaries yet — run `indexa summarize <path>` first"
+            )));
+        }
+        let events: Vec<(String, Option<String>, i64)> = store
+            .pack_events(&pack.id)
+            .map_err(mcp_err)?
+            .into_iter()
+            .map(|e| (e.event, e.detail, e.at))
+            .collect();
+        let bundle = indexa_query::render_okf_bundle(name, &roots, &events);
+        let mut out = String::new();
+        for (rel_path, content) in &bundle {
+            out.push_str(&format!("--- file: {rel_path} ---\n"));
+            out.push_str(content);
+            out.push('\n');
+        }
+        let (redacted, _) = redact_secrets(&out);
+        return Ok(redacted);
     }
 
     // Relational slice (v0.58/v0.60): same filters as CLI `pack export` and web `/api/packs/:name/export`,

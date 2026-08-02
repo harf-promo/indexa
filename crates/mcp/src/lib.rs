@@ -1359,6 +1359,78 @@ mod tests {
         assert!(with_graph.contains("flowchart TD"));
     }
 
+    /// 4.2 — `export_pack` with `format: "okf"` returns the OKF bundle concatenated with
+    /// `--- file: <path> ---` separators (a real directory bundle is the CLI's job).
+    #[tokio::test]
+    async fn export_pack_okf_format_returns_a_concatenated_bundle() {
+        use indexa_core::store::SummaryRecord;
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_summary(&SummaryRecord {
+                    path: "/proj".into(),
+                    kind: "dir".into(),
+                    parent_path: None,
+                    depth: 0,
+                    summary: "A small project.".into(),
+                    summary_l0: Some("A small project abstract.".into()),
+                    embedding: None,
+                    child_count: 0,
+                    byte_size: 0,
+                    model: "test".into(),
+                    source_hash: "deadbeef00".into(),
+                    generated_at: 0,
+                })
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        mcp.create_pack(Parameters(CreatePackMcpParams {
+            name: "proj-pack".into(),
+            description: None,
+        }))
+        .await
+        .unwrap();
+        mcp.add_pack_paths(Parameters(PackPathsParams {
+            name: "proj-pack".into(),
+            paths: vec!["/proj".into()],
+        }))
+        .await
+        .unwrap();
+
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let body = text_of(
+            mcp.export_pack(Parameters(ExportPackParams {
+                name: "proj-pack".into(),
+                format: Some("okf".into()),
+                depth: None,
+                signatures: None,
+                changed_since: None,
+                category: None,
+                include_graph: false,
+                graph_format: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(body.contains("--- file: index.md ---"));
+        assert!(body.contains("--- file: log.md ---"));
+        assert!(body.contains("okf_version"));
+        assert!(body.contains("A small project abstract."));
+        assert!(
+            !body.contains('<'),
+            "OKF bundle must be pure Markdown, never HTML"
+        );
+    }
+
     #[tokio::test]
     async fn search_flags_a_stale_result_and_summarizes_in_footer() {
         // 1.2: a cited file whose on-disk mtime is newer than what's indexed gets a "(stale)"
