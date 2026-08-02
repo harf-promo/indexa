@@ -169,11 +169,12 @@ impl IndexaMcp {
             include_graph,
             graph_format,
         } = params.0;
-        let store = self.store()?;
+        let mut store = self.store()?;
+        let fmt = format.as_deref().unwrap_or("xml");
         let buf = export_pack_body(
             &store,
             &name,
-            format.as_deref().unwrap_or("xml"),
+            fmt,
             depth,
             signatures.unwrap_or(false),
             changed_since.as_deref(),
@@ -181,6 +182,11 @@ impl IndexaMcp {
             include_graph,
             graph_format.as_deref().unwrap_or("text"),
         )?;
+        // Record the export (4.1) — best-effort, a history-write hiccup must never fail an
+        // otherwise-successful export.
+        if let Ok(Some(pack)) = store.pack_by_name(&name) {
+            let _ = store.record_pack_exported(&pack.id, fmt);
+        }
         Ok(ok_text(buf))
     }
 

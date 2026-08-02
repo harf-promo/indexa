@@ -208,7 +208,7 @@ pub(crate) async fn api_packs_export(
     let format = q.format.as_deref().unwrap_or("xml");
     let depth = q.depth;
 
-    let store = state.store.lock().await;
+    let mut store = state.store.lock().await;
     let pack = match store.pack_by_name(&name) {
         Ok(Some(p)) => p,
         Ok(None) => return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\"")),
@@ -318,6 +318,8 @@ pub(crate) async fn api_packs_export(
     // same invariant the whole-tree export (api_export), MCP export_pack, and CLI
     // `pack export` enforce. This pack route was the one surface that skipped it.
     let (buf, _redacted) = indexa_query::redact::redact_secrets(&buf);
+    // Best-effort (4.1) — a history-write hiccup must never fail an otherwise-successful export.
+    let _ = store.record_pack_exported(&pack.id, format);
     ([(axum::http::header::CONTENT_TYPE, content_type)], buf).into_response()
 }
 

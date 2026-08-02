@@ -8,7 +8,7 @@ use anyhow::Result;
 ///
 /// **INVARIANT: bump this whenever the DDL or any migration in `init_schema` changes** — otherwise a
 /// DB stamped at the old value would skip the new migration and silently miss a column/table.
-pub(super) const SCHEMA_VERSION: i64 = 3;
+pub(super) const SCHEMA_VERSION: i64 = 4;
 
 /// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
 /// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
@@ -293,6 +293,18 @@ impl Store {
                 added_at INTEGER NOT NULL DEFAULT (unixepoch()),
                 PRIMARY KEY (pack_id, path)
             );
+            -- Pack event history (4.1): an append-only changelog per pack, feeding a pack's
+            -- `updated_at` (MAX(at)) and the OKF bundle export's log.md (4.2). ON DELETE
+            -- CASCADE mirrors pack_paths — deleting a pack needs no manual cleanup here.
+            CREATE TABLE IF NOT EXISTS pack_events (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                pack_id TEXT NOT NULL REFERENCES packs(id) ON DELETE CASCADE,
+                event   TEXT NOT NULL
+                            CHECK(event IN ('created','path_added','path_removed','renamed','exported')),
+                detail  TEXT,
+                at      INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE INDEX IF NOT EXISTS idx_pack_events_pack ON pack_events(pack_id, at);
             -- Importance weights (v0.8): user-controlled boosts per file, directory,
             -- or classification category. A weight > 1.0 promotes the target in search
             -- results; 0.0 effectively silences it. 'auto' rows are recency-based

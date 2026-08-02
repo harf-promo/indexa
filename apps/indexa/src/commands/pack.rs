@@ -266,7 +266,7 @@ pub(crate) async fn cmd_pack_export(
     if !db_path.exists() {
         bail!("No index found. Run `indexa index <path>` first.");
     }
-    let store = Store::open(&db_path)?;
+    let mut store = Store::open(&db_path)?;
     let pack = store
         .pack_by_name(&name)?
         .ok_or_else(|| anyhow::anyhow!("no pack named \"{name}\""))?;
@@ -400,7 +400,13 @@ pub(crate) async fn cmd_pack_export(
             clipboard,
             output,
         },
-    )
+    )?;
+    // Record the event only once the artifact is actually written (4.1) — a failed
+    // finalize (disk error, budget overflow) must not log a phantom export.
+    if let Err(e) = store.record_pack_exported(&pack.id, &format) {
+        tracing::debug!("pack event (exported) not recorded: {e:#}");
+    }
+    Ok(())
 }
 
 pub(crate) async fn cmd_pack_rename(name: String, new_name: String) -> Result<()> {
