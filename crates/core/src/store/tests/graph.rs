@@ -178,7 +178,7 @@ fn blast_radius_strict_cuts_bare_transitive_hop() {
         .unwrap();
 
     let fuzzy = store
-        .blast_radius_resolved("target", 200, false, 2)
+        .blast_radius_resolved("target", 200, false, 2, false)
         .unwrap();
     assert!(fuzzy.files.contains(&"/a/mid.rs".to_string()));
     assert!(
@@ -187,7 +187,9 @@ fn blast_radius_strict_cuts_bare_transitive_hop() {
     );
     assert_eq!((fuzzy.direct, fuzzy.bare_transitive), (1, 1));
 
-    let strict = store.blast_radius_resolved("target", 200, true, 2).unwrap();
+    let strict = store
+        .blast_radius_resolved("target", 200, true, 2, false)
+        .unwrap();
     assert!(strict.files.contains(&"/a/mid.rs".to_string()));
     assert!(
         !strict.files.contains(&"/c/far.rs".to_string()),
@@ -216,7 +218,7 @@ fn blast_radius_scoped_resolution_filters_and_confirms_transitive_callers() {
         .unwrap();
 
     let fuzzy = store
-        .blast_radius_resolved("target", 200, false, 2)
+        .blast_radius_resolved("target", 200, false, 2, false)
         .unwrap();
     assert!(fuzzy.files.contains(&"/r/src/far/user.rs".to_string()));
     assert!(
@@ -226,7 +228,9 @@ fn blast_radius_scoped_resolution_filters_and_confirms_transitive_callers() {
     assert!(fuzzy.files.contains(&"/z/noimp.rs".to_string()));
     assert_eq!((fuzzy.scoped_transitive, fuzzy.bare_transitive), (1, 1));
 
-    let strict = store.blast_radius_resolved("target", 200, true, 2).unwrap();
+    let strict = store
+        .blast_radius_resolved("target", 200, true, 2, false)
+        .unwrap();
     assert!(
         strict.files.contains(&"/r/src/far/user.rs".to_string()),
         "an import-confirmed transitive caller survives strict"
@@ -253,14 +257,14 @@ fn blast_radius_depth_controls_transitive_reach() {
 
     // depth 1 = direct callers only.
     let d1 = store
-        .blast_radius_resolved("target", 200, false, 1)
+        .blast_radius_resolved("target", 200, false, 1, false)
         .unwrap();
     assert_eq!(d1.files, vec!["/p/a.rs".to_string()]);
     assert_eq!(d1.scoped_transitive + d1.bare_transitive, 0);
 
     // depth 2 = direct + one transitive hop (reaches b.rs, not c.rs).
     let d2 = store
-        .blast_radius_resolved("target", 200, false, 2)
+        .blast_radius_resolved("target", 200, false, 2, false)
         .unwrap();
     assert!(d2.files.contains(&"/p/a.rs".to_string()));
     assert!(d2.files.contains(&"/p/b.rs".to_string()));
@@ -271,7 +275,7 @@ fn blast_radius_depth_controls_transitive_reach() {
 
     // depth 3 = reaches c.rs through the chain.
     let d3 = store
-        .blast_radius_resolved("target", 200, false, 3)
+        .blast_radius_resolved("target", 200, false, 3, false)
         .unwrap();
     assert!(
         d3.files.contains(&"/p/c.rs".to_string()),
@@ -306,7 +310,7 @@ fn blast_radius_risk_scales_with_direct_caller_count() {
         .collect();
     store.upsert_edges(&edges).unwrap();
     let r = store
-        .blast_radius_resolved("target", 200, false, 1)
+        .blast_radius_resolved("target", 200, false, 1, false)
         .unwrap();
     assert_eq!(r.direct, 12);
     assert_eq!(r.risk(), crate::store::BlastRadiusRisk::High);
@@ -328,7 +332,7 @@ fn blast_radius_deep_terminates_on_cycle() {
         .unwrap();
     // A high depth must not loop forever.
     let r = store
-        .blast_radius_resolved("target", 200, false, 5)
+        .blast_radius_resolved("target", 200, false, 5, false)
         .unwrap();
     assert!(r.files.contains(&"/p/a.rs".to_string()));
     assert!(r.files.contains(&"/p/b.rs".to_string()));
@@ -429,4 +433,56 @@ fn find_cycles_detects_an_scc() {
         ])
         .unwrap();
     assert!(store2.find_cycles("/", 400).unwrap().is_empty());
+}
+
+#[test]
+fn heritage_edges_migration_widens_old_check_constraint() {
+    // 2.2: a DB previously migrated only as far as the 'calls'-widened CHECK (imports/
+    // defines/calls, no extends/implements) must widen further on the next open, without
+    // losing existing rows. Simulates that prior state directly, then re-runs init_schema
+    // (what a real Store::open on an old DB triggers).
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .conn
+        .execute_batch(
+            "DROP TABLE edges;
+             CREATE TABLE edges (
+                 from_path TEXT NOT NULL,
+                 kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls')),
+                 to_ref    TEXT NOT NULL,
+                 PRIMARY KEY (from_path, kind, to_ref)
+             ) WITHOUT ROWID;
+             INSERT INTO edges VALUES ('/a.rs', 'calls', 'foo');
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+
+    store.init_schema().unwrap();
+
+    // The pre-existing row survived the copy-table migration.
+    let preserved: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM edges WHERE from_path='/a.rs' AND kind='calls' AND to_ref='foo'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        preserved, 1,
+        "existing 'calls' row must survive the migration"
+    );
+
+    // The widened CHECK now accepts 'extends'/'implements'.
+    store
+        .conn
+        .execute("INSERT INTO edges VALUES ('/a.rs', 'extends', 'Base')", [])
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO edges VALUES ('/a.rs', 'implements', 'Trait')",
+            [],
+        )
+        .unwrap();
 }

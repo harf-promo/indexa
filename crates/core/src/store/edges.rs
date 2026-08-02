@@ -782,7 +782,9 @@ impl Store {
     /// at the default depth of 2 = direct callers + one transitive hop; same files, no tier
     /// breakdown).
     pub fn blast_radius(&self, symbol: &str, limit: usize, strict: bool) -> Result<Vec<String>> {
-        Ok(self.blast_radius_resolved(symbol, limit, strict, 2)?.files)
+        Ok(self
+            .blast_radius_resolved(symbol, limit, strict, 2, false)?
+            .files)
     }
 
     /// v0.25 — 1-hop blast radius with scoped resolution: direct callers of `symbol`
@@ -798,19 +800,28 @@ impl Store {
     /// adds one transitive hop (the legacy default), and higher depths keep expanding from
     /// each newly-reached frontier of caller files. `included` doubles as the visited set, so
     /// cycles terminate; results are capped at `limit`.
+    ///
+    /// `include_heritage` (2.2, default false): also treat a file with an `extends`/
+    /// `implements` edge to `symbol` as a direct (hop-1) hit — changing a base class/trait
+    /// breaks its subclasses/implementors just as directly as changing a called function
+    /// breaks its callers. Byte-identical to the pre-2.2 output when false.
     pub fn blast_radius_resolved(
         &self,
         symbol: &str,
         limit: usize,
         strict: bool,
         depth: usize,
+        include_heritage: bool,
     ) -> Result<BlastRadius> {
         let direct: Vec<String> = {
             let mut stmt = self.conn.prepare(
                 "SELECT DISTINCT from_path FROM edges
-                  WHERE kind = 'calls' AND to_ref = ?1 ORDER BY from_path",
+                  WHERE to_ref = ?1
+                    AND (kind = 'calls'
+                         OR (?2 AND kind IN ('extends', 'implements')))
+                  ORDER BY from_path",
             )?;
-            let rows = stmt.query_map(params![symbol], |r| r.get(0))?;
+            let rows = stmt.query_map(params![symbol, include_heritage], |r| r.get(0))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
         // A decided symbol_ambiguity answer pins the authoritative definition:

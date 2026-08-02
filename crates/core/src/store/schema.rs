@@ -33,6 +33,17 @@ fn edges_allows_calls(conn: &rusqlite::Connection) -> bool {
     .unwrap_or(true)
 }
 
+/// Does the `edges` table's CHECK constraint already allow `'extends'` (2.2, heritage edges)?
+/// Returns `true` when the table is absent (fresh DB) — DDL below already includes it.
+fn edges_allows_heritage(conn: &rusqlite::Connection) -> bool {
+    conn.query_row(
+        "SELECT sql LIKE '%''extends''%' FROM sqlite_master WHERE type='table' AND name='edges'",
+        [],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(true)
+}
+
 impl Store {
     pub(super) fn init_schema(&mut self) -> Result<()> {
         // Connection-level PRAGMAs — these are per-connection (not persisted, except journal_mode
@@ -204,16 +215,18 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_dirapps_primary ON directory_apps(path) WHERE is_primary = 1;
             CREATE INDEX IF NOT EXISTS idx_dirapps_kind    ON directory_apps(app_kind);
 
-            -- Code-relationship graph (D1 + D2). One row per edge from a code file:
-            --   kind='imports' → to_ref is an imported module/path
-            --   kind='defines' → to_ref is a symbol defined in the file
-            --   kind='calls'   → to_ref is a function/method name called by the file (D2)
+            -- Code-relationship graph (D1 + D2 + 2.2). One row per edge from a code file:
+            --   kind='imports'    → to_ref is an imported module/path
+            --   kind='defines'    → to_ref is a symbol defined in the file
+            --   kind='calls'      → to_ref is a function/method name called by the file (D2)
+            --   kind='extends'    → to_ref is the parent class/struct name (2.2, heritage)
+            --   kind='implements' → to_ref is the implemented trait/interface name (2.2)
             -- Composite PK dedups identical edges; idx_edges_to powers reverse lookups
             -- (who imports X / who defines Y / who calls Z). Re-deep of a file replaces
             -- its rows (delete-by-from_path then insert), mirroring chunks.
             CREATE TABLE IF NOT EXISTS edges (
                 from_path TEXT NOT NULL,
-                kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls')),
+                kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls','extends','implements')),
                 to_ref    TEXT NOT NULL,
                 PRIMARY KEY (from_path, kind, to_ref)
             ) WITHOUT ROWID;
@@ -514,6 +527,33 @@ impl Store {
                     CREATE TABLE edges_new (
                         from_path TEXT NOT NULL,
                         kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls')),
+                        to_ref    TEXT NOT NULL,
+                        PRIMARY KEY (from_path, kind, to_ref)
+                    ) WITHOUT ROWID;
+                    INSERT OR IGNORE INTO edges_new SELECT * FROM edges;
+                    DROP TABLE edges;
+                    ALTER TABLE edges_new RENAME TO edges;
+                    CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(kind, to_ref);
+                    ",
+                )?;
+            }
+            tx.commit()?;
+        }
+
+        // Migration: widen the edges.kind CHECK to include 'extends'/'implements' (2.2,
+        // heritage edges). Same copy-table pattern as the 'calls' widening above — SQLite
+        // can't ALTER a constraint. A fresh DB never hits this (base DDL above already
+        // includes both); a DB previously migrated to the 'calls'-only CHECK does.
+        if !edges_allows_heritage(&self.conn) {
+            let tx = self
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if !edges_allows_heritage(&tx) {
+                tx.execute_batch(
+                    "
+                    CREATE TABLE edges_new (
+                        from_path TEXT NOT NULL,
+                        kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls','extends','implements')),
                         to_ref    TEXT NOT NULL,
                         PRIMARY KEY (from_path, kind, to_ref)
                     ) WITHOUT ROWID;

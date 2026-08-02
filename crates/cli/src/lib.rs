@@ -420,6 +420,13 @@ pub enum Commands {
         /// instead of a flat file list.
         #[arg(long)]
         grouped: bool,
+
+        /// With --blast: also treat a file with an extends/implements edge to the symbol as
+        /// a direct hit (2.2) — pass a class/trait/interface name as --blast to see what
+        /// breaks if you change it. Without --blast: no effect (the whole-scope graph view
+        /// doesn't render heritage edges yet).
+        #[arg(long)]
+        heritage: bool,
     },
 
     /// Find files related to a file via the call graph (it calls them, or they call it).

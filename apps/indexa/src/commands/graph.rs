@@ -32,6 +32,7 @@ pub(crate) async fn cmd_graph(
     blast: Option<String>,
     depth: usize,
     grouped: bool,
+    heritage: bool,
 ) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
@@ -43,7 +44,8 @@ pub(crate) async fn cmd_graph(
     // `depth` hops, instead of the whole-scope graph. `path` is ignored in this mode.
     if let Some(symbol) = blast {
         let depth = depth.clamp(1, 5);
-        let radius = store.blast_radius_resolved(&symbol, limit.max(200), strict, depth)?;
+        let radius =
+            store.blast_radius_resolved(&symbol, limit.max(200), strict, depth, heritage)?;
         if radius.files.is_empty() {
             println!("No blast radius found for \"{symbol}\".");
             println!(

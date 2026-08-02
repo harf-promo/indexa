@@ -13,6 +13,11 @@ use crate::{mcp_err, ok_text, IndexaMcp};
 pub struct DependenciesParams {
     /// Absolute path of an indexed code file.
     pub path: String,
+    /// Also show `extends`/`implements` heritage edges (2.2) in an "Extends"/"Implements"
+    /// section — already stored, just hidden by default so the flat dump stays
+    /// byte-identical to before 2.2. Default false.
+    #[serde(default)]
+    pub include_heritage: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -46,6 +51,11 @@ pub struct BlastRadiusParams {
     /// flat file list. Default false (flat output unchanged).
     #[serde(default)]
     pub grouped: bool,
+    /// Also treat a file with an `extends`/`implements` edge to `symbol` as a direct hit
+    /// (2.2) — changing a base class/trait breaks its subclasses/implementors just as
+    /// directly as changing a called function breaks its callers. Default false.
+    #[serde(default)]
+    pub include_heritage: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -78,7 +88,7 @@ pub struct CodeGraphParams {
 impl IndexaMcp {
     /// List a code file's dependencies from the code graph (imports + defined symbols).
     #[tool(
-        description = "List a code file's dependencies from the code graph: the modules/paths it imports and the symbols (functions, types, classes) it defines. Requires an absolute path to a file indexed with `indexa deep`."
+        description = "List a code file's dependencies from the code graph: the modules/paths it imports and the symbols (functions, types, classes) it defines. Set `include_heritage: true` to also list `extends`/`implements` edges (2.2) — the base classes/traits this file's types derive from. Requires an absolute path to a file indexed with `indexa deep`."
     )]
     pub(crate) async fn dependencies(
         &self,
@@ -137,6 +147,38 @@ impl IndexaMcp {
                 out.push('\n');
             }
             out.push_str(&format!("\nCalls ({}):\n{}", calls.len(), line("↪", calls)));
+        }
+        if params.0.include_heritage {
+            let extends: Vec<&str> = edges
+                .iter()
+                .filter(|e| e.kind == "extends")
+                .map(|e| e.to_ref.as_str())
+                .collect();
+            let implements: Vec<&str> = edges
+                .iter()
+                .filter(|e| e.kind == "implements")
+                .map(|e| e.to_ref.as_str())
+                .collect();
+            if !extends.is_empty() {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&format!(
+                    "\nExtends ({}):\n{}",
+                    extends.len(),
+                    line("▲", extends)
+                ));
+            }
+            if !implements.is_empty() {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&format!(
+                    "\nImplements ({}):\n{}",
+                    implements.len(),
+                    line("◇", implements)
+                ));
+            }
         }
         Ok(ok_text(out))
     }
@@ -254,7 +296,7 @@ impl IndexaMcp {
     /// D2 — blast radius for a symbol: direct callers and transitive callers to `depth` hops,
     /// with each transitive hop resolved (scoped) where possible.
     #[tool(
-        description = "D2 code-graph: compute the blast radius of changing a function or method — returns the direct callers plus files whose call to a frontier caller's exported symbol resolves back to that caller (same-dir/import resolution; bare-name matches are kept as a labeled fallback). Use to answer 'what breaks if I change X?'. `depth` controls how many hops of caller reachability to follow: 1 = direct callers only, 2 = direct + one transitive hop (default), up to 5 for transitive reach through chains. Set `strict: true` to drop the bare-name fallback on the transitive hops. Set `grouped: true` to group the file list by hop with a risk label (hop 1 'WILL BREAK', hop 2 'LIKELY AFFECTED', hop 3+ 'MAY NEED TESTING') plus a LOW/MEDIUM/HIGH risk summary, instead of a flat list. Returns up to 200 results."
+        description = "D2 code-graph: compute the blast radius of changing a function or method — returns the direct callers plus files whose call to a frontier caller's exported symbol resolves back to that caller (same-dir/import resolution; bare-name matches are kept as a labeled fallback). Use to answer 'what breaks if I change X?'. `depth` controls how many hops of caller reachability to follow: 1 = direct callers only, 2 = direct + one transitive hop (default), up to 5 for transitive reach through chains. Set `strict: true` to drop the bare-name fallback on the transitive hops. Set `grouped: true` to group the file list by hop with a risk label (hop 1 'WILL BREAK', hop 2 'LIKELY AFFECTED', hop 3+ 'MAY NEED TESTING') plus a LOW/MEDIUM/HIGH risk summary, instead of a flat list. Set `include_heritage: true` to also treat a class/trait's subclasses/implementors as direct hits (2.2) — pass a class/trait/interface name as `symbol` to see what breaks if you change it. Returns up to 200 results."
     )]
     pub(crate) async fn blast_radius(
         &self,
@@ -264,7 +306,13 @@ impl IndexaMcp {
         // Clamp depth to a sane range; default to the legacy 2 (direct + one transitive hop).
         let depth = params.0.depth.unwrap_or(2).clamp(1, 5);
         let radius = store
-            .blast_radius_resolved(&params.0.symbol, 200, params.0.strict, depth)
+            .blast_radius_resolved(
+                &params.0.symbol,
+                200,
+                params.0.strict,
+                depth,
+                params.0.include_heritage,
+            )
             .map_err(mcp_err)?;
         if radius.files.is_empty() {
             return Ok(ok_text(format!(
