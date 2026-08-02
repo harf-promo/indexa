@@ -414,6 +414,12 @@ pub enum Commands {
         /// transitive hop (default), up to 5 for transitive reach through chains.
         #[arg(long, default_value = "2")]
         depth: usize,
+
+        /// With --blast: group results by hop with a risk label (hop 1 "WILL BREAK", hop 2
+        /// "LIKELY AFFECTED", hop 3+ "MAY NEED TESTING") plus a LOW/MEDIUM/HIGH risk summary,
+        /// instead of a flat file list.
+        #[arg(long)]
+        grouped: bool,
     },
 
     /// Find files related to a file via the call graph (it calls them, or they call it).
@@ -954,6 +960,14 @@ pub enum PackAction {
         /// Append an importance-weights section (which files you've marked as important).
         #[arg(long)]
         include_weights: bool,
+        /// Append a call-graph section (which files relate to which) for the pack's paths,
+        /// capped at 200 heaviest edges. Format follows --graph-format.
+        #[arg(long)]
+        include_graph: bool,
+        /// With --include-graph: "text" (per-format list, default) or "mermaid" (a fenced
+        /// ```mermaid flowchart block — pure text, renders natively in most AI tools/viewers).
+        #[arg(long, default_value = "text")]
+        graph_format: String,
         /// Emit a code-skeleton view (symbol signatures, bodies elided) instead of summaries.
         #[arg(long)]
         signatures: bool,

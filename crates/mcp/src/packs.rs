@@ -38,6 +38,14 @@ pub struct ExportPackParams {
     /// Combine with `changed_since` to intersect. Omit for no category filter.
     #[serde(default)]
     pub category: Option<String>,
+    /// Append a call-graph section (which files relate to which) for the pack's paths, capped
+    /// at 200 heaviest edges. Default false.
+    #[serde(default)]
+    pub include_graph: bool,
+    /// With `include_graph`: `"text"` (per-format list, default) or `"mermaid"` (a fenced
+    /// ```mermaid flowchart block — pure text, renders natively in most AI tools/viewers).
+    #[serde(default)]
+    pub graph_format: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -142,7 +150,9 @@ impl IndexaMcp {
         description = "Export a Context Pack as a self-contained context file (XML by default, \
                        also Markdown or JSON). Each path in the pack is rendered with its \
                        hierarchical summary tree. Optionally slice with `changed_since` \
-                       (e.g. '7d') and/or `category` (e.g. 'code'). Ideal for giving an AI tool \
+                       (e.g. '7d') and/or `category` (e.g. 'code'). Set `include_graph: true` \
+                       to append a call-graph section (`graph_format: \"mermaid\"` for a fenced \
+                       diagram block instead of a per-format list). Ideal for giving an AI tool \
                        focused context on a specific topic (e.g. 'Auth', 'Tax 2025', 'Client X')."
     )]
     pub(crate) async fn export_pack(
@@ -156,6 +166,8 @@ impl IndexaMcp {
             signatures,
             changed_since,
             category,
+            include_graph,
+            graph_format,
         } = params.0;
         let store = self.store()?;
         let buf = export_pack_body(
@@ -166,6 +178,8 @@ impl IndexaMcp {
             signatures.unwrap_or(false),
             changed_since.as_deref(),
             category.as_deref(),
+            include_graph,
+            graph_format.as_deref().unwrap_or("text"),
         )?;
         Ok(ok_text(buf))
     }
@@ -337,6 +351,7 @@ impl IndexaMcp {
 /// Render a Context Pack to a single string in `format` (`xml` | `md` | `json`), with
 /// `redact_secrets` applied — the shared body for the `export_pack` tool, the
 /// `indexa://pack/{name}` resource, and the `pack-context` prompt (one redaction site).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn export_pack_body(
     store: &Store,
     name: &str,
@@ -345,10 +360,12 @@ pub(crate) fn export_pack_body(
     signatures: bool,
     changed_since: Option<&str>,
     category: Option<&str>,
+    include_graph: bool,
+    graph_format: &str,
 ) -> Result<String, ErrorData> {
     use indexa_query::{
-        build_export_filter, build_tree, prune_tree, redact::redact_secrets, render_json,
-        render_markdown, render_signatures, render_xml,
+        build_export_filter, build_tree, prune_tree, redact::redact_secrets, render_graph,
+        render_graph_mermaid, render_json, render_markdown, render_signatures, render_xml,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -417,6 +434,26 @@ pub(crate) fn export_pack_body(
         buf.push('\n');
         exported += 1;
     }
+
+    // Optional call-graph section (1.6): a single pack path scopes the graph to it; multiple
+    // paths fall back to the whole-index scope ("/"), matching `indexa export --include-graph`.
+    // Capped at 200 edges (the MCP `code_graph` tool's default).
+    if include_graph {
+        let scope = if paths.len() == 1 {
+            paths[0].clone()
+        } else {
+            "/".to_owned()
+        };
+        if let Ok(graph) = store.code_graph(&scope, 200, false) {
+            let section = if graph_format == "mermaid" {
+                render_graph_mermaid(&graph)
+            } else {
+                render_graph(&graph, format)
+            };
+            buf.push_str(&section);
+        }
+    }
+
     if is_xml {
         buf.push_str("</context>\n");
     }

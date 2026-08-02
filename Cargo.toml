@@ -56,6 +56,9 @@ ignore = "0.4"
 notify = "8"
 notify-debouncer-full = "0.7"
 
+# Text encoding (UTF-16/BOM transcoding for the text-family parsers)
+encoding_rs = "0.8"
+
 # Storage
 rusqlite = { version = "0.40", features = ["bundled"] }
 

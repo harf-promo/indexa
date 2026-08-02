@@ -145,6 +145,9 @@ pub(crate) async fn run_deep_phase(
         indexa_parsers::types::ChunkParams {
             size: state.config.chunking.size,
             overlap: state.config.chunking.overlap,
+            encoding: indexa_parsers::types::TextEncoding::from_config_str(
+                &state.config.parsers.encoding,
+            ),
         },
     ));
 

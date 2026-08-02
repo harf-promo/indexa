@@ -81,6 +81,9 @@ pub(crate) async fn api_watch_start(
         indexa_parsers::registry::Registry::with_chunk(indexa_parsers::types::ChunkParams {
             size: state.config.chunking.size,
             overlap: state.config.chunking.overlap,
+            encoding: indexa_parsers::types::TextEncoding::from_config_str(
+                &state.config.parsers.encoding,
+            ),
         });
     let watch_root = PathBuf::from(&path);
     let watch_root2 = watch_root.clone();
@@ -90,6 +93,7 @@ pub(crate) async fn api_watch_start(
         std::slice::from_ref(&watch_root),
         state.config.scan.respect_gitignore,
         &state.config.scan.ignore,
+        state.config.scan.custom_ignore,
     );
     let include_sensitive = state.config.scan.include_sensitive;
     let redact_at_index = state.config.scan.redact_at_index;

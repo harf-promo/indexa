@@ -21,6 +21,7 @@ pub(crate) async fn cmd_scan(paths: Vec<String>, all: bool, yes: bool, cfg: &Con
         ignore: cfg.scan.ignore.clone(),
         include_sensitive: cfg.scan.include_sensitive,
         threads: cfg.scan.threads,
+        custom_ignore: cfg.scan.custom_ignore,
         ..Default::default()
     };
 

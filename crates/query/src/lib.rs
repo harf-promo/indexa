@@ -4,9 +4,11 @@ pub mod contextual;
 pub mod eval;
 pub mod export;
 pub mod impact;
+pub mod predicates;
 pub mod qa;
 pub mod redact;
 pub mod rerank;
+pub mod staleness;
 pub mod summarize;
 pub mod worker;
 
@@ -15,8 +17,8 @@ pub use eval::{
     GoldenSet, MetricDelta, QuestionMetrics,
 };
 pub use export::{
-    approx_tokens, build_export_filter, build_tree, prune_tree, render_graph, render_json,
-    render_markdown, render_signatures, render_weights, render_xml,
+    approx_tokens, build_export_filter, build_tree, prune_tree, render_graph, render_graph_mermaid,
+    render_json, render_markdown, render_signatures, render_weights, render_xml,
 };
 pub use impact::{
     ask_impact_breakdown, record_ask_impact, served_bytes, AnswerImpact, ImpactBreakdown,

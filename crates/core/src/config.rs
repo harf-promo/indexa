@@ -133,6 +133,9 @@ pub struct ScanConfig {
     /// walk is I/O/syscall-bound, so this scales past the core count. Set a number to cap on a
     /// shared host (leave cores for other tenants) or raise it on a fast local NVMe machine.
     pub threads: Option<usize>,
+    /// Honor `.indexaignore` files (highest-precedence ignore layer, above `.gitignore`/`.ignore`,
+    /// supports `!` re-includes) during the walk. Default on; set `false` to disable entirely.
+    pub custom_ignore: bool,
 }
 
 impl Default for ScanConfig {
@@ -145,6 +148,7 @@ impl Default for ScanConfig {
             redact_at_index: true,
             skip_binary: false,
             threads: None,
+            custom_ignore: true,
         }
     }
 }
@@ -392,6 +396,22 @@ pub struct RetrievalConfig {
     /// so clustering can be used without the added latency. `false` by default.
     #[serde(default)]
     pub graphrag_summarize: bool,
+    /// Annotate cited files whose on-disk mtime is newer than what's indexed (1.2) —
+    /// "(stale: modified since indexed)" per source, plus a footer summary. Annotation-only:
+    /// never changes retrieval scores or which chunks are cited, so it needs no eval gate.
+    /// `true` by default; set `false` to disable the extra per-citation `fs::metadata` check.
+    #[serde(default = "default_true")]
+    pub staleness_flags: bool,
+    /// Recognize `path:`/`ext:` predicates in free-text `search`/`ask` queries (1.8) — e.g.
+    /// `ext:md path:crates/core auth flow`. `path:` maps onto the existing scope filter;
+    /// `ext:` is a post-hoc hit filter (search only). Off by default: it changes query
+    /// interpretation, so it's eval-gated before flipping the default.
+    #[serde(default)]
+    pub query_predicates: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Default cluster cap for [`RetrievalConfig::graphrag_max_clusters`].
@@ -444,6 +464,8 @@ impl Default for RetrievalConfig {
             graphrag_max_clusters: default_graphrag_max_clusters(),
             graphrag_cluster_sim: default_graphrag_cluster_sim(),
             graphrag_summarize: false,
+            staleness_flags: true,
+            query_predicates: false,
         }
     }
 }
@@ -552,6 +574,18 @@ pub struct ParsersConfig {
     /// `0` disables the cap.
     #[serde(default = "default_max_file_mb")]
     pub max_file_mb: u64,
+    /// Text-file encoding detection (1.3): `"auto"` (default) BOM-sniffs UTF-16 and transcodes
+    /// it to UTF-8 (lossy — invalid sequences become U+FFFD), falling back to lossy UTF-8 for
+    /// everything else — a valid-UTF-8 file decodes identically to the old strict read, so this
+    /// only changes outcomes for files that previously errored/were skipped. `"utf-8"` restores
+    /// the old strict behavior (errors on invalid UTF-8) for callers who want a bad file
+    /// detected rather than silently patched.
+    #[serde(default = "default_encoding")]
+    pub encoding: String,
+}
+
+fn default_encoding() -> String {
+    "auto".to_owned()
 }
 
 impl Default for ParsersConfig {
@@ -562,6 +596,7 @@ impl Default for ParsersConfig {
             audio: AudioParserConfig::default(),
             video: VideoParserConfig::default(),
             max_file_mb: default_max_file_mb(),
+            encoding: default_encoding(),
         }
     }
 }
@@ -814,6 +849,71 @@ pub fn load_default() -> Result<Config> {
     load(&default_config_path())
 }
 
+/// Every dotted-path key in `cfg` whose value differs from `Config::default()` — for `indexa
+/// doctor`'s config-observability report (ripgrep's `--debug` config reporting: which file was
+/// loaded, which non-default settings are active). Generic over the whole `Config` tree via a
+/// `toml::Value` diff, so a new config field is covered automatically without a hand-maintained
+/// field list.
+///
+/// `[api_keys]` is never surfaced at the value level — only whether the section is configured —
+/// matching the "keys never logged" invariant.
+pub fn non_default_keys(cfg: &Config) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let default = Config::default();
+    let (Ok(actual), Ok(defaults)) = (toml::Value::try_from(cfg), toml::Value::try_from(&default))
+    else {
+        // Fail-open: an unexpected serialization error just means an empty report, not a crash.
+        return out;
+    };
+    diff_toml_values("", &actual, &defaults, &mut out);
+    out
+}
+
+fn diff_toml_values(
+    prefix: &str,
+    actual: &toml::Value,
+    defaults: &toml::Value,
+    out: &mut Vec<(String, String)>,
+) {
+    if prefix == "api_keys" {
+        if actual != defaults {
+            out.push((prefix.to_owned(), "configured (values redacted)".to_owned()));
+        }
+        return;
+    }
+    match (actual, defaults) {
+        (toml::Value::Table(a), toml::Value::Table(d)) => {
+            for (key, actual_val) in a {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                match d.get(key) {
+                    Some(default_val) => diff_toml_values(&path, actual_val, default_val, out),
+                    // A key present in `cfg` but absent from `Config::default()`'s serialization
+                    // can't happen for a struct-derived Config (every field always serializes),
+                    // but stay fail-open rather than panic if it ever does.
+                    None => out.push((path, display_toml_value(actual_val))),
+                }
+            }
+        }
+        _ => {
+            if actual != defaults {
+                out.push((prefix.to_owned(), display_toml_value(actual)));
+            }
+        }
+    }
+}
+
+fn display_toml_value(v: &toml::Value) -> String {
+    match v {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Array(items) if items.is_empty() => "[]".to_owned(),
+        other => other.to_string(),
+    }
+}
+
 /// Serialise `cfg` to `path`, creating parent directories as needed.
 /// On Unix, the file is written with `0600` permissions (owner read/write only)
 /// to protect any stored API keys.
@@ -901,6 +1001,36 @@ mod tests {
         assert_eq!(parse_reindex_interval("7°"), None);
         assert_eq!(parse_reindex_interval("10日"), None);
         assert_eq!(parse_reindex_interval("°"), None);
+    }
+
+    #[test]
+    fn non_default_keys_reports_only_changed_fields() {
+        let mut cfg = Config::default();
+        assert!(
+            non_default_keys(&cfg).is_empty(),
+            "a default config must report no non-default keys"
+        );
+
+        cfg.scan.skip_binary = true;
+        cfg.scan.ignore = vec!["*.log".to_owned()];
+        cfg.chunking.size = 500;
+        let keys = non_default_keys(&cfg);
+        let paths: Vec<&str> = keys.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(paths.contains(&"scan.skip_binary"));
+        assert!(paths.contains(&"scan.ignore"));
+        assert!(paths.contains(&"chunking.size"));
+        // Untouched fields must not appear.
+        assert!(!paths.contains(&"scan.respect_gitignore"));
+    }
+
+    #[test]
+    fn non_default_keys_redacts_api_key_values() {
+        let mut cfg = Config::default();
+        cfg.api_keys.openai = Some("sk-super-secret-value".to_owned());
+        let keys = non_default_keys(&cfg);
+        let joined: String = keys.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        assert!(!joined.contains("sk-super-secret-value"));
+        assert!(keys.iter().any(|(k, _)| k == "api_keys"));
     }
 
     #[cfg(unix)]

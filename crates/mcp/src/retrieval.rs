@@ -134,7 +134,7 @@ impl IndexaMcp {
     /// Returns matching chunks with their file path, heading, and a text snippet.
     /// Use `scope` to restrict to a subtree. For path-name browsing, prefer `browse_tree`.
     #[tool(
-        description = "Search indexed chunk content by keyword (BM25 + vector hybrid). Returns matching chunks with path, heading, and snippet — richer than path-name search. Each hit shows `#N`, the chunk seq — pass it to `get_chunk_context` to expand that chunk with its neighbors. Optionally scope to a path prefix."
+        description = "Search indexed chunk content by keyword (BM25 + vector hybrid). Returns matching chunks with path, heading, and snippet — richer than path-name search. Each hit shows `#N`, the chunk seq — pass it to `get_chunk_context` to expand that chunk with its neighbors. A result whose on-disk mtime is newer than what's indexed is marked '(stale)'. Optionally scope to a path prefix."
     )]
     pub(crate) async fn search(
         &self,
@@ -147,24 +147,41 @@ impl IndexaMcp {
             mode,
         } = params.0;
         let limit = limit.unwrap_or(20).min(100);
-        let scope = scope.as_deref().filter(|s| !s.is_empty());
         let mode = parse_hybrid_mode(mode.as_deref());
+
+        // Predicate grammar (1.8): `path:`/`ext:` tokens stripped from the query and mapped
+        // onto the existing scope filter / a post-hoc extension filter. Off by default — an
+        // explicit `scope` param always wins over a `path:` predicate; a predicate parse that
+        // would leave nothing to search on (the whole query was predicates) falls back to the
+        // original query text rather than searching on an empty string.
+        let predicates = self
+            .config
+            .retrieval
+            .query_predicates
+            .then(|| indexa_query::predicates::parse_predicates(&query))
+            .filter(|p| !p.text.trim().is_empty());
+        let search_text = predicates.as_ref().map_or(query.as_str(), |p| &p.text);
+        let scope = scope
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| predicates.as_ref().and_then(|p| p.path.as_deref()));
+        let ext_filter = predicates.as_ref().and_then(|p| p.ext.clone());
 
         // Try to embed the query for the dense arm; fall back to sparse if the embedder is
         // unavailable or the index has no embeddings.
         let embedding = if matches!(mode, HybridMode::Sparse) {
             None
         } else {
-            self.embedder.embed(&query).await.ok()
+            self.embedder.embed(search_text).await.ok()
         };
 
         // Use the cached ANN index for the dense arm when available (unscoped, large index);
         // `hybrid_search_with_ann` falls back to brute-force otherwise, so results are unchanged.
         let ann = self.ensure_ann().await;
         let mut store = self.store()?;
-        let hits = store
+        let mut hits = store
             .hybrid_search_with_ann(
-                &query,
+                search_text,
                 embedding.as_deref(),
                 &mode,
                 scope,
@@ -173,11 +190,21 @@ impl IndexaMcp {
                 ann.as_deref(),
             )
             .map_err(mcp_err)?;
+        if let Some(ext) = &ext_filter {
+            let suffix = format!(".{ext}");
+            hits.retain(|h| h.entry_path.ends_with(&suffix));
+        }
 
         if hits.is_empty() {
             return Ok(ok_text(format!("No results for '{query}'.")));
         }
 
+        // Staleness attestation (1.2): flag hits whose on-disk mtime is newer than what's
+        // indexed. Fail-open — a store error just means no annotations, never a failed search.
+        let staleness = self.config.retrieval.staleness_flags.then(|| {
+            let paths = hits.iter().map(|h| h.entry_path.as_str());
+            indexa_query::staleness::stale_paths(&store, paths)
+        });
         let body = hits
             .iter()
             .map(|h| {
@@ -187,11 +214,26 @@ impl IndexaMcp {
                     format!(" [{}]", h.heading)
                 };
                 let snippet: String = h.text.chars().take(120).collect();
-                format!("{}{} #{}\n  {}", h.entry_path, heading, h.seq, snippet)
+                let flag = staleness
+                    .as_ref()
+                    .is_some_and(|(stale, ..)| stale.contains(&h.entry_path));
+                let stale_note = if flag { " (stale)" } else { "" };
+                format!(
+                    "{}{}{} #{}\n  {}",
+                    h.entry_path, heading, stale_note, h.seq, snippet
+                )
             })
             .collect::<Vec<_>>()
             .join("\n\n");
-        let out = format!("{} result(s):\n\n{body}", hits.len());
+        let mut out = format!("{} result(s):\n\n{body}", hits.len());
+        if let Some((_, stale_count, total)) = &staleness {
+            if *stale_count > 0 {
+                out.push_str(&format!(
+                    "\n\n({stale_count} of {total} result file(s) changed on disk since \
+                     indexing — re-run `indexa deep` to refresh)"
+                ));
+            }
+        }
 
         let paths: Vec<&str> = hits.iter().map(|h| h.entry_path.as_str()).collect();
         let counterfactual = store.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
@@ -356,7 +398,7 @@ impl IndexaMcp {
 
     /// Answer a natural-language question against the index (grounded RAG).
     #[tool(
-        description = "Answer a natural-language question using the indexed context (hybrid retrieval + LOCAL LLM synthesis — e.g. ollama/gemma3:12b, NOT your model). Returns an answer with source paths. **If you are a capable model, prefer `synthesize: false`**: Indexa then runs the same retrieval pipeline but returns the packed context SLICE for YOU to answer with your own (stronger) model — better answers, and no local-model cost. Set `agentic: true` for compositional questions (a few extra model calls; ignored when `synthesize: false`). Optional `top_k` widens/narrows retrieval breadth."
+        description = "Answer a natural-language question using the indexed context (hybrid retrieval + LOCAL LLM synthesis — e.g. ollama/gemma3:12b, NOT your model). Returns an answer with source paths; a cited file whose on-disk mtime is newer than what's indexed is marked '(stale: modified since indexed)'. **If you are a capable model, prefer `synthesize: false`**: Indexa then runs the same retrieval pipeline but returns the packed context SLICE for YOU to answer with your own (stronger) model — better answers, and no local-model cost. Set `agentic: true` for compositional questions (a few extra model calls; ignored when `synthesize: false`). Optional `top_k` widens/narrows retrieval breadth."
     )]
     pub(crate) async fn ask(
         &self,
@@ -379,6 +421,19 @@ impl IndexaMcp {
         let catalog = catalog.unwrap_or(false);
         let synthesize = synthesize.unwrap_or(true);
         let agentic = agentic.unwrap_or(self.config.retrieval.agentic);
+        // Predicate grammar (1.8): only `path:` is honored for `ask` (it maps onto the
+        // existing pre-retrieval `scope` knob); `ext:` would need a post-retrieval,
+        // pre-synthesis hit filter the qa pipeline doesn't expose, so it's stripped from the
+        // question text (so it doesn't pollute retrieval/synthesis as a literal keyword) but
+        // has no filtering effect here — `search` is where `ext:` is fully honored.
+        let predicates = self
+            .config
+            .retrieval
+            .query_predicates
+            .then(|| indexa_query::predicates::parse_predicates(&question))
+            .filter(|p| !p.text.trim().is_empty());
+        let question = predicates.as_ref().map_or(question, |p| p.text.clone());
+        let predicate_path = predicates.and_then(|p| p.path);
         // Config-derived defaults from `[retrieval]`, then per-request overrides.
         let mut cfg = QaConfig::from_retrieval(&self.config.retrieval);
         if let Some(k) = top_k {
@@ -387,7 +442,7 @@ impl IndexaMcp {
         if let Some(m) = mode.as_deref() {
             cfg.mode = parse_hybrid_mode(Some(m));
         }
-        cfg.scope = scope.filter(|s| !s.is_empty());
+        cfg.scope = scope.filter(|s| !s.is_empty()).or(predicate_path);
         if let Some(r) = rerank {
             cfg.rerank = r;
         }
@@ -503,8 +558,34 @@ impl IndexaMcp {
         };
         if !answer.sources.is_empty() {
             out.push_str("\n\nSources:\n");
+            // Staleness attestation (1.2): flag citations whose on-disk mtime is newer than
+            // what's indexed, so the answer admits when it may be serving stale text. Fail-open
+            // (store errors just mean no annotations) — never blocks or alters the answer.
+            let staleness = if self.config.retrieval.staleness_flags {
+                self.store().ok().map(|store| {
+                    let paths = answer.sources.iter().map(|s| s.path.as_str());
+                    indexa_query::staleness::stale_paths(&store, paths)
+                })
+            } else {
+                None
+            };
             for s in &answer.sources {
-                out.push_str(&format!("- {}\n", s.path));
+                let flag = staleness
+                    .as_ref()
+                    .is_some_and(|(stale, ..)| stale.contains(&s.path));
+                if flag {
+                    out.push_str(&format!("- {} (stale: modified since indexed)\n", s.path));
+                } else {
+                    out.push_str(&format!("- {}\n", s.path));
+                }
+            }
+            if let Some((_, stale_count, total)) = &staleness {
+                if *stale_count > 0 {
+                    out.push_str(&format!(
+                        "({stale_count} of {total} cited file(s) changed on disk since indexing \
+                         — re-run `indexa deep` to refresh)\n"
+                    ));
+                }
             }
         }
         if agentic && steps.len() > 1 {

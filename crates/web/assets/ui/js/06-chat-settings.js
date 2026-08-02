@@ -119,6 +119,7 @@ function renderSources(sources) {
     sources.map(function(s) {
       return '<div class="source-item"><span class="path">' + escapeHtml(s.path) + '</span>' +
         (s.heading ? '<span class="heading">' + escapeHtml(s.heading) + '</span>' : '') +
+        (s.stale ? '<span class="stale-badge" title="This file changed on disk since it was indexed — re-run indexa deep to refresh.">stale</span>' : '') +
         '<div class="snippet">' + escapeHtml(s.snippet) + '</div></div>';
     }).join('') + '</div>';
 }

@@ -12,7 +12,7 @@ use super::search::like_prefix;
 use super::{CodeGraph, CodeGraphEdge, CodeGraphNode, EdgeRecord, RelatedFile, Store};
 use anyhow::Result;
 use rusqlite::params;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// The honesty caveat for the **bare remainder** of D2 call-graph results (CLI, MCP,
 /// web). Since v0.25 most edges resolve via scoped tiers (same-file/same-dir/import);
@@ -101,6 +101,58 @@ pub struct BlastRadius {
     pub scoped_transitive: usize,
     /// Transitive callers kept on the bare-name fallback only (dropped when `strict`).
     pub bare_transitive: usize,
+    /// `(path, hop)` for every file in `files`, same order — hop 1 = direct caller, hop 2 =
+    /// one transitive step, hop 3+ = further steps. Lets a caller group results by risk
+    /// ("hop 1 WILL BREAK / hop 2 LIKELY AFFECTED / hop 3+ MAY NEED TESTING") without a
+    /// second traversal. Additive: existing readers of `files`/`direct`/`*_transitive` are
+    /// unaffected.
+    pub by_hop: Vec<(String, usize)>,
+}
+
+/// Coarse risk label for a blast radius, by direct-caller count — the same three-tier shape
+/// GitNexus's `api_impact` uses for consumer counts (LOW/MEDIUM/HIGH), applied here to direct
+/// callers as the strongest signal of "how much breaks immediately".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlastRadiusRisk {
+    Low,
+    Medium,
+    High,
+}
+
+impl BlastRadiusRisk {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BlastRadiusRisk::Low => "LOW",
+            BlastRadiusRisk::Medium => "MEDIUM",
+            BlastRadiusRisk::High => "HIGH",
+        }
+    }
+}
+
+impl BlastRadius {
+    /// Group [`Self::by_hop`] into `(hop, files-at-that-hop)` buckets, ascending hop, files
+    /// sorted within each bucket — the data behind a "d=1 WILL BREAK / d=2 LIKELY AFFECTED /
+    /// d=3+ MAY NEED TESTING" presentation (label text is a caller concern; this is grouping
+    /// only, shared by the MCP and CLI surfaces).
+    pub fn grouped_by_hop(&self) -> Vec<(usize, Vec<String>)> {
+        let mut buckets: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        for (f, hop) in &self.by_hop {
+            buckets.entry(*hop).or_default().push(f.clone());
+        }
+        for files in buckets.values_mut() {
+            files.sort();
+        }
+        buckets.into_iter().collect()
+    }
+
+    /// Coarse risk label from the direct-caller count: LOW ≤3, MEDIUM 4-9, HIGH ≥10.
+    pub fn risk(&self) -> BlastRadiusRisk {
+        match self.direct {
+            0..=3 => BlastRadiusRisk::Low,
+            4..=9 => BlastRadiusRisk::Medium,
+            _ => BlastRadiusRisk::High,
+        }
+    }
 }
 
 /// A related file with the best resolution tier that linked it.
@@ -805,6 +857,9 @@ impl Store {
         let mut def_cache: HashMap<String, DefinerIndex> = HashMap::new();
         let mut import_cache: HashMap<String, ImportTargets> = HashMap::new();
         let (mut scoped_transitive, mut bare_transitive) = (0usize, 0usize);
+        // Hop of first inclusion, for `BlastRadius::by_hop` (1 = direct caller). Direct callers
+        // seed at hop 1; each transitive pass below records its own hop as it inserts.
+        let mut hop_of: HashMap<String, usize> = direct.iter().map(|f| (f.clone(), 1)).collect();
 
         // Hop 1 — the legacy transitive pass: files whose call to a direct caller's exported
         // symbol resolves back to a direct caller. Guarded by `depth >= 2` so `depth == 1`
@@ -854,6 +909,7 @@ impl Store {
                         bare_transitive += 1;
                     }
                     included.insert(f.clone());
+                    hop_of.insert(f.clone(), 2);
                     frontier.push(f);
                 }
             }
@@ -886,6 +942,7 @@ impl Store {
                         bare_transitive += 1;
                     }
                     included.insert(f.clone());
+                    hop_of.insert(f.clone(), hop + 1);
                     next.push(f);
                 }
             }
@@ -893,11 +950,17 @@ impl Store {
             hop += 1;
         }
 
+        let files: Vec<String> = included.into_iter().take(limit).collect();
+        let by_hop: Vec<(String, usize)> = files
+            .iter()
+            .map(|f| (f.clone(), hop_of.get(f).copied().unwrap_or(1)))
+            .collect();
         Ok(BlastRadius {
-            files: included.into_iter().take(limit).collect(),
+            files,
             direct: direct.len(),
             scoped_transitive,
             bare_transitive,
+            by_hop,
         })
     }
 

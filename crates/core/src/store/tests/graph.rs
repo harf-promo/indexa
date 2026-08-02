@@ -277,6 +277,39 @@ fn blast_radius_depth_controls_transitive_reach() {
         d3.files.contains(&"/p/c.rs".to_string()),
         "depth 3 reaches the far end of the chain"
     );
+
+    // by_hop / grouped_by_hop (1.1): a.rs is hop 1 (direct), b.rs hop 2, c.rs hop 3 — each
+    // file's first-inclusion hop, matching the WILL BREAK / LIKELY AFFECTED / MAY NEED
+    // TESTING grouping.
+    let hop_of = |r: &crate::store::BlastRadius, path: &str| {
+        r.by_hop.iter().find(|(p, _)| p == path).map(|(_, h)| *h)
+    };
+    assert_eq!(hop_of(&d3, "/p/a.rs"), Some(1));
+    assert_eq!(hop_of(&d3, "/p/b.rs"), Some(2));
+    assert_eq!(hop_of(&d3, "/p/c.rs"), Some(3));
+
+    let grouped = d3.grouped_by_hop();
+    assert_eq!(grouped[0], (1, vec!["/p/a.rs".to_string()]));
+    assert_eq!(grouped[1], (2, vec!["/p/b.rs".to_string()]));
+    assert_eq!(grouped[2], (3, vec!["/p/c.rs".to_string()]));
+
+    // risk(): 1 direct caller → LOW.
+    assert_eq!(d3.risk(), crate::store::BlastRadiusRisk::Low);
+}
+
+#[test]
+fn blast_radius_risk_scales_with_direct_caller_count() {
+    let mut store = Store::open_in_memory().unwrap();
+    // 12 distinct direct callers of "target" → HIGH (>=10).
+    let edges: Vec<_> = (0..12)
+        .map(|i| edge(&format!("/p/caller{i}.rs"), "calls", "target"))
+        .collect();
+    store.upsert_edges(&edges).unwrap();
+    let r = store
+        .blast_radius_resolved("target", 200, false, 1)
+        .unwrap();
+    assert_eq!(r.direct, 12);
+    assert_eq!(r.risk(), crate::store::BlastRadiusRisk::High);
 }
 
 #[test]

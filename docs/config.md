@@ -86,6 +86,7 @@ respect_gitignore = true   # honor the scan root's .gitignore (its patterns, anc
 ignore            = []     # extra gitignore-style patterns, e.g. ["build/", "*.log", "vendor/"]
 auto_reindex      = "off"  # "off" | "7d" | "30d" | "12h" … staleness interval for `worker --auto-reindex`
 skip_binary       = false  # NUL-sniff files during deep; skip binaries (executables/images/blobs) from parsing
+custom_ignore     = true   # honor .indexaignore files (see below); set false to disable entirely
 # threads         = 8      # walker worker threads; omit = all cores (min 4). Lower on a shared host.
 ```
 
@@ -93,6 +94,23 @@ skip_binary       = false  # NUL-sniff files during deep; skip binaries (executa
 > files are not separately loaded. `ignore` patterns use gitignore syntax (globs, `dir/`, `!negation`).
 > Anything skipped here is never walked, so it can't be indexed or summarized. Use
 > [`indexa prune`](#) to clean rows left from content that *was* indexed before you ignored it.
+
+### `.indexaignore` — tune indexing without touching git behavior
+
+Drop a `.indexaignore` file (gitignore syntax) anywhere in the tree to add the **highest-precedence**
+ignore layer — above `.gitignore` and `.ignore`, nested per directory like both. Because it's a
+separate file, you can tune what Indexa indexes without changing what git tracks:
+
+```gitignore
+# .indexaignore
+fixtures/          # exclude a noisy, committed fixtures dir from the index
+!docs/generated/    # re-include a gitignored-but-valuable generated-docs dir
+```
+
+`!`-prefixed lines re-include a path even if `.gitignore`/`.ignore` excludes it — but this can never
+re-include a sensitive credential store (`.ssh`, `.gnupg`, Keychains, browser profiles, …); that
+prune is a separate, unconditional check. Gated on `respect_gitignore`; disable entirely with
+`[scan] custom_ignore = false`.
 
 ### Scheduled / auto re-index
 
@@ -152,6 +170,8 @@ graphrag_clusters    = false  # GraphRAG "Approach C": group a broad answer's hi
 graphrag_max_clusters = 4     # max clusters (also caps the per-cluster summary calls)
 graphrag_cluster_sim = 0.55   # cosine threshold to join a hit to a cluster (higher = more clusters)
 graphrag_summarize   = false  # also add a one-line LLM theme per cluster (extra calls; fail-open)
+staleness_flags      = true   # flag cited files whose on-disk mtime is newer than what's indexed
+query_predicates     = false  # recognize path:/ext: predicates in free-text search/ask queries
 ```
 
 > `broad_per_file_cap` (v0.69+) only acts on broad/thematic, **unscoped** questions — focused and
@@ -174,6 +194,22 @@ graphrag_summarize   = false  # also add a one-line LLM theme per cluster (extra
 > per call (`indexa ask --agentic`, MCP `agentic: true`, or the web chat's "Agentic" checkbox); set
 > `agentic = true` here to make it the default. It **fails open** to one-shot retrieval if the model
 > won't emit the loop's actions. See [methodology.md](methodology.md#agentic-retrieval-opt-in).
+
+> **Staleness attestation** (`staleness_flags`, default on): a cited file whose on-disk mtime is
+> newer than what's indexed is flagged — "(stale: modified since indexed)" in `ask`/MCP text output,
+> "(stale)" plus a footer count in `search`, a `stale: bool` field per source in the web JSON API.
+> Annotation-only (never changes retrieval scores or which chunks are cited); each check is one
+> `fs::metadata` call per cited file, fail-open on any I/O error.
+
+> **Query predicates** (`query_predicates`, default off): recognize `path:<prefix>` and
+> `ext:<extension>` tokens in a free-text `search`/`ask` query and strip them out as filters instead
+> of searching for them literally — e.g. `ext:md path:crates/core auth flow` searches "auth flow"
+> scoped to `.md` files under `crates/core`. `path:` maps onto the existing scope filter (both
+> `search` and `ask`); `ext:` is a post-hoc hit filter (`search` only — `ask` synthesizes before a
+> hit-level filter could apply, so `ext:` is stripped from the question but not enforced there). Off
+> by default because it changes query interpretation; an unrecognized `field:value`-shaped token
+> (anything not `path`/`ext`) always passes through as ordinary text, so turning this on is safe even
+> for queries that happen to contain a colon.
 
 ### Hybrid modes
 
@@ -267,6 +303,11 @@ keep_alive_secs = 0            # 0 = use the profile default; how long Ollama ke
 Fine-tune how specific file types are handled.
 
 ```toml
+[parsers]
+encoding = "auto"     # "auto" (default) transcodes UTF-16 (BOM-detected) to UTF-8 and lossy-
+                       # decodes anything else; "utf-8" restores the old strict behavior (errors
+                       # on invalid UTF-8) — see below.
+
 [parsers.image]
 caption = false       # set true to caption images with a local vision model (opt-in)
 model   = "gemma3:4b" # vision model to caption with (default: reuses the gemma3 summary model — no extra download)
@@ -295,6 +336,15 @@ ocr_lang   = "eng"    # optional tesseract language hint, e.g. "eng" or "eng+ara
 > crate (no native dependency) by default. Scanned / image-only PDFs have no text layer, so they
 > yield little or no text under `backend = "text"`; set `backend = "ocr"` (and install poppler +
 > tesseract) to recognise them.
+
+> **Encoding (`[parsers] encoding`):** the plain-text and Markdown parsers previously required
+> strict UTF-8 — a UTF-16 file (a common Windows artifact: PowerShell redirects, Notepad "Save as
+> UTF-16", `.resx`, some logs/CSVs) failed to parse and was silently skipped. `encoding = "auto"`
+> (the default) BOM-sniffs the file and transcodes UTF-16 to UTF-8 (lossy — invalid sequences
+> become `U+FFFD`), falling back to lossy UTF-8 decoding for anything without a recognized BOM.
+> A valid-UTF-8 file decodes identically either way, so `auto` only changes outcomes for files
+> that previously errored. Set `encoding = "utf-8"` to restore the old strict behavior if you'd
+> rather a malformed file be skipped than silently patched.
 
 ---
 
