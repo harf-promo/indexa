@@ -51,6 +51,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ImpactBreakdown`/`ImpactItem` in `indexa_query`. Surfaced everywhere: web **"Show the math"** table
   under the answer, CLI `indexa ask --explain-savings` (and `--json` `savings`), and an opt-in MCP
   `ask` `explain_savings` param. MCP tool count unchanged (47).
+- **A 4-wave feature backlog from external sources (Open Knowledge Format, ripgrep, GitNexus,
+  DeusData/codebase-memory-mcp) — 24 features deepening pack interop, code-graph intelligence, index
+  freshness, and agent distribution.** `SCHEMA_VERSION` moved 1→5 across the two waves that touched
+  storage; the MCP tool surface grew **47→50**.
+  - **Wave 1 — quick wins, no schema changes:** risk-grouped, depth-labeled `blast_radius` output
+    (`grouped: true` / `--grouped`, GitNexus's WILL BREAK / LIKELY AFFECTED / MAY NEED TESTING
+    contract); staleness attestation on `ask`/`search` citations (`[retrieval] staleness_flags`,
+    default on — a cited file changed since indexing is flagged inline); UTF-16/BOM transcoding for
+    the text-family parsers (`[parsers] encoding`, default `"auto"` — fixes silent data loss on
+    PowerShell redirects and Notepad "Save as UTF-16" files); export renderers now carry summary
+    provenance (`model`/`generated_at`/`source_hash`) that `SummaryRecord` already stored but every
+    renderer dropped; `.indexaignore`, a highest-precedence git-independent ignore layer with `!`
+    re-includes; Mermaid call-graph diagrams in pack exports (`--include-graph=mermaid`); `indexa
+    doctor` now reports the loaded config file and every non-default key in effect; `path:`/`ext:`
+    predicate grammar for free-text `search`/`ask` queries (`[retrieval] query_predicates`, default
+    off).
+  - **Wave 2 — code-graph & memory deepening:** a `symbols` table (kind + line range per top-level
+    symbol) and heritage edges (`extends`/`implements` across Rust/Python/JS/TS/Java/C++, surfaced via
+    `include_heritage` on `blast_radius`/`dependencies`); **three new MCP tools** — `changed_impact`
+    (git diff → changed symbols → blast radius, one call), `trace_path` (BFS shortest call-graph path
+    between two symbols/files), `symbol_context` (360° symbol view: definitions, callers, heritage,
+    outgoing references); note/decision anchoring to code (`add_note(anchor: ...)`, joined into
+    graph-tool output); co-change edges from git history (`indexa graph --compute-co-change`,
+    `related_files(include_co_change)`).
+  - **Wave 3 — distribution & freshness:** `indexa install-hooks [--write]` generates Claude Code
+    hook config (project-scoped only) — a SessionStart hook injects a freshness summary, an optional
+    PreToolUse-on-Grep hook injects related indexed context — plus a shipped SKILL.md teaching an
+    agent which Indexa tool fits which question; MCP tool-surface profiles
+    (`indexa mcp --tool-profile core` serves a ~10-tool subset, un-advertised *and* un-callable for
+    the rest; default `full` is byte-identical to before); `[scan] auto_reindex = "git-poll"`, a
+    persistent background task watching each indexed git root's HEAD/working-tree state at an
+    adaptive interval and re-indexing on change (baseline advances only on a successful reindex).
+  - **Wave 4 — packs interop & pipeline breadth:** an append-only `pack_events` history table
+    (giving packs an `updated_at` and a changelog source); OKF-conformant pack bundle export
+    (`--format okf` — one Markdown file per item with YAML frontmatter, a progressive-disclosure
+    `index.md`, and a generated `log.md`; pure Markdown, no `viz.html`); `indexa pack import <bundle>`
+    reconstructing a pack from an OKF export with checksum conflict detection; runtime preprocessor
+    hooks (`[[parsers.preprocessor]]`, config-file-only — an external command's stdout is indexed as
+    text for long-tail formats, with a timeout + output-size cap and graceful fallback to native
+    parsers on any failure); transparent gzip content indexing (`[parsers] compressed`, default
+    off — a standalone `.gz` file's decompressed content is indexed via its inner extension;
+    `.tar.gz`/`.tgz` are unaffected); persisted architecture-map modules (`indexa graph
+    --compute-modules` / `--modules`, MCP `code_graph`'s `modules: true`, `[graph] modules` config —
+    clusters the code graph via Louvain, directory-prior-boosted, into named functional areas each
+    labeled by a short local-LLM call; a web "Modules" toggle reads the persisted table, kept separate
+    from the existing live "Communities" overlay).
 
 ### Performance
 
