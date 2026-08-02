@@ -405,6 +405,13 @@ async fn main() -> Result<()> {
                 commands::cmd_mcp_install(client, dry_run).await
             }
         },
+        Commands::InstallHooks {
+            write,
+            with_pretooluse,
+        } => commands::cmd_install_hooks(write, with_pretooluse).await,
+        Commands::McpHook { event } => {
+            commands::cmd_mcp_hook(commands::HookEvent::parse(&event)?).await
+        }
         Commands::Status {
             unknown,
             deep,

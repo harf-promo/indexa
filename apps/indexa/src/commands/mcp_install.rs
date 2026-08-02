@@ -98,7 +98,14 @@ pub(crate) async fn cmd_mcp_install(clients: Vec<String>, dry_run: bool) -> Resu
     let mut configured_any = false;
     for client in parsed {
         let done = match client {
-            McpClient::ClaudeCode => install_claude_code(&exe, dry_run)?,
+            McpClient::ClaudeCode => {
+                let registered = install_claude_code(&exe, dry_run)?;
+                // The skill teaches an agent how to query Indexa well (which tool for which
+                // question, progressive disclosure) — Claude Code only, since Skills are a
+                // Claude Code concept (3.1b).
+                install_skill_md(dry_run)?;
+                registered
+            }
             McpClient::ClaudeDesktop => install_json(
                 &claude_desktop_config_path()?,
                 "mcpServers",
@@ -264,6 +271,60 @@ fn install_claude_code(exe: &str, dry_run: bool) -> Result<bool> {
     }
 }
 
+/// Bundled at compile time (3.1b) — teaches an agent which Indexa tool to reach for and how
+/// to use progressive disclosure instead of re-reading files from scratch.
+const SKILL_MD: &str = include_str!("../../assets/skill/SKILL.md");
+
+/// Install the bundled SKILL.md to the current project's `.claude/skills/indexa/SKILL.md`.
+/// Project-scoped only (mirrors `install-hooks`'s scoping) — never touches
+/// `~/.claude/skills/`. Idempotent: re-running with identical bundled content is a no-op;
+/// content differing from an existing file (e.g. the user hand-edited it, or a newer Indexa
+/// version bundles an updated skill) is left untouched with a note, never silently
+/// overwritten. Returns `true` once the file is in place (`false` on dry-run).
+fn install_skill_md(dry_run: bool) -> Result<bool> {
+    let path = Path::new(".claude")
+        .join("skills")
+        .join("indexa")
+        .join("SKILL.md");
+    install_skill_md_at(&path, dry_run)
+}
+
+/// The path-explicit half of [`install_skill_md`], so it's testable without changing the
+/// test process's working directory (`std::env::set_current_dir` is global mutable state
+/// that would race other tests under Rust's default parallel test execution).
+fn install_skill_md_at(path: &Path, dry_run: bool) -> Result<bool> {
+    if dry_run {
+        println!(
+            "[dry-run] claude-code: would write skill to {}",
+            path.display()
+        );
+        return Ok(false);
+    }
+
+    if path.exists() {
+        let existing = std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        if existing == SKILL_MD {
+            println!("claude-code: skill already installed ({})", path.display());
+            return Ok(true);
+        }
+        println!(
+            "claude-code: {} exists with different content — leaving it untouched \
+             (delete it and re-run to pick up the bundled version)",
+            path.display()
+        );
+        return Ok(true);
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    std::fs::write(path, SKILL_MD).with_context(|| format!("cannot write {}", path.display()))?;
+    println!("claude-code: installed skill to {}", path.display());
+    Ok(true)
+}
+
 /// macOS: ~/Library/Application Support/Claude/claude_desktop_config.json
 /// Windows: %APPDATA%\Claude\claude_desktop_config.json
 /// Linux: ~/.config/Claude/claude_desktop_config.json
@@ -427,5 +488,53 @@ mod tests {
     fn non_object_servers_key_is_refused() {
         let root: Value = json!({ "mcpServers": ["not", "a", "map"] });
         assert!(merge_server_entry(root, "mcpServers", "/bin/indexa").is_err());
+    }
+
+    #[test]
+    fn install_skill_md_at_writes_the_bundled_content() {
+        let dir = TempDir::new();
+        let path = dir.file("SKILL.md");
+        let wrote = install_skill_md_at(&path, false).unwrap();
+        assert!(wrote);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), SKILL_MD);
+    }
+
+    #[test]
+    fn install_skill_md_at_dry_run_writes_nothing() {
+        let dir = TempDir::new();
+        let path = dir.file("SKILL.md");
+        let wrote = install_skill_md_at(&path, true).unwrap();
+        assert!(!wrote);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn install_skill_md_at_rerun_with_identical_content_is_a_noop() {
+        let dir = TempDir::new();
+        let path = dir.file("SKILL.md");
+        install_skill_md_at(&path, false).unwrap();
+        let first_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let wrote = install_skill_md_at(&path, false).unwrap();
+        assert!(wrote);
+        let second_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(
+            first_mtime, second_mtime,
+            "identical content must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn install_skill_md_at_never_clobbers_hand_edited_content() {
+        let dir = TempDir::new();
+        let path = dir.file("SKILL.md");
+        std::fs::write(&path, "my own custom skill content").unwrap();
+        let wrote = install_skill_md_at(&path, false).unwrap();
+        assert!(wrote, "reports success even though it left the file alone");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "my own custom skill content",
+            "must never overwrite content that differs from the bundled skill"
+        );
     }
 }
