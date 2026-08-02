@@ -346,6 +346,28 @@ ocr_lang   = "eng"    # optional tesseract language hint, e.g. "eng" or "eng+ara
 > that previously errored. Set `encoding = "utf-8"` to restore the old strict behavior if you'd
 > rather a malformed file be skipped than silently patched.
 
+### Runtime preprocessor hooks (`[[parsers.preprocessor]]`)
+
+```toml
+[[parsers.preprocessor]]
+glob           = "*.dwg"     # matched against the full path
+command        = "dwg2text"  # run with the file's path as its argument + the file's bytes on stdin
+timeout_s      = 30          # kill the command if it hasn't finished by then
+max_output_mb  = 16          # cap on how much of its stdout is read
+```
+
+> **⚠ Security: `command` runs arbitrary code on every matching file.** There is deliberately no
+> MCP tool or web endpoint to configure this — it's config-file only (the config file itself is
+> 0600), so adding a hook is something only someone with local file access to your machine can do.
+> Only point `command` at a tool you trust with the contents of every file it matches.
+>
+> Covers long-tail formats without shipping a parser — the external tool's stdout is indexed as
+> plain text. Runs once per file **version** (the deep phase's mtime/hash skip applies), not once
+> per query. Graceful fallback (mirrors ripgrep's `--pre`): a nonzero exit, empty stdout, or a
+> timeout all fall through to whatever built-in parser would otherwise have handled the file — a
+> broken or misconfigured hook never blanks a file a native parser could still extract from.
+> `indexa doctor` lists any preprocessor hooks in effect.
+
 ---
 
 ## Per-region overrides

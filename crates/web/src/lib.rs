@@ -41,6 +41,25 @@ use tracing::info;
 
 use handlers::*;
 
+/// Convert `[[parsers.preprocessor]]` config entries into parsers-crate-local specs (4.4).
+/// `indexa-parsers` has no dependency on `indexa-core`, so this conversion lives at each
+/// registry-construction call site — the same pattern `[chunking]` -> `ChunkParams` already
+/// uses (mirrored in `apps/indexa`'s own `helpers::preprocessor_specs`).
+pub(crate) fn preprocessor_specs(
+    cfg: &Config,
+) -> Vec<indexa_parsers::preprocess::PreprocessorSpec> {
+    cfg.parsers
+        .preprocessor
+        .iter()
+        .map(|p| indexa_parsers::preprocess::PreprocessorSpec {
+            glob: p.glob.clone(),
+            command: p.command.clone(),
+            timeout: std::time::Duration::from_secs(p.timeout_s),
+            max_output_bytes: p.max_output_mb.saturating_mul(1024 * 1024),
+        })
+        .collect()
+}
+
 // ── Shared state ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]

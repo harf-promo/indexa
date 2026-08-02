@@ -608,6 +608,51 @@ pub struct ParsersConfig {
     /// detected rather than silently patched.
     #[serde(default = "default_encoding")]
     pub encoding: String,
+    /// Runtime preprocessor hooks (4.4, ripgrep `--pre` improved): an external command's
+    /// stdout is indexed as text for any file matching `glob`, covering long-tail formats
+    /// without shipping a parser. Config-file only — there is deliberately no MCP/web
+    /// surface to add one, since this is arbitrary-command execution the user opts into via
+    /// their own config file. Empty by default (no hooks configured).
+    #[serde(default)]
+    pub preprocessor: Vec<PreprocessorConfig>,
+}
+
+/// One `[[parsers.preprocessor]]` entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PreprocessorConfig {
+    /// Glob pattern (matched against the full path) selecting which files this hook handles,
+    /// e.g. `"*.dwg"`.
+    pub glob: String,
+    /// The command to run, given the file's path as its argument and the file's bytes on
+    /// stdin. Its stdout is indexed as the file's text content.
+    pub command: String,
+    /// Kill the command if it hasn't finished within this many seconds.
+    #[serde(default = "default_preprocessor_timeout_s")]
+    pub timeout_s: u64,
+    /// Cap on how much of the command's stdout is read (MB) — a runaway or misbehaving
+    /// command can't blow up memory.
+    #[serde(default = "default_preprocessor_max_output_mb")]
+    pub max_output_mb: u64,
+}
+
+impl Default for PreprocessorConfig {
+    fn default() -> Self {
+        Self {
+            glob: String::new(),
+            command: String::new(),
+            timeout_s: default_preprocessor_timeout_s(),
+            max_output_mb: default_preprocessor_max_output_mb(),
+        }
+    }
+}
+
+fn default_preprocessor_timeout_s() -> u64 {
+    30
+}
+
+fn default_preprocessor_max_output_mb() -> u64 {
+    16
 }
 
 fn default_encoding() -> String {
@@ -623,6 +668,7 @@ impl Default for ParsersConfig {
             video: VideoParserConfig::default(),
             max_file_mb: default_max_file_mb(),
             encoding: default_encoding(),
+            preprocessor: Vec::new(),
         }
     }
 }

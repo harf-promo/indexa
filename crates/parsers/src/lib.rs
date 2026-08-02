@@ -13,6 +13,7 @@ pub mod media;
 pub mod office;
 pub mod org;
 pub mod pdf;
+pub mod preprocess;
 pub mod presentation;
 pub mod proc;
 pub mod registry;

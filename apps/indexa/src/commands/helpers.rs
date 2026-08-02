@@ -464,11 +464,32 @@ pub(crate) fn migrate_legacy_data_dir(new_dir: &std::path::Path) {
 /// (default 800/100). Every content-parse pipeline (`deep`, `watch`) uses this instead of the
 /// free `registry::parse_guarded`, which would rebuild a default-800/100 registry per call.
 pub(crate) fn chunk_registry(cfg: &Config) -> indexa_parsers::registry::Registry {
-    indexa_parsers::registry::Registry::with_chunk(indexa_parsers::types::ChunkParams {
-        size: cfg.chunking.size,
-        overlap: cfg.chunking.overlap,
-        encoding: indexa_parsers::types::TextEncoding::from_config_str(&cfg.parsers.encoding),
-    })
+    let mut registry =
+        indexa_parsers::registry::Registry::with_chunk(indexa_parsers::types::ChunkParams {
+            size: cfg.chunking.size,
+            overlap: cfg.chunking.overlap,
+            encoding: indexa_parsers::types::TextEncoding::from_config_str(&cfg.parsers.encoding),
+        });
+    registry.register_preprocessors(&preprocessor_specs(cfg));
+    registry
+}
+
+/// Convert `[[parsers.preprocessor]]` config entries into parsers-crate-local specs (4.4).
+/// `indexa-parsers` has no dependency on `indexa-core`, so this conversion lives at each of
+/// the CLI/web call sites — the same pattern `[chunking]` -> `ChunkParams` already uses.
+pub(crate) fn preprocessor_specs(
+    cfg: &Config,
+) -> Vec<indexa_parsers::preprocess::PreprocessorSpec> {
+    cfg.parsers
+        .preprocessor
+        .iter()
+        .map(|p| indexa_parsers::preprocess::PreprocessorSpec {
+            glob: p.glob.clone(),
+            command: p.command.clone(),
+            timeout: std::time::Duration::from_secs(p.timeout_s),
+            max_output_bytes: p.max_output_mb.saturating_mul(1024 * 1024),
+        })
+        .collect()
 }
 
 pub(crate) fn parse_summary_mode(mode: &str) -> Result<SummaryMode> {
