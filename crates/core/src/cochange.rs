@@ -201,19 +201,21 @@ mod tests {
         assert_eq!(pairs.len(), 1);
         let (a, b, count) = &pairs[0];
         assert_eq!(*count, 1);
-        // Canonicalize before comparing — `git rev-parse --show-toplevel` resolves
-        // macOS's /tmp -> /private/tmp symlink, but `tempfile::tempdir()`'s raw path
-        // doesn't; that's a platform quirk, not what this test is checking.
-        let canon_sub = sub.canonicalize().unwrap();
-        let expected_a = canon_sub.join("a.rs").to_string_lossy().into_owned();
-        let expected_b = canon_sub.join("b.rs").to_string_lossy().into_owned();
-        let mut got = vec![a.clone(), b.clone()];
-        got.sort();
-        let mut expected = vec![expected_a, expected_b];
-        expected.sort();
-        assert_eq!(
-            got, expected,
-            "paths must resolve against the repo root, not double up the subdirectory"
-        );
+        // Check the path SUFFIX only, not a canonicalized absolute-path equality: on
+        // Windows, `Path::canonicalize()` prepends the `\\?\` extended-length-path
+        // marker, which git's own output never has — comparing full equality there
+        // would fail on a Rust std quirk, not on anything this test is checking (the
+        // segment must appear exactly once, not doubled as "sub/sub/a.rs").
+        let single_sub = |p: &str| {
+            let norm = p.replace('\\', "/");
+            let count = norm.matches("/sub/").count();
+            assert_eq!(count, 1, "\"sub\" must appear exactly once, got: {p}");
+            assert!(
+                norm.ends_with("/sub/a.rs") || norm.ends_with("/sub/b.rs"),
+                "must resolve under the repo root's sub/ dir, got: {p}"
+            );
+        };
+        single_sub(a);
+        single_sub(b);
     }
 }
