@@ -17,6 +17,7 @@
 //! - [`symbols`] — code symbol (kind + line range) writes and queries (2.1).
 //! - [`note_anchors`] — note-to-code anchor writes and queries (2.6).
 //! - [`co_change`] — git-history co-change edge writes and queries (2.7).
+//! - [`modules`] — persisted architecture-map clustering + labeling storage (4.6).
 //! - [`types`] — the public record structs.
 
 use anyhow::{Context, Result};
@@ -34,6 +35,7 @@ mod dir_apps;
 mod edges;
 mod entries;
 mod insights;
+mod modules;
 mod note_anchors;
 mod pack_edges;
 mod packs;
@@ -66,6 +68,7 @@ pub use edges::{
 };
 pub use entries::CoverageEntry;
 pub use insights::{DuplicateCluster, LanguageStat, LargestEntry, StaleEntry, WeeklyDiff};
+pub use modules::{cluster_with_directory_priors, ComputedModule, GraphModule};
 pub use note_anchors::NoteAnchor;
 pub use prune::OrphanCounts;
 pub use saved::SavedQuery;
@@ -75,9 +78,9 @@ pub use sessions::ConversationTurn;
 pub use search::is_stub_chunk;
 pub use types::{
     chunk_content_hash, ChunkRecord, ClassificationRecord, CodeGraph, CodeGraphEdge, CodeGraphNode,
-    DecisionRecord, EdgeRecord, EntryInfo, FailedQueueItem, HealthStats, NewDecision, PackRecord,
-    QueueItem, QueueStats, RegionSummary, RelatedFile, SearchHit, SummaryRecord, SymbolRecord,
-    TreeNode, WeightRecord,
+    DecisionRecord, EdgeRecord, EntryInfo, FailedQueueItem, HealthStats, NewDecision, PackEvent,
+    PackRecord, QueueItem, QueueStats, RegionSummary, RelatedFile, SearchHit, SummaryRecord,
+    SymbolRecord, TreeNode, WeightRecord,
 };
 pub use usage::{UsageSummary, USAGE_WEEK_SECS};
 

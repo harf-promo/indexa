@@ -41,6 +41,25 @@ use tracing::info;
 
 use handlers::*;
 
+/// Convert `[[parsers.preprocessor]]` config entries into parsers-crate-local specs (4.4).
+/// `indexa-parsers` has no dependency on `indexa-core`, so this conversion lives at each
+/// registry-construction call site — the same pattern `[chunking]` -> `ChunkParams` already
+/// uses (mirrored in `apps/indexa`'s own `helpers::preprocessor_specs`).
+pub(crate) fn preprocessor_specs(
+    cfg: &Config,
+) -> Vec<indexa_parsers::preprocess::PreprocessorSpec> {
+    cfg.parsers
+        .preprocessor
+        .iter()
+        .map(|p| indexa_parsers::preprocess::PreprocessorSpec {
+            glob: p.glob.clone(),
+            command: p.command.clone(),
+            timeout: std::time::Duration::from_secs(p.timeout_s),
+            max_output_bytes: p.max_output_mb.saturating_mul(1024 * 1024),
+        })
+        .collect()
+}
+
 // ── Shared state ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -135,6 +154,7 @@ pub(crate) const UI_CSS: &str = concat!(
     include_str!("../assets/ui/css/20-graph-layers.css"),
     include_str!("../assets/ui/css/21-graph-communities.css"),
     include_str!("../assets/ui/css/19-conversation.css"),
+    include_str!("../assets/ui/css/22-graph-modules.css"),
 );
 pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/00-auth-bootstrap.js"),
@@ -167,6 +187,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/27-health.js"),
     include_str!("../assets/ui/js/28-graph-layers.js"),
     include_str!("../assets/ui/js/29-graph-communities.js"),
+    include_str!("../assets/ui/js/30-graph-modules.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -357,6 +378,7 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/api/map", get(api_map))
         .route("/api/map/treemap", get(api_map_treemap))
         .route("/api/graph", get(api_graph))
+        .route("/api/graph/modules", get(api_graph_modules))
         .route("/api/roots", get(api_roots))
         .route("/api/search", get(api_search))
         .route("/api/fs/ls", get(api_fs_ls))

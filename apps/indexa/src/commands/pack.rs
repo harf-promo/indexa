@@ -247,6 +247,7 @@ pub(crate) async fn cmd_pack_export(
     name: String,
     format: String,
     output: Option<String>,
+    out: Option<String>,
     depth: Option<usize>,
     include_weights: bool,
     include_graph: bool,
@@ -266,13 +267,63 @@ pub(crate) async fn cmd_pack_export(
     if !db_path.exists() {
         bail!("No index found. Run `indexa index <path>` first.");
     }
-    let store = Store::open(&db_path)?;
+    let mut store = Store::open(&db_path)?;
     let pack = store
         .pack_by_name(&name)?
         .ok_or_else(|| anyhow::anyhow!("no pack named \"{name}\""))?;
     let paths = store.pack_paths(&pack.id)?;
     if paths.is_empty() {
         bail!("Pack \"{name}\" has no paths. Add paths first with `indexa pack add`.");
+    }
+
+    // 4.2 — OKF bundle export is a directory of files, not a single blob: handled entirely
+    // separately from the xml/md/json rendering path below (no --output/--clipboard/
+    // --token-budget — those are single-artifact concepts that don't apply to a bundle).
+    if format == "okf" {
+        let Some(out_dir) = out else {
+            bail!("--format okf requires --out <dir> (a directory to write the bundle into).");
+        };
+        let out_dir = expand(&out_dir);
+        let mut roots = Vec::new();
+        for root_path in &paths {
+            match build_tree(&store, root_path, depth)? {
+                Some(tree) => roots.push(tree),
+                None => eprintln!(
+                    "  \u{26a0} No summary for {root_path} — run `indexa summarize {root_path}` first."
+                ),
+            }
+        }
+        if roots.is_empty() {
+            bail!("No paths in pack \"{name}\" have summaries yet. Run `indexa summarize <path>` or `indexa index <path>` first.");
+        }
+        let events: Vec<(String, Option<String>, i64)> = store
+            .pack_events(&pack.id)?
+            .into_iter()
+            .map(|e| (e.event, e.detail, e.at))
+            .collect();
+        let bundle = indexa_query::render_okf_bundle(&name, &roots, &events);
+
+        std::fs::create_dir_all(&out_dir)
+            .map_err(|e| anyhow::anyhow!("cannot create {out_dir}: {e}"))?;
+        for (rel_path, content) in &bundle {
+            let content = if no_redact {
+                content.clone()
+            } else {
+                indexa_query::redact::redact_secrets(content).0
+            };
+            let file_path = std::path::Path::new(&out_dir).join(rel_path);
+            std::fs::write(&file_path, content)
+                .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", file_path.display()))?;
+        }
+        println!(
+            "Wrote OKF v0.1 bundle for pack \"{name}\" to {out_dir} ({} file(s): index.md, log.md, {} concept file(s)).",
+            bundle.len(),
+            bundle.len() - 2
+        );
+        if let Err(e) = store.record_pack_exported(&pack.id, "okf") {
+            tracing::debug!("pack event (exported) not recorded: {e:#}");
+        }
+        return Ok(());
     }
 
     // Relational slice (v0.60): same `--changed-since` / `--category` filters as `indexa export`,
@@ -400,7 +451,13 @@ pub(crate) async fn cmd_pack_export(
             clipboard,
             output,
         },
-    )
+    )?;
+    // Record the event only once the artifact is actually written (4.1) — a failed
+    // finalize (disk error, budget overflow) must not log a phantom export.
+    if let Err(e) = store.record_pack_exported(&pack.id, &format) {
+        tracing::debug!("pack event (exported) not recorded: {e:#}");
+    }
+    Ok(())
 }
 
 pub(crate) async fn cmd_pack_rename(name: String, new_name: String) -> Result<()> {
@@ -430,4 +487,409 @@ pub(crate) async fn cmd_pack_delete(name: String) -> Result<()> {
     store.delete_pack(&pack.id)?;
     println!("Deleted pack \"{name}\". (Indexed files are untouched.)");
     Ok(())
+}
+
+/// `indexa pack import <bundle_dir> [--force] [--name <override>]` (4.3) — reconstructs a
+/// pack from a 4.2 OKF export's `manifest.json`. Same-machine / machine-migration scope,
+/// NOT team sharing: every path must already exist in THIS machine's index (no remote
+/// fetching, no re-creating entries), and must be under an indexed root — those two checks
+/// are unconditional (never bypassed by `--force`). `--force` overrides only the checksum
+/// conflict check: an item whose current `source_hash` no longer matches the manifest's
+/// recorded hash (the underlying file changed since export) is skipped by default (fail
+/// fast, per the plan) and imported anyway with `--force`. Tolerant-consumer: unrecognized
+/// manifest.json fields are silently ignored (`PackManifest`'s `#[serde(default)]` fields +
+/// serde_json's default non-`deny_unknown_fields` behavior) rather than rejected.
+/// The outcome of validating a manifest's items against the live index (4.3) — pure and
+/// store-only (no filesystem/CLI I/O), so it's testable against an in-memory `Store` without
+/// touching the real user data directory. `valid` is what actually gets imported;
+/// `hard_skips` (missing from the index / outside an indexed root) are excluded
+/// unconditionally; `hash_conflicts` (content changed since export) are excluded unless
+/// `force`, in which case they're included in `valid` too (and also listed, so the caller
+/// can report which ones drifted). Only `ManifestItem`s with `is_root` are considered at
+/// all — a bundle's manifest also lists every DESCENDANT reached by walking a root's summary
+/// tree (so the bundle's own concept files/hashes are complete), but `pack_paths` only ever
+/// held the pack's original root anchors; re-adding every descendant too would give the
+/// reconstructed pack a different (more granular) shape than the original, and a later
+/// export would then double-list descendants (once as their own top-level tree, once as a
+/// child of the root's tree) — caught by a real export→import→export round-trip, not by any
+/// unit test, since the unit tests only checked ONE side of the round-trip in isolation.
+struct ImportPlan {
+    valid: Vec<String>,
+    hard_skips: Vec<String>,
+    hash_conflicts: Vec<String>,
+}
+
+fn resolve_import_plan(
+    store: &Store,
+    manifest: &indexa_query::PackManifest,
+    force: bool,
+) -> Result<ImportPlan> {
+    let roots = store.root_paths()?;
+    let under_a_root = |p: &str| {
+        roots
+            .iter()
+            .any(|r| p == r || p.starts_with(&format!("{}/", r.trim_end_matches('/'))))
+    };
+
+    let mut valid: Vec<String> = Vec::new();
+    let mut hard_skips: Vec<String> = Vec::new();
+    let mut hash_conflicts: Vec<String> = Vec::new();
+    for item in manifest.items.iter().filter(|i| i.is_root) {
+        if store.entry_by_path(&item.path)?.is_none() {
+            hard_skips.push(format!("{} — not found in the index", item.path));
+            continue;
+        }
+        if !under_a_root(&item.path) {
+            hard_skips.push(format!("{} — not under any indexed root", item.path));
+            continue;
+        }
+        let current_hash = store
+            .summary_by_path(&item.path)?
+            .map(|s| s.source_hash)
+            .unwrap_or_default();
+        if current_hash != item.hash {
+            hash_conflicts.push(format!(
+                "{} — content changed since export (manifest hash {}, current {})",
+                item.path,
+                item.hash,
+                if current_hash.is_empty() {
+                    "<no summary yet>".to_owned()
+                } else {
+                    current_hash
+                }
+            ));
+            if !force {
+                continue;
+            }
+        }
+        valid.push(item.path.clone());
+    }
+
+    Ok(ImportPlan {
+        valid,
+        hard_skips,
+        hash_conflicts,
+    })
+}
+
+pub(crate) async fn cmd_pack_import(
+    bundle_dir: String,
+    force: bool,
+    name: Option<String>,
+) -> Result<()> {
+    let Some(db_path) = require_index_db()? else {
+        return Ok(());
+    };
+    let bundle_dir = expand(&bundle_dir);
+    let manifest_path = std::path::Path::new(&bundle_dir).join("manifest.json");
+    let manifest_text = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", manifest_path.display()))?;
+    let manifest: indexa_query::PackManifest =
+        serde_json::from_str(&manifest_text).map_err(|e| {
+            anyhow::anyhow!(
+                "{} is not a valid pack manifest: {e}",
+                manifest_path.display()
+            )
+        })?;
+    if manifest.items.is_empty() {
+        bail!(
+            "{} has no items — nothing to import.",
+            manifest_path.display()
+        );
+    }
+
+    let mut store = Store::open(&db_path)?;
+    let ImportPlan {
+        valid,
+        hard_skips,
+        hash_conflicts,
+    } = resolve_import_plan(&store, &manifest, force)?;
+
+    if !hash_conflicts.is_empty() && !force {
+        eprintln!(
+            "Cannot import — {} item(s) changed since export:",
+            hash_conflicts.len()
+        );
+        for c in &hash_conflicts {
+            eprintln!("  \u{26a0} {c}");
+        }
+        bail!(
+            "Re-export the bundle from the current index, or pass --force to import anyway \
+             (accepting the drifted content)."
+        );
+    }
+    if valid.is_empty() {
+        bail!(
+            "No importable paths — every item in {} is missing from the index or outside an \
+             indexed root.",
+            manifest_path.display()
+        );
+    }
+
+    let pack_name = name.unwrap_or_else(|| manifest.name.clone());
+    if pack_name.trim().is_empty() {
+        bail!("manifest.json has no pack name — pass one explicitly with --name.");
+    }
+    if store.pack_by_name(&pack_name)?.is_some() {
+        bail!(
+            "a pack named \"{pack_name}\" already exists — choose a different --name, or \
+             rename/delete the existing pack first."
+        );
+    }
+
+    let pack_id = store.create_pack(&pack_name, manifest.description.as_deref())?;
+    store.add_pack_paths(&pack_id, &valid)?;
+
+    println!(
+        "Imported pack \"{pack_name}\" with {} path(s) from {bundle_dir}.",
+        valid.len()
+    );
+    if !hard_skips.is_empty() {
+        println!(
+            "{} path(s) skipped (not indexed / outside indexed roots):",
+            hard_skips.len()
+        );
+        for s in &hard_skips {
+            println!("  \u{26a0} {s}");
+        }
+    }
+    if force && !hash_conflicts.is_empty() {
+        println!(
+            "{} path(s) imported despite a content-hash mismatch since export (--force):",
+            hash_conflicts.len()
+        );
+        for c in &hash_conflicts {
+            println!("  \u{26a0} {c}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use indexa_core::store::SummaryRecord;
+    use indexa_core::walker::{Entry, EntryKind};
+    use indexa_query::ManifestItem;
+
+    fn seed_indexed_file(store: &mut Store, root: &str, path: &str, hash: &str) {
+        store
+            .upsert_entries(&[
+                Entry {
+                    path: std::path::PathBuf::from(root),
+                    kind: EntryKind::Dir,
+                    size: 0,
+                    modified: None,
+                    hint: None,
+                    is_binary: false,
+                },
+                Entry {
+                    path: std::path::PathBuf::from(path),
+                    kind: EntryKind::File,
+                    size: 10,
+                    modified: None,
+                    hint: None,
+                    is_binary: false,
+                },
+            ])
+            .unwrap();
+        store
+            .upsert_summary(&SummaryRecord {
+                path: path.to_owned(),
+                kind: "file".to_owned(),
+                parent_path: Some(root.to_owned()),
+                depth: 1,
+                summary: "A summary.".to_owned(),
+                summary_l0: None,
+                embedding: None,
+                child_count: 0,
+                byte_size: 10,
+                model: "test".to_owned(),
+                source_hash: hash.to_owned(),
+                generated_at: 0,
+            })
+            .unwrap();
+    }
+
+    fn manifest_with(items: Vec<(&str, &str)>) -> indexa_query::PackManifest {
+        indexa_query::PackManifest {
+            pack_format_version: "0.1".to_owned(),
+            name: "proj".to_owned(),
+            description: None,
+            items: items
+                .into_iter()
+                .map(|(path, hash)| ManifestItem {
+                    path: path.to_owned(),
+                    hash: hash.to_owned(),
+                    filename: "x.md".to_owned(),
+                    is_root: true,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn resolve_import_plan_accepts_a_matching_indexed_file() {
+        let mut store = Store::open_in_memory().unwrap();
+        seed_indexed_file(&mut store, "/root", "/root/a.rs", "hash1");
+        let manifest = manifest_with(vec![("/root/a.rs", "hash1")]);
+        let plan = resolve_import_plan(&store, &manifest, false).unwrap();
+        assert_eq!(plan.valid, vec!["/root/a.rs".to_owned()]);
+        assert!(plan.hard_skips.is_empty());
+        assert!(plan.hash_conflicts.is_empty());
+    }
+
+    #[test]
+    fn resolve_import_plan_hard_skips_a_path_not_in_the_index() {
+        let store = Store::open_in_memory().unwrap();
+        let manifest = manifest_with(vec![("/nope.rs", "hash1")]);
+        let plan = resolve_import_plan(&store, &manifest, false).unwrap();
+        assert!(plan.valid.is_empty());
+        assert_eq!(plan.hard_skips.len(), 1);
+        assert!(plan.hard_skips[0].contains("not found in the index"));
+    }
+
+    #[test]
+    fn resolve_import_plan_hard_skips_a_path_outside_any_indexed_root() {
+        let mut store = Store::open_in_memory().unwrap();
+        // Indexed under /root, but the manifest references a path under a sibling that
+        // merely shares a string prefix — must not be treated as "under a root".
+        seed_indexed_file(&mut store, "/root", "/root/a.rs", "hash1");
+        store
+            .upsert_entries(&[Entry {
+                path: std::path::PathBuf::from("/rootother/b.rs"),
+                kind: EntryKind::File,
+                size: 1,
+                modified: None,
+                hint: None,
+                is_binary: false,
+            }])
+            .unwrap();
+        let manifest = manifest_with(vec![("/rootother/b.rs", "whatever")]);
+        let plan = resolve_import_plan(&store, &manifest, false).unwrap();
+        assert!(plan.valid.is_empty());
+        assert_eq!(plan.hard_skips.len(), 1);
+        assert!(plan.hard_skips[0].contains("not under any indexed root"));
+    }
+
+    #[test]
+    fn resolve_import_plan_flags_a_hash_conflict_and_excludes_it_without_force() {
+        let mut store = Store::open_in_memory().unwrap();
+        seed_indexed_file(&mut store, "/root", "/root/a.rs", "current-hash");
+        let manifest = manifest_with(vec![("/root/a.rs", "old-hash")]);
+
+        let without_force = resolve_import_plan(&store, &manifest, false).unwrap();
+        assert!(without_force.valid.is_empty());
+        assert_eq!(without_force.hash_conflicts.len(), 1);
+
+        let with_force = resolve_import_plan(&store, &manifest, true).unwrap();
+        assert_eq!(with_force.valid, vec!["/root/a.rs".to_owned()]);
+        assert_eq!(
+            with_force.hash_conflicts.len(),
+            1,
+            "force still reports the drift, just doesn't exclude the item"
+        );
+    }
+
+    #[test]
+    fn resolve_import_plan_handles_a_mix_of_valid_and_problem_items() {
+        let mut store = Store::open_in_memory().unwrap();
+        seed_indexed_file(&mut store, "/root", "/root/a.rs", "hash1");
+        seed_indexed_file(&mut store, "/root", "/root/b.rs", "hash2");
+        let manifest = manifest_with(vec![
+            ("/root/a.rs", "hash1"),  // valid
+            ("/root/b.rs", "stale"),  // hash conflict
+            ("/root/gone.rs", "any"), // not indexed
+        ]);
+        let plan = resolve_import_plan(&store, &manifest, false).unwrap();
+        assert_eq!(plan.valid, vec!["/root/a.rs".to_owned()]);
+        assert_eq!(plan.hash_conflicts.len(), 1);
+        assert_eq!(plan.hard_skips.len(), 1);
+    }
+
+    /// Regression test for a real round-trip bug: a bundle's manifest lists every summarized
+    /// descendant (so the bundle's own concept files are complete), not just the pack's
+    /// original root paths — importing every listed item as a pack_path would reconstruct a
+    /// pack with a different (more granular) shape than the original.
+    #[test]
+    fn resolve_import_plan_only_imports_root_items_not_descendants() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                Entry {
+                    path: std::path::PathBuf::from("/root"),
+                    kind: EntryKind::Dir,
+                    size: 0,
+                    modified: None,
+                    hint: None,
+                    is_binary: false,
+                },
+                Entry {
+                    path: std::path::PathBuf::from("/root/child.rs"),
+                    kind: EntryKind::File,
+                    size: 10,
+                    modified: None,
+                    hint: None,
+                    is_binary: false,
+                },
+            ])
+            .unwrap();
+        store
+            .upsert_summary(&SummaryRecord {
+                path: "/root".to_owned(),
+                kind: "dir".to_owned(),
+                parent_path: None,
+                depth: 0,
+                summary: "A root.".to_owned(),
+                summary_l0: None,
+                embedding: None,
+                child_count: 1,
+                byte_size: 0,
+                model: "test".to_owned(),
+                source_hash: "roothash".to_owned(),
+                generated_at: 0,
+            })
+            .unwrap();
+        store
+            .upsert_summary(&SummaryRecord {
+                path: "/root/child.rs".to_owned(),
+                kind: "file".to_owned(),
+                parent_path: Some("/root".to_owned()),
+                depth: 1,
+                summary: "A child.".to_owned(),
+                summary_l0: None,
+                embedding: None,
+                child_count: 0,
+                byte_size: 10,
+                model: "test".to_owned(),
+                source_hash: "childhash".to_owned(),
+                generated_at: 0,
+            })
+            .unwrap();
+        let manifest = indexa_query::PackManifest {
+            pack_format_version: "0.1".to_owned(),
+            name: "proj".to_owned(),
+            description: None,
+            items: vec![
+                ManifestItem {
+                    path: "/root".to_owned(),
+                    hash: "roothash".to_owned(),
+                    filename: "root.md".to_owned(),
+                    is_root: true,
+                },
+                ManifestItem {
+                    path: "/root/child.rs".to_owned(),
+                    hash: "childhash".to_owned(),
+                    filename: "child.md".to_owned(),
+                    is_root: false,
+                },
+            ],
+        };
+        let plan = resolve_import_plan(&store, &manifest, false).unwrap();
+        assert_eq!(
+            plan.valid,
+            vec!["/root".to_owned()],
+            "only the is_root item must be imported as a pack_path"
+        );
+    }
 }

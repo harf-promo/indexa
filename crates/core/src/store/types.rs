@@ -291,4 +291,16 @@ pub struct PackRecord {
     pub description: Option<String>,
     pub path_count: usize,
     pub created_at: i64,
+    /// Latest `pack_events.at` for this pack (4.1) — `None` for a pack with no recorded
+    /// events yet (e.g. one created before this column existed and never touched since).
+    pub updated_at: Option<i64>,
+}
+
+/// One row in a pack's event history (4.1) — an append-only changelog entry.
+#[derive(Debug, Clone)]
+pub struct PackEvent {
+    pub pack_id: String,
+    pub event: String,
+    pub detail: Option<String>,
+    pub at: i64,
 }

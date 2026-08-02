@@ -434,6 +434,20 @@ pub enum Commands {
         /// --include-co-change` picks up the result. Requires `path` to be inside a git repo.
         #[arg(long)]
         compute_co_change: bool,
+
+        /// Recompute the persisted architecture map (4.6) under `path`: cluster the code
+        /// graph (Louvain, directory-prior-boosted) into named functional areas and label
+        /// each with a short local-LLM call from member file summaries. Ignores every other
+        /// flag; spends local-LLM time (uses `[describer] dir_model`, e.g. gemma3:12b) —
+        /// run it deliberately, not on every `indexa deep`.
+        #[arg(long)]
+        compute_modules: bool,
+
+        /// Show the persisted architecture map (4.6) instead of the whole-scope graph —
+        /// named functional-area clusters with a cohesion score and member files. Empty
+        /// until `--compute-modules` has been run at least once.
+        #[arg(long)]
+        modules: bool,
     },
 
     /// Find files related to a file via the call graph (it calls them, or they call it).
@@ -993,20 +1007,26 @@ pub enum PackAction {
         /// Pack name.
         name: String,
     },
-    /// Export a pack as XML, Markdown, or JSON — ready to paste into any AI tool.
+    /// Export a pack as XML, Markdown, JSON, or an OKF bundle — ready to paste into any AI
+    /// tool, or (OKF) to hand to any OKF-aware tool (Obsidian, Knowledge Catalog, ...).
     #[command(after_help = "Examples:
   indexa pack export \"Auth\" --format xml > auth.xml
   indexa pack export \"Auth\" --format md
-  indexa pack export \"Auth\" --format json --output auth.json")]
+  indexa pack export \"Auth\" --format json --output auth.json
+  indexa pack export \"Auth\" --format okf --out ./auth-bundle")]
     Export {
         /// Pack name.
         name: String,
-        /// Output format: xml (default), md, json.
+        /// Output format: xml (default), md, json, or okf (4.2 — a directory bundle;
+        /// requires --out).
         #[arg(long, default_value = "xml")]
         format: String,
         /// Write to a file instead of stdout.
         #[arg(long, short)]
         output: Option<String>,
+        /// With --format okf: directory to write the bundle into (created if missing).
+        #[arg(long)]
+        out: Option<String>,
         /// Maximum tree depth per path (0 = top summary only).
         #[arg(long)]
         depth: Option<usize>,
@@ -1059,6 +1079,27 @@ pub enum PackAction {
     Delete {
         /// Pack name.
         name: String,
+    },
+    /// Reconstruct a pack from an OKF bundle's manifest.json (4.3 — round-trip a
+    /// `pack export --format okf` bundle). Same-machine / migration scope, not team
+    /// sharing: every path must already be indexed on THIS machine.
+    #[command(after_help = "Examples:
+  indexa pack import ./auth-bundle
+  indexa pack import ./auth-bundle --name \"Auth (restored)\"
+  indexa pack import ./auth-bundle --force   # import despite content-hash drift since export")]
+    Import {
+        /// Path to a directory previously written by `pack export --format okf --out <dir>`.
+        bundle_dir: String,
+        /// Import an item even if its current content hash no longer matches the manifest's
+        /// recorded hash (the file changed since export). Without this, any such drift fails
+        /// the whole import (fix it or re-export first). Never overrides the unconditional
+        /// checks that a path is indexed and under an indexed root.
+        #[arg(long)]
+        force: bool,
+        /// Pack name to create (default: the name recorded in manifest.json). Required if the
+        /// manifest's name is already taken by an existing pack.
+        #[arg(long)]
+        name: Option<String>,
     },
 }
 

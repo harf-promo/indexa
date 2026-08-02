@@ -136,6 +136,12 @@ pub struct CodeGraphParams {
     /// answers "are there circular dependencies?". Default false.
     #[serde(default)]
     pub cycles: bool,
+    /// Report the persisted architecture map (4.6) — named functional-area clusters with a
+    /// cohesion score and member files — instead of the edge/hub view. Populated by
+    /// `indexa graph --compute-modules`; empty until that's been run at least once. Default
+    /// false.
+    #[serde(default)]
+    pub modules: bool,
 }
 
 #[tool_router(router = router_graph, vis = "pub(crate)")]
@@ -422,7 +428,7 @@ impl IndexaMcp {
 
     /// File-to-file call graph for a scope (the v0.18 signature graph, as text).
     #[tool(
-        description = "Build the file-to-file call graph for files under a path scope: an edge 'A → B' means file A calls a function that file B defines. Each call is resolved against the symbol's definition sites (same-file → same-dir → import-matched); unresolvable calls fall back to bare-name matching and are labeled. Returns the heaviest edges (most shared symbols) as a 'caller → callee [weight]' list, the most central hub files by weighted PageRank (scored 0–100), plus node/edge/tier counts. Set `strict: true` to drop the bare-name fallback entirely, or `cycles: true` to report dependency cycles (circular call chains) instead of the edge/hub view. Languages: Rust, Python, JS, TS, Go, Java, C, C++."
+        description = "Build the file-to-file call graph for files under a path scope: an edge 'A → B' means file A calls a function that file B defines. Each call is resolved against the symbol's definition sites (same-file → same-dir → import-matched); unresolvable calls fall back to bare-name matching and are labeled. Returns the heaviest edges (most shared symbols) as a 'caller → callee [weight]' list, the most central hub files by weighted PageRank (scored 0–100), plus node/edge/tier counts. Set `strict: true` to drop the bare-name fallback entirely, `cycles: true` to report dependency cycles (circular call chains), or `modules: true` to report the persisted architecture map (4.6, named functional-area clusters — run `indexa graph --compute-modules` first) instead of the edge/hub view. Languages: Rust, Python, JS, TS, Go, Java, C, C++."
     )]
     pub(crate) async fn code_graph(
         &self,
@@ -433,6 +439,7 @@ impl IndexaMcp {
             limit,
             strict,
             cycles,
+            modules,
         } = params.0;
         let limit = limit.unwrap_or(200).min(2000);
         let store = self.store()?;
@@ -456,6 +463,31 @@ impl IndexaMcp {
                 }
             }
             out.push_str(&format!("\n⚠ {}", indexa_core::store::BARE_NAME_CAVEAT));
+            return Ok(ok_text(out));
+        }
+
+        // Persisted architecture map (4.6) — a sibling view over the `graph_modules` table
+        // written by `indexa graph --compute-modules`, matching CLI `indexa graph --modules`.
+        if modules {
+            let found = store.graph_modules_for_scope(&scope).map_err(mcp_err)?;
+            if found.is_empty() {
+                return Ok(ok_text(format!(
+                    "No architecture-map modules under '{scope}'. Run `indexa graph \
+                     --compute-modules` first."
+                )));
+            }
+            let mut out = format!("{} module(s) under '{scope}':\n", found.len());
+            for m in &found {
+                out.push_str(&format!(
+                    "\n📦 {} (cohesion {:.2}, {} file(s)):\n",
+                    m.label,
+                    m.cohesion,
+                    m.members.len()
+                ));
+                for p in &m.members {
+                    out.push_str(&format!("  {p}\n"));
+                }
+            }
             return Ok(ok_text(out));
         }
 

@@ -194,8 +194,11 @@
               <label class="graph-layer-toggle" title="Link files that share a confirmed classification category"><input type="checkbox" id="graph-category-toggle" onchange="toggleCategoryLayer(this.checked)"> Same category</label>
               <label class="graph-layer-toggle" title="Link files that belong to the same Context Pack"><input type="checkbox" id="graph-pack-toggle" onchange="togglePackLayer(this.checked)"> Same pack</label>
               <label class="graph-layer-toggle" title="Cluster densely-connected files (Louvain community detection)"><input type="checkbox" id="graph-communities-toggle" onchange="toggleCommunitiesLayer(this.checked)"> Communities</label>
+              <label class="graph-layer-toggle" title="Persisted architecture map — named functional-area clusters (run `indexa graph --compute-modules` first)"><input type="checkbox" id="graph-modules-toggle" onchange="toggleModulesPanel(this.checked)"> Modules</label>
               <span class="graph-meta" id="graph-meta"></span>
             </div>
+            <!-- Persisted architecture map panel (4.6) — distinct from the live Communities overlay. -->
+            <div id="graph-modules-panel" class="graph-modules-panel" hidden></div>
             <!-- Plain-language explainer for the graph (mirrors #map-help). -->
             <div id="graph-help" class="graph-help" hidden>
               <p>This is a map of how your files connect. Each <strong>dot is a file</strong>, and a <strong>line between two files</strong> means one of them uses code from the other.</p>

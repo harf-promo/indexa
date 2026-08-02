@@ -1,7 +1,8 @@
 use anyhow::Result;
+use indexa_core::config::Config;
 use indexa_core::store::{BlastRadius, ResolutionTier, Store};
 
-use super::helpers::{expand, require_index_db};
+use super::helpers::{build_llm, expand, require_index_db};
 
 fn basename(path: &str) -> String {
     std::path::Path::new(path)
@@ -25,6 +26,7 @@ fn rel_to_scope(path: &str, scope: &str) -> String {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn cmd_graph(
+    cfg: &Config,
     path: String,
     limit: usize,
     strict: bool,
@@ -34,6 +36,8 @@ pub(crate) async fn cmd_graph(
     grouped: bool,
     heritage: bool,
     compute_co_change: bool,
+    compute_modules: bool,
+    modules: bool,
 ) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
@@ -59,6 +63,49 @@ pub(crate) async fn cmd_graph(
         store.replace_co_change(&pairs)?;
         println!("Computed {pair_count} co-change pair(s) under \"{scope}\" and stored them.");
         println!("Run `indexa related --include-co-change <file>` to see them.");
+        return Ok(());
+    }
+
+    // --compute-modules: recompute the persisted architecture map (4.6) and return — every
+    // other flag is ignored in this mode, matching --compute-co-change's precedent.
+    if compute_modules {
+        let mut store = Store::open(&db_path)?;
+        let llm = build_llm(cfg, Some(&cfg.describer.dir_model))?;
+        let count =
+            indexa_query::modules::recompute_graph_modules(&mut store, llm.as_ref(), &scope, 5000)
+                .await?;
+        if count == 0 {
+            println!("No call graph under \"{scope}\" to cluster — nothing computed.");
+            println!("Run `indexa deep {path}` on source files first.");
+            return Ok(());
+        }
+        println!("Computed {count} architecture-map module(s) under \"{scope}\" and stored them.");
+        println!("Run `indexa graph --modules {path}` to see them.");
+        return Ok(());
+    }
+
+    // --modules: show the persisted architecture map instead of the whole-scope graph.
+    if modules {
+        let store = Store::open(&db_path)?;
+        let found = store.graph_modules_for_scope(&scope)?;
+        if found.is_empty() {
+            println!("No architecture-map modules under \"{scope}\".");
+            println!("Run `indexa graph --compute-modules {path}` first.");
+            return Ok(());
+        }
+        println!("{} module(s) under \"{scope}\":", found.len());
+        println!("{}", "─".repeat(60));
+        for m in &found {
+            println!(
+                "\n📦 {} (cohesion {:.2}, {} file(s)):",
+                m.label,
+                m.cohesion,
+                m.members.len()
+            );
+            for p in &m.members {
+                println!("  {}", rel_to_scope(p, &scope));
+            }
+        }
         return Ok(());
     }
 

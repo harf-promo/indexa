@@ -8,7 +8,7 @@ use anyhow::Result;
 ///
 /// **INVARIANT: bump this whenever the DDL or any migration in `init_schema` changes** — otherwise a
 /// DB stamped at the old value would skip the new migration and silently miss a column/table.
-pub(super) const SCHEMA_VERSION: i64 = 3;
+pub(super) const SCHEMA_VERSION: i64 = 5;
 
 /// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
 /// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
@@ -277,6 +277,23 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_co_change_a ON co_change(path_a);
             CREATE INDEX IF NOT EXISTS idx_co_change_b ON co_change(path_b);
 
+            -- Persisted architecture map (4.6): a whole-repo recompute (`indexa graph
+            -- --compute-modules`) clusters the code graph via Louvain (directory-prior-boosted)
+            -- and labels each cluster with a short local-LLM-generated name from its members'
+            -- L0 abstracts. One row per (module, member file); `label`/`cohesion` are repeated
+            -- per member row (denormalized — the whole table is replaced wholesale each
+            -- recompute, so there's no update-anomaly risk). Additive/inert until a reader
+            -- opts in (`code_graph`'s `modules: true`, `indexa graph --modules`).
+            CREATE TABLE IF NOT EXISTS graph_modules (
+                module_id   INTEGER NOT NULL,
+                label       TEXT NOT NULL,
+                cohesion    REAL NOT NULL DEFAULT 0.0,
+                member_path TEXT NOT NULL,
+                computed_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                PRIMARY KEY (module_id, member_path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_graph_modules_member ON graph_modules(member_path);
+
             -- Context Packs (v0.9): named, cross-directory context bundles.
             -- A pack is a user-curated set of paths that form a coherent topic
             -- (e.g. 'Auth', 'Tax 2025', 'Client X'). Paths may span multiple
@@ -293,6 +310,18 @@ impl Store {
                 added_at INTEGER NOT NULL DEFAULT (unixepoch()),
                 PRIMARY KEY (pack_id, path)
             );
+            -- Pack event history (4.1): an append-only changelog per pack, feeding a pack's
+            -- `updated_at` (MAX(at)) and the OKF bundle export's log.md (4.2). ON DELETE
+            -- CASCADE mirrors pack_paths — deleting a pack needs no manual cleanup here.
+            CREATE TABLE IF NOT EXISTS pack_events (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                pack_id TEXT NOT NULL REFERENCES packs(id) ON DELETE CASCADE,
+                event   TEXT NOT NULL
+                            CHECK(event IN ('created','path_added','path_removed','renamed','exported')),
+                detail  TEXT,
+                at      INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE INDEX IF NOT EXISTS idx_pack_events_pack ON pack_events(pack_id, at);
             -- Importance weights (v0.8): user-controlled boosts per file, directory,
             -- or classification category. A weight > 1.0 promotes the target in search
             -- results; 0.0 effectively silences it. 'auto' rows are recency-based

@@ -154,6 +154,7 @@ async fn main() -> Result<()> {
                 name,
                 format,
                 output,
+                out,
                 depth,
                 include_weights,
                 include_graph,
@@ -171,6 +172,7 @@ async fn main() -> Result<()> {
                     name,
                     format,
                     output,
+                    out,
                     depth,
                     include_weights,
                     include_graph,
@@ -190,6 +192,11 @@ async fn main() -> Result<()> {
                 commands::cmd_pack_rename(name, new_name).await
             }
             PackAction::Delete { name } => commands::cmd_pack_delete(name).await,
+            PackAction::Import {
+                bundle_dir,
+                force,
+                name,
+            } => commands::cmd_pack_import(bundle_dir, force, name).await,
         },
         Commands::Weight { action } => match action {
             WeightAction::Set {
@@ -286,8 +293,11 @@ async fn main() -> Result<()> {
             grouped,
             heritage,
             compute_co_change,
+            compute_modules,
+            modules,
         } => {
             commands::cmd_graph(
+                &cfg,
                 path,
                 limit,
                 strict,
@@ -297,6 +307,8 @@ async fn main() -> Result<()> {
                 grouped,
                 heritage,
                 compute_co_change,
+                compute_modules,
+                modules,
             )
             .await
         }

@@ -43,6 +43,9 @@ pub struct Config {
     /// MCP server settings (3.2): tool-surface profile.
     #[serde(default)]
     pub mcp: McpServerConfig,
+    /// Code-graph settings (4.6): persisted architecture-map modules.
+    #[serde(default)]
+    pub graph: GraphConfig,
 }
 
 /// Settings for opt-in remote-source ingestion (`indexa pack add-url`). Off by default — fetching
@@ -88,6 +91,19 @@ impl Default for McpServerConfig {
             tool_profile: "full".to_owned(),
         }
     }
+}
+
+/// Code-graph settings (4.6).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GraphConfig {
+    /// Persisted architecture-map modules: cluster the code graph (Louvain, directory-prior-
+    /// boosted) into named functional areas, labeled via a short local-LLM call per cluster from
+    /// member L0 abstracts. Populated by `indexa graph --compute-modules`, read by `code_graph`'s
+    /// `modules: true` and `indexa graph --modules`. Default false — spends local-LLM time at
+    /// compute time; this flag only gates whether those read surfaces report the persisted table
+    /// (empty/absent otherwise), not whether `--compute-modules` can be run manually.
+    pub modules: bool,
 }
 
 // ── Review (Decision Ledger) ──────────────────────────────────────────────────
@@ -608,6 +624,57 @@ pub struct ParsersConfig {
     /// detected rather than silently patched.
     #[serde(default = "default_encoding")]
     pub encoding: String,
+    /// Runtime preprocessor hooks (4.4, ripgrep `--pre` improved): an external command's
+    /// stdout is indexed as text for any file matching `glob`, covering long-tail formats
+    /// without shipping a parser. Config-file only — there is deliberately no MCP/web
+    /// surface to add one, since this is arbitrary-command execution the user opts into via
+    /// their own config file. Empty by default (no hooks configured).
+    #[serde(default)]
+    pub preprocessor: Vec<PreprocessorConfig>,
+    /// Transparent gzip content indexing (4.5, ripgrep `-z`): index the decompressed
+    /// content of standalone `.gz` files (`README.md.gz`, rotated `.log.gz`, man pages) —
+    /// `.tar.gz`/`.tgz` are unaffected (always handled by the archive parser). Default
+    /// `false`: without it, a `.gz` file is metadata-only, same as today.
+    #[serde(default)]
+    pub compressed: bool,
+}
+
+/// One `[[parsers.preprocessor]]` entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PreprocessorConfig {
+    /// Glob pattern (matched against the full path) selecting which files this hook handles,
+    /// e.g. `"*.dwg"`.
+    pub glob: String,
+    /// The command to run, given the file's path as its argument and the file's bytes on
+    /// stdin. Its stdout is indexed as the file's text content.
+    pub command: String,
+    /// Kill the command if it hasn't finished within this many seconds.
+    #[serde(default = "default_preprocessor_timeout_s")]
+    pub timeout_s: u64,
+    /// Cap on how much of the command's stdout is read (MB) — a runaway or misbehaving
+    /// command can't blow up memory.
+    #[serde(default = "default_preprocessor_max_output_mb")]
+    pub max_output_mb: u64,
+}
+
+impl Default for PreprocessorConfig {
+    fn default() -> Self {
+        Self {
+            glob: String::new(),
+            command: String::new(),
+            timeout_s: default_preprocessor_timeout_s(),
+            max_output_mb: default_preprocessor_max_output_mb(),
+        }
+    }
+}
+
+fn default_preprocessor_timeout_s() -> u64 {
+    30
+}
+
+fn default_preprocessor_max_output_mb() -> u64 {
+    16
 }
 
 fn default_encoding() -> String {
@@ -623,6 +690,8 @@ impl Default for ParsersConfig {
             video: VideoParserConfig::default(),
             max_file_mb: default_max_file_mb(),
             encoding: default_encoding(),
+            preprocessor: Vec::new(),
+            compressed: false,
         }
     }
 }

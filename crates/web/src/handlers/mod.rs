@@ -42,7 +42,7 @@ pub(crate) use config::{
 pub(crate) use export::api_export;
 pub(crate) use file_preview::api_file_preview;
 pub(crate) use fs::api_fs_ls;
-pub(crate) use graph::api_graph;
+pub(crate) use graph::{api_graph, api_graph_modules};
 pub(crate) use health::api_health;
 pub(crate) use insights_handler::{
     api_insights_diff, api_insights_duplicates, api_insights_languages, api_insights_largest,

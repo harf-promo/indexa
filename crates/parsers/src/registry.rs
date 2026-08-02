@@ -113,6 +113,29 @@ impl Registry {
         self.parsers.insert(0, parser);
     }
 
+    /// Register `[[parsers.preprocessor]]` rules (4.4) — each constructs its own graceful-
+    /// fallback registry from THIS registry's chunk sizing (via `Registry::with_chunk`, not
+    /// `self` itself, which would recurse), then is prepended like any other custom parser.
+    /// An invalid glob is logged and skipped rather than failing the whole registry build —
+    /// a config typo in one hook must not disable the other parsers.
+    pub fn register_preprocessors(&mut self, specs: &[crate::preprocess::PreprocessorSpec]) {
+        for spec in specs {
+            match crate::preprocess::PreprocessorParser::new(spec, self.chunk) {
+                Ok(parser) => self.register(Box::new(parser)),
+                Err(e) => eprintln!("skipping preprocessor hook for glob '{}': {e:#}", spec.glob),
+            }
+        }
+    }
+
+    /// Enable transparent gzip content indexing (4.5, `[parsers] compressed`, default off).
+    /// Registered like any other custom parser (takes priority for `.gz`, but not
+    /// `.tar.gz`/`.tgz` — see `CompressedParser::accepts_path`), so call this AFTER
+    /// [`Self::register_preprocessors`] if both are used, so a user's own preprocessor hook
+    /// for a `.gz`-suffixed glob (unusual, but not disallowed) still wins.
+    pub fn enable_compressed(&mut self) {
+        self.register(Box::new(crate::compressed::CompressedParser));
+    }
+
     /// Parse `path` using the first matching parser in the registry.
     pub fn parse(&self, path: &Path) -> Result<Extracted> {
         let mime = mime_guess::from_path(path)

@@ -141,15 +141,19 @@ pub(crate) async fn run_deep_phase(
     // Chunk-aware registry honoring `[chunking]` size/overlap. This loop spawns a fresh blocking
     // task per file, so share one registry via `Arc` (cloned into each closure) rather than
     // rebuilding a default one per file (which the free `parse_guarded` would do).
-    let registry = std::sync::Arc::new(indexa_parsers::registry::Registry::with_chunk(
-        indexa_parsers::types::ChunkParams {
+    let mut registry_inner =
+        indexa_parsers::registry::Registry::with_chunk(indexa_parsers::types::ChunkParams {
             size: state.config.chunking.size,
             overlap: state.config.chunking.overlap,
             encoding: indexa_parsers::types::TextEncoding::from_config_str(
                 &state.config.parsers.encoding,
             ),
-        },
-    ));
+        });
+    registry_inner.register_preprocessors(&crate::preprocessor_specs(&state.config));
+    if state.config.parsers.compressed {
+        registry_inner.enable_compressed();
+    }
+    let registry = std::sync::Arc::new(registry_inner);
 
     for entry in &files {
         // Honor cancellation requested via DELETE /api/jobs/:id.

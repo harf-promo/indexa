@@ -50,3 +50,10 @@ wasmparser = "0.252.0"
 cfb = "0.14.0"
 # UTF-16/BOM transcoding for the text-family parsers ([parsers] encoding = "auto")
 encoding_rs = { workspace = true }
+# Glob matching for preprocessor hooks (4.4) — [[parsers.preprocessor]] glob scoping.
+globset = { workspace = true }
+# Unix process-group kill for preprocessor hooks (4.4) — a killed shell wrapper can leave an
+# orphaned grandchild (e.g. a shebang script's last command) holding the stdout pipe open past
+# the timeout; already in Cargo.lock transitively (via cpufeatures/lopdf), promoted to a direct
+# dep at the same pinned version: zero new tree entries.
+libc = "0.2"

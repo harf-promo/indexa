@@ -346,6 +346,63 @@ ocr_lang   = "eng"    # optional tesseract language hint, e.g. "eng" or "eng+ara
 > that previously errored. Set `encoding = "utf-8"` to restore the old strict behavior if you'd
 > rather a malformed file be skipped than silently patched.
 
+### Runtime preprocessor hooks (`[[parsers.preprocessor]]`)
+
+```toml
+[[parsers.preprocessor]]
+glob           = "*.dwg"     # matched against the full path
+command        = "dwg2text"  # run with the file's path as its argument + the file's bytes on stdin
+timeout_s      = 30          # kill the command if it hasn't finished by then
+max_output_mb  = 16          # cap on how much of its stdout is read
+```
+
+> **⚠ Security: `command` runs arbitrary code on every matching file.** There is deliberately no
+> MCP tool or web endpoint to configure this — it's config-file only (the config file itself is
+> 0600), so adding a hook is something only someone with local file access to your machine can do.
+> Only point `command` at a tool you trust with the contents of every file it matches.
+>
+> Covers long-tail formats without shipping a parser — the external tool's stdout is indexed as
+> plain text. Runs once per file **version** (the deep phase's mtime/hash skip applies), not once
+> per query. Graceful fallback (mirrors ripgrep's `--pre`): a nonzero exit, empty stdout, or a
+> timeout all fall through to whatever built-in parser would otherwise have handled the file — a
+> broken or misconfigured hook never blanks a file a native parser could still extract from.
+> `indexa doctor` lists any preprocessor hooks in effect.
+
+### Transparent gzip content indexing (`[parsers] compressed`)
+
+```toml
+[parsers]
+compressed = false   # set true to index the DECOMPRESSED content of standalone .gz files
+```
+
+> **Off by default.** When enabled, a standalone `.gz` file (`README.md.gz`, a rotated
+> `access.log.gz`, a gzipped man page) is decompressed and its content routed through the normal
+> parser dispatch by its inner extension (`notes.md.gz` → `.md` → the Markdown parser), instead of
+> being indexed as an opaque binary blob. `.tar.gz`/`.tgz` are unaffected either way — those are
+> always handled by the archive parser. gzip only (`flate2`, already in the dependency tree);
+> zstd/xz/brotli are not supported. Decompression is capped at the same size limit as zip archive
+> entries — an oversized `.gz` falls back to metadata-only rather than exhausting memory, and a
+> file that turns out not to actually be gzip (despite the `.gz` name) also falls back cleanly.
+
+---
+
+## Code graph
+
+```toml
+[graph]
+modules = false   # set true to expose the persisted architecture-map modules (4.6)
+```
+
+> **Off by default.** `modules` gates whether `code_graph`'s `modules: true` (MCP) and
+> `indexa graph --modules` (CLI) report the persisted architecture map instead of an empty
+> result — it does NOT control whether the map can be computed. Run `indexa graph
+> --compute-modules <path>` any time (regardless of this flag) to cluster the code graph
+> (Louvain, boosted by a same-directory prior) into named functional areas and label each with
+> a short local-LLM call (`[describer] dir_model`, e.g. gemma3:12b) from its members' one-line
+> summaries; a cluster too small or a label call that fails/rambles falls back to a
+> deterministic name instead of blocking the computation. The web UI's Map → Graph view has a
+> matching "Modules" toggle that reads the same persisted table.
+
 ---
 
 ## Per-region overrides
