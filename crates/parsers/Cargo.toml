@@ -57,3 +57,14 @@ globset = { workspace = true }
 # the timeout; already in Cargo.lock transitively (via cpufeatures/lopdf), promoted to a direct
 # dep at the same pinned version: zero new tree entries.
 libc = "0.2"
+# Transparent .zst content indexing — pure-Rust zstd decoder (decode-only, no C toolchain).
+# Already a transitive dep of `object` (above) at this exact version; promoted to a direct dep,
+# zero new tree entries.
+ruzstd = "0.8.3"
+# Transparent .xz/.lzma content indexing — pure-Rust, decode-only. Genuinely new to the tree.
+lzma-rs = "0.3"
+# Transparent .br content indexing — pure-Rust brotli decoder. Exact pin (not a range): already
+# present transitively via Tauri in apps/indexa-desktop's separate Cargo.lock at this exact
+# version — 8.0.3 is a known-broken release (compile error in enc/combined_alloc.rs), which is
+# why the desktop app itself pins the exact patch.
+brotli = "=8.0.2"
