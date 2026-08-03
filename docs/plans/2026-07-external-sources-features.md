@@ -430,8 +430,13 @@ strongest convergence signal — two independent competitors built the identical
   the orientation value at ~20% of the cost. Revisit only if 4.6 proves demand.
 - Cypher-like `graph_query` tool — parser + injection-review surface; revisit only as a
   *consolidation* play if graph tools multiply.
-- Named file-type sets — real gap, but a positive-allowlist scan semantic interacts with
-  reconcile/prune ghost-row logic; revisit after `.indexaignore` + preprocessors land.
+- ~~Named file-type sets~~ — **RESOLVED, shipped** (2026-08-02) after its two blockers landed
+  (`.indexaignore` in Wave 1, preprocessor hooks in Wave 4). Its actual scan-time reconcile/prune
+  interaction risk was confirmed real during design (a positive allowlist during `scan` would
+  delete every non-matching file's index rows via the ordinary "unseen this run ⇒ ghost"
+  mechanism) — shipped instead as a **query-time predicate** (`type:python` etc. in
+  `search`/`ask`, `crates/query/src/predicates.rs`), which never touches the walker or reconcile
+  and reuses the same mechanism Wave 1.8's `ext:`/`path:` predicates already proved safe.
 - Query fan-out (3 gemma3 variants + RRF) — adds local-model latency per query; wait for eval
   evidence it lifts hit_rate.
 - `task_context`/goal hint param on retrieve — boost plumbing exists; wait for demand.
@@ -446,14 +451,18 @@ strongest convergence signal — two independent competitors built the identical
 
 ## Remaining owner decision points
 
-1. **Preprocessor hooks (4.4)** — arbitrary-command execution from config; parked as a standalone
-   yes/no before any code.
-2. **zstd/xz/brotli deps** for compressed indexing beyond gzip (4.5) — genuinely new deps; gzip-only
-   ships without them.
-3. **`--grouped` default flip** for `blast_radius` (1.1) after a release of soak.
-4. **Hooks `--write`** behavior (3.1): print-only is the default; confirm the diff-then-write UX.
-5. **MCP count evolution**: this plan lands at 50 (47 + `changed_impact`, `trace_path`,
-   `symbol_context`) — batch the pinned-test/docs update once per release that adds tools.
+1. ~~**Preprocessor hooks (4.4)**~~ — **RESOLVED, shipped.** Owner-approved in Wave 4 (#400);
+   `crates/parsers/src/preprocess.rs`, config-file-only, no MCP/web surface.
+2. ~~**zstd/xz/brotli deps**~~ — **RESOLVED, shipped** in the compression-codec-expansion follow-up
+   PR after Wave 4: `.zst` (`ruzstd`), `.xz`/`.lzma` (`lzma-rs`), `.br` (`brotli`), all pure-Rust,
+   no C toolchain. Same `[parsers] compressed` flag gates all four codecs.
+3. **`--grouped` default flip** for `blast_radius` (1.1) after a release of soak — **still open.**
+   No release has shipped since Wave 1 introduced this feature, so the stated condition genuinely
+   hasn't been met yet; owner chose to keep the default off for now (2026-08-02).
+4. ~~**Hooks `--write`**~~ — **RESOLVED, shipped** in Wave 3 (#399): `apps/indexa/src/commands/
+   hooks.rs` — print-only default, `--write` applies (keeps a `.bak`), exactly the confirmed UX.
+5. ~~**MCP count evolution**~~ — **RESOLVED.** Landed at 50 tools (`changed_impact`/`trace_path`/
+   `symbol_context`), pinned-test and docs updated together in Wave 2 (#398).
 
 ## Verification (per wave, before "done")
 

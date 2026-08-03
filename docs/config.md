@@ -368,21 +368,24 @@ max_output_mb  = 16          # cap on how much of its stdout is read
 > broken or misconfigured hook never blanks a file a native parser could still extract from.
 > `indexa doctor` lists any preprocessor hooks in effect.
 
-### Transparent gzip content indexing (`[parsers] compressed`)
+### Transparent compressed content indexing (`[parsers] compressed`)
 
 ```toml
 [parsers]
-compressed = false   # set true to index the DECOMPRESSED content of standalone .gz files
+compressed = false   # set true to index the DECOMPRESSED content of standalone compressed files
 ```
 
-> **Off by default.** When enabled, a standalone `.gz` file (`README.md.gz`, a rotated
-> `access.log.gz`, a gzipped man page) is decompressed and its content routed through the normal
-> parser dispatch by its inner extension (`notes.md.gz` → `.md` → the Markdown parser), instead of
-> being indexed as an opaque binary blob. `.tar.gz`/`.tgz` are unaffected either way — those are
-> always handled by the archive parser. gzip only (`flate2`, already in the dependency tree);
-> zstd/xz/brotli are not supported. Decompression is capped at the same size limit as zip archive
-> entries — an oversized `.gz` falls back to metadata-only rather than exhausting memory, and a
-> file that turns out not to actually be gzip (despite the `.gz` name) also falls back cleanly.
+> **Off by default.** When enabled, a standalone compressed file (`README.md.gz`, a rotated
+> `access.log.gz`, `notes.md.zst`, `notes.md.xz`, `notes.md.br`, …) is decompressed and its
+> content routed through the normal parser dispatch by its inner extension (`notes.md.gz` →
+> `.md` → the Markdown parser), instead of being indexed as an opaque binary blob. Four codecs
+> are supported: **gzip** (`.gz`), **zstd** (`.zst`), **xz/lzma** (`.xz`/`.lzma`), and **brotli**
+> (`.br`) — all pure-Rust implementations, no C toolchain or system library required.
+> `.tar.<codec>` and its short aliases (`.tgz`, `.tzst`, `.txz`) are unaffected either way —
+> those are always handled by the archive parser, for every codec. Decompression is capped at
+> the same size limit as zip archive entries — an oversized compressed file falls back to
+> metadata-only rather than exhausting memory, and a file that turns out not to actually match
+> its extension's codec also falls back cleanly.
 
 ---
 
