@@ -222,14 +222,6 @@ pub fn is_broad_intent(question: &str) -> bool {
 
 // ── Project-overview composer ─────────────────────────────────────────────────
 
-/// Safely truncate `s` to at most `max_chars` chars at a UTF-8 boundary.
-pub(crate) fn truncate_on_boundary(s: &str, max_chars: usize) -> &str {
-    match s.char_indices().nth(max_chars) {
-        None => s,
-        Some((i, _)) => &s[..i],
-    }
-}
-
 /// Compute the nearest common ancestor (deepest shared directory prefix) of a
 /// set of file paths (using `/` as the separator). Returns `None` when `paths`
 /// is empty or has no common prefix.
@@ -366,12 +358,16 @@ pub fn build_project_overview(
         }
     }
 
-    // Hard-cap to overview_budget chars at a UTF-8 boundary.
-    truncate_on_boundary(&block, overview_budget).to_owned()
+    // Hard-cap to overview_budget BYTES at a UTF-8 boundary — consistent with the byte-based loop
+    // guard above (`block.len() + line.len() > overview_budget`) and the byte accounting where the
+    // overview is subtracted from the chunk budget. `truncate_on_boundary` capped by CHAR count,
+    // which for multibyte content could let the overview overrun its byte budget.
+    let end = indexa_core::text::floor_char_boundary(&block, overview_budget);
+    block[..end].to_owned()
 }
 
-/// Phrases that signal a question is about implementation/code, not prose. (v0.39)
-const CODE_INTENT_TERMS: [&str; 12] = [
+/// Phrases that strongly signal a question is about implementation/code, not prose. (v0.39)
+const CODE_INTENT_TERMS_STRONG: [&str; 10] = [
     "function",
     "implement",
     "method",
@@ -380,11 +376,14 @@ const CODE_INTENT_TERMS: [&str; 12] = [
     "fn ",
     "class ",
     "def ",
-    "which file",
     "in the code",
     "code that",
-    "where is",
 ];
+
+/// Weak locator phrases: "where is X" / "which file …" are just as common for prose ("which file
+/// has the contract", "where is the budget spreadsheet") as for code, so they signal code intent
+/// ONLY when a code file extension co-occurs. Alone they must NOT trigger the code boost.
+const CODE_INTENT_TERMS_WEAK: [&str; 2] = ["which file", "where is"];
 
 /// How hard to lift a code-file hit when the question is code-intent. Modest and
 /// multiplicative — enough to put the implementing file above prose docs of similar
@@ -401,10 +400,17 @@ const CODE_EXTS: [&str; 22] = [
 /// snake_case identifier (≥4 chars with an underscore) — a strong "they mean a symbol" tell.
 pub(crate) fn is_code_intent(question: &str) -> bool {
     let q = question.to_ascii_lowercase();
-    CODE_INTENT_TERMS.iter().any(|t| q.contains(t))
-        || question
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .any(|w| w.len() >= 4 && w.contains('_'))
+    // A snake_case token (≥4 chars with an underscore) is a strong code tell on its own.
+    let has_snake = question
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|w| w.len() >= 4 && w.contains('_'));
+    if has_snake || CODE_INTENT_TERMS_STRONG.iter().any(|t| q.contains(t)) {
+        return true;
+    }
+    // Weak locators only count when a code file extension is named (e.g. "where is parse in
+    // retrieve.rs"). The leading `.` keeps `.rs` from matching "parsers", "rust", etc.
+    CODE_INTENT_TERMS_WEAK.iter().any(|t| q.contains(t))
+        && CODE_EXTS.iter().any(|ext| q.contains(&format!(".{ext}")))
 }
 
 fn is_code_path(path: &str) -> bool {

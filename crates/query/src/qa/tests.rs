@@ -3,7 +3,7 @@ use super::cluster::{cluster_hits, Cluster};
 use super::mmr::apply_mmr;
 use super::retrieve::{
     apply_archive_penalty, apply_code_intent_boost, cap_per_file, common_ancestor, is_code_intent,
-    path_is_historical, truncate_on_boundary,
+    path_is_historical,
 };
 use super::synthesize::{
     build_prompt, build_prompt_clustered, pack_context, pack_context_clustered,
@@ -103,9 +103,16 @@ fn code_intent_boost_lifts_implementation_over_docs() {
 
 #[test]
 fn is_code_intent_detects_code_questions_only() {
-    assert!(is_code_intent("which function does this?"));
+    assert!(is_code_intent("which function does this?")); // "function" (strong)
     assert!(is_code_intent("how does apply_archive_penalty work")); // snake_case symbol
-    assert!(is_code_intent("where is the retrieve method"));
+    assert!(is_code_intent("where is the retrieve method")); // "method" (strong) corroborates the locator
+    // E-6: bare locators ("where is" / "which file") no longer trigger code intent on their own —
+    // they're just as common for prose file questions.
+    assert!(!is_code_intent("where is the budget spreadsheet"));
+    assert!(!is_code_intent("which file has the meeting notes"));
+    // …but a locator WITH a named code file IS code intent.
+    assert!(is_code_intent("where is parse defined in retrieve.rs"));
+    assert!(is_code_intent("which file imports config.py"));
     assert!(!is_code_intent("what is the marketing strategy?"));
     assert!(!is_code_intent("summarize the quarterly results"));
 }
@@ -1136,14 +1143,14 @@ fn build_prompt_contains_project_overview_guidance() {
 }
 
 #[test]
-fn truncate_on_boundary_respects_utf8() {
-    // "こんにちは" is 5 chars × 3 bytes = 15 bytes. Capping at 9 chars must land
-    // on a char boundary (not in the middle of a multi-byte sequence).
-    let s = "こんにちは world";
-    let result = truncate_on_boundary(s, 6);
-    // Must be valid UTF-8 (would panic on invalid slice otherwise)
-    assert!(std::str::from_utf8(result.as_bytes()).is_ok());
-    assert!(result.len() <= s.len());
+fn project_overview_caps_by_bytes_on_a_utf8_boundary() {
+    // Overview is byte-capped now (floor_char_boundary) to match the byte-based loop guard and the
+    // byte accounting. A multibyte block capped to N bytes must land on a char boundary and be ≤ N.
+    let block = "こんにちは world"; // 5×3 + 6 = 21 bytes
+    let end = indexa_core::text::floor_char_boundary(block, 10);
+    let capped = &block[..end];
+    assert!(std::str::from_utf8(capped.as_bytes()).is_ok());
+    assert!(capped.len() <= 10, "must not exceed the byte budget");
 }
 
 // ── MMR (Maximal Marginal Relevance) re-ranking ───────────────────────────
