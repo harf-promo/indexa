@@ -66,10 +66,11 @@ open if you already have the context to resolve it.
 ## Predicate grammar in search (if enabled)
 
 `search`/`ask` accept inline predicates in the free-text query — `path:src/auth`,
-`ext:md` — to scope without a separate param. This is config-gated
-(`[retrieval] query_predicates`) and off by default; if predicates don't seem to narrow
-results, they may not be enabled for this index — fall back to plain keywords or `search`'s
-explicit scope handling instead of assuming the syntax works.
+`ext:md`, `type:python` (a curated named set expanding to multiple extensions, e.g.
+`.py`/`.pyi` — see `docs/config.md` for the full list) — to scope without a separate param.
+This is config-gated (`[retrieval] query_predicates`) and off by default; if predicates don't
+seem to narrow results, they may not be enabled for this index — fall back to plain keywords or
+`search`'s explicit scope handling instead of assuming the syntax works.
 
 ## Staleness
 

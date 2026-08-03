@@ -1568,6 +1568,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_honors_type_predicate_when_enabled() {
+        // Named file-type sets: "type:python" restricts hits to .py/.pyi files (both members
+        // of the set) while excluding a .rs file, and is stripped from the searched text.
+        use indexa_core::store::ChunkRecord;
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let chunk = |path: &str| ChunkRecord {
+                entry_path: path.to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: "an auth handler definition".to_owned(),
+                language: None,
+                embedding: None,
+                embed_model: None,
+                content_hash: None,
+            };
+            store
+                .upsert_chunks(&[
+                    chunk("/proj/auth.py"),
+                    chunk("/proj/auth.pyi"),
+                    chunk("/proj/auth.rs"),
+                ])
+                .unwrap();
+        }
+        let mut cfg = Config::default();
+        cfg.retrieval.query_predicates = true;
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(cfg),
+        );
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let out = text_of(
+            mcp.search(Parameters(SearchParams {
+                query: "type:python auth".into(),
+                limit: None,
+                scope: None,
+                mode: Some("sparse".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(out.contains("/proj/auth.py"), "{out}");
+        assert!(out.contains("/proj/auth.pyi"), "{out}");
+        assert!(
+            !out.contains("/proj/auth.rs"),
+            "type:python must exclude the .rs file: {out}"
+        );
+    }
+
+    #[tokio::test]
     async fn search_predicates_are_a_noop_when_disabled() {
         // The default (query_predicates: false) must searchd the literal query text,
         // predicates and all — behavior-neutral for anyone not opting in.

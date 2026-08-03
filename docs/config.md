@@ -171,7 +171,7 @@ graphrag_max_clusters = 4     # max clusters (also caps the per-cluster summary 
 graphrag_cluster_sim = 0.55   # cosine threshold to join a hit to a cluster (higher = more clusters)
 graphrag_summarize   = false  # also add a one-line LLM theme per cluster (extra calls; fail-open)
 staleness_flags      = true   # flag cited files whose on-disk mtime is newer than what's indexed
-query_predicates     = false  # recognize path:/ext: predicates in free-text search/ask queries
+query_predicates     = false  # recognize path:/ext:/type: predicates in free-text search/ask queries
 ```
 
 > `broad_per_file_cap` (v0.69+) only acts on broad/thematic, **unscoped** questions — focused and
@@ -201,15 +201,21 @@ query_predicates     = false  # recognize path:/ext: predicates in free-text sea
 > Annotation-only (never changes retrieval scores or which chunks are cited); each check is one
 > `fs::metadata` call per cited file, fail-open on any I/O error.
 
-> **Query predicates** (`query_predicates`, default off): recognize `path:<prefix>` and
-> `ext:<extension>` tokens in a free-text `search`/`ask` query and strip them out as filters instead
-> of searching for them literally — e.g. `ext:md path:crates/core auth flow` searches "auth flow"
-> scoped to `.md` files under `crates/core`. `path:` maps onto the existing scope filter (both
-> `search` and `ask`); `ext:` is a post-hoc hit filter (`search` only — `ask` synthesizes before a
-> hit-level filter could apply, so `ext:` is stripped from the question but not enforced there). Off
+> **Query predicates** (`query_predicates`, default off): recognize `path:<prefix>`,
+> `ext:<extension>`, and `type:<name>` tokens in a free-text `search`/`ask` query and strip them
+> out as filters instead of searching for them literally — e.g. `ext:md path:crates/core auth flow`
+> searches "auth flow" scoped to `.md` files under `crates/core`. `path:` maps onto the existing
+> scope filter (both `search` and `ask`); `ext:`/`type:` are a post-hoc hit filter (`search`
+> only — `ask` synthesizes before a hit-level filter could apply, so they're stripped from the
+> question but not enforced there). `type:<name>` is a ripgrep-style named file-type set — a
+> curated multi-extension convenience over `ext:` (`type:python` == `.py` or `.pyi`); current
+> sets: `rust`, `python`, `js`, `ts`, `go`, `java`, `c`, `cpp`, `web`, `docs`, `config`, `shell`,
+> `ruby`, `php`, `swift`, `kotlin`. Unlike `path`/`ext` (any value accepted), `type` has a closed
+> vocabulary — an unrecognized set name (`type:bogus`) is never treated as a predicate, so it
+> passes through as ordinary text exactly like any other unrecognized `field:value` token. Off
 > by default because it changes query interpretation; an unrecognized `field:value`-shaped token
-> (anything not `path`/`ext`) always passes through as ordinary text, so turning this on is safe even
-> for queries that happen to contain a colon.
+> (anything not `path`/`ext`/a known `type` name) always passes through as ordinary text, so
+> turning this on is safe even for queries that happen to contain a colon.
 
 ### Hybrid modes
 

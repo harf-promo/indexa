@@ -149,11 +149,11 @@ impl IndexaMcp {
         let limit = limit.unwrap_or(20).min(100);
         let mode = parse_hybrid_mode(mode.as_deref());
 
-        // Predicate grammar (1.8): `path:`/`ext:` tokens stripped from the query and mapped
-        // onto the existing scope filter / a post-hoc extension filter. Off by default — an
-        // explicit `scope` param always wins over a `path:` predicate; a predicate parse that
-        // would leave nothing to search on (the whole query was predicates) falls back to the
-        // original query text rather than searching on an empty string.
+        // Predicate grammar (1.8, +type: sets): `path:`/`ext:`/`type:` tokens stripped from the
+        // query and mapped onto the existing scope filter / a post-hoc extension filter. Off by
+        // default — an explicit `scope` param always wins over a `path:` predicate; a predicate
+        // parse that would leave nothing to search on (the whole query was predicates) falls
+        // back to the original query text rather than searching on an empty string.
         let predicates = self
             .config
             .retrieval
@@ -165,7 +165,14 @@ impl IndexaMcp {
             .as_deref()
             .filter(|s| !s.is_empty())
             .or_else(|| predicates.as_ref().and_then(|p| p.path.as_deref()));
-        let ext_filter = predicates.as_ref().and_then(|p| p.ext.clone());
+        // `ext:` and `type:` combine into one match-ANY-of-these-extensions filter (a named
+        // type set is just a curated multi-extension `ext:`); both still AND with `path`/scope.
+        let ext_filter: Option<Vec<String>> = predicates.as_ref().map(|p| {
+            let mut exts: Vec<String> = p.type_exts.clone().unwrap_or_default();
+            exts.extend(p.ext.clone());
+            exts
+        });
+        let ext_filter = ext_filter.filter(|exts| !exts.is_empty());
 
         // Try to embed the query for the dense arm; fall back to sparse if the embedder is
         // unavailable or the index has no embeddings.
@@ -190,9 +197,11 @@ impl IndexaMcp {
                 ann.as_deref(),
             )
             .map_err(mcp_err)?;
-        if let Some(ext) = &ext_filter {
-            let suffix = format!(".{ext}");
-            hits.retain(|h| h.entry_path.ends_with(&suffix));
+        if let Some(exts) = &ext_filter {
+            hits.retain(|h| {
+                exts.iter()
+                    .any(|e| h.entry_path.ends_with(&format!(".{e}")))
+            });
         }
 
         if hits.is_empty() {
