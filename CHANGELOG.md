@@ -97,6 +97,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     clusters the code graph via Louvain, directory-prior-boosted, into named functional areas each
     labeled by a short local-LLM call; a web "Modules" toggle reads the persisted table, kept separate
     from the existing live "Communities" overlay).
+- **Compressed content indexing now covers zstd, xz/lzma, and brotli — not just gzip.** The
+  transparent-decompression parser (`[parsers] compressed`) gains three more codecs alongside the
+  existing gzip support: `.zst` (`ruzstd`), `.xz`/`.lzma` (`lzma-rs`), and `.br` (`brotli`). All
+  three are pure-Rust implementations — no C toolchain or system library required, keeping the
+  build matrix as simple as before. Same single config flag gates all four codecs; `.tar.<codec>`
+  and its short aliases (`.tgz`/`.tzst`/`.txz`) are unaffected either way — those stay the archive
+  parser's job regardless of codec.
+- **Named file-type sets in search predicates (`type:python`, etc.).** A ripgrep-style curated
+  multi-extension shorthand joins the existing `path:`/`ext:` query predicates
+  (`[retrieval] query_predicates`) in MCP `search`/`ask` — `type:python` matches `.py` or `.pyi`
+  in one token instead of two separate `ext:` predicates. Deliberately a query-time filter (a
+  post-hoc hit filter over an already-indexed corpus), not a scan-time indexing filter — an
+  indexing-time positive allowlist would have interacted badly with the existing reconcile/prune
+  logic (files excluded by a type filter would look identical to files genuinely deleted from
+  disk). An unrecognized type name is never silently swallowed; it passes through as ordinary
+  query text, same safety property `ext:`/`path:` already have.
 
 ### Performance
 
