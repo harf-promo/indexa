@@ -41,6 +41,8 @@ pub use synthesize::{
     answer_retrieval_only_history, answer_stream, answer_stream_with_ann,
     answer_stream_with_ann_history, answer_with_ann, answer_with_ann_history,
 };
+// Shared prompt-injection scrub, reused by the reranker prompt (in the sibling `rerank` module).
+pub(crate) use synthesize::neutralize_fence;
 
 /// A prior conversation turn, folded into the prompt + used to rewrite a follow-up into
 /// a standalone query. Chronological order (oldest first). Deliberately decoupled from
