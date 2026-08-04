@@ -147,17 +147,24 @@ pub async fn answer_stream_with_ann_history(
     on_chunk(AnswerChunk::Sources(sources.clone()));
 
     let prompt = build_prompt_clustered(question, &context, &history_block, clustered);
-    let mut full = String::new();
+    let mut trimmer = StreamTrimmer::new();
     {
         let mut on_frag = |frag: String| {
-            full.push_str(&frag);
-            on_chunk(AnswerChunk::Fragment(frag));
+            let safe = trimmer.push(&frag);
+            if !safe.is_empty() {
+                on_chunk(AnswerChunk::Fragment(safe));
+            }
         };
         llm.generate_stream(&prompt, &mut on_frag).await?;
     }
+    // Flush the legit withheld tail (nothing if a hallucinated continuation stopped the stream).
+    let tail = trimmer.flush();
+    if !tail.is_empty() {
+        on_chunk(AnswerChunk::Fragment(tail));
+    }
     Ok(Answer {
         question: question.to_owned(),
-        answer: full.trim().to_owned(),
+        answer: trimmer.finish(),
         sources,
         confidence,
         synthesized: true,
@@ -519,24 +526,95 @@ pub(crate) async fn synthesize_from_hits_clustered(
     })
 }
 
+/// Markers that begin a hallucinated next Q&A turn — see [`trim_continuation`]. The longest is
+/// `\n\nQUESTION` (10 bytes), which bounds how much [`StreamTrimmer`] must withhold at the tail.
+const CONTINUATION_MARKERS: [&str; 5] = [
+    "\nQUESTION:",
+    "\nQuestion:",
+    "\nQ:",
+    "\nANSWER:",
+    "\n\nQUESTION",
+];
+
+/// Byte index of the earliest continuation marker in `text`, if any.
+fn first_marker(text: &str) -> Option<usize> {
+    CONTINUATION_MARKERS
+        .iter()
+        .filter_map(|m| text.find(m))
+        .min()
+}
+
 /// Keep only the answer to the asked question. The `QUESTION:/ANSWER:` prompt frame can lead an
 /// instruct/base model to keep going with an invented next turn (observed live: it appended
 /// "QUESTION: what should you do when contributing? ANSWER: …"). Cut at the first such marker so
 /// the user never sees a fabricated extra Q&A. Defensive — the prompt also forbids it.
 pub(crate) fn trim_continuation(text: &str) -> String {
-    let mut end = text.len();
-    for marker in [
-        "\nQUESTION:",
-        "\nQuestion:",
-        "\nQ:",
-        "\nANSWER:",
-        "\n\nQUESTION",
-    ] {
-        if let Some(i) = text.find(marker) {
-            end = end.min(i);
+    let end = first_marker(text).unwrap_or(text.len());
+    text[..end].trim().to_owned()
+}
+
+/// Streams answer fragments while (a) withholding any trailing text that might be the *start* of a
+/// continuation marker, and (b) halting emission once a complete marker appears — so the fragments
+/// the UI accumulates never flash a hallucinated next-turn, and the final answer matches the
+/// non-streaming `trim_continuation` path (stream == non-stream). Used by the streaming synthesize
+/// and agentic paths in place of a raw `full.push_str + emit` loop.
+pub(crate) struct StreamTrimmer {
+    full: String,
+    emitted: usize,
+    stopped: bool,
+}
+
+impl StreamTrimmer {
+    /// Longest marker length − 1 = the most a partial marker prefix can span at the tail.
+    const HOLDBACK: usize = 9;
+
+    pub(crate) fn new() -> Self {
+        Self {
+            full: String::new(),
+            emitted: 0,
+            stopped: false,
         }
     }
-    text[..end].trim().to_owned()
+
+    /// Append a raw fragment; return the slice newly safe to emit downstream (may be empty).
+    pub(crate) fn push(&mut self, frag: &str) -> String {
+        self.full.push_str(frag);
+        if self.stopped {
+            return String::new();
+        }
+        // A complete marker → emit up to it, then nothing more.
+        if let Some(cut) = first_marker(&self.full) {
+            self.stopped = true;
+            let out = self.full[self.emitted..cut].to_string();
+            self.emitted = cut;
+            return out;
+        }
+        // No marker yet: withhold the last HOLDBACK bytes (a marker could still be forming),
+        // snapped down to a char boundary so a multi-byte char is never split.
+        let want = self.full.len().saturating_sub(Self::HOLDBACK).max(self.emitted);
+        let safe = indexa_core::text::floor_char_boundary(&self.full, want);
+        if safe <= self.emitted {
+            return String::new();
+        }
+        let out = self.full[self.emitted..safe].to_string();
+        self.emitted = safe;
+        out
+    }
+
+    /// Emit the legit withheld tail when the stream ends normally (nothing if a marker stopped it).
+    pub(crate) fn flush(&mut self) -> String {
+        if self.stopped || self.emitted >= self.full.len() {
+            return String::new();
+        }
+        let out = self.full[self.emitted..].to_string();
+        self.emitted = self.full.len();
+        out
+    }
+
+    /// The final trimmed answer, identical to `trim_continuation` of all fragments.
+    pub(crate) fn finish(&self) -> String {
+        trim_continuation(&self.full)
+    }
 }
 
 pub(crate) fn pack_context(
@@ -781,4 +859,79 @@ pub(crate) fn build_prompt_clustered(
          \n\
          ANSWER:"
     )
+}
+
+#[cfg(test)]
+mod stream_trim_tests {
+    use super::{trim_continuation, StreamTrimmer};
+
+    /// Feed `full` one fragment at a time (arbitrary split), collect what the trimmer emits, and
+    /// return the streamed text. Mirrors how `generate_stream` drives `on_frag`.
+    fn stream_in_chunks(full: &str, chunk: usize) -> String {
+        let mut t = StreamTrimmer::new();
+        let mut out = String::new();
+        let bytes = full.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            // Advance to a char boundary so we never split a multi-byte char mid-fragment.
+            let mut end = (i + chunk).min(bytes.len());
+            while end < bytes.len() && !full.is_char_boundary(end) {
+                end += 1;
+            }
+            out.push_str(&t.push(&full[i..end]));
+            i = end;
+        }
+        out.push_str(&t.flush());
+        out
+    }
+
+    #[test]
+    fn clean_answer_streams_whole_and_matches_finish() {
+        let full = "The auth flow uses JWTs signed with RS256, verified on every request.";
+        for chunk in [1, 3, 7, 200] {
+            let mut t = StreamTrimmer::new();
+            // Drive it and finish.
+            let streamed = stream_in_chunks(full, chunk);
+            t.push(full);
+            let _ = t.flush();
+            assert_eq!(streamed, full, "chunk={chunk}: clean answer streams verbatim");
+            assert_eq!(t.finish(), trim_continuation(full));
+        }
+    }
+
+    #[test]
+    fn stops_at_a_hallucinated_continuation() {
+        let full = "Real answer here.\n\nQUESTION: what else?\nANSWER: invented.";
+        for chunk in [1, 2, 5, 500] {
+            let streamed = stream_in_chunks(full, chunk);
+            assert!(
+                !streamed.contains("QUESTION"),
+                "chunk={chunk}: streamed text must not include the hallucinated turn: {streamed:?}"
+            );
+            assert_eq!(streamed.trim(), "Real answer here.");
+        }
+    }
+
+    #[test]
+    fn finish_equals_trim_continuation() {
+        for full in [
+            "Just an answer.",
+            "Answer.\nQUESTION: next?\nANSWER: no.",
+            "Answer with a lone\nnewline but no marker.",
+            "Answer.\nQ: short marker form.",
+        ] {
+            let mut t = StreamTrimmer::new();
+            t.push(full);
+            let _ = t.flush();
+            assert_eq!(t.finish(), trim_continuation(full), "finish must equal trim_continuation for {full:?}");
+        }
+    }
+
+    #[test]
+    fn multibyte_tail_does_not_panic() {
+        // Emoji + accented chars at the very tail (inside the holdback window) must not split.
+        let full = "Café ☕ déjà vu — naïve façade 🚀";
+        let streamed = stream_in_chunks(full, 1);
+        assert_eq!(streamed, full);
+    }
 }
