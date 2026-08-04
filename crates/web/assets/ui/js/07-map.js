@@ -80,6 +80,9 @@ async function loadMap() {
     table.appendChild(tfoot);
   } catch(e) {
     table.innerHTML = '<tr><td style="color:var(--red)">' + escapeHtml(e.message) + '</td></tr>';
+    // Reset the cache flag so a later loadMap() actually retries — otherwise a transient failure
+    // wedged the Coverage panel on its error row until a full page reload.
+    mapLoaded = false;
   }
 }
 

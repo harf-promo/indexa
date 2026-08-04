@@ -74,6 +74,10 @@ function renderRootPicker() {
   if (!treemapData || treemapData.length <= 1) return;
   var bc = document.getElementById('treemap-breadcrumb');
   if (!bc) return;
+  // Remove a stale picker first — this runs on every (re-)render, so without this each refresh
+  // stacked another pill row above the treemap.
+  var stale = document.querySelector('.treemap-root-picker');
+  if (stale) stale.remove();
   var picker = document.createElement('div');
   picker.className = 'treemap-root-picker';
   treemapData.forEach(function(root, i) {

@@ -105,6 +105,13 @@
   background: none; border: none; color: var(--muted); cursor: pointer;
   font-size: 14px; padding: 0 0 0 4px; line-height: 1; flex-shrink: 0;
 }
+/* Optional action button inside a toast (e.g. "Ask a question →", "View activity"). */
+.toast-action {
+  background: none; border: 1px solid var(--border); border-radius: var(--r-2);
+  color: var(--accent); cursor: pointer; font-family: var(--font-sans);
+  font-size: 12px; padding: 2px 10px; margin-left: 10px; flex-shrink: 0;
+}
+.toast-action:hover { border-color: var(--accent); }
 
 /* ── ⌘K Command palette ── */
 .cmd-palette {
