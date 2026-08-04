@@ -335,6 +335,25 @@ pub async fn answer_catalog_history(
     })
 }
 
+/// Apply the configured cross-encoder rerank to `hits` against `query` (fail-open); a no-op when
+/// `cfg.rerank` is off. Shared by the one-shot [`retrieve_and_rerank`] and the agentic pool so both
+/// rank the merged candidates the same way (the agentic path previously skipped reranking entirely).
+pub(crate) async fn maybe_rerank(
+    cfg: &QaConfig,
+    llm: &dyn Generator,
+    query: &str,
+    hits: Vec<SearchHit>,
+) -> Vec<SearchHit> {
+    if !cfg.rerank {
+        return hits;
+    }
+    if cfg.rerank_backend == "cross-encoder" {
+        apply_rerank(&CandleReranker::new(&cfg.rerank_model), query, hits).await
+    } else {
+        apply_rerank(&LlmReranker::new(llm), query, hits).await
+    }
+}
+
 /// Embed → retrieve → optional rerank + project overview, shared by [`answer`] and
 /// [`answer_stream`]. Returns `(hits, overview, clusters)`. Empty hits ⇒ callers short-circuit.
 /// The `&Store` is confined to a sync scope and dropped before any `.await`, so the
@@ -364,8 +383,10 @@ async fn retrieve_and_rerank(
     };
 
     // GraphRAG clustering is gated like the per-file cap: only broad, unscoped questions, and only
-    // when enabled. Focused/scoped asks are byte-identical to today (clusters stays empty).
-    let want_clusters = cfg.graphrag_clusters && cfg.scope.is_none() && is_broad_intent(question);
+    // when enabled. Broad-intent is judged on the REWRITTEN standalone query (== `question` when
+    // there's no conversation history). Focused/scoped asks are byte-identical to today.
+    let want_clusters =
+        cfg.graphrag_clusters && cfg.scope.is_none() && is_broad_intent(&search_query);
 
     // 2. Retrieve + build project overview in a sync scope — `&Store` never crosses an await.
     //    Also fetch the chunk embeddings here (same open connection) when clustering wants them;
@@ -376,7 +397,7 @@ async fn retrieve_and_rerank(
         // Compute project-overview block while the store is still open.
         // Budget: broad questions get ~35% of context_budget (≤1400); specific → 300 chars
         // for just the root one-liner. Always subtracted FROM the chunk budget, never added.
-        let overview_budget = if is_broad_intent(question) {
+        let overview_budget = if is_broad_intent(&search_query) {
             cfg.context_budget * 35 / 100
         } else {
             300
@@ -397,17 +418,10 @@ async fn retrieve_and_rerank(
         return Ok((Vec::new(), String::new(), Vec::new()));
     }
 
-    // 3. Optional cross-encoder rerank (fails open). Reaches every surface
-    //    because they all call this helper.
-    let hits = if cfg.rerank {
-        if cfg.rerank_backend == "cross-encoder" {
-            apply_rerank(&CandleReranker::new(&cfg.rerank_model), question, hits).await
-        } else {
-            apply_rerank(&LlmReranker::new(llm), question, hits).await
-        }
-    } else {
-        hits
-    };
+    // 3. Optional cross-encoder rerank (fails open). Rerank against the REWRITTEN standalone
+    //    `search_query`, not the raw follow-up — for "and why is that?" the raw text is a poor
+    //    rerank signal; the rewritten query is what retrieval used. (No history ⇒ identical.)
+    let hits = maybe_rerank(cfg, llm, &search_query, hits).await;
 
     // 4. GraphRAG clustering (post-rerank, reusing the pre-fetched embeddings). Empty unless
     //    enabled — fails open to a single cluster inside `cluster_hits`, which the packer renders

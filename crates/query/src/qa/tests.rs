@@ -897,6 +897,9 @@ async fn agentic_runs_a_second_hop_and_merges_context() {
     let cfg = QaConfig {
         mode: HybridMode::Sparse,
         max_steps: 3,
+        // Isolate the agentic hop logic from reranking (E-5 made the merged pool rerank when
+        // `rerank` is on, which would consume the scripted LLM responses these tests count).
+        rerank: false,
         ..QaConfig::default()
     };
 
@@ -919,6 +922,42 @@ async fn agentic_runs_a_second_hop_and_merges_context() {
 }
 
 #[tokio::test]
+async fn agentic_reranks_merged_pool_when_enabled() {
+    // E-5: with `rerank` on, the agentic path reranks the merged pool before synthesis (it did not
+    // before) — so an extra "rank the passages" LLM call appears between the last decide and
+    // synthesis: decide#1 + decide#2 + rerank + synthesis = 4.
+    let (_d, path) = temp_index_with_chunks(&[
+        ("/a.md", "alpha subsystem overview"),
+        ("/b.md", "beta subsystem details"),
+    ]);
+    let gen_calls = Arc::new(AtomicUsize::new(0));
+    let llm = ScriptedGen::new(
+        &["SEARCH: beta", "DONE", "1,2", "Answer [1][2]."],
+        gen_calls.clone(),
+    );
+    let embedder = CountingEmbedder {
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let cfg = QaConfig {
+        mode: HybridMode::Sparse,
+        max_steps: 3,
+        rerank: true,
+        rerank_backend: "llm".to_string(),
+        ..QaConfig::default()
+    };
+
+    let ans = answer_agentic(&path, &embedder, &llm, "alpha", &cfg, &mut |_i, _q| {})
+        .await
+        .unwrap();
+    assert_eq!(ans.answer, "Answer [1][2].");
+    assert_eq!(
+        gen_calls.load(Ordering::SeqCst),
+        4,
+        "agentic now reranks the merged pool (the extra LLM call)"
+    );
+}
+
+#[tokio::test]
 async fn agentic_fails_open_to_single_hop_on_unparseable_decision() {
     let (_d, path) = temp_index_with_chunks(&[("/a.md", "alpha subsystem overview")]);
     let gen_calls = Arc::new(AtomicUsize::new(0));
@@ -930,6 +969,9 @@ async fn agentic_fails_open_to_single_hop_on_unparseable_decision() {
     let cfg = QaConfig {
         mode: HybridMode::Sparse,
         max_steps: 3,
+        // Isolate the agentic hop logic from reranking (E-5 made the merged pool rerank when
+        // `rerank` is on, which would consume the scripted LLM responses these tests count).
+        rerank: false,
         ..QaConfig::default()
     };
 
@@ -969,6 +1011,9 @@ async fn agentic_stream_emits_steps_before_sources_and_answer() {
     let cfg = QaConfig {
         mode: HybridMode::Sparse,
         max_steps: 3,
+        // Isolate the agentic hop logic from reranking (E-5 made the merged pool rerank when
+        // `rerank` is on, which would consume the scripted LLM responses these tests count).
+        rerank: false,
         ..QaConfig::default()
     };
 
