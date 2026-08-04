@@ -24,15 +24,28 @@ pub(crate) fn cosine(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// `mmr = λ * relevance - (1 - λ) * max_sim_to_selected`
 ///
-/// When `selected` is empty (no chunk chosen yet) the diversity penalty is zero,
-/// so the first pick is always the highest-relevance chunk.
+/// `relevance` is the hit's raw RRF score **min-max normalized into `[0,1]` across the candidate
+/// pool** (`rel_min`/`rel_span` computed once in [`apply_mmr`]). This is essential: raw RRF scores
+/// are ~0.01–0.05 while the cosine `max_sim` diversity term is ~0.3–0.9, so without normalization
+/// the diversity penalty dwarfs relevance ~20× and MMR effectively ignores how relevant a chunk is.
+///
+/// When `selected` is empty (no chunk chosen yet) the diversity penalty is zero, so the first pick
+/// is always the highest-relevance chunk (its normalized relevance is the pool maximum, 1.0).
 fn mmr_score(
     hit: &SearchHit,
     selected: &[&[f32]],
     lambda: f32,
     embeddings: &HashMap<i64, Vec<f32>>,
+    rel_min: f32,
+    rel_span: f32,
 ) -> f32 {
-    let rel = hit.rrf_score as f32;
+    // Normalize into [0,1]; when every candidate has the same score there's no relevance signal,
+    // so treat all as maximally relevant (1.0) and let the diversity term order them.
+    let rel = if rel_span > 0.0 {
+        ((hit.rrf_score as f32 - rel_min) / rel_span).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
     if selected.is_empty() {
         return rel;
     }
@@ -64,6 +77,17 @@ pub(crate) fn apply_mmr(
     if lambda >= 1.0 || candidates.len() < 2 || embeddings.is_empty() {
         return candidates;
     }
+    // Min-max normalization range for relevance, computed once over the whole pool (see `mmr_score`).
+    let rel_min = candidates
+        .iter()
+        .map(|h| h.rrf_score as f32)
+        .fold(f32::INFINITY, f32::min);
+    let rel_max = candidates
+        .iter()
+        .map(|h| h.rrf_score as f32)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let rel_span = rel_max - rel_min;
+
     let mut selected_vecs: Vec<&[f32]> = Vec::with_capacity(candidates.len());
     let mut result = Vec::with_capacity(candidates.len());
 
@@ -74,8 +98,8 @@ pub(crate) fn apply_mmr(
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| {
-                let sa = mmr_score(a, &selected_vecs, lambda, embeddings);
-                let sb = mmr_score(b, &selected_vecs, lambda, embeddings);
+                let sa = mmr_score(a, &selected_vecs, lambda, embeddings, rel_min, rel_span);
+                let sb = mmr_score(b, &selected_vecs, lambda, embeddings, rel_min, rel_span);
                 sa.total_cmp(&sb)
             })
             .map(|(i, _)| i)

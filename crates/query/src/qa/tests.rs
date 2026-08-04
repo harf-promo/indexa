@@ -1164,10 +1164,11 @@ fn mmr_with_identical_chunks_demotes_second() {
     // Two hits share the same embedding (cosine sim = 1.0).
     // A third hit is orthogonal (cosine sim = 0.0) but has a lower raw score.
     //
+    // Relevance is min-max normalized across {0.9, 0.8, 0.5} → A=1.0, B=0.75, C=0.0.
     // With lambda=0.5:
     //   First pick  = A (highest relevance; no selected yet, so no diversity penalty).
-    //   MMR(C | A)  = 0.5*0.5  - 0.5*0.0 =  0.25   (orthogonal → zero penalty)
-    //   MMR(B | A)  = 0.5*0.8  - 0.5*1.0 = -0.1    (identical  → max penalty)
+    //   MMR(C | A)  = 0.5*0.0  - 0.5*0.0 =  0.0     (orthogonal → zero penalty)
+    //   MMR(B | A)  = 0.5*0.75 - 0.5*1.0 = -0.125   (identical  → max penalty)
     //   → Second pick must be C, third must be B.
     let hit_a = make_hit(1, 0.9);
     let hit_b = make_hit(2, 0.8); // identical embedding to A
@@ -1233,6 +1234,34 @@ fn mmr_without_embeddings_preserves_relevance_order() {
 
     assert_eq!(result[0].chunk_id, 1);
     assert_eq!(result[1].chunk_id, 2);
+    assert_eq!(result[2].chunk_id, 3);
+}
+
+#[test]
+fn mmr_relevance_survives_production_scale_rrf() {
+    // Production RRF scores are ~0.01–0.05 while cosine max_sim is ~0.3–0.9. WITHOUT normalization
+    // the diversity term dwarfs relevance ~20×, so a barely-relevant orthogonal chunk beats a
+    // highly-relevant but moderately-similar one. With min-max normalization + a relevance-favoring
+    // lambda, the high-relevance chunk correctly wins the second slot.
+    let hit_a = make_hit(1, 0.050); // top relevance
+    let hit_b = make_hit(2, 0.048); // near-top relevance, moderately similar to A (cos 0.6)
+    let hit_c = make_hit(3, 0.011); // much lower relevance, orthogonal to A (cos 0.0)
+
+    let mut embeddings: HashMap<i64, Vec<f32>> = HashMap::new();
+    embeddings.insert(1, vec![1.0, 0.0]);
+    embeddings.insert(2, vec![0.6, 0.8]); // cosine to A = 0.6
+    embeddings.insert(3, vec![0.0, 1.0]); // cosine to A = 0.0
+
+    // lambda=0.7 favors relevance. Normalized rel: A=1.0, B≈0.949, C=0.0.
+    //   MMR(B|A) = 0.7*0.949 - 0.3*0.6 ≈  0.484
+    //   MMR(C|A) = 0.7*0.0   - 0.3*0.0 =   0.0    → B wins.
+    // (With raw RRF the old code gave B ≈ -0.146 and C ≈ 0.008, so C wrongly won.)
+    let result = apply_mmr(vec![hit_a, hit_b, hit_c], &embeddings, 0.7);
+    assert_eq!(result[0].chunk_id, 1, "first pick = highest relevance");
+    assert_eq!(
+        result[1].chunk_id, 2,
+        "normalized relevance keeps the near-top chunk ahead of a low-relevance orthogonal one"
+    );
     assert_eq!(result[2].chunk_id, 3);
 }
 
