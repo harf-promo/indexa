@@ -12,7 +12,11 @@ function refreshMap() {
   var panel = document.getElementById('panel-map');
   if (panel && panel.classList.contains('active')) {
     if (typeof switchMapView === 'function') {
-      switchMapView(typeof mapSubView !== 'undefined' && mapSubView ? mapSubView : 'treemap');
+      switchMapView(
+        typeof pickMapView === 'function' ? pickMapView()
+          : (typeof mapSubView !== 'undefined' && mapSubView ? mapSubView : 'treemap'),
+        false
+      );
     } else {
       loadMap();
     }
