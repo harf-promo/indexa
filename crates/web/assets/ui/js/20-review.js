@@ -52,7 +52,20 @@ function renderReviewList(questions) {
   }
   var batch = buildBatchControl(questions);
   if (batch) list.appendChild(batch);
-  questions.forEach(function (q) { list.appendChild(buildReviewCard(q)); });
+  var groups = {};
+  var order = [];
+  questions.forEach(function (q) {
+    var t = q.decision_type || 'other';
+    if (!groups[t]) { groups[t] = []; order.push(t); }
+    groups[t].push(q);
+  });
+  order.forEach(function (t) {
+    var h = document.createElement('h3');
+    h.className = 'review-group-head';
+    h.textContent = (TYPE_LABELS[t] || t) + ' · ' + groups[t].length;
+    list.appendChild(h);
+    groups[t].forEach(function (q) { list.appendChild(buildReviewCard(q)); });
+  });
 }
 
 // Batch-safe answers per decision type — mirrors core::decisions::batch_answer_refusal
@@ -101,6 +114,8 @@ function buildBatchControl(questions) {
     (BATCH_CHOICES[typeSel.value] || []).forEach(function (c) {
       var o = document.createElement('option'); o.value = c; o.textContent = c; choiceSel.appendChild(o);
     });
+    var shared = sharedUnderPrefix(questions, typeSel.value);
+    if (shared) under.value = shared;
   }
   fillChoices();
   typeSel.addEventListener('change', fillChoices);
@@ -115,6 +130,27 @@ function buildBatchControl(questions) {
   form.appendChild(go);
   box.appendChild(form);
   return box;
+}
+
+/* Longest common directory prefix of subjects of one type. Empty when there
+   aren't enough shared segments to be a useful "under" filter. */
+function sharedUnderPrefix(questions, type) {
+  var paths = [];
+  questions.forEach(function (q) {
+    if (q.decision_type === type && q.subject) paths.push(q.subject);
+  });
+  if (paths.length < 2) return '';
+  var parts = paths[0].split('/');
+  for (var i = 1; i < paths.length; i++) {
+    var other = paths[i].split('/');
+    var n = 0;
+    while (n < parts.length && n < other.length && parts[n] === other[n]) n++;
+    parts = parts.slice(0, n);
+  }
+  // Skip home-directory-only prefixes (`/Users/name`) — too broad to batch on.
+  var depth = parts.filter(function (s) { return s.length > 0; }).length;
+  if (depth < 4) return '';
+  return parts.join('/');
 }
 
 function batchField(text, control) {

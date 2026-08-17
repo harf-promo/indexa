@@ -772,6 +772,54 @@ fn duplicate_detector_skips_generated_dir_clusters() {
 }
 
 #[test]
+fn duplicate_detector_skips_sibling_manifests_in_different_crates() {
+    let mut store = Store::open_in_memory().unwrap();
+    // Exact-content Cargo.toml in two crates — every workspace has this.
+    store
+        .upsert_summary(&file_summary("/apps/indexa/Cargo.toml", "H1"))
+        .unwrap();
+    store
+        .upsert_summary(&file_summary("/crates/cli/Cargo.toml", "H1"))
+        .unwrap();
+    let cfg = crate::config::ReviewConfig::default();
+    let report = run_detectors(&mut store, &cfg).unwrap();
+    assert_eq!(
+        report.opened, 0,
+        "two crate manifests are not a user-actionable duplicate"
+    );
+}
+
+#[test]
+fn archive_detector_skips_build_and_toolchain_caches() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            old_entry(
+                "/app/mobile/build/ios/SourcePackages/absl.xcframework",
+                EntryKind::Dir,
+            ),
+            old_entry(
+                "/flutter/bin/cache/artifacts/gradle_wrapper/gradle",
+                EntryKind::Dir,
+            ),
+            old_entry("/legacy", EntryKind::Dir),
+            old_entry("/legacy/a.txt", EntryKind::File),
+        ])
+        .unwrap();
+    let cfg = crate::config::ReviewConfig::default();
+    let report = run_detectors(&mut store, &cfg).unwrap();
+    let open = store.open_decisions(Some("archive"), 10).unwrap();
+    let subjects: Vec<&str> = open.iter().map(|d| d.subject.as_str()).collect();
+    assert_eq!(
+        subjects,
+        vec!["/legacy"],
+        "opened={:?} skipped={}",
+        report.opened,
+        report.skipped
+    );
+}
+
+#[test]
 fn symbol_ambiguity_is_off_by_default() {
     let mut store = Store::open_in_memory().unwrap();
     seed_ambiguous_foo(&mut store);
@@ -985,6 +1033,54 @@ fn near_dup_same_named_cluster_is_kept() {
         1,
         "question must remain open"
     );
+}
+
+#[test]
+fn sweep_dismisses_sibling_manifest_and_archive_cache_noise() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .record_decision(NewDecision {
+            decision_type: "duplicate".into(),
+            subject: "/apps/indexa/Cargo.toml".into(),
+            params: serde_json::json!({
+                "paths": ["/apps/indexa/Cargo.toml", "/crates/cli/Cargo.toml"],
+                "similarity": 0.96_f32,
+                "exact": false,
+            }),
+            options: serde_json::json!([
+                "/apps/indexa/Cargo.toml",
+                "/crates/cli/Cargo.toml",
+                "keep_all"
+            ]),
+            auto_value: Some("/apps/indexa/Cargo.toml".into()),
+            confidence: Some(0.96),
+            evidence_hash: "test-manifest-noise".into(),
+            priority: 60,
+            paths: vec![
+                "/apps/indexa/Cargo.toml".into(),
+                "/crates/cli/Cargo.toml".into(),
+            ],
+        })
+        .unwrap();
+    store
+        .record_decision(NewDecision {
+            decision_type: "archive".into(),
+            subject: "/app/build/ios/SourcePackages/absl.xcframework".into(),
+            params: serde_json::json!({ "days": 500, "files": 1900 }),
+            options: serde_json::json!(["archive", "keep_active"]),
+            auto_value: Some("archive".into()),
+            confidence: None,
+            evidence_hash: "test-archive-cache".into(),
+            priority: 30,
+            paths: vec!["/app/build/ios/SourcePackages/absl.xcframework".into()],
+        })
+        .unwrap();
+    assert_eq!(store.open_decision_count().unwrap(), 2);
+
+    let cfg = crate::config::ReviewConfig::default();
+    let n = sweep_filtered_noise(&mut store, &cfg, false).unwrap();
+    assert_eq!(n, 2, "manifest + toolchain-cache archive must both sweep");
+    assert_eq!(store.open_decision_count().unwrap(), 0);
 }
 
 #[test]
