@@ -80,6 +80,28 @@ const DUP_SKIP_DIR_FRAGMENTS: &[&str] = &[
     "/.next/",
     "/target/",
     "/competitors/",
+    "/gen/",
+    "/SourcePackages/",
+    ".xcframework",
+    "/DerivedData/",
+    "/Pods/",
+    "/.gradle/",
+    "/gradle_wrapper/",
+    "/gradle/wrapper/",
+];
+
+/// Filenames that every crate/package is *supposed* to have. Two `Cargo.toml`
+/// files in different crates are not a duplicate the user can consolidate.
+/// Ask only when they are exact copies in the same folder.
+const SIBLING_MANIFESTS: &[&str] = &[
+    "Cargo.toml",
+    "package.json",
+    "go.mod",
+    "pyproject.toml",
+    "Gemfile",
+    "composer.json",
+    "Package.swift",
+    "pubspec.yaml",
 ];
 
 /// Universal trait/idiom method names: legitimately defined independently by many
@@ -164,6 +186,41 @@ fn dup_in_generated_dir(path: &str) -> bool {
     DUP_SKIP_DIR_FRAGMENTS.iter().any(|f| path.contains(f))
 }
 
+/// Generated / vendored / toolchain-cache trees: never ask "archive this?" —
+/// the user cannot usefully archive an xcframework or gradle wrapper.
+fn archive_path_is_noise(path: &str) -> bool {
+    dup_in_generated_dir(path)
+}
+
+fn is_sibling_manifest(name: &str) -> bool {
+    SIBLING_MANIFESTS
+        .iter()
+        .any(|m| name.eq_ignore_ascii_case(m))
+}
+
+fn parent_dir(path: &str) -> &str {
+    path.rsplit_once('/').map(|(p, _)| p).unwrap_or("")
+}
+
+fn same_parent(paths: &[String]) -> bool {
+    match paths.first() {
+        None => false,
+        Some(first) => {
+            let parent = parent_dir(first);
+            paths.iter().all(|p| parent_dir(p) == parent)
+        }
+    }
+}
+
+/// Sibling-crate manifests (`Cargo.toml`, `package.json`, …) are expected in
+/// every project. Only ask when they are exact copies in the *same* folder.
+fn sibling_manifest_noise(paths: &[String], exact: bool) -> bool {
+    if paths.is_empty() || !paths.iter().all(|p| is_sibling_manifest(basename(p))) {
+        return false;
+    }
+    !(exact && same_parent(paths))
+}
+
 /// Is a duplicate cluster worth a human's attention? Not when every member is an
 /// asset/binary (you won't "pick a canonical" screenshot) or any member lives in a
 /// generated/vendored tree (icon sets regenerate; vendored copies aren't yours).
@@ -241,7 +298,14 @@ pub fn sweep_filtered_noise(store: &mut Store, cfg: &ReviewConfig, dry_run: bool
                 .unwrap_or(1.0);
             let near_dup_false_pos =
                 similarity < 1.0 && !paths.is_empty() && !near_dup_same_basenames(&paths);
-            noisy_asset || near_dup_false_pos
+            let exact = params
+                .get("exact")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(similarity >= 1.0);
+            let manifest_noise = sibling_manifest_noise(&paths, exact);
+            noisy_asset || near_dup_false_pos || manifest_noise
+        } else if d.decision_type == DecisionType::Archive.as_str() {
+            archive_path_is_noise(&d.subject)
         } else {
             false
         };
@@ -343,6 +407,12 @@ pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorRe
             report.skipped += 1;
             continue;
         }
+        // Two Cargo.toml files in different crates are not a copy the user
+        // can pick a canonical for — only exact twins in the same folder.
+        if sibling_manifest_noise(&cluster.paths, cluster.exact) {
+            report.skipped += 1;
+            continue;
+        }
         if report.opened >= cfg.max_new_per_scan || open_budget == 0 {
             break;
         }
@@ -386,6 +456,10 @@ pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorRe
     stale.sort_unstable();
     let mut kept: Vec<(String, i64)> = Vec::new();
     for (path, days) in stale {
+        if archive_path_is_noise(&path) {
+            report.skipped += 1;
+            continue;
+        }
         if !kept.iter().any(|(k, _)| is_path_ancestor(k, &path)) {
             kept.push((path, days));
         }

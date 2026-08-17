@@ -63,3 +63,8 @@
   color: var(--ink-1); padding: 3px 6px; font-size: 12px;
 }
 .review-batch-under { min-width: 150px; }
+.review-group-head {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.7px;
+  color: var(--muted); margin: 14px 0 4px;
+}
+.review-group-head:first-of-type { margin-top: 4px; }
