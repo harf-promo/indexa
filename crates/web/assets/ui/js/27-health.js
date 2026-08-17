@@ -67,6 +67,19 @@
     document.body.insertBefore(bar, document.body.firstChild);
   }
 
+  function showThinContextBanner(h) {
+    if (!h.thin_context || document.getElementById('thin-context-banner')) return;
+    var entries = h.entries || 0;
+    var summaries = h.summaries || 0;
+    var pct = entries ? Math.round((100 * summaries) / entries) : 0;
+    var bar = makeBanner(
+      'thin-context-banner',
+      'Hierarchical context is thin (' + pct + '% summarized) — folder overviews and Export need summaries. Pick a project and click Build context.'
+    );
+    bar.appendChild(dismissButton(bar, 'Dismiss thin-context warning'));
+    document.body.insertBefore(bar, document.body.firstChild);
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     fetch('/api/health')
       .then(function (r) { return r.json(); })
@@ -74,6 +87,7 @@
         if (!h) return;
         showStaleIndexBanner(h);
         showCliSkewBanner(h);
+        showThinContextBanner(h);
       })
       .catch(function () { /* health is best-effort — never block the UI */ });
   });

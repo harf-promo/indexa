@@ -231,6 +231,18 @@ pub(crate) struct RootResponse {
     pub(crate) name: String,
 }
 
+/// One top-level detected project for the welcome "Build context" list.
+#[derive(Serialize)]
+pub(crate) struct ProjectResponse {
+    pub(crate) path: String,
+    pub(crate) name: String,
+    pub(crate) app_name: String,
+    pub(crate) chunk_count: u64,
+    pub(crate) has_summary: bool,
+    pub(crate) covered: u64,
+    pub(crate) total: u64,
+}
+
 #[derive(Serialize)]
 pub(crate) struct FsEntry {
     pub(crate) name: String,

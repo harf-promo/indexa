@@ -95,3 +95,123 @@ fn primary_apps_under_returns_one_per_dir_in_subtree() {
     let kinds: Vec<&str> = under.iter().map(|a| a.app_kind.as_str()).collect();
     assert_eq!(kinds, vec!["django_app", "nextjs_app"]);
 }
+
+#[test]
+fn top_projects_under_drops_nested_and_vendored() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .replace_apps_for_dir(
+            "/dev/indexa",
+            &[app("/dev/indexa", "rust_crate", "Rust crate", 10, true)],
+        )
+        .unwrap();
+    store
+        .replace_apps_for_dir(
+            "/dev/indexa/crates/core",
+            &[app(
+                "/dev/indexa/crates/core",
+                "rust_crate",
+                "Rust crate",
+                10,
+                true,
+            )],
+        )
+        .unwrap();
+    store
+        .replace_apps_for_dir(
+            "/dev/site/assets/vendor/jquery",
+            &[app(
+                "/dev/site/assets/vendor/jquery",
+                "node_package",
+                "Node.js / npm package",
+                10,
+                true,
+            )],
+        )
+        .unwrap();
+    store
+        .replace_apps_for_dir(
+            "/dev/site",
+            &[app("/dev/site", "nextjs_app", "Next.js app", 30, true)],
+        )
+        .unwrap();
+
+    let top = store.top_projects_under("/dev").unwrap();
+    let paths: Vec<&str> = top.iter().map(|a| a.path.as_str()).collect();
+    assert_eq!(paths, vec!["/dev/indexa", "/dev/site"]);
+}
+
+#[test]
+fn path_coverage_counts_chunks_and_summary() {
+    use crate::store::types::ChunkRecord;
+    use crate::walker::{Entry, EntryKind};
+    use std::path::PathBuf;
+
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            Entry {
+                path: PathBuf::from("/p"),
+                kind: EntryKind::Dir,
+                size: 0,
+                modified: None,
+                hint: None,
+                is_binary: false,
+            },
+            Entry {
+                path: PathBuf::from("/p/a.rs"),
+                kind: EntryKind::File,
+                size: 10,
+                modified: None,
+                hint: None,
+                is_binary: false,
+            },
+        ])
+        .unwrap();
+    store
+        .upsert_chunks(&[ChunkRecord {
+            entry_path: "/p/a.rs".into(),
+            seq: 0,
+            heading: String::new(),
+            text: "fn main() {}".into(),
+            language: Some("rust".into()),
+            embedding: None,
+            embed_model: None,
+            content_hash: None,
+        }])
+        .unwrap();
+
+    let empty = store.path_coverage("/p").unwrap();
+    assert_eq!(empty.chunk_count, 1);
+    assert!(!empty.has_summary);
+    assert_eq!(empty.total, 1); // the dir itself
+
+    store.upsert_summary(&file_summary_for("/p")).unwrap();
+    let built = store.path_coverage("/p").unwrap();
+    assert!(built.has_summary);
+    assert_eq!(built.chunk_count, 1);
+}
+
+fn file_summary_for(path: &str) -> crate::store::SummaryRecord {
+    crate::store::SummaryRecord {
+        path: path.to_owned(),
+        kind: "dir".into(),
+        parent_path: None,
+        depth: 0,
+        summary: "a project".into(),
+        summary_l0: None,
+        embedding: None,
+        child_count: 1,
+        byte_size: 10,
+        model: "test".into(),
+        source_hash: "H".into(),
+        generated_at: 1,
+    }
+}
+
+#[test]
+fn is_project_noise_path_matches_vendor_and_xcodeproj() {
+    assert!(is_project_noise_path("/a/assets/vendor/foo"));
+    assert!(is_project_noise_path("/app/ios/Runner.xcodeproj"));
+    assert!(!is_project_noise_path("/a/Barrq/mobile"));
+}

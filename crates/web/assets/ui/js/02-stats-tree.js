@@ -3,9 +3,16 @@ async function loadStats() {
   try {
     const r = await fetch('/api/stats');
     const d = await r.json();
-    const text = d.entries.toLocaleString() + ' files \xb7 ' + d.chunks.toLocaleString() + ' chunks';
+    const summaries = d.summaries || 0;
+    const pct = d.entries > 0 ? Math.round((100 * summaries) / d.entries) : 0;
+    const text = d.entries.toLocaleString() + ' files \xb7 ' +
+      d.chunks.toLocaleString() + ' chunks \xb7 ' +
+      summaries.toLocaleString() + ' summaries (' + pct + '%)';
     const statsEl = document.getElementById('stats');
-    if (statsEl) statsEl.textContent = text;
+    if (statsEl) {
+      statsEl.textContent = text;
+      statsEl.title = 'Searchable chunks vs written summaries — Ask works on chunks; Export and folder overviews need summaries.';
+    }
     renderSavingsWidget(d.usage_week);
   } catch(e) { document.getElementById('stats').textContent = 'No context yet'; }
 }

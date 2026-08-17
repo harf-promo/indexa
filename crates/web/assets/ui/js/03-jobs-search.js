@@ -18,8 +18,18 @@ async function fireJob(kind, path) {
     }
     const d = await r.json();
     subscribeJob(d.job_id, path, kind);
-    // Switch to jobs tab so user can watch progress
-    switchTab('jobs');
+    // Stay on the current view — the Engine bar already shows work in flight.
+    // Opt-in to the Activity drawer via the toast's "Watch progress" action.
+    if (typeof toast === 'function') {
+      var verb = kind === 'summarize' ? 'Building context'
+        : kind === 'index' ? 'Indexing'
+        : kind === 'deep' ? 'Indexing for search'
+        : 'Scanning';
+      toast(verb + '\u2026', 'info', {
+        label: 'Watch progress',
+        onClick: function () { if (typeof switchTab === 'function') switchTab('jobs'); },
+      });
+    }
   } catch (e) {
     toast('Network error starting job: ' + e.message, 'error');
   }
@@ -65,7 +75,48 @@ function coverageGlyph(node) {
   if (covered > 0) {
     return '<span class="cov-glyph cov-partial" title="Partly built (' + covered + '/' + total + ')">◐</span>';
   }
-  return '<span class="cov-glyph cov-none" title="Not indexed yet — use Index for search to index this folder">○</span>';
+  if ((node.chunk_count || 0) > 0) {
+    return '<span class="cov-glyph cov-none" title="Searchable, not summarized — click Build context">○</span>';
+  }
+  return '<span class="cov-glyph cov-none" title="Not searchable yet — click Build context">○</span>';
+}
+
+/* One primary verb: write the missing layer. `index` = parse+embed+summarize
+   (nothing searchable yet); `summarize` = write hierarchical context on top of
+   existing chunks; `null` = already covered, hide the primary button. */
+function chooseBuildKind(node) {
+  if (!node) return 'summarize';
+  if (node.kind === 'dir' && !(node.chunk_count > 0)) return 'index';
+  if (node.kind === 'dir') {
+    var total = node.total || 0;
+    var covered = node.covered || 0;
+    if (total > 0 && covered >= total && node.summary_state === 'done') return null;
+    if (total === 0 && node.summary_state === 'done') return null;
+    return 'summarize';
+  }
+  return node.summary_state === 'done' ? null : 'summarize';
+}
+
+async function fireBuildContext(path, node) {  // eslint-disable-line no-unused-vars
+  // A folder that *contains* several detected projects (e.g. ~/development)
+  // must not kick off a whole-tree summarize — that's hours of LLM work.
+  // Per-project buttons pass a leaf path and skip this guard.
+  try {
+    var r = await fetch('/api/projects?path=' + encodeURIComponent(path));
+    if (r.ok) {
+      var projects = await r.json();
+      var kids = (projects || []).filter(function (p) { return p.path !== path; });
+      if (kids.length >= 2) {
+        if (typeof toast === 'function') {
+          toast('This folder has ' + kids.length + ' projects. Build context on one of them — not the whole tree.', 'warn');
+        }
+        if (typeof loadWelcomeProjects === 'function') loadWelcomeProjects();
+        return;
+      }
+    }
+  } catch (_) { /* fail open: still start the job */ }
+  var kind = chooseBuildKind(node) || 'summarize';
+  return fireJob(kind, path);
 }
 
 function buildTreeNode(node) {
@@ -77,7 +128,14 @@ function buildTreeNode(node) {
   const icon = isDir ? ICO_FOLDER : ICO_FILE;
   // Stash the subtree coverage rollup so the summary header can show a "context: N%"
   // chip for this path without a second request (see coverageByPath / renderSummary).
-  coverageByPath[node.path] = { covered: node.covered || 0, partial: node.partial || 0, total: node.total || 0 };
+  coverageByPath[node.path] = {
+    covered: node.covered || 0,
+    partial: node.partial || 0,
+    total: node.total || 0,
+    chunk_count: node.chunk_count || 0,
+    summary_state: node.summary_state || null,
+    kind: node.kind,
+  };
   const badge = coverageGlyph(node);
   // One calm, determinate count per ACTIVE subtree (something still queued), instead of
   // N pulsing children. Static until the next tree refresh — live updates arrive in PR-4.
@@ -103,10 +161,16 @@ function buildTreeNode(node) {
     coverageCount +
     badge +
     '<span class="tree-row-actions">' +
-    '<button data-act="scan"      title="Re-scan"              aria-label="Re-scan">' + ICO_REFRESH + '</button>' +
-    '<button data-act="deep"      title="Index for search: parse and embed this folder so you can search and ask about its contents (the deep phase — scanning only lists files)" aria-label="Index for search">' + ICO_BOLT + '</button>' +
-    '<button data-act="summarize" title="Summarize"            aria-label="Summarize">' + ICO_PENCIL + '</button>' +
-    '<button data-act="remove"    title="Remove from context"  aria-label="Remove from context">' + ICO_TRASH + '</button>' +
+    (chooseBuildKind(node)
+      ? '<button data-act="build" title="Build context: write summaries so Ask and Export can use this folder" aria-label="Build context">' + ICO_PENCIL + '</button>'
+      : '') +
+    '<span class="tree-row-more">' +
+    '<button data-act="more" title="More actions" aria-label="More actions" aria-haspopup="true">&#x22EF;</button>' +
+    '<span class="tree-row-menu" hidden>' +
+    '<button data-act="scan">Re-scan</button>' +
+    '<button data-act="index">Refresh</button>' +
+    '<button data-act="remove">Remove from context</button>' +
+    '</span></span>' +
     '</span>';
 
   // ARIA tree semantics + roving focus (WS6). Every row is a treeitem reachable by
@@ -120,6 +184,15 @@ function buildTreeNode(node) {
     btn.addEventListener('click', async function(e) {
       e.stopPropagation();
       const act = btn.dataset.act;
+      if (act === 'more') {
+        var wrap = btn.closest('.tree-row-more');
+        var menu = wrap && wrap.querySelector('.tree-row-menu');
+        if (!menu) return;
+        var willOpen = menu.hidden;
+        document.querySelectorAll('.tree-row-menu').forEach(function (m) { m.hidden = true; });
+        menu.hidden = !willOpen;
+        return;
+      }
       if (act === 'remove') {
         const label = node.path.split('/').pop() || node.path;
         if (!(await confirmModal('Remove ‹' + label + '› from your context?\nFiles on disk are not deleted.', 'Remove'))) return;
@@ -129,11 +202,12 @@ function buildTreeNode(node) {
           refreshTree();
           loadStats();
         } catch(err) { toast('Remove failed: ' + err.message, 'error'); }
-      } else {
-        try {
-          await fireJob(act, node.path);
-        } catch(err) { toast('Failed to start job: ' + err.message, 'error'); }
+        return;
       }
+      try {
+        if (act === 'build') await fireBuildContext(node.path, node);
+        else await fireJob(act, node.path);
+      } catch(err) { toast('Failed to start job: ' + err.message, 'error'); }
     });
   });
 
@@ -380,6 +454,10 @@ async function doSearch(query) {
     list.innerHTML = '<div role="alert" style="padding:8px 12px;color:var(--red);font-size:12px">Search error</div>';
   }
 }
+
+document.addEventListener('click', function () {
+  document.querySelectorAll('.tree-row-menu').forEach(function (m) { m.hidden = true; });
+});
 
 /* ══════════════════════════════════════════════════════════════════
    JOBS — data model + render system

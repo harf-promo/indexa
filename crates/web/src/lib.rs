@@ -380,6 +380,7 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/api/graph", get(api_graph))
         .route("/api/graph/modules", get(api_graph_modules))
         .route("/api/roots", get(api_roots))
+        .route("/api/projects", get(api_projects))
         .route("/api/search", get(api_search))
         .route("/api/fs/ls", get(api_fs_ls))
         .route("/api/file", get(api_file_preview))
@@ -1218,6 +1219,84 @@ mod tests {
         let (status, json) = get_json(app, "/api/stats").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["summaries"], 1);
+    }
+
+    #[tokio::test]
+    async fn api_health_reports_thin_context_and_summaries() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[entry("/r", EntryKind::Dir)])
+            .unwrap();
+        store
+            .upsert_chunks(&[chunk("/r/a.rs", 0, "fn main() {}")])
+            .unwrap();
+        let app = build_router(state_with(store), 7620);
+        let (status, json) = get_json(app, "/api/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["summaries"], 0);
+        assert_eq!(json["chunks"], 1);
+        assert_eq!(json["thin_context"], true);
+        assert!(json.get("stale").is_some());
+    }
+
+    #[tokio::test]
+    async fn api_projects_returns_top_apps_with_coverage() {
+        use indexa_core::store::DetectedApp;
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                entry("/dev/indexa", EntryKind::Dir),
+                entry("/dev/indexa/a.rs", EntryKind::File),
+                entry("/dev/other", EntryKind::Dir),
+            ])
+            .unwrap();
+        store
+            .upsert_chunks(&[chunk("/dev/indexa/a.rs", 0, "fn main() {}")])
+            .unwrap();
+        store
+            .replace_apps_for_dir(
+                "/dev/indexa",
+                &[DetectedApp {
+                    path: "/dev/indexa".into(),
+                    app_kind: "rust_crate".into(),
+                    app_name: "Rust crate".into(),
+                    family: "code".into(),
+                    specificity: 10,
+                    is_primary: true,
+                    markers_json: "[]".into(),
+                    source: "builtin".into(),
+                    detected_at: 0,
+                }],
+            )
+            .unwrap();
+        store
+            .replace_apps_for_dir(
+                "/dev/indexa/crates/core",
+                &[DetectedApp {
+                    path: "/dev/indexa/crates/core".into(),
+                    app_kind: "rust_crate".into(),
+                    app_name: "Rust crate".into(),
+                    family: "code".into(),
+                    specificity: 10,
+                    is_primary: true,
+                    markers_json: "[]".into(),
+                    source: "builtin".into(),
+                    detected_at: 0,
+                }],
+            )
+            .unwrap();
+        store
+            .upsert_summary(&summary("/dev/indexa", "dir", Some("/dev"), 1))
+            .unwrap();
+        let app = build_router(state_with(store), 7620);
+        let (status, json) = get_json(app, "/api/projects?path=/dev").await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = json.as_array().expect("projects is an array");
+        assert_eq!(rows.len(), 1, "nested crate must be collapsed: {json}");
+        assert_eq!(rows[0]["path"], "/dev/indexa");
+        assert_eq!(rows[0]["has_summary"], true);
+        assert_eq!(rows[0]["chunk_count"], 1);
+        assert_eq!(rows[0]["app_name"], "Rust crate");
     }
 
     #[tokio::test]
