@@ -164,6 +164,66 @@ function exportCurrentPack() {  // eslint-disable-line no-unused-vars
 
 function quickExportPack(name) {  // eslint-disable-line no-unused-vars
   doExportPack(name, 'xml');
+  document.querySelectorAll('.export-menu').forEach(function (m) { m.hidden = true; });
+}
+
+/* Inject named packs into the toolbar Export menu (Wave 3). */
+function fillExportPacks(menu) {
+  var list = document.getElementById('export-pack-list');
+  var sep = document.getElementById('export-pack-sep');
+  if (!list) return;
+  list.textContent = '';
+  fetch('/api/packs')
+    .then(function (r) { return r.json(); })
+    .then(function (packs) {
+      if (!Array.isArray(packs) || !packs.length) {
+        if (sep) sep.hidden = true;
+        return;
+      }
+      if (sep) sep.hidden = false;
+      packs.forEach(function (p) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = 'Pack: ' + p.name;
+        b.title = (p.path_count || 0) + ' path' + (p.path_count === 1 ? '' : 's');
+        b.addEventListener('click', function () { quickExportPack(p.name); });
+        list.appendChild(b);
+      });
+    })
+    .catch(function () { if (sep) sep.hidden = true; });
+}
+
+/* Create a pack named after the selected folder and add that path. */
+function newPackFromSelection() {  // eslint-disable-line no-unused-vars
+  var path = (typeof selectedPath === 'string') ? selectedPath : '';
+  if (!path) {
+    if (typeof toast === 'function') toast('Select a folder first', 'warn');
+    return;
+  }
+  var name = path.split('/').filter(Boolean).pop() || 'pack';
+  fetch('/api/packs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name, description: path }),
+  })
+    .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+    .then(function (res) {
+      if (!res.ok) throw new Error(res.d.error || 'Could not create pack');
+      return fetch('/api/packs/' + encodeURIComponent(name) + '/paths', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paths: [path] }),
+      });
+    })
+    .then(function (r) {
+      if (r && !r.ok) throw new Error('Pack created but adding the path failed');
+      if (typeof toast === 'function') toast('Pack “' + name + '” created from selection', 'info');
+      if (typeof loadPacks === 'function') loadPacks();
+    })
+    .catch(function (e) {
+      if (typeof toast === 'function') toast(e.message || 'Pack error', 'error');
+    });
+  document.querySelectorAll('.export-menu').forEach(function (m) { m.hidden = true; });
 }
 
 function doExportPack(name, format) {

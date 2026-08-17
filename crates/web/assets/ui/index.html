@@ -70,7 +70,7 @@
       <!-- Export: the headline action — hand context to an AI tool -->
       <div class="export-menu-wrap toolbar-export">
         <button class="btn-sm export-menu-btn toolbar-export-btn"
-          title="Export context as XML, Markdown, or JSON — paste into Claude, Cursor, or any AI tool"
+          title="Export the selection or a Context Pack as XML, Markdown, or JSON"
           aria-label="Export context"
           aria-haspopup="menu"
           aria-expanded="false"
@@ -79,6 +79,9 @@
           <button onclick="doExport(selectedPath||'','xml')">XML <span class="export-hint">for Claude / Cursor</span></button>
           <button onclick="doExport(selectedPath||'','md')">Markdown</button>
           <button onclick="doExport(selectedPath||'','json')">JSON</button>
+          <div class="export-menu-sep" hidden id="export-pack-sep"></div>
+          <div id="export-pack-list"></div>
+          <button onclick="newPackFromSelection()">New pack from selection</button>
         </div>
       </div>
       <button class="btn-sm preview-toggle" id="preview-toggle-btn" onclick="togglePreview()"
@@ -149,8 +152,8 @@
             <h2 class="panel-heading">Context map</h2>
             <button id="map-help-btn" class="btn-sm map-help-btn" onclick="toggleMapHelp()" aria-expanded="false" aria-controls="map-help" title="What is this?">&#x24D8; What is this?</button>
             <div class="map-sub-toggle" role="tablist" aria-label="Map view">
-              <button id="map-tab-graph"   class="map-sub-tab active" role="tab" aria-selected="true"  onclick="switchMapView('graph')">Graph</button>
-              <button id="map-tab-treemap" class="map-sub-tab"        role="tab" aria-selected="false" onclick="switchMapView('treemap')">Treemap</button>
+              <button id="map-tab-treemap" class="map-sub-tab active" role="tab" aria-selected="true"  onclick="switchMapView('treemap')">Treemap</button>
+              <button id="map-tab-graph"   class="map-sub-tab"        role="tab" aria-selected="false" onclick="switchMapView('graph')">Graph</button>
               <button id="map-tab-table"   class="map-sub-tab"        role="tab" aria-selected="false" onclick="switchMapView('table')">Table</button>
             </div>
           </div>
@@ -166,7 +169,7 @@
             <p class="map-help-terms"><strong>The words:</strong> a <em>chunk</em> is a small searchable piece a file is split into (so AI can find the exact relevant bit, not re-read the whole file); a <em>summary</em> is a short AI-written description of a file or folder; <em>coverage</em> is the share of your folders that have summaries built. The <strong>Graph</strong> tab shows which files call into which.</p>
           </div>
           <!-- Treemap sub-view -->
-          <div id="map-panel-treemap" hidden>
+          <div id="map-panel-treemap">
             <div class="treemap-breadcrumb" id="treemap-breadcrumb" aria-label="Treemap navigation path"></div>
             <div class="treemap-canvas-wrap">
               <svg id="treemap-svg" class="treemap-svg" role="group" aria-label="Context coverage treemap — cells sized by chunk count, colored by coverage state. Tab to navigate, Enter to drill down"></svg>
@@ -185,7 +188,7 @@
             <table id="map-table"></table>
           </div>
           <!-- Graph sub-view (signature / call graph) — flagship default Map view -->
-          <div id="map-panel-graph">
+          <div id="map-panel-graph" hidden>
             <div class="graph-toolbar">
               <label for="graph-scope" class="graph-scope-label">Scope</label>
               <select id="graph-scope" class="graph-scope" aria-label="Graph scope root" onchange="loadGraph(this.value)"></select>
@@ -324,6 +327,8 @@
         </div>
         <p class="settings-note">Keys are saved to your config file with 0600 permissions. A self-hosted Ollama/llama.cpp endpoint is configured under <strong>Local models</strong> above. Restart <code>indexa serve</code> after saving to apply.</p>
       </div>
+      <details class="settings-advanced">
+        <summary>More settings — passes, resources, insights, packs</summary>
       <div class="settings-section">
         <h2>Refinement Passes</h2>
         <div class="key-rows">
@@ -474,7 +479,7 @@
 
       <div class="settings-section" id="section-packs">
         <h2>Context Packs</h2>
-        <p class="settings-note" style="margin-bottom:10px">Named bundles of files and folders from anywhere on your disk. Export as a single XML, Markdown, or JSON file to paste into any AI tool.</p>
+        <p class="settings-note" style="margin-bottom:10px">Named bundles. Export one from the toolbar <strong>Export</strong> menu, or create <strong>New pack from selection</strong> there. Manage paths here.</p>
         <!-- create form -->
         <div style="display:flex;gap:6px;align-items:center;margin-bottom:10px">
           <input type="text" class="key-input" id="pack-new-name" placeholder="Pack name e.g. Auth" autocomplete="off" aria-label="New pack name" style="flex:1;max-width:220px" onkeydown="if(event.key==='Enter')createPack()">
@@ -515,6 +520,7 @@
           </div>
         </div>
       </div>
+      </details>
       <div class="settings-section" id="section-update">
         <h2>Software Update</h2>
         <p class="settings-note" style="margin-bottom:8px">
