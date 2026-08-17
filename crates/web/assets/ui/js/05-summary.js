@@ -273,6 +273,7 @@ function toggleExportMenu(btn) {
   if (!menu.hidden) {
     // Move focus to first menu item so the menu is immediately keyboard-navigable.
     var menuItems = Array.from(menu.querySelectorAll('button:not([disabled])'));
+    if (typeof fillExportPacks === 'function') fillExportPacks(menu);
     if (menuItems.length) menuItems[0].focus();
 
     function closeExportMenu() {

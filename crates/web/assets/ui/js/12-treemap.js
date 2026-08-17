@@ -294,11 +294,22 @@ function renderBreadcrumb() {
 }
 
 /* ── Map sub-view toggle ── */
-// Default Map sub-view: the interactive knowledge graph is the flagship view, so opening
-// Map lands on the force-directed graph (it blooms on entry), not the treemap table.
-var mapSubView = 'graph';
+// Default is coverage Treemap (the useful picture at whole-disk scope). Graph
+// is the right default once the user has scoped into a project-depth folder.
+// An explicit tab click sticks for the rest of the session.
+var mapSubView = 'treemap';
+var mapUserPicked = false;
 
-function switchMapView(view) {
+function pickMapView() {
+  if (mapUserPicked && mapSubView) return mapSubView;
+  if (!selectedPath) return 'treemap';
+  var depth = String(selectedPath).split('/').filter(Boolean).length;
+  // /Users/name/development/projects/indexa → 5 segments: a project, not the disk.
+  return depth >= 5 ? 'graph' : 'treemap';
+}
+
+function switchMapView(view, fromUser) {
+  if (fromUser !== false) mapUserPicked = true;
   mapSubView = view;
   ['treemap', 'table', 'graph'].forEach(function(v) {
     var btn   = document.getElementById('map-tab-' + v);
