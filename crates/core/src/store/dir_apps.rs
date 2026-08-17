@@ -122,4 +122,84 @@ impl Store {
         let rows = stmt.query_map(params![exact, child], row_to_app)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+
+    /// Chunk + summary coverage for one path (the path itself and everything under it).
+    /// `covered`/`total` are directory-summary rollups — same contract as `TreeNode`.
+    pub fn path_coverage(&self, path: &str) -> Result<PathCoverage> {
+        let (exact, child) = subtree_match(path);
+        let chunk_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM chunks
+             WHERE entry_path = ?1 OR entry_path LIKE ?2 ESCAPE '\\'",
+            params![exact, child],
+            |r| r.get(0),
+        )?;
+        let covered: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM summary_queue
+             WHERE kind = 'dir' AND state = 'done'
+               AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
+            params![exact, child],
+            |r| r.get(0),
+        )?;
+        let total: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM entries
+             WHERE kind = 'dir' AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
+            params![exact, child],
+            |r| r.get(0),
+        )?;
+        Ok(PathCoverage {
+            chunk_count: chunk_count as u64,
+            has_summary: self.summary_exists(&exact)?,
+            covered: covered as u64,
+            total: total as u64,
+        })
+    }
+
+    /// Primary detected apps under `prefix`, dropping vendored/generated noise and
+    /// nested children of another primary app. The welcome "Build context" list
+    /// uses this so a monorepo is one row, not every crate.
+    pub fn top_projects_under(&self, prefix: &str) -> Result<Vec<DetectedApp>> {
+        let apps = self.primary_apps_under(prefix)?;
+        let kept: Vec<DetectedApp> = apps
+            .into_iter()
+            .filter(|a| !is_project_noise_path(&a.path))
+            .collect();
+        let paths: Vec<String> = kept.iter().map(|a| a.path.clone()).collect();
+        Ok(kept
+            .into_iter()
+            .filter(|a| {
+                !paths
+                    .iter()
+                    .any(|other| other != &a.path && a.path.starts_with(&format!("{other}/")))
+            })
+            .collect())
+    }
+}
+
+/// Coverage snapshot for one path — chunks (searchable) vs summaries (understood).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PathCoverage {
+    pub chunk_count: u64,
+    pub has_summary: bool,
+    /// Directory summaries in the subtree whose queue state is `done`.
+    pub covered: u64,
+    /// Directory entries in the subtree.
+    pub total: u64,
+}
+
+/// Detected-app paths that are not useful "Build context" targets: vendored
+/// copies, generated trees, nested Xcode project bundles.
+pub fn is_project_noise_path(path: &str) -> bool {
+    const FRAGMENTS: &[&str] = &[
+        "/vendor/",
+        "/node_modules/",
+        "/target/",
+        "/dist/",
+        "/assets/vendor/",
+        "/.next/",
+        "/build/",
+        ".xcodeproj",
+        "/DerivedData/",
+        "/Pods/",
+    ];
+    FRAGMENTS.iter().any(|f| path.contains(f))
 }

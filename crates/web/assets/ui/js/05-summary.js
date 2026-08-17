@@ -7,6 +7,7 @@ async function showSummary(path) {
   // Keep tree selection + deep-link URL in sync with what's being viewed (v0.37).
   selectedPath = path;
   if (typeof writeHash === 'function') writeHash();
+  if (typeof refreshContextNotice === 'function') refreshContextNotice();
   var view = document.getElementById('summary-view');
   view.style.display = 'block';
   view.innerHTML = '<div class="summary-pending">Loading summary…</div>';
@@ -94,7 +95,7 @@ function renderNoPendingSummary(path) {
     'You can still ask about it — answers use its raw content.</div>' +
     '<div class="summary-noctx-actions">' +
     '<button class="btn-sm summary-ask-btn" id="ask-cta-btn" title="Ask a question answered only from this file">' + ICO_CHAT + ' Ask about this file</button>' +
-    '<button class="enqueue-btn" id="enqueue-btn" title="Queue an AI summary for this file">Generate summary</button>' +
+    '<button class="enqueue-btn" id="enqueue-btn" title="Write summaries so Ask and Export can use this folder">Build context</button>' +
     '</div></div>';
 }
 

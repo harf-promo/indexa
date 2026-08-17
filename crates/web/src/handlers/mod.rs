@@ -17,6 +17,7 @@ mod keys;
 mod misc;
 mod models;
 mod packs;
+mod projects;
 mod providers;
 mod queue;
 mod review;
@@ -62,6 +63,7 @@ pub(crate) use packs::{
     api_packs_create, api_packs_delete, api_packs_export, api_packs_list, api_packs_paths_add,
     api_packs_paths_get, api_packs_paths_remove, api_packs_search, api_packs_suggest,
 };
+pub(crate) use projects::api_projects;
 pub(crate) use providers::api_providers_status;
 pub(crate) use queue::{api_queue_failed, api_queue_retry, api_queue_stats};
 pub(crate) use review::{

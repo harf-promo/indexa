@@ -61,3 +61,63 @@ function onContextReady(folderName) {
     if (el && el.querySelector('.onboard-cta')) el.innerHTML = '';
   }, 10000);
 }
+
+/* Populate the welcome project list: uncovered detected apps get a Build context button. */
+async function loadWelcomeProjects() {
+  var slot = document.getElementById('welcome-projects');
+  if (!slot) return;
+  try {
+    var r = await fetch('/api/projects');
+    if (!r.ok) { slot.hidden = true; return; }
+    var projects = await r.json();
+    if (!Array.isArray(projects) || !projects.length) { slot.hidden = true; return; }
+    var uncovered = projects.filter(function (p) { return !p.has_summary; });
+    var n = projects.length;
+    var missing = uncovered.length;
+    var head = document.createElement('p');
+    head.className = 'welcome-projects-head';
+    head.textContent = missing === 0
+      ? n + ' project' + (n === 1 ? '' : 's') + ' have summaries.'
+      : missing + ' of ' + n + ' project' + (n === 1 ? '' : 's') + ' have no summaries.';
+    slot.textContent = '';
+    slot.appendChild(head);
+    uncovered.slice(0, 24).forEach(function (p) {
+      var row = document.createElement('div');
+      row.className = 'welcome-project-row';
+      var label = document.createElement('span');
+      label.className = 'welcome-project-name';
+      label.textContent = p.name;
+      var kind = document.createElement('span');
+      kind.className = 'welcome-project-kind';
+      kind.textContent = p.app_name || '';
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn-sm';
+      btn.textContent = 'Build context';
+      btn.addEventListener('click', function () {
+        if (typeof fireBuildContext === 'function') {
+          fireBuildContext(p.path, {
+            kind: 'dir',
+            chunk_count: p.chunk_count,
+            covered: p.covered,
+            total: p.total,
+            summary_state: p.has_summary ? 'done' : null,
+          });
+        } else if (typeof fireJob === 'function') {
+          fireJob(p.chunk_count > 0 ? 'summarize' : 'index', p.path);
+        }
+      });
+      row.appendChild(label);
+      row.appendChild(kind);
+      row.appendChild(btn);
+      slot.appendChild(row);
+    });
+    slot.hidden = false;
+  } catch (_) {
+    slot.hidden = true;
+  }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+  if (typeof loadWelcomeProjects === 'function') loadWelcomeProjects();
+});

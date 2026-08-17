@@ -73,6 +73,27 @@
 .onboard-cta:disabled { opacity: 0.4; cursor: default; }
 .onboard-hint { color: var(--muted); font-size: 12.5px; }
 .onboard-hint code { color: var(--accent); font-family: var(--font-mono); font-size: 12px; }
+.welcome-projects {
+  margin-top: 22px;
+  text-align: left;
+  max-width: 520px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.welcome-projects-head {
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+.welcome-project-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border-subtle);
+}
+.welcome-project-name { font-size: 13px; font-weight: 500; color: var(--text); }
+.welcome-project-kind { flex: 1; font-size: 11px; color: var(--muted); }
 .msg { max-width: 800px; width: 100%; }
 /* Harf: sharp chat bubbles. The user bubble keeps the teal author fill (it's an
    author identity colour, not a button); the assistant bubble is a hairline card. */
