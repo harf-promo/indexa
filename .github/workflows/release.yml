@@ -28,9 +28,37 @@ jobs:
             exit 1
           fi
 
+  # A forgotten version bump in either Cargo.toml doesn't just mislabel the build — `indexa
+  # update` compares env!("CARGO_PKG_VERSION") (baked in at compile time) against the release
+  # tag, so a stale version makes every installed binary see "update available" forever, even
+  # right after updating, since the self-replace lands the same already-stale version (H6).
+  version-gate:
+    name: Cargo.toml version matches the tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Require both Cargo.toml version fields to equal the tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ROOT_VERSION=$(grep -m1 '^version = "' Cargo.toml | sed -E 's/version = "([^"]*)"/\1/')
+          DESKTOP_VERSION=$(grep -m1 '^version = "' apps/indexa-desktop/Cargo.toml | sed -E 's/version = "([^"]*)"/\1/')
+          FAIL=0
+          if [ "$ROOT_VERSION" != "$VERSION" ]; then
+            echo "::error file=Cargo.toml::[workspace.package] version is \"$ROOT_VERSION\", tag ${GITHUB_REF_NAME} expects \"$VERSION\"."
+            FAIL=1
+          fi
+          if [ "$DESKTOP_VERSION" != "$VERSION" ]; then
+            echo "::error file=apps/indexa-desktop/Cargo.toml::version is \"$DESKTOP_VERSION\", tag ${GITHUB_REF_NAME} expects \"$VERSION\"."
+            FAIL=1
+          fi
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::Follow the release procedure in AGENTS.md — bump BOTH Cargo.toml version fields before tagging."
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.target }}
-    needs: changelog-gate
+    needs: [changelog-gate, version-gate]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -65,13 +93,15 @@ jobs:
 
       - name: Build (native targets)
         if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: cargo build --release --target ${{ matrix.target }} -p indexa
+        # --locked: build from the committed root Cargo.lock and fail if it's stale, so the
+        # released CLI binaries can't silently float onto an unpinned dependency resolve (C6).
+        run: cargo build --locked --release --target ${{ matrix.target }} -p indexa
 
       - name: Build (Linux arm64 cross-compile)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --release --target ${{ matrix.target }} -p indexa
+        run: cargo build --locked --release --target ${{ matrix.target }} -p indexa
 
       - name: Rename binary (Unix)
         if: runner.os != 'Windows'
