@@ -165,6 +165,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **PPTX speaker-notes bytes now count toward the zip-bomb running-total cap.** The
+  `MAX_ZIP_TOTAL_BYTES` guard in the PPTX parser was meant to cover slides *and* notes
+  (per its own comment) but only ever accumulated slide-body bytes — a deck with many
+  slides whose speaker notes were each individually under the per-entry cap
+  (`MAX_ZIP_ENTRY_BYTES`) could still sum to far more than the intended 64 MB total.
+  Notes bytes are now added to the running total, same as slides and chart/diagram parts.
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
   open to the LLM reranker for every user who enabled it: candle's DeBERTa loader read the transformer
   at the safetensors root, but HF `DebertaV2ForSequenceClassification` checkpoints nest it under a
