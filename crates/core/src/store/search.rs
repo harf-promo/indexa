@@ -1,5 +1,6 @@
 //! Hybrid / cosine search and the shared FTS / embedding encoding helpers.
 
+use super::entries;
 use super::{AnnIndex, RegionSummary, SearchHit, Store, TreeNode};
 use crate::config::HybridMode;
 use rusqlite::{params, Row};
@@ -75,14 +76,18 @@ pub(super) fn build_fts_query(query: &str) -> String {
     }
 }
 
-/// Escape `%` and `_` wildcards in a path prefix before appending `%` for LIKE matching.
+/// Escape `%`, `_`, and `\` in `s` so it can be embedded in a `LIKE … ESCAPE '\'` pattern
+/// without its own characters being read as wildcards.
+pub(super) fn like_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// [`like_escape`] plus a trailing `%` — a prefix pattern for `LIKE … ESCAPE '\'`.
 /// Must be used with `LIKE ?n ESCAPE '\'` in the SQL clause.
 pub(super) fn like_prefix(prefix: &str) -> String {
-    let escaped = prefix
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    format!("{escaped}%")
+    format!("{}%", like_escape(prefix))
 }
 
 /// SQL `WHERE`-fragment (begins with ` AND `) that excludes content-free stub chunks from
@@ -236,15 +241,20 @@ impl Store {
             HybridMode::Dense => Vec::new(),
             _ => {
                 let fts_query = build_fts_query(query_text);
+                // `entry_path = exact OR entry_path LIKE child_pattern`, not a bare
+                // `LIKE '{prefix}%'` — a plain prefix match has no path-separator boundary,
+                // so scoping to `/proj` also matched a sibling like `/projector` (and every
+                // chunk under it), silently widening a scoped ask/search to unrelated trees.
                 let (sql, scope_param) = if let Some(s) = scope {
                     (
                         format!(
                             "SELECT CAST(chunk_id AS INTEGER), entry_path, bm25(chunks_fts) AS score
                              FROM chunks_fts
-                             WHERE chunks_fts MATCH ?1 AND entry_path LIKE ?2 ESCAPE '\\'{STUB_EXCLUDE_SQL}
+                             WHERE chunks_fts MATCH ?1
+                               AND (entry_path = ?2 OR entry_path LIKE ?3 ESCAPE '\\'){STUB_EXCLUDE_SQL}
                              ORDER BY score LIMIT 100"
                         ),
-                        Some(like_prefix(s)),
+                        Some(entries::subtree_match_or_all(s)),
                     )
                 } else {
                     (
@@ -258,8 +268,8 @@ impl Store {
                     )
                 };
                 let mut stmt = self.conn.prepare(&sql)?;
-                let rows: Vec<(i64, String)> = if let Some(ref sp) = scope_param {
-                    stmt.query_map(params![fts_query, sp], |r| {
+                let rows: Vec<(i64, String)> = if let Some((ref exact, ref child)) = scope_param {
+                    stmt.query_map(params![fts_query, exact, child], |r| {
                         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?
@@ -327,7 +337,12 @@ impl Store {
 
     /// Search entries whose path contains `query` (case-insensitive LIKE).
     pub fn search_paths(&self, query: &str, limit: usize) -> Result<Vec<TreeNode>> {
-        let pattern = format!("%{query}%");
+        // `query` is caller-controlled (CLI arg, web `?q=`, MCP param) — escape its own
+        // `%`/`_`/`\` before embedding it as a substring pattern, or a query containing them
+        // is read as SQL wildcards: an unescaped `%` alone would match every path in the
+        // index, and `_` matches any single character (`test_helper` would also match
+        // `test-helper.rs`).
+        let pattern = format!("%{}%", like_escape(query));
         let mut stmt = self.conn.prepare(
             "SELECT e.path, e.kind, e.size,
                     (SELECT COUNT(*) FROM entries c
@@ -346,7 +361,7 @@ impl Store {
                        AND (d.path = e.path OR d.path LIKE e.path || '/%')) AS subtree_total
                FROM entries e
                LEFT JOIN summary_queue sq ON sq.path = e.path
-              WHERE e.path LIKE ?1
+              WHERE e.path LIKE ?1 ESCAPE '\\'
               ORDER BY LENGTH(e.path) ASC, e.path ASC
               LIMIT ?2",
         )?;
@@ -699,8 +714,10 @@ impl Store {
         }
         // Select `id, embedding` only — the per-row path `String` is gone (resolved after, via
         // `paths_for_ids`). Same WHERE (incl. STUB_EXCLUDE) so the candidate set is identical.
+        // `entry_path = exact OR entry_path LIKE child_pattern`, not a bare prefix `LIKE` —
+        // see the identical fix + rationale on the FTS arm above.
         let sql = if scope.is_some() {
-            format!("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL AND entry_path LIKE ?1 ESCAPE '\\'{STUB_EXCLUDE_SQL}")
+            format!("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL AND (entry_path = ?1 OR entry_path LIKE ?2 ESCAPE '\\'){STUB_EXCLUDE_SQL}")
         } else {
             format!(
                 "SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL{STUB_EXCLUDE_SQL}"
@@ -712,9 +729,9 @@ impl Store {
         let query_norm = query.iter().map(|x| x * x).sum::<f32>().sqrt();
         let expected_bytes = query.len() * 4;
 
-        let scope_pattern = scope.map(like_prefix);
-        let mut rows = if let Some(ref p) = scope_pattern {
-            stmt.query(params![p])?
+        let scope_pattern = scope.map(entries::subtree_match_or_all);
+        let mut rows = if let Some((ref exact, ref child)) = scope_pattern {
+            stmt.query(params![exact, child])?
         } else {
             stmt.query([])?
         };

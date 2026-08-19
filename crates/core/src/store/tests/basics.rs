@@ -440,6 +440,34 @@ fn cosine_search_handles_empty_limit0_and_scope() {
 }
 
 #[test]
+fn search_paths_escapes_wildcard_characters_in_the_query() {
+    // H4: `query` is caller-controlled and was embedded in a LIKE pattern with no escaping —
+    // a literal `%`/`_` in the search box was read as a SQL wildcard, not matched literally.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            dummy_entry("/proj/test_helper.rs", EntryKind::File, 1),
+            dummy_entry("/proj/test-helper.rs", EntryKind::File, 1),
+        ])
+        .unwrap();
+
+    // An unescaped `_` matches any single character, so "test_helper" would also match
+    // "test-helper.rs" (the `-` standing in for `_`'s wildcard). Only the literal
+    // underscore variant should come back.
+    let hits = store.search_paths("test_helper", 10).unwrap();
+    let paths: Vec<&str> = hits.iter().map(|n| n.path.as_str()).collect();
+    assert_eq!(paths, vec!["/proj/test_helper.rs"]);
+
+    // A bare `%` must be matched literally too, not treated as "match everything".
+    store
+        .upsert_entries(&[dummy_entry("/proj/100%-done.md", EntryKind::File, 1)])
+        .unwrap();
+    let hits = store.search_paths("100%", 10).unwrap();
+    let paths: Vec<&str> = hits.iter().map(|n| n.path.as_str()).collect();
+    assert_eq!(paths, vec!["/proj/100%-done.md"]);
+}
+
+#[test]
 fn open_stamps_schema_version_and_reopen_is_safe() {
     // D8: Store::open stamps PRAGMA user_version so a re-open skips the DDL + migration probes.
     // Prove the stamp lands, persists across re-open, and the schema stays fully usable.
