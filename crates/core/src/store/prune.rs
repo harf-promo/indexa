@@ -17,6 +17,10 @@ pub struct OrphanCounts {
     pub classifications: u64,
     /// Orphaned directory-app detection rows.
     pub directory_apps: u64,
+    /// Orphaned code-graph symbol rows (written by the same `deep` pass as `edges`, which
+    /// this struct already covers — `symbols` had been left out of the sweep, so a pruned
+    /// file's stale symbols lingered and `symbol_context` kept citing them).
+    pub symbols: u64,
 }
 
 impl OrphanCounts {
@@ -26,6 +30,7 @@ impl OrphanCounts {
             && self.queue == 0
             && self.classifications == 0
             && self.directory_apps == 0
+            && self.symbols == 0
     }
 }
 
@@ -53,6 +58,9 @@ impl Store {
             directory_apps: count(
                 "SELECT COUNT(*) FROM directory_apps WHERE path NOT IN (SELECT path FROM entries)",
             )?,
+            symbols: count(
+                "SELECT COUNT(*) FROM symbols WHERE path NOT IN (SELECT path FROM entries)",
+            )?,
         })
     }
 
@@ -79,6 +87,12 @@ impl Store {
         )?;
         tx.execute(
             "DELETE FROM edges WHERE from_path NOT IN (SELECT path FROM entries)",
+            [],
+        )?;
+        // Symbols are written by the same `deep` pass as edges (same path column contract:
+        // one row set per file, replaced on re-deep) — sweep them together.
+        tx.execute(
+            "DELETE FROM symbols WHERE path NOT IN (SELECT path FROM entries)",
             [],
         )?;
         tx.execute(
