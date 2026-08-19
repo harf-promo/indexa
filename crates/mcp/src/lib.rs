@@ -310,6 +310,61 @@ impl IndexaMcp {
     }
 }
 
+/// The `full` profile's static instructions prose — every tool it names is available under
+/// `ToolProfile::Full` (the unrestricted router), so this is safe to keep hand-written.
+/// Resources/Prompts are listed in both profiles' instructions because `tool_profile` only
+/// gates the `ToolRouter` (tools), never `list_resources`/`list_prompts` — both stay available
+/// under `core` too.
+const FULL_INSTRUCTIONS: &str =
+    "Indexa is a local context engine: a hierarchically-summarized index of your files. \
+     Navigate with `browse_tree` and `search`; call `get_summary` with tier=l0 (one-line \
+     abstract) to scan cheaply, then drill to l1 (full summary) or l2 (raw content). \
+     Use `read_file` for raw text; `ask` for grounded RAG answers (supports scope + mode). \
+     NOTE: `ask` synthesizes with Indexa's LOCAL model (e.g. ollama/gemma3:12b), not your \
+     model — so if you are a strong model, call `ask` with `synthesize: false` to get the \
+     retrieved context slice and write the answer yourself (better, and no local-model cost), \
+     or compose `search`/`get_chunk_context`/`export_pack` for raw context. \
+     Use `trigger_index` to index new or changed files. \
+     Context Packs: `list_packs`/`get_pack`/`create_pack`/`add_pack_paths`/\
+`remove_pack_paths`/`delete_pack`/`export_pack`/`search_pack` — \
+     named, cross-directory bundles ready to paste into any AI tool. \
+     Smart classification: `list_classifications`/`confirm_classification`/\
+`ignore_classification`. \
+     Code graph: `dependencies`/`who_imports`/`who_calls`/`blast_radius`/`code_graph`. \
+     Decision review: `list_open_decisions`/`get_decision`/`answer_decision`/\
+`dismiss_decision`/`decision_history` — questions Indexa needs a human judgment on; \
+     relay them to your user and answer on their behalf. \
+     Resources (`indexa://overview`, `indexa://packs`, `indexa://pack/{name}`, \
+`indexa://summary/{path}`) and Prompts (`onboarding-overview`, `explain-file`, \
+`pack-context`) expose the same index data for browsing/attachment.";
+
+/// The `core` profile's instructions — built from [`CORE_TOOL_NAMES`] itself (via the
+/// trailing "Available tools" sentence) rather than a second hand-maintained prose list, so a
+/// future edit to `CORE_TOOL_NAMES` can't silently leave this prose naming a tool the profile
+/// no longer exposes. The narrative sentences above it only ever name tools that are also in
+/// `CORE_TOOL_NAMES` — `core_instructions_never_names_a_non_core_tool` pins this.
+fn core_instructions() -> String {
+    format!(
+        "Indexa is a local context engine: a hierarchically-summarized index of your files. \
+         This server is running the CORE tool profile — a bounded retrieval + graph/pack/\
+         decision subset; every other tool is hidden from `tools/list` and rejected if called. \
+         Use `search` for keyword+semantic search over indexed content, and `ask` for grounded \
+         RAG answers. NOTE: `ask` synthesizes with Indexa's LOCAL model (e.g. ollama/gemma3:12b), \
+         not your model — if you are a strong model, call `ask` with `synthesize: false` to get \
+         the retrieved context slice and write the answer yourself instead (better, and no \
+         local-model cost). Code graph: `dependencies`/`who_calls`/`blast_radius`. Context \
+         Packs: `list_packs`/`search_pack`/`export_pack` — named, cross-directory bundles ready \
+         to paste into any AI tool; `add_note` writes something you learned back into a pack. \
+         Decision review: `list_open_decisions` — questions Indexa needs a human judgment on; \
+         relay them to your user and answer on their behalf. \
+         Resources (`indexa://overview`, `indexa://packs`, `indexa://pack/{{name}}`, \
+`indexa://summary/{{path}}`) and Prompts (`onboarding-overview`, `explain-file`, \
+`pack-context`) expose the same index data for browsing/attachment. \
+         Available tools in this profile: {}.",
+        CORE_TOOL_NAMES.join(", ")
+    )
+}
+
 #[tool_handler(router = self.active_tool_router())]
 impl ServerHandler for IndexaMcp {
     fn get_info(&self) -> ServerInfo {
@@ -317,6 +372,13 @@ impl ServerHandler for IndexaMcp {
         let mut server_info = Implementation::from_build_env();
         server_info.name = "indexa".to_owned();
         server_info.version = env!("CARGO_PKG_VERSION").to_owned();
+        // 3.2 / Wave 7: the instructions prose must reflect what `self.tool_profile` actually
+        // exposes — a `core`-profile caller told about a tool it can't reach (e.g. `read_file`,
+        // `code_graph`) will call it and get rejected. See `core_instructions`.
+        let instructions = match self.tool_profile {
+            ToolProfile::Full => FULL_INSTRUCTIONS.to_owned(),
+            ToolProfile::Core => core_instructions(),
+        };
         ServerInfo::new(
             ServerCapabilities::builder()
                 .enable_tools()
@@ -325,30 +387,7 @@ impl ServerHandler for IndexaMcp {
                 .build(),
         )
         .with_server_info(server_info)
-        .with_instructions(
-            "Indexa is a local context engine: a hierarchically-summarized index of your files. \
-             Navigate with `browse_tree` and `search`; call `get_summary` with tier=l0 (one-line \
-             abstract) to scan cheaply, then drill to l1 (full summary) or l2 (raw content). \
-             Use `read_file` for raw text; `ask` for grounded RAG answers (supports scope + mode). \
-             NOTE: `ask` synthesizes with Indexa's LOCAL model (e.g. ollama/gemma3:12b), not your \
-             model — so if you are a strong model, call `ask` with `synthesize: false` to get the \
-             retrieved context slice and write the answer yourself (better, and no local-model cost), \
-             or compose `search`/`get_chunk_context`/`export_pack` for raw context. \
-             Use `trigger_index` to index new or changed files. \
-             Context Packs: `list_packs`/`get_pack`/`create_pack`/`add_pack_paths`/\
-`remove_pack_paths`/`delete_pack`/`export_pack`/`search_pack` — \
-             named, cross-directory bundles ready to paste into any AI tool. \
-             Smart classification: `list_classifications`/`confirm_classification`/\
-`ignore_classification`. \
-             Code graph: `dependencies`/`who_imports`/`who_calls`/`blast_radius`/`code_graph`. \
-             Decision review: `list_open_decisions`/`get_decision`/`answer_decision`/\
-`dismiss_decision`/`decision_history` — questions Indexa needs a human judgment on; \
-             relay them to your user and answer on their behalf. \
-             Resources (`indexa://overview`, `indexa://packs`, `indexa://pack/{name}`, \
-`indexa://summary/{path}`) and Prompts (`onboarding-overview`, `explain-file`, \
-`pack-context`) expose the same index data for browsing/attachment."
-                .to_owned(),
-        )
+        .with_instructions(instructions)
     }
 
     // ── Resources (read-only index artifacts) ──────────────────────────────────
@@ -729,6 +768,75 @@ mod tests {
                 "CORE_TOOL_NAMES has '{name}', which is not a real tool — typo?"
             );
         }
+    }
+
+    /// Wave 7 bug 2 — `get_info()`'s `core`-profile instructions must never name a tool the
+    /// `core` profile doesn't actually expose (a caller told about `read_file`/`code_graph`/etc.
+    /// would call it and get rejected by `active_tool_router`). Every backtick-quoted plain
+    /// snake_case identifier in the prose (resource URIs and prompt names contain `:`/`/`/`-`
+    /// and are skipped) must be a real `CORE_TOOL_NAMES` entry.
+    #[test]
+    fn core_instructions_never_names_a_non_core_tool() {
+        let text = core_instructions();
+        let parts: Vec<&str> = text.split('`').collect();
+        let mut distinct_tool_terms: std::collections::HashSet<&str> =
+            std::collections::HashSet::new();
+        for (i, part) in parts.iter().enumerate() {
+            // `split('`')` alternates plain-text / backtick-quoted spans — odd indices are
+            // the backtick-quoted ones.
+            if i % 2 != 1 {
+                continue;
+            }
+            let is_snake_case_identifier =
+                !part.is_empty() && part.chars().all(|c| c.is_ascii_lowercase() || c == '_');
+            if !is_snake_case_identifier {
+                continue; // a resource URI, prompt name, or "synthesize: false" — not a tool name
+            }
+            assert!(
+                CORE_TOOL_NAMES.contains(part),
+                "core_instructions() names `{part}`, which is NOT in CORE_TOOL_NAMES — a \
+                 core-profile caller would be told about a tool it can't actually call"
+            );
+            distinct_tool_terms.insert(part);
+        }
+        // Sanity on the DISTINCT set (not raw mention count — `ask` alone appears 3 times, so a
+        // naive tally could reach `CORE_TOOL_NAMES.len()` even if several real core tools were
+        // silently dropped from the prose while `ask`/`search` kept being repeated).
+        for name in CORE_TOOL_NAMES {
+            assert!(
+                distinct_tool_terms.contains(name),
+                "core_instructions() never mentions core tool `{name}` even once"
+            );
+        }
+    }
+
+    /// Wave 7 bug 2 — `get_info()` actually wires `core_instructions()`/`FULL_INSTRUCTIONS`
+    /// through to the live `ToolProfile`, not just as dead helper functions.
+    #[test]
+    fn get_info_instructions_match_the_live_tool_profile() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let full = mcp_with_db(&dbdir);
+        assert_eq!(
+            full.get_info().instructions.as_deref(),
+            Some(FULL_INSTRUCTIONS),
+            "full profile must be byte-identical to pre-3.2 instructions"
+        );
+
+        let dbdir2 = tempfile::tempdir().unwrap();
+        let dbpath = dbdir2.path().join("idx.db");
+        let _ = Store::open(&dbpath).unwrap();
+        let core = IndexaMcp::new_with_profile(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+            ToolProfile::Core,
+        );
+        assert_eq!(
+            core.get_info().instructions,
+            Some(core_instructions()),
+            "core profile must serve the core-specific instructions"
+        );
     }
 
     /// 3.2 — `core` profile: `list_tools` advertises only the core subset, and calling a
@@ -1671,6 +1779,153 @@ mod tests {
             .unwrap(),
         );
         assert!(out.contains("/proj/widget.rs"), "{out}");
+    }
+
+    /// Wave 7 bug 3a — the `ext:`/`type:` filter is applied AFTER `hybrid_search_with_ann`
+    /// already truncated to the requested `limit`, so a real match ranked below that naive
+    /// cutoff was silently invisible ("no results" when a match genuinely exists further down).
+    /// Four short, tightly-matching `.md` chunks outrank one long, diluted `.rs` chunk that
+    /// also matches "widget" (BM25 length-normalizes, so the long document ranks worse) —
+    /// with `limit: 1`, a naive fetch-then-filter would already have thrown the `.rs` hit away
+    /// before the filter ever sees it.
+    #[tokio::test]
+    async fn ext_predicate_finds_a_match_below_the_naive_limit_then_filter_cutoff() {
+        use indexa_core::store::ChunkRecord;
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let short = |path: &str| ChunkRecord {
+                entry_path: path.to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: "widget".to_owned(),
+                language: None,
+                embedding: None,
+                embed_model: None,
+                content_hash: None,
+            };
+            // BM25 length-normalizes: a "widget" mention diluted across a long document
+            // ranks below four short, single-word "widget" chunks.
+            let long_text = format!("{}widget {}", "filler ".repeat(200), "filler ".repeat(200));
+            store
+                .upsert_chunks(&[
+                    short("/proj/a.md"),
+                    short("/proj/b.md"),
+                    short("/proj/c.md"),
+                    short("/proj/d.md"),
+                    ChunkRecord {
+                        entry_path: "/proj/impl.rs".to_owned(),
+                        seq: 0,
+                        heading: String::new(),
+                        text: long_text,
+                        language: None,
+                        embedding: None,
+                        embed_model: None,
+                        content_hash: None,
+                    },
+                ])
+                .unwrap();
+        }
+        let mut cfg = Config::default();
+        cfg.retrieval.query_predicates = true;
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(cfg),
+        );
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let out = text_of(
+            mcp.search(Parameters(SearchParams {
+                query: "ext:rs widget".into(),
+                limit: Some(1),
+                scope: None,
+                mode: Some("sparse".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            out.contains("/proj/impl.rs"),
+            "a genuine .rs match ranked below the naive limit=1 cutoff must still surface: {out}"
+        );
+    }
+
+    /// Wave 7 bug 3b — `ext:` matching must be case-insensitive in both directions: an
+    /// uppercase predicate value must match a lowercase stored extension, and vice versa.
+    #[tokio::test]
+    async fn ext_predicate_matches_case_insensitively_both_directions() {
+        use indexa_core::store::ChunkRecord;
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let chunk = |path: &str| ChunkRecord {
+                entry_path: path.to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: "a widget function definition".to_owned(),
+                language: None,
+                embedding: None,
+                embed_model: None,
+                content_hash: None,
+            };
+            store
+                .upsert_chunks(&[chunk("/proj/lower.rs"), chunk("/proj/UPPER.RS")])
+                .unwrap();
+        }
+        let mut cfg = Config::default();
+        cfg.retrieval.query_predicates = true;
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(cfg),
+        );
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // Direction 1: an UPPERCASE predicate value must match a lowercase-extension file.
+        let out_upper_predicate = text_of(
+            mcp.search(Parameters(SearchParams {
+                query: "ext:RS widget".into(),
+                limit: None,
+                scope: None,
+                mode: Some("sparse".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            out_upper_predicate.contains("/proj/lower.rs"),
+            "ext:RS must match a stored .rs file: {out_upper_predicate}"
+        );
+        // Direction 2: a lowercase predicate value must match an UPPERCASE-extension file.
+        let out_lower_predicate = text_of(
+            mcp.search(Parameters(SearchParams {
+                query: "ext:rs widget".into(),
+                limit: None,
+                scope: None,
+                mode: Some("sparse".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            out_lower_predicate.contains("/proj/UPPER.RS"),
+            "ext:rs must match a stored .RS file: {out_lower_predicate}"
+        );
     }
 
     #[tokio::test]
