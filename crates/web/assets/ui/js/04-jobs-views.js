@@ -79,8 +79,13 @@ function subscribeJob(jobId, path, kind) {
         // Post-completion guidance for deep/index jobs: toast + welcome-panel update.
         if (j.kind === 'deep' || j.kind === 'index') {
           var folderName = (j.path || '').split('/').pop() || j.path || 'folder';
-          toast('✓ Context ready for “' + escapeHtml(folderName) + '” — ' +
-            '<a href=”#” onclick=”switchTab(\'chat\');return false;” style=”color:var(--accent)”>Ask a question →</a>', 'info');
+          // toast() renders msg as a plain text node (no HTML parsing) — route the CTA
+          // through its action button instead of embedding an <a> tag as markup, which
+          // used to render as literal, unclickable source text.
+          toast('✓ Context ready for “' + folderName + '”', 'info', {
+            label: 'Ask a question →',
+            onClick: function() { switchTab('chat'); },
+          });
           if (typeof onContextReady === 'function') onContextReady(folderName);
         }
 

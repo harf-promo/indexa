@@ -14,6 +14,12 @@
 }
 .modal h2 { font-size: 15px; font-weight: 600; margin-bottom: 16px; }
 /* In-app confirm dialog (replaces native confirm()) */
+/* confirmModal() can be opened from inside an already-open drawer (e.g. the "Set embedder"
+   confirm from Settings, or "Answer all" from the Review drawer) — .confirm-overlay inherits
+   .modal-overlay's z-index: var(--z-overlay) (100), below .drawer-overlay's --z-drawer (150),
+   so it painted UNDER the drawer: invisible, but still focused and blind-confirmable on the
+   next Enter/click. Lift it above both the drawer and its backdrop. */
+.confirm-overlay { z-index: var(--z-modal); }
 .confirm-modal { width: 420px; }
 .confirm-msg { font-size: 14px; line-height: 1.6; color: var(--text); margin-bottom: 18px; }
 .modal .path-row { display: flex; gap: 8px; margin-bottom: 8px; }

@@ -41,24 +41,10 @@ async function fireJob(kind, path, force) {
   }
 }
 
-// Trigger an index job for every currently-indexed root. Called from the sidebar
-// refresh button and 27-health.js "Re-index now" banner.
-async function reindexAll() {  // eslint-disable-line no-unused-vars
-  var btn = document.querySelector('.app-sidebar button[onclick="reindexAll()"]');
-  if (btn) btn.disabled = true;
-  try {
-    var r = await fetch('/api/roots');
-    if (!r.ok) { if (typeof toast === 'function') toast('Could not fetch roots', 'error'); return; }
-    var roots = await r.json();
-    for (var i = 0; i < roots.length; i++) {
-      if (typeof fireJob === 'function') await fireJob('index', roots[i].path);
-    }
-  } catch(e) {
-    if (typeof toast === 'function') toast('Reindex error: ' + e.message, 'error');
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
+// reindexAll() lives in 08-util-palette-init.js — this file's concat position is earlier
+// (crates/web/src/lib.rs), so a same-named function declared here would silently be the
+// dead, shadowed one (last declaration at a given scope wins). Its useful bits (the !r.ok
+// check, disabling the sidebar button mid-run) are merged into the surviving definition.
 
 /* Calm, STATIC per-row context-coverage glyph. Replaces the old per-row pending
    strobe: instead of a pulsing spinner on every folder during a subtree build, each dir
@@ -281,9 +267,9 @@ function buildTreeNode(node) {
     target.textContent = '⋯';
     try {
       await fetch('/api/queue/retry?path=' + encodeURIComponent(path), { method: 'POST' });
-      toast('Queued retry for "' + escapeHtml(path.split('/').pop() || path) + '"', 'info');
+      toast('Queued retry for "' + (path.split('/').pop() || path) + '"', 'info');
       setTimeout(function() { refreshTree(); }, 400);
-    } catch(err) { toast('Retry failed: ' + escapeHtml(err.message), 'error'); }
+    } catch(err) { toast('Retry failed: ' + err.message, 'error'); }
   });
   treeList.addEventListener('keydown', function(e) {
     var target = e.target.closest('.cov-retry');

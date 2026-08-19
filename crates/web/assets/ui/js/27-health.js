@@ -67,16 +67,29 @@
     document.body.insertBefore(bar, document.body.firstChild);
   }
 
+  // Dismissal keys on the summaries COUNT, not a plain boolean: re-dismissing after every
+  // reload with unchanged coverage was worse than no dismiss button, but a flat "never show
+  // again" would hide a real regression (or the banner never confirming real progress). If
+  // the count when the user dismissed differs from the current count, coverage moved since
+  // then — the banner is legitimately showing new information and returns.
+  var THIN_DISMISS_KEY = 'indexa_thin_dismissed_at_summaries';
+
   function showThinContextBanner(h) {
     if (!h.thin_context || document.getElementById('thin-context-banner')) return;
     var entries = h.entries || 0;
     var summaries = h.summaries || 0;
+    var dismissedAt = localStorage.getItem(THIN_DISMISS_KEY);
+    if (dismissedAt !== null && Number(dismissedAt) === summaries) return;
     var pct = entries ? Math.round((100 * summaries) / entries) : 0;
     var bar = makeBanner(
       'thin-context-banner',
       'Hierarchical context is thin (' + pct + '% summarized) — folder overviews and Export need summaries. Pick a project and click Build context.'
     );
-    bar.appendChild(dismissButton(bar, 'Dismiss thin-context warning'));
+    var dismiss = dismissButton(bar, 'Dismiss thin-context warning');
+    dismiss.addEventListener('click', function () {
+      localStorage.setItem(THIN_DISMISS_KEY, String(summaries));
+    });
+    bar.appendChild(dismiss);
     document.body.insertBefore(bar, document.body.firstChild);
   }
 

@@ -513,6 +513,75 @@ mod tests {
         assert!(UI_JS.contains("/api/ask"));
     }
 
+    /// Every `NN-name.js` fragment shares one global scope once concatenated (no modules,
+    /// no build step) — a `function NAME(...)` declared in two fragments silently shadows
+    /// the earlier one (JS: last top-level declaration at a scope wins), invisible to
+    /// fmt/clippy/test and to any linter, since each fragment parses fine on its own. This
+    /// is exactly how `toggleSound`/`reindexAll` went dead in two fragments for a real
+    /// release before being caught by hand. `UI_JS` is `concat!` of the fragments with no
+    /// separator inserted — each source file ends in its own trailing newline, so scanning
+    /// for start-of-line `function NAME(` in the joined string is equivalent to scanning
+    /// every fragment individually.
+    #[test]
+    fn no_top_level_function_is_declared_in_two_js_fragments() {
+        let mut counts: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+        for line in UI_JS.split('\n') {
+            let Some(rest) = line.strip_prefix("function ") else {
+                continue;
+            };
+            let name_end = rest
+                .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+                .unwrap_or(rest.len());
+            let name = &rest[..name_end];
+            // A bare `function (` (anonymous) or a name immediately followed by something
+            // other than `(` (e.g. `function foo` mid-comment) isn't a real declaration.
+            if name.is_empty() || !rest[name_end..].starts_with('(') {
+                continue;
+            }
+            *counts.entry(name).or_insert(0) += 1;
+        }
+        let dupes: Vec<&str> = counts
+            .into_iter()
+            .filter(|(_, n)| *n > 1)
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            dupes.is_empty(),
+            "top-level function(s) declared in more than one JS fragment (the later one \
+             silently wins, the earlier is dead code): {dupes:?}"
+        );
+    }
+
+    /// Every `NN-name.js`/`.css` file in `assets/ui/{js,css}` must be listed in this file's
+    /// `UI_JS`/`UI_CSS` `concat!` — a new fragment added to the directory but never wired
+    /// into the concat list compiles fine and is simply never served, dead on arrival.
+    #[test]
+    fn every_ui_fragment_on_disk_is_wired_into_the_concat_list() {
+        let lib_rs_src = include_str!("lib.rs");
+        for sub in ["js", "css"] {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/ui")
+                .join(sub);
+            let mut missing = Vec::new();
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().and_then(|e| e.to_str()) != Some(sub) {
+                    continue;
+                }
+                let name = path.file_name().unwrap().to_str().unwrap();
+                let needle = format!("assets/ui/{sub}/{name}\")");
+                if !lib_rs_src.contains(&needle) {
+                    missing.push(name.to_owned());
+                }
+            }
+            assert!(
+                missing.is_empty(),
+                "{sub} fragment(s) on disk but not include_str!'d into UI_{}: {missing:?}",
+                sub.to_uppercase()
+            );
+        }
+    }
+
     // ── Test scaffolding ────────────────────────────────────────────────────────
     // Stub AI backends: the handlers exercised below (stats/search/keys) never call
     // them, but `AppState` requires concrete trait objects.
