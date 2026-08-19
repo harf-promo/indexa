@@ -233,6 +233,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory to `0700` — so on a shared host other local users can't read the indexed corpus (which
   can include secrets on a whole-machine scan) or the logs. Fail-open; matches the existing
   `config.toml` 0600 hardening. No-op on Windows.
+- **`config.toml` permissions were only enforced on write, never on read.** `save()` has always
+  written `config.toml` 0600 (TOCTOU-safe create + re-tighten), but the documented way to set
+  `[api_keys]` is hand-authoring the TOML directly — a file created that way (e.g. by a text editor)
+  keeps whatever the umask left it at, commonly `0644` (group/other-readable), and `load()` never
+  checked. `config::load` now mirrors `Store::open`'s unconditional re-tighten on unix: when the
+  loaded config actually has a non-empty `[api_keys]` section, a group/other-readable file is
+  silently re-tightened to `0600` (fail-open — a permissions error never blocks startup); a config
+  with no keys set is left untouched, so this never fires as noise. `indexa doctor` now reports the
+  config file's permission status (only when keys are present) so a tighten that failed (e.g.
+  read-only mount) is visible rather than silent. `USAGE.md`'s `[api_keys]` comment corrected — it
+  previously implied the file is always 0600, which was only true for `save()`'s own writes.
 - **`pack add-url` can no longer be redirected into your private network (SSRF).** The remote-source
   fetch followed up to 10 redirects with no host check, so an external URL could `3xx` to
   `169.254.169.254` (cloud metadata), `localhost:7620`, or an internal service and pull the response

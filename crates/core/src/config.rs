@@ -246,6 +246,18 @@ pub struct ApiKeysConfig {
     pub google: Option<String>,
 }
 
+impl ApiKeysConfig {
+    /// True if any provider key is set to a non-empty value — i.e. this config actually
+    /// holds something sensitive that permission hardening should protect. An absent or
+    /// blank `[api_keys]` section (the common case) returns `false`, so permission checks
+    /// that gate on this never warn/tighten a config with nothing worth protecting.
+    pub fn has_any(&self) -> bool {
+        [&self.openai, &self.anthropic, &self.google]
+            .into_iter()
+            .any(|k| k.as_deref().is_some_and(|s| !s.is_empty()))
+    }
+}
+
 // ── Embedding ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -936,7 +948,30 @@ pub fn load(path: &Path) -> Result<Config> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading config: {}", path.display()))?;
 
-    toml::from_str(&text).with_context(|| format!("parsing config: {}", path.display()))
+    let cfg: Config =
+        toml::from_str(&text).with_context(|| format!("parsing config: {}", path.display()))?;
+
+    // `save()` always writes 0600 (with a TOCTOU-safe create + re-tighten), but the documented
+    // way to set `[api_keys]` is hand-authoring the TOML directly — a file created that way
+    // (e.g. by a text editor) is left at the umask default, commonly 0644 (group/other-readable).
+    // Mirror `Store::open`'s unconditional re-tighten of `index.db` on every open: fail-open (a
+    // permissions error must never block startup) and unix-only. Gated on `has_any()` so a config
+    // with no keys in it — the common case — is never touched or warned about; there's nothing
+    // sensitive to protect.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if cfg.api_keys.has_any() {
+            if let Ok(meta) = std::fs::metadata(path) {
+                let mode = meta.permissions().mode() & 0o777;
+                if mode & 0o077 != 0 {
+                    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+                }
+            }
+        }
+    }
+
+    Ok(cfg)
 }
 
 /// Load config from the default platform path.
@@ -1151,6 +1186,79 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_retightens_hand_authored_config_with_api_keys() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("indexa-cfg-load-test-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Simulate a config hand-authored by a text editor under a permissive umask: valid
+        // TOML with a real API key, but written directly (never round-tripped through
+        // `save()`) so it keeps the loose mode.
+        std::fs::write(&path, "[api_keys]\nopenai = \"sk-hand-authored-secret\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let cfg = load(&path).unwrap();
+        assert_eq!(
+            cfg.api_keys.openai.as_deref(),
+            Some("sk-hand-authored-secret")
+        );
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "load() must re-tighten a loose config that has API keys set, got {mode:o}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_leaves_loose_permissions_alone_when_api_keys_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("indexa-cfg-load-noop-test-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A config with no keys (the common case) is left exactly as-is — no false-positive
+        // tightening/noise for a file that has nothing sensitive in it.
+        std::fs::write(
+            &path,
+            "[api_keys]\nopenai = \"\"\nanthropic = \"\"\ngoogle = \"\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let cfg = load(&path).unwrap();
+        assert!(!cfg.api_keys.has_any());
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o644,
+            "load() must not touch permissions when [api_keys] is empty, got {mode:o}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn api_keys_has_any_detects_non_empty_values_only() {
+        let mut cfg = ApiKeysConfig::default();
+        assert!(!cfg.has_any(), "default (all None) must be false");
+
+        cfg.openai = Some(String::new());
+        assert!(!cfg.has_any(), "an empty string key must not count as set");
+
+        cfg.openai = Some("sk-real-key".to_owned());
+        assert!(cfg.has_any());
     }
 
     #[test]

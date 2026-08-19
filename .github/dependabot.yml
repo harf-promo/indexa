@@ -9,6 +9,18 @@ updates:
     labels:
       - dependencies
 
+  # apps/indexa-desktop is workspace-excluded (its own Cargo.lock, own dependency graph —
+  # see .gitignore / Cargo.toml's `exclude`) so it needs its own dependabot entry; the root
+  # entry above never sees it (C6).
+  - package-ecosystem: cargo
+    directory: "/apps/indexa-desktop"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
