@@ -36,7 +36,10 @@ ollama pull gemma3:4b          # file summaries (~2.5GB, Google)
 ollama pull gemma3:12b         # answers + directory roll-ups (~8GB, Google)
 ```
 
-All three run entirely locally — your data never leaves your machine. (`gemma3:4b` alone is enough to get started; `gemma3:12b` is used for answers and directory roll-up summaries.)
+All three run entirely locally — your data never leaves your machine. All three are required to get
+started with the defaults above: `gemma3:12b` is `[describer] dir_model` (directory roll-ups) *and*
+the default `[describer] model` used by `ask`, so `indexa doctor`/`deep`/`summarize` won't proceed
+without it pulled, not just `gemma3:4b`.
 
 ## Check your setup first
 

@@ -8,7 +8,7 @@
 //!
 //! The authoritative tool list is `golden_tools.txt` (enforced by the contract tests
 //! below — `tool_contract_golden_list` fails on any add/remove/rename, and
-//! `doc_tool_count_matches_code` keeps the counts in README/CLAUDE.md/docs honest).
+//! `doc_tool_count_matches_code` keeps the counts in README/AGENTS.md/USAGE.md/docs honest).
 //! Tool families: retrieval (`search`, `browse_tree`, `get_summary` l0/l1/l2,
 //! `read_file`, `ask`), code graph (`dependencies`, `who_imports`, `who_calls`,
 //! `blast_radius`, `code_graph`, `related_files`), Context Packs, Smart
@@ -709,7 +709,7 @@ mod tests {
         assert_eq!(
             actual, golden,
             "MCP tool surface changed. If intentional: INDEXA_UPDATE_GOLDEN=1 cargo test -p indexa-mcp, \
-             commit golden_tools.txt, and update the tool counts in README.md / CLAUDE.md / \
+             commit golden_tools.txt, and update the tool counts in README.md / AGENTS.md / USAGE.md / \
              docs/how-to/live-retrieval-over-mcp.md (doc_tool_count_matches_code enforces them)."
         );
     }
@@ -843,6 +843,7 @@ mod tests {
         for rel in [
             "README.md",
             "AGENTS.md",
+            "USAGE.md",
             "docs/how-to/live-retrieval-over-mcp.md",
         ] {
             let text = std::fs::read_to_string(repo.join(rel)).unwrap();

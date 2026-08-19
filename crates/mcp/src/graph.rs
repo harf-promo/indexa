@@ -709,7 +709,15 @@ impl IndexaMcp {
         if callers.is_empty() {
             out.push_str("\n\nCalled by: none found.");
         } else {
-            out.push_str(&format!("\n\nCalled by ({}):", callers.len()));
+            // `who_calls_resolved` is SQL-LIMIT-capped at `limit`, not a real total — when the
+            // result hits the cap exactly, say so instead of implying `callers.len()` is the
+            // whole count (there may be more callers beyond `limit`).
+            let trunc = if callers.len() == limit {
+                ", truncated — raise `limit` for more"
+            } else {
+                ""
+            };
+            out.push_str(&format!("\n\nCalled by ({}{trunc}):", callers.len()));
             for c in &callers {
                 out.push_str(&format!("\n  ↩ {} [{}]", c.path, c.tier.label()));
             }
