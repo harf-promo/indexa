@@ -5,12 +5,31 @@
 //! and `summarize`'s enqueue pass all depend on computing the *same* depth and
 //! ancestor chain, so they live here rather than being copy-pasted per crate.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 /// Path's `/`-or-`\`-separator count — the depth metric the summary queue sorts
 /// on (deepest first), so re-pended ancestors roll up after their children.
 pub fn path_depth(path: &str) -> i64 {
     path.chars().filter(|&c| c == '/' || c == '\\').count() as i64
+}
+
+/// Normalize `\` to `/` for separator-sensitive string matching — a `/`-delimited
+/// fragment literal (`"/node_modules/"`) or a `starts_with(prefix + "/")` prefix
+/// check never matches a Windows-persisted path (`C:\proj\node_modules\pkg`)
+/// without this. Borrows when there's no `\` to replace, so the hot,
+/// all-Unix-in-practice path allocates nothing.
+///
+/// Not a fix for splitting on separators (`rsplit('/')` etc.) — for that, match
+/// on `['/', '\\']` directly (see `basename`/`parent_dir` in
+/// `decisions::detectors`) rather than normalizing first, since a borrowed `&str`
+/// can't slice into an owned, separator-rewritten copy.
+pub fn norm_sep(path: &str) -> Cow<'_, str> {
+    if path.contains('\\') {
+        Cow::Owned(path.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(path)
+    }
 }
 
 /// The ancestor directories of `path`, from its immediate parent up to and
@@ -78,6 +97,18 @@ mod tests {
     fn ancestor_dirs_empty_when_outside_any_root() {
         let roots = vec![PathBuf::from("/proj")];
         assert!(ancestor_dirs_to_root(Path::new("/other/file.rs"), &roots).is_empty());
+    }
+
+    #[test]
+    fn norm_sep_replaces_backslashes_and_borrows_when_absent() {
+        assert_eq!(
+            norm_sep(r"C:\proj\node_modules\pkg"),
+            "C:/proj/node_modules/pkg"
+        );
+        match norm_sep("/a/b/c") {
+            Cow::Borrowed(s) => assert_eq!(s, "/a/b/c"),
+            Cow::Owned(_) => panic!("no backslash present — must not allocate"),
+        }
     }
 
     #[test]
