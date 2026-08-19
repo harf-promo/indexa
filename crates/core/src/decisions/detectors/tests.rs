@@ -1165,3 +1165,52 @@ fn run_detectors_skips_near_dup_differently_named_cluster() {
         "question must be dismissed"
     );
 }
+
+// ── M7: Windows path separators ──────────────────────────────────────────
+
+#[test]
+fn basename_and_parent_dir_handle_windows_style_paths() {
+    assert_eq!(basename(r"C:\Users\x\dev\a\foo.rs"), "foo.rs");
+    assert_eq!(parent_dir(r"C:\Users\x\dev\a\foo.rs"), r"C:\Users\x\dev\a");
+    // Unix paths are unaffected.
+    assert_eq!(basename("/a/b/foo.rs"), "foo.rs");
+    assert_eq!(parent_dir("/a/b/foo.rs"), "/a/b");
+    // No separator at all: the whole string is the basename, empty parent.
+    assert_eq!(basename("foo.rs"), "foo.rs");
+    assert_eq!(parent_dir("foo.rs"), "");
+}
+
+#[test]
+fn same_parent_and_near_dup_basenames_work_on_windows_style_paths() {
+    let siblings = vec![
+        r"C:\proj\crate_a\Cargo.toml".to_owned(),
+        r"C:\proj\crate_a\other.txt".to_owned(),
+    ];
+    assert!(same_parent(&siblings));
+    let not_siblings = vec![
+        r"C:\proj\crate_a\Cargo.toml".to_owned(),
+        r"C:\proj\crate_b\Cargo.toml".to_owned(),
+    ];
+    assert!(!same_parent(&not_siblings));
+
+    let same_basename = vec![
+        r"C:\dev\crates\query\src\qa.rs".to_owned(),
+        r"C:\dev\crates\web\src\qa.rs".to_owned(),
+    ];
+    assert!(near_dup_same_basenames(&same_basename));
+    let different_basename = vec![
+        r"C:\dev\crates\query\src\summarize.rs".to_owned(),
+        r"C:\dev\crates\web\src\jobs_exec.rs".to_owned(),
+    ];
+    assert!(!near_dup_same_basenames(&different_basename));
+}
+
+#[test]
+fn dup_in_generated_dir_and_archive_path_is_noise_match_windows_style_paths() {
+    assert!(dup_in_generated_dir(r"C:\proj\node_modules\pkg\index.js"));
+    assert!(archive_path_is_noise(
+        r"C:\app\mobile\build\ios\SourcePackages\absl.xcframework"
+    ));
+    assert!(!dup_in_generated_dir(r"C:\proj\src\main.rs"));
+    assert!(!archive_path_is_noise(r"C:\proj\src"));
+}
