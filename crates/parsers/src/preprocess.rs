@@ -337,24 +337,49 @@ mod tests {
 
         let tmp = tempfile::NamedTempFile::with_suffix(".txt").unwrap();
         std::fs::write(tmp.path(), vec![b'y'; 200_000]).unwrap(); // > one pipe buffer as stdin
+                                                                  // Generous timeout — this asserts "does not hang forever", not "is fast"; a loaded
+                                                                  // CI runner is not the failure mode this test exists to catch.
         let mut s = spec("*.txt", script.path().to_str().unwrap());
-        s.timeout = Duration::from_secs(15);
+        s.timeout = Duration::from_secs(30);
         s.max_output_bytes = 1024 * 1024;
         let p = PreprocessorParser::new(&s, ChunkParams::default()).unwrap();
 
+        // Call the private `run_command` directly rather than through `parse()`: `parse()`
+        // silently falls through to the native-text fallback on ANY failure (spawn error,
+        // nonzero exit, timeout, empty stdout — see its doc comment), which would make a
+        // real failure here indistinguishable from "the deadlock is back" — both just show
+        // up as DONE-MARKER missing. Asserting on `run_command`'s own `Option` first gives
+        // an unambiguous signal, and the length check catches a truncation short of a full
+        // hang (the timeout path already proves it isn't hanging).
         let start = std::time::Instant::now();
-        let extracted = p.parse(tmp.path()).unwrap();
+        let result = p.run_command(tmp.path());
+        let elapsed = start.elapsed();
         assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "must complete well within the timeout — hitting it here means the deadlock is back"
+            elapsed < Duration::from_secs(30),
+            "must complete well within the timeout — hitting it here means the deadlock is back \
+             (elapsed: {elapsed:?})"
+        );
+        let text = result.unwrap_or_else(|| {
+            panic!(
+                "run_command returned None (spawn failure / nonzero exit / empty stdout) after \
+                 {elapsed:?} — NOT the deadlock this test targets (that would hit the {:?} \
+                 timeout instead), but the command did not run as expected on this platform",
+                s.timeout
+            )
+        });
+        assert!(
+            text.len() > 200_000,
+            "captured stdout is only {} bytes, expected the full ~200 KB burst plus the \
+             trailing marker — truncated, not lost to a stuck pipe (elapsed: {elapsed:?})",
+            text.len()
         );
         assert!(
-            extracted
-                .chunks
-                .iter()
-                .any(|c| c.text.contains("DONE-MARKER")),
+            text.contains("DONE-MARKER"),
             "command's full stdout (including the trailing marker written after the large \
-             stdout burst) must have been captured, not lost to a stuck pipe"
+             stdout burst) must have been captured, not lost to a stuck pipe — got {} bytes, \
+             last 80: {:?}",
+            text.len(),
+            &text[text.len().saturating_sub(80)..]
         );
     }
 
