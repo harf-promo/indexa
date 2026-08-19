@@ -66,25 +66,13 @@ function toggleTheme() {
   }
 }
 
-// Sound-notification toggle — persists to localStorage; icon reflects muted state.
-(function initSound() {
-  var btn = document.getElementById('sound-toggle');
-  if (!btn) return;
-  var on = localStorage.getItem('indexa_sound') !== 'off';
-  btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-  btn.setAttribute('aria-label', on ? 'Mute sound notifications' : 'Unmute sound notifications');
-})();
-
-function toggleSound() {  // eslint-disable-line no-unused-vars
-  var on = localStorage.getItem('indexa_sound') !== 'off';
-  var next = !on;
-  localStorage.setItem('indexa_sound', next ? 'on' : 'off');
-  var btn = document.getElementById('sound-toggle');
-  if (btn) {
-    btn.setAttribute('aria-pressed', next ? 'true' : 'false');
-    btn.setAttribute('aria-label', next ? 'Mute sound notifications' : 'Unmute sound notifications');
-  }
-}
+// Sound-notification toggle (init + toggleSound()) lives in 08-util-palette-init.js — this
+// file's concat position is earlier, so a same-named function/IIFE declared here would be
+// the dead, shadowed one. It also keyed on 'indexa_sound' ('off' sentinel), a different
+// localStorage key than the surviving code's 'indexa_sound_muted' ('1' sentinel) — meaning
+// this IIFE's aria-pressed/aria-label were stuck permanently "unmuted" (that key is never
+// written by any current code, so the read is always null !== 'off' = true) regardless of
+// actual mute state. Its aria bookkeeping is merged into the surviving init/toggle below.
 
 /* ── Navigation ──
    'tree' | 'chat' | 'map'            → workspace views (in-place toggle)
@@ -132,7 +120,15 @@ let lastDrawerOpener = null;
    region (a complete focus trap). #toast is deliberately omitted: it's a non-focusable
    aria-live status region that should keep announcing while a drawer is open. Keep this
    list in sync with the top-level focusable siblings in index.html. */
-const DRAWER_BACKGROUND_REGIONS = ['.app-topbar', '.app-body', '#engine-bar', '#jobs-pill'];
+// The three health banners (27-health.js) are created at runtime, inserted as siblings of
+// .app-topbar/.app-body directly on <body> — not nested inside either, so they were never
+// covered by this list and stayed tab-reachable (and their controls clickable) above an
+// open drawer's scrim. querySelector on an ID that doesn't exist yet is a safe no-op, so
+// listing them unconditionally is fine whether or not a given banner is showing.
+const DRAWER_BACKGROUND_REGIONS = [
+  '.app-topbar', '.app-body', '#engine-bar', '#jobs-pill',
+  '#health-banner', '#cli-skew-banner', '#thin-context-banner',
+];
 
 function setBackgroundInert(on) {
   DRAWER_BACKGROUND_REGIONS.forEach(function(sel) {

@@ -193,7 +193,30 @@ function fillExportPacks(menu) {
     .catch(function () { if (sep) sep.hidden = true; });
 }
 
-/* Create a pack named after the selected folder and add that path. */
+/* "<parent>/<basename>" for a path — a collision-safer pack name than the bare basename
+   alone (mirrors the intent behind projects.rs's project_display_name, which qualifies
+   generic names like "admin"/"mobile"/"src" the same way). `null` when there's no parent
+   segment to qualify with. */
+function parentQualifiedName(path) {
+  var parts = path.split('/').filter(Boolean);
+  if (parts.length < 2) return null;
+  return parts[parts.length - 2] + '/' + parts[parts.length - 1];
+}
+
+function createPackAndAddPath(name, path) {
+  return fetch('/api/packs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name, description: path }),
+  }).then(function (r) {
+    return r.json().then(function (d) { return { status: r.status, ok: r.ok, d: d }; });
+  });
+}
+
+/* Create a pack named after the selected folder and add that path. The backend correctly
+   409s on a name collision (bare basenames like "admin"/"src" collide across projects), but
+   until now the JS had no recovery from that beyond an error toast with no path forward —
+   retry once with a parent-qualified name before giving up. */
 function newPackFromSelection() {  // eslint-disable-line no-unused-vars
   var path = (typeof selectedPath === 'string') ? selectedPath : '';
   if (!path) {
@@ -201,24 +224,37 @@ function newPackFromSelection() {  // eslint-disable-line no-unused-vars
     return;
   }
   var name = path.split('/').filter(Boolean).pop() || 'pack';
-  fetch('/api/packs', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: name, description: path }),
-  })
-    .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+
+  createPackAndAddPath(name, path)
     .then(function (res) {
-      if (!res.ok) throw new Error(res.d.error || 'Could not create pack');
-      return fetch('/api/packs/' + encodeURIComponent(name) + '/paths', {
+      if (res.ok) return { name: name };
+      if (res.status !== 409) throw new Error(res.d.error || 'Could not create pack');
+      var qualified = parentQualifiedName(path);
+      if (!qualified || qualified === name) {
+        throw new Error(
+          'A pack named "' + name + '" already exists — rename it from Settings → Context Packs.'
+        );
+      }
+      return createPackAndAddPath(qualified, path).then(function (res2) {
+        if (res2.ok) return { name: qualified };
+        throw new Error(
+          res2.status === 409
+            ? 'Packs named "' + name + '" and "' + qualified + '" both already exist — ' +
+              'rename one from Settings → Context Packs.'
+            : (res2.d.error || 'Could not create pack')
+        );
+      });
+    })
+    .then(function (created) {
+      return fetch('/api/packs/' + encodeURIComponent(created.name) + '/paths', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ paths: [path] }),
+      }).then(function (r) {
+        if (!r.ok) throw new Error('Pack created but adding the path failed');
+        if (typeof toast === 'function') toast('Pack “' + created.name + '” created from selection', 'info');
+        if (typeof loadPacks === 'function') loadPacks();
       });
-    })
-    .then(function (r) {
-      if (r && !r.ok) throw new Error('Pack created but adding the path failed');
-      if (typeof toast === 'function') toast('Pack “' + name + '” created from selection', 'info');
-      if (typeof loadPacks === 'function') loadPacks();
     })
     .catch(function (e) {
       if (typeof toast === 'function') toast(e.message || 'Pack error', 'error');
@@ -245,6 +281,11 @@ function doExportPack(name, format) {
       URL.revokeObjectURL(a.href);
     })
     .catch(function (e) {
+      // Unconditional toast, not just the in-drawer #pack-path-status span: this function is
+      // also reached from the toolbar Export menu's quickExportPack(), where the Settings
+      // drawer that span lives in is closed — the error used to be written where nobody
+      // could see it, reading as "nothing happened" on export failure.
+      if (typeof toast === 'function') toast('Pack export failed: ' + e.message, 'error');
       var statusEl = document.getElementById('pack-path-status');
       if (statusEl) { statusEl.textContent = e.message; }
     });

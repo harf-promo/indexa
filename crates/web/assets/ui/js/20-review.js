@@ -369,16 +369,43 @@ function dismissReview(id, card) {
 
 function removeReviewCard(card) {
   var list = card.parentElement;
-  // The focused button is about to vanish with its card — keep keyboard focus
-  // inside the drawer's logical flow instead of dropping it to <body>.
-  var next = card.nextElementSibling || card.previousElementSibling;
+  // This card's group header (nearest preceding .review-group-head sibling, found before
+  // removal) — recounted or removed once its group empties below. Previously left behind
+  // with a stale "N" count reading over zero remaining cards in that group.
+  var groupHead = null;
+  for (var h = card.previousElementSibling; h; h = h.previousElementSibling) {
+    if (h.classList.contains('review-group-head')) { groupHead = h; break; }
+  }
+  // The focused button is about to vanish with its card — keep keyboard focus inside the
+  // drawer's logical flow. Skip past group headers (no button) to the nearest actual card.
+  var focusTarget = null;
+  for (var n = card.nextElementSibling; n; n = n.nextElementSibling) {
+    if (n.classList.contains('review-card')) { focusTarget = n; break; }
+  }
+  if (!focusTarget) {
+    for (var p = card.previousElementSibling; p; p = p.previousElementSibling) {
+      if (p.classList.contains('review-card')) { focusTarget = p; break; }
+    }
+  }
   card.remove();
+  if (groupHead) {
+    var remaining = 0;
+    for (var s = groupHead.nextElementSibling; s && !s.classList.contains('review-group-head'); s = s.nextElementSibling) {
+      if (s.classList.contains('review-card')) remaining++;
+    }
+    if (remaining === 0) {
+      groupHead.remove();
+    } else {
+      var label = groupHead.textContent.split(' · ')[0];
+      groupHead.textContent = label + ' · ' + remaining;
+    }
+  }
   if (list && !list.children.length) {
     renderReviewEmpty(list);
     if (!list.hasAttribute('tabindex')) list.setAttribute('tabindex', '-1');
     list.focus();
-  } else if (next) {
-    var btn = next.querySelector('button');
+  } else if (focusTarget) {
+    var btn = focusTarget.querySelector('button');
     if (btn) btn.focus();
   }
 }
