@@ -62,6 +62,47 @@ function onContextReady(folderName) {
   }, 10000);
 }
 
+/* One row for a project returned by /api/projects: name, kind, an "N/M folders" coverage
+   readout when the API actually returned nonzero totals (M4 — covered/total were computed
+   and shipped over the wire but had no consumer; this is the consumer), and a Build context
+   button. Shared by the welcome sidebar list and the multi-project chooser modal (H3) so
+   both surfaces read the same real numbers instead of duplicating the row markup.
+   `beforeBuild`, if given, runs before the build call fires (the modal uses it to close
+   itself first). */
+function buildProjectRow(p, beforeBuild) {  // eslint-disable-line no-unused-vars
+  var row = document.createElement('div');
+  row.className = 'welcome-project-row';
+  var label = document.createElement('span');
+  label.className = 'welcome-project-name';
+  label.textContent = p.name;
+  var kind = document.createElement('span');
+  kind.className = 'welcome-project-kind';
+  var covText = (p.total > 0) ? ((p.covered || 0) + '/' + p.total + ' folders') : '';
+  kind.textContent = [p.app_name, covText].filter(Boolean).join(' \xb7 ');
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn-sm';
+  btn.textContent = 'Build context';
+  btn.addEventListener('click', function () {
+    if (typeof beforeBuild === 'function') beforeBuild();
+    if (typeof fireBuildContext === 'function') {
+      fireBuildContext(p.path, {
+        kind: 'dir',
+        chunk_count: p.chunk_count,
+        covered: p.covered,
+        total: p.total,
+        summary_state: p.has_summary ? 'done' : null,
+      });
+    } else if (typeof fireJob === 'function') {
+      fireJob(p.chunk_count > 0 ? 'summarize' : 'index', p.path);
+    }
+  });
+  row.appendChild(label);
+  row.appendChild(kind);
+  row.appendChild(btn);
+  return row;
+}
+
 /* Populate the welcome project list: uncovered detected apps get a Build context button. */
 async function loadWelcomeProjects() {
   var slot = document.getElementById('welcome-projects');
@@ -82,35 +123,7 @@ async function loadWelcomeProjects() {
     slot.textContent = '';
     slot.appendChild(head);
     uncovered.slice(0, 24).forEach(function (p) {
-      var row = document.createElement('div');
-      row.className = 'welcome-project-row';
-      var label = document.createElement('span');
-      label.className = 'welcome-project-name';
-      label.textContent = p.name;
-      var kind = document.createElement('span');
-      kind.className = 'welcome-project-kind';
-      kind.textContent = p.app_name || '';
-      var btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'btn-sm';
-      btn.textContent = 'Build context';
-      btn.addEventListener('click', function () {
-        if (typeof fireBuildContext === 'function') {
-          fireBuildContext(p.path, {
-            kind: 'dir',
-            chunk_count: p.chunk_count,
-            covered: p.covered,
-            total: p.total,
-            summary_state: p.has_summary ? 'done' : null,
-          });
-        } else if (typeof fireJob === 'function') {
-          fireJob(p.chunk_count > 0 ? 'summarize' : 'index', p.path);
-        }
-      });
-      row.appendChild(label);
-      row.appendChild(kind);
-      row.appendChild(btn);
-      slot.appendChild(row);
+      slot.appendChild(buildProjectRow(p));
     });
     slot.hidden = false;
   } catch (_) {

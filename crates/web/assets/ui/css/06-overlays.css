@@ -22,6 +22,11 @@
 .confirm-overlay { z-index: var(--z-modal); }
 .confirm-modal { width: 420px; }
 .confirm-msg { font-size: 14px; line-height: 1.6; color: var(--text); margin-bottom: 18px; }
+/* Multi-project chooser (H3) — reuses .confirm-overlay's z-index and .welcome-project-row's
+   list-row styling so it matches both the confirm dialog and the welcome sidebar list. */
+.project-chooser-modal { width: 460px; }
+.project-chooser-list { max-height: 320px; overflow-y: auto; margin-bottom: 14px; }
+.project-chooser-list .welcome-project-row:first-child { border-top: none; }
 .modal .path-row { display: flex; gap: 8px; margin-bottom: 8px; }
 /* Harf: text input — 4px corner, control boundary, green focus ring. */
 .modal .path-row input {

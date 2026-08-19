@@ -1311,7 +1311,11 @@ mod tests {
     #[tokio::test]
     async fn api_projects_returns_top_apps_with_coverage() {
         use indexa_core::store::DetectedApp;
-        let mut store = Store::open_in_memory().unwrap();
+        // File-backed, not in-memory: api_projects (M4) opens its own fresh connection to
+        // state.db_path instead of locking the shared store, so the handler's connection
+        // must reopen the SAME database this setup writes into (:memory: would not).
+        let db = temp_db_path("projects-coverage");
+        let mut store = Store::open(&db).unwrap();
         store
             .upsert_entries(&[
                 entry("/dev/indexa", EntryKind::Dir),
@@ -1357,7 +1361,7 @@ mod tests {
         store
             .upsert_summary(&summary("/dev/indexa", "dir", Some("/dev"), 1))
             .unwrap();
-        let app = build_router(state_with(store), 7620);
+        let app = build_router(state_with_db(store, db.clone()), 7620);
         let (status, json) = get_json(app, "/api/projects?path=/dev").await;
         assert_eq!(status, StatusCode::OK);
         let rows = json.as_array().expect("projects is an array");
@@ -1366,6 +1370,7 @@ mod tests {
         assert_eq!(rows[0]["has_summary"], true);
         assert_eq!(rows[0]["chunk_count"], 1);
         assert_eq!(rows[0]["app_name"], "Rust crate");
+        let _ = std::fs::remove_file(&db);
     }
 
     #[tokio::test]
