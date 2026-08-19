@@ -147,6 +147,14 @@ pub(crate) async fn cmd_doctor(
             println!("    {key} = {value}");
         }
     }
+    // Permission check (unix only) — only worth reporting when there's actually a key stored.
+    // `config::load` above already re-tightens a loose file to 0600 on a best-effort (fail-open)
+    // basis, so this mostly confirms that succeeded; it only warns when the file is STILL loose
+    // (e.g. the tighten itself failed — read-only mount, ownership mismatch).
+    #[cfg(unix)]
+    if let Some(line) = config_permission_line(&config_path, cfg.api_keys.has_any()) {
+        println!("{line}");
+    }
     println!();
 
     // Blocking prerequisites for "can I index right now?" — filled by the Ollama probe.
@@ -546,6 +554,36 @@ pub(crate) async fn cmd_doctor(
     Ok(())
 }
 
+/// Report line for the config file's Unix permissions (H5) — `None` when there's nothing
+/// sensitive to report (`has_keys` false, matching `config::load`'s own no-op gate) or the
+/// file doesn't exist. `config::load` (called before this, to build `cfg`) already re-tightens
+/// a loose file to 0600 on a best-effort (fail-open) basis, so a ⚠️ here means that tighten
+/// itself failed (e.g. a read-only mount or ownership mismatch), not just that the file was
+/// loose — it was already loose-checked-and-fixed by the time this runs.
+#[cfg(unix)]
+fn config_permission_line(config_path: &std::path::Path, has_keys: bool) -> Option<String> {
+    if !has_keys || !config_path.exists() {
+        return None;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    Some(match std::fs::metadata(config_path) {
+        Ok(meta) => {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                format!(
+                    "  ⚠️   {} is mode {mode:o} (group/other-readable) with API keys stored — \
+                     run: chmod 600 {}",
+                    config_path.display(),
+                    config_path.display()
+                )
+            } else {
+                "  ✅  permissions 0600 (API keys protected)".to_owned()
+            }
+        }
+        Err(e) => format!("  ⚠️   could not check config file permissions: {e:#}"),
+    })
+}
+
 /// True if `want` (a configured model name) is among Ollama's installed `models`,
 /// matching leniently across the implicit `:latest` tag (Ollama reports a model pulled
 /// as `nomic-embed-text` as `nomic-embed-text:latest`).
@@ -597,6 +635,8 @@ fn apply_ollama_env_vars(vars: &[(&str, &str)]) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::config_permission_line;
     use super::model_installed;
 
     #[test]
@@ -618,5 +658,73 @@ mod tests {
         let installed = vec!["gemma3:4b".to_owned()];
         assert!(!model_installed(&installed, "gemma3:12b"));
         assert!(model_installed(&installed, "gemma3:4b"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_permission_line_warns_on_loose_mode_with_keys() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("indexa-doctor-perm-test-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "[api_keys]\nopenai = \"sk-x\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let line = config_permission_line(&path, true).expect("keys present, file exists");
+        assert!(line.contains('⚠'), "expected a warning line, got: {line}");
+        assert!(
+            line.contains("644"),
+            "expected the mode in the line: {line}"
+        );
+        assert!(
+            line.contains(&path.display().to_string()),
+            "expected the path in the line: {line}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_permission_line_reports_ok_when_already_tight() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("indexa-doctor-perm-ok-test-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "[api_keys]\nopenai = \"sk-x\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let line = config_permission_line(&path, true).expect("keys present, file exists");
+        assert!(line.contains('✅'), "expected an OK line, got: {line}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_permission_line_is_silent_without_keys_or_missing_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "indexa-doctor-perm-none-test-{}",
+            std::process::id()
+        ));
+        let path = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "[api_keys]\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        // No keys present — even at a loose mode, this must produce no line (no false positive).
+        assert!(config_permission_line(&path, false).is_none());
+
+        // A missing file must also produce no line, regardless of `has_keys`.
+        let missing = dir.join("does-not-exist.toml");
+        assert!(config_permission_line(&missing, true).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
