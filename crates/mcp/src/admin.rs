@@ -181,12 +181,13 @@ impl IndexaMcp {
         let counts = store.prune_orphans().map_err(mcp_err)?;
         Ok(ok_text(format!(
             "Pruned {} orphaned chunk(s), {} stale queue row(s), {} summary row(s), {} \
-             classification(s), and {} app detection(s).",
+             classification(s), {} app detection(s), and {} symbol row(s).",
             counts.chunks,
             counts.queue,
             counts.summaries,
             counts.classifications,
-            counts.directory_apps
+            counts.directory_apps,
+            counts.symbols
         )))
     }
 
