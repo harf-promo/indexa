@@ -4,12 +4,12 @@ use indexa_embed::OllamaEmbedder;
 use indexa_query::summarize_subtree_sync;
 
 use super::helpers::{
-    parse_summary_mode, require_index_db, resolve_target_roots, select_summary_models,
+    require_index_db, resolve_summary_mode, resolve_target_roots, select_summary_models,
 };
 
 pub(crate) async fn cmd_summarize(
     paths: Vec<String>,
-    mode: String,
+    mode: Option<String>,
     passes: Option<u32>,
     cfg: &Config,
 ) -> Result<()> {
@@ -19,7 +19,7 @@ pub(crate) async fn cmd_summarize(
     };
 
     let mut summary_cfg = cfg.describer.clone();
-    summary_cfg.mode = parse_summary_mode(&mode)?;
+    summary_cfg.mode = resolve_summary_mode(mode.as_deref(), cfg.describer.mode.clone())?;
 
     // Pre-flight: for local Ollama, downgrade the dir roll-up model to one that
     // fits the budget (non-interactive CLI "ask me first"). For claude-code the

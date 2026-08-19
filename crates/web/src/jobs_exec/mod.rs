@@ -9,7 +9,8 @@ use indexa_core::{
     walker::{walk, WalkConfig},
 };
 use indexa_query::{
-    enqueue_subtree, process_queue_item_with_passes, requeue_subtree, QueueOutcome, MAX_DIR_DEFERS,
+    cleanup_chunks_for_mode, enqueue_subtree, process_queue_item_with_passes, requeue_subtree,
+    QueueOutcome, MAX_DIR_DEFERS,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -577,13 +578,29 @@ pub(crate) async fn run_summarize_phase(
 
     if done == 0 && errors > 0 {
         // Nothing succeeded AND there were failures (e.g. Ollama went down for the whole run) —
-        // report a failure, not a misleading "0 summaries generated" Done.
+        // report a failure, not a misleading "0 summaries generated" Done. Skip the chunk
+        // cleanup below too: nothing summarized means dropping chunks now would just lose data.
         finalize_failed(
             handle,
             "summarize",
             &anyhow::anyhow!("all {errors} summary item(s) failed — see indexa status / the log"),
         );
     } else {
+        // Compress and summaries-only both drop now-unwanted chunk rows once this subtree has
+        // been (re-)summarized — mirrors the CLI's `summarize_subtree_sync` (shared
+        // `cleanup_chunks_for_mode`), which the web path was previously missing entirely: a
+        // subtree switched to either mode via config never actually shrank until now.
+        match cleanup_chunks_for_mode(&mut job_store, &root, &cfg.mode) {
+            Ok(n) if n > 0 => tracing::info!(
+                mode = ?cfg.mode,
+                removed = n,
+                path,
+                "summarize: dropped now-unwanted chunk rows"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(path, error = %e, "summarize: chunk cleanup failed"),
+        }
+
         let summary = if errors > 0 {
             format!("{done} summaries generated, {errors} failed — see indexa status")
         } else {

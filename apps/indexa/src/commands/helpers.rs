@@ -566,6 +566,52 @@ pub(crate) fn parse_summary_mode(mode: &str) -> Result<SummaryMode> {
     }
 }
 
+/// Resolve the effective summary mode for a command invocation: an explicit `--mode` flag
+/// always overrides, and an omitted flag defers to `cfg_mode` (the config-loaded
+/// `[describer] mode`). Mirrors `build_embedder`'s `model_override.unwrap_or(&cfg.field)`
+/// "flag overrides config, omitted flag defers to config" pattern — `--mode` used to be a
+/// plain `String` with a hardcoded CLI default, which meant clap always supplied SOME value
+/// and the config's `mode` could never win even when the user never typed `--mode`.
+pub(crate) fn resolve_summary_mode(
+    cli_mode: Option<&str>,
+    cfg_mode: SummaryMode,
+) -> Result<SummaryMode> {
+    match cli_mode {
+        Some(m) => parse_summary_mode(m),
+        None => Ok(cfg_mode),
+    }
+}
+
+#[cfg(test)]
+mod summary_mode_tests {
+    use super::{resolve_summary_mode, SummaryMode};
+
+    #[test]
+    fn omitted_flag_defers_to_config_mode() {
+        let resolved = resolve_summary_mode(None, SummaryMode::SummariesOnly).unwrap();
+        assert_eq!(
+            resolved,
+            SummaryMode::SummariesOnly,
+            "an omitted --mode must preserve whatever [describer] mode config loaded, \
+             not silently fall back to augment"
+        );
+    }
+
+    #[test]
+    fn explicit_flag_overrides_config_mode() {
+        // Config says summaries-only, but the user explicitly typed --mode augment on
+        // this one invocation — the explicit flag must win.
+        let resolved = resolve_summary_mode(Some("augment"), SummaryMode::SummariesOnly).unwrap();
+        assert_eq!(resolved, SummaryMode::Augment);
+    }
+
+    #[test]
+    fn explicit_flag_still_validates() {
+        let err = resolve_summary_mode(Some("bogus"), SummaryMode::Augment).unwrap_err();
+        assert!(err.to_string().contains("unknown --mode"));
+    }
+}
+
 pub(crate) fn format_size(bytes: u64) -> String {
     const KB: u64 = 1_024;
     const MB: u64 = KB * 1_024;

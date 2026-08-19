@@ -229,7 +229,9 @@ reports the file's permission status when keys are present, including if an auto
 
 **Storage modes** (`[describer] mode`): `augment` (chunks + summaries, best recall) · `compress`
 (summarize, then drop chunks — ~10× smaller) · `summaries-only` (skip chunking — ~100× smaller, no
-hybrid retrieval; ~3.5 GB per 1 TB indexed).
+hybrid retrieval; ~3.5 GB per 1 TB indexed). Set it in config and just run `indexa index`/`deep`/
+`summarize` with no `--mode` flag to use it everywhere; an explicit `--mode` on any of those three
+commands overrides the config value for that one run.
 
 **Resource profiles:** `conservative` (8 GB headroom, gentlest) · `balanced` (5 GB, default) ·
 `performance` (3 GB, fastest/heaviest). The memory watchdog pauses LLM/embed work under genuine pressure

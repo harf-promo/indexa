@@ -165,6 +165,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`[describer] mode` was unreachable, and `summaries-only` didn't actually skip chunking.**
+  Three bugs, one root cause: `--mode` on `index`/`deep`/`summarize` was a plain `String` with
+  a hardcoded `"augment"` CLI default, so clap always supplied *some* value and the config file's
+  `[describer] mode` could never win even when `--mode` was never typed — the documented
+  "set `mode = "summaries-only"` in config and just run `indexa index`" recipe silently did
+  nothing. `--mode` is now `Option<String>`; an omitted flag defers to config, an explicit one
+  still overrides it (same pattern as `--embed-model`). Separately, `summaries-only` mode (the
+  ~100×-smaller, no-chunking mode this project's whole-computer-indexing plan depends on) never
+  actually skipped chunk storage in either deep path — both the CLI's `cmd_deep` and the web's
+  `run_deep_phase` called `upsert_chunks` unconditionally regardless of mode. Both now skip
+  chunk storage (and the embedding/contextual-blurb/caption/transcribe/OCR work that only exists
+  to enrich a stored chunk) in `summaries-only` mode, while still parsing files and writing
+  entries/edges/symbols so the subtree stays summarizable. Without a stored chunk to sample from,
+  `summarize_file` used to fall back to a raw byte slice of the file — header/binary garbage for
+  the ~84 non-plaintext formats (PDF, DOCX, XLSX, EPUB, …) `summaries-only` mostly indexes; it now
+  re-parses the file with the default registry first (`sample_via_parse`) and only drops to raw
+  bytes when parsing itself fails. `Compress` mode's
+  "drop chunks after summarizing" cleanup existed only in the CLI's `summarize_subtree_sync`; the
+  web's `run_summarize_phase` had no equivalent at all, so a subtree switched to `compress` (or
+  the newly-fixed `summaries-only`) via the web never actually shrank. Both now share one
+  `cleanup_chunks_for_mode` in `indexa_query`, so switching an already-chunked/embedded subtree
+  to either leaner mode removes the now-unwanted chunk rows instead of just stopping future
+  growth, from either entry point.
 - **PPTX speaker-notes bytes now count toward the zip-bomb running-total cap.** The
   `MAX_ZIP_TOTAL_BYTES` guard in the PPTX parser was meant to cover slides *and* notes
   (per its own comment) but only ever accumulated slide-body bytes — a deck with many

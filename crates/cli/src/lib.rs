@@ -65,9 +65,11 @@ pub enum Commands {
         #[arg(long)]
         embed_model: Option<String>,
 
-        /// Summary storage mode: augment (default), compress, summaries-only.
-        #[arg(long, default_value = "augment")]
-        mode: String,
+        /// Summary storage mode: augment, compress, summaries-only. Overrides
+        /// `[describer] mode` when given; omit to use the configured default (augment
+        /// unless changed in config.toml).
+        #[arg(long)]
+        mode: Option<String>,
 
         /// Refinement passes per summary. Default: 2 for new context, 1 for refresh.
         #[arg(long)]
@@ -147,9 +149,11 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// Summary storage mode: augment (default), compress, summaries-only.
-        #[arg(long, default_value = "augment")]
-        mode: String,
+        /// Summary storage mode: augment, compress, summaries-only. Overrides
+        /// `[describer] mode` when given; omit to use the configured default (augment
+        /// unless changed in config.toml).
+        #[arg(long)]
+        mode: Option<String>,
 
         /// Enable Anthropic Contextual Retrieval: generate a 1–2 sentence situating blurb
         /// per chunk before embedding. Reduces retrieval failures by ~35% at the cost of
@@ -186,9 +190,11 @@ pub enum Commands {
         #[arg(num_args = 0..)]
         paths: Vec<String>,
 
-        /// Summary mode: augment (default), compress, summaries-only.
-        #[arg(long, default_value = "augment")]
-        mode: String,
+        /// Summary mode: augment, compress, summaries-only. Overrides `[describer] mode`
+        /// when given; omit to use the configured default (augment unless changed in
+        /// config.toml).
+        #[arg(long)]
+        mode: Option<String>,
 
         /// Refinement passes per summary. Default: 2 for new context, 1 for refresh.
         /// Capped at the config `passes-cap` (default 3).
@@ -1636,6 +1642,95 @@ mod tests {
         match cli.command {
             Commands::Eval { rerank, .. } => {
                 assert!(rerank, "--rerank must thread through to true when passed");
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    // ── `--mode` (Index/Deep/Summarize): omitted must defer to `[describer] mode`, not a
+    // hardcoded CLI default — clap can no longer hand the command layer a value indistinguishable
+    // from an explicit `--mode augment` (see `resolve_summary_mode` in apps/indexa/commands/helpers.rs).
+
+    #[test]
+    fn cli_index_mode_omitted_is_none() {
+        let cli = Cli::try_parse_from(["indexa", "index", "~/Documents"]).unwrap();
+        match cli.command {
+            Commands::Index { mode, .. } => {
+                assert!(
+                    mode.is_none(),
+                    "omitted --mode must defer to config, not augment"
+                );
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_index_mode_explicit_is_some() {
+        let cli =
+            Cli::try_parse_from(["indexa", "index", "~/Documents", "--mode", "summaries-only"])
+                .unwrap();
+        match cli.command {
+            Commands::Index { mode, .. } => {
+                assert_eq!(mode.as_deref(), Some("summaries-only"));
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_deep_mode_omitted_is_none() {
+        let cli = Cli::try_parse_from(["indexa", "deep", "~/Documents"]).unwrap();
+        match cli.command {
+            Commands::Deep { mode, .. } => {
+                assert!(
+                    mode.is_none(),
+                    "omitted --mode must defer to config, not augment"
+                );
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_deep_mode_explicit_is_some() {
+        let cli =
+            Cli::try_parse_from(["indexa", "deep", "~/Documents", "--mode", "compress"]).unwrap();
+        match cli.command {
+            Commands::Deep { mode, .. } => {
+                assert_eq!(mode.as_deref(), Some("compress"));
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_summarize_mode_omitted_is_none() {
+        let cli = Cli::try_parse_from(["indexa", "summarize", "~/Documents"]).unwrap();
+        match cli.command {
+            Commands::Summarize { mode, .. } => {
+                assert!(
+                    mode.is_none(),
+                    "omitted --mode must defer to config, not augment"
+                );
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_summarize_mode_explicit_is_some() {
+        let cli = Cli::try_parse_from([
+            "indexa",
+            "summarize",
+            "~/Documents",
+            "--mode",
+            "summaries-only",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Summarize { mode, .. } => {
+                assert_eq!(mode.as_deref(), Some("summaries-only"));
             }
             _ => panic!("wrong command"),
         }
