@@ -2,11 +2,15 @@
 /target/
 # Build dirs of workspace-excluded helper crates (e.g. the offline tools/gen-fingerprints generator).
 tools/*/target/
+# Cargo.lock is ignored by default (helper/tool crates like tools/gen-fingerprints have no
+# reproducibility requirement) except for the two that ARE committed: the root workspace (a
+# binary crate — indexa) and apps/indexa-desktop (workspace-EXCLUDED; its Tauri dependency
+# graph floats into broken upstream releases — brotli 8.0.3, pcre2 — on a fresh CI/release
+# resolve). Both commits make the released CLI and desktop builds reproducible; --locked in
+# ci.yml/release.yml enforces it (C6).
 Cargo.lock
-# …but commit the desktop binary's lock: it's a workspace-EXCLUDED app whose Tauri
-# dependency graph floats into broken upstream releases (brotli 8.0.3, pcre2) on a
-# fresh CI/release resolve. A committed lock makes the desktop build reproducible.
-!apps/indexa-desktop/Cargo.lock
+!/Cargo.lock
+!/apps/indexa-desktop/Cargo.lock
 
 # IDE
 .idea/
