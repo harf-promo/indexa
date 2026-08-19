@@ -65,7 +65,7 @@ async fn run_auto_reindex(db_path: &std::path::Path, cfg: &Config) -> Result<()>
         if let Err(e) = cmd_index(
             vec![root.clone()],
             None,
-            "augment".to_owned(),
+            None, // defer to [describer] mode, same as every other auto-reindex trigger
             None,
             false,
             false, // contextual_prefix off here; config [describer] contextual_prefix still applies
@@ -178,7 +178,7 @@ async fn run_git_poll(db_path: PathBuf, cfg: Config) {
                         match cmd_index(
                             vec![root.clone()],
                             None,
-                            "augment".to_owned(),
+                            None, // defer to [describer] mode
                             None,
                             false,
                             false,
@@ -206,7 +206,7 @@ async fn run_git_poll(db_path: PathBuf, cfg: Config) {
                         if let Err(e) = cmd_index(
                             vec![root.clone()],
                             None,
-                            "augment".to_owned(),
+                            None, // defer to [describer] mode
                             None,
                             false,
                             false,

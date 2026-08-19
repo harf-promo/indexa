@@ -10,7 +10,7 @@ use indexa_query::{contextual::ContextualEvent, enqueue_subtree, redact::chunk_t
 use std::io::{IsTerminal, Write};
 
 use super::helpers::{
-    build_embedder, parse_summary_mode, preflight_ollama, require_index_db, resolve_target_roots,
+    build_embedder, preflight_ollama, require_index_db, resolve_summary_mode, resolve_target_roots,
 };
 
 #[allow(clippy::too_many_arguments)] // thin CLI fan-out; grouping into a struct would just move fields
@@ -18,7 +18,7 @@ pub(crate) async fn cmd_deep(
     paths: Vec<String>,
     embed_model_flag: Option<String>,
     dry_run: bool,
-    mode: String,
+    mode: Option<String>,
     contextual: bool,
     contextual_prefix: bool,
     no_embed: bool,
@@ -28,11 +28,22 @@ pub(crate) async fn cmd_deep(
     // Skip during dry-run (no actual model calls are made) and in `--no-embed`
     // mode (FTS-only: no embeddings, no contextual/caption/transcribe/OCR calls,
     // so no model needs to be reachable — this is what makes a CI run hermetic).
+    // NOT skipped for `summaries-only` alone: that mode still needs the file_model/
+    // dir_model describer check preflighted here, since `cmd_index`'s later summarize
+    // phase is the one that actually calls them.
     if !dry_run && !no_embed {
         preflight_ollama(cfg).await?;
     }
 
-    let summary_mode = parse_summary_mode(&mode)?;
+    let summary_mode = resolve_summary_mode(mode.as_deref(), cfg.describer.mode.clone())?;
+    // `summaries-only` never stores chunks, so every model call that only exists to enrich
+    // stored chunks (embeddings, contextual blurbs, image captions, audio transcription, PDF
+    // OCR) is wasted work here — treat it exactly like `--no-embed` for all of those, while
+    // still parsing + writing entries/edges/symbols. `summarize_file` re-parses the file
+    // itself when no chunks are stored (`sample_via_parse` in `indexa_query::summarize`), so
+    // this phase doesn't need to feed it a sample — but that means the describer prompt is
+    // built from the default 800/100-word registry, not this pass's `[chunking]`/parser config.
+    let skip_embed_work = no_embed || summary_mode == SummaryMode::SummariesOnly;
     let roots = resolve_target_roots(paths, false)?;
     let Some(db_path) = require_index_db()? else {
         return Ok(());
@@ -113,19 +124,19 @@ pub(crate) async fn cmd_deep(
     }
 
     let mut store = Store::open(&db_path)?;
-    // `--no-embed` builds no embedder at all (FTS-only); a plain run builds it once.
-    let embedder = if no_embed {
+    // `--no-embed` / `summaries-only` build no embedder at all.
+    let embedder = if skip_embed_work {
         None
     } else {
         Some(build_embedder(cfg, Some(&embed_model))?)
     };
 
     // Effective contextual-retrieval flag: CLI --contextual OR config [describer] contextual_retrieval.
-    // Forced off under --no-embed — a situating blurb needs an LLM call.
-    let use_contextual = !no_embed && (contextual || cfg.describer.contextual_retrieval);
+    // Forced off when embedding work is skipped — a situating blurb needs an LLM call.
+    let use_contextual = !skip_embed_work && (contextual || cfg.describer.contextual_retrieval);
     // Effective deterministic contextual-prefix flag: CLI --contextual-prefix OR config
-    // [describer] contextual_prefix. Forced off under --no-embed (nothing is embedded).
-    let use_prefix = !no_embed && (contextual_prefix || cfg.describer.contextual_prefix);
+    // [describer] contextual_prefix. Forced off when embedding work is skipped (nothing is embedded).
+    let use_prefix = !skip_embed_work && (contextual_prefix || cfg.describer.contextual_prefix);
     // Build the contextual LLM once (re-used per file) when the feature is enabled.
     // Uses the same file-describer model and base URL — no extra model pull needed.
     let ctx_llm: Option<OllamaLlm> = if use_contextual {
@@ -143,7 +154,7 @@ pub(crate) async fn cmd_deep(
 
     // Optional image captioning (opt-in): a vision model adds a caption chunk per image.
     // Built once, gated on [parsers.image] caption; shares the describer's Ollama endpoint.
-    let captioner = if !no_embed && cfg.parsers.image.caption {
+    let captioner = if !skip_embed_work && cfg.parsers.image.caption {
         let base = OllamaLlm::resolve_base_url(Some(&cfg.describer.base_url));
         Some(
             OllamaLlm::new(&base, cfg.parsers.image.caption_model())
@@ -154,13 +165,13 @@ pub(crate) async fn cmd_deep(
     };
     let caption_model = cfg.parsers.image.caption_model().to_owned();
     // Optional audio transcription (opt-in): a whisper.cpp-style CLI per audio file.
-    // Disabled under --no-embed (the FTS-only path makes no model/tool calls).
-    let transcribe = !no_embed && cfg.parsers.audio.transcribe;
+    // Disabled when embedding work is skipped (that path makes no model/tool calls).
+    let transcribe = !skip_embed_work && cfg.parsers.audio.transcribe;
     let transcribe_binary = cfg.parsers.audio.transcribe_binary().to_owned();
     let transcribe_model = cfg.parsers.audio.model.clone();
     // Optional PDF OCR (opt-in): pdftoppm + tesseract for scanned PDFs with no text layer.
-    // Disabled under --no-embed (the FTS-only path makes no model/tool calls).
-    let ocr_enabled = !no_embed && cfg.parsers.pdf.ocr_enabled();
+    // Disabled when embedding work is skipped (that path makes no model/tool calls).
+    let ocr_enabled = !skip_embed_work && cfg.parsers.pdf.ocr_enabled();
     let ocr_binary = cfg.parsers.pdf.ocr_binary().to_owned();
     let ocr_lang = cfg.parsers.pdf.ocr_lang.clone();
 
@@ -168,6 +179,11 @@ pub(crate) async fn cmd_deep(
         if no_embed {
             println!(
                 "Deep-scanning {} (FTS only — no embeddings)",
+                root.display()
+            );
+        } else if summary_mode == SummaryMode::SummariesOnly {
+            println!(
+                "Deep-scanning {} (summaries-only — chunks not stored)",
                 root.display()
             );
         } else {
@@ -274,6 +290,10 @@ pub(crate) async fn cmd_deep(
             // mtime may be stale and would wrongly skip an edited file (the web
             // pipeline avoids this by re-scanning first). Fall back to the stored
             // check when the filesystem gives us no mtime.
+            // NOTE: in `summaries-only` mode this check can never see a chunk row (none are
+            // ever stored), so it always re-parses every file on every pass — cheap relative
+            // to embedding, but the dominant cost once nothing is embedded. Known, not a bug;
+            // a real fix needs a freshness marker independent of the chunks table.
             let mtime_secs = entry
                 .modified
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -423,7 +443,9 @@ pub(crate) async fn cmd_deep(
             // `--no-embed` stores every chunk text-only (vector = None) for sparse/FTS
             // search; a later plain `deep` self-heals them (the skip-if-current check
             // requires COUNT(*) = COUNT(embedding), so vector-less chunks aren't "current").
-            let all_embeddings: Vec<Option<Vec<f32>>> = if no_embed {
+            // `summaries-only` never stores the chunk at all, so its embedding is moot —
+            // skip computing one exactly like `--no-embed` does.
+            let all_embeddings: Vec<Option<Vec<f32>>> = if skip_embed_work {
                 vec![None; extracted.chunks.len()]
             } else {
                 // Load the cached embedding map for this file (hash → Vec<f32>).
@@ -506,7 +528,7 @@ pub(crate) async fn cmd_deep(
                     indexa_embed::embed_all(
                         embedder
                             .as_ref()
-                            .expect("embedder is built when !no_embed")
+                            .expect("embedder is built whenever embedding work isn't skipped")
                             .as_ref(),
                         &miss_embed_refs,
                         indexa_embed::EMBED_BATCH_SIZE,
@@ -566,8 +588,8 @@ pub(crate) async fn cmd_deep(
                     text,
                     language: chunk.language.clone(),
                     embedding,
-                    // No model produced a vector in --no-embed mode → leave it NULL.
-                    embed_model: if no_embed {
+                    // No model produced a vector when embedding work is skipped → leave it NULL.
+                    embed_model: if skip_embed_work {
                         None
                     } else {
                         Some(embed_model.clone())
@@ -582,9 +604,16 @@ pub(crate) async fn cmd_deep(
             // entry-less paths) and silently deleted the next time `prune_orphans` runs (every
             // `indexa scan`, once ANY entries row exists) — wiping the embedding work this pass
             // just paid for. `upsert_entries` is an idempotent ON-CONFLICT upsert (matches the
-            // `watch` command's write path, which already does this correctly).
+            // `watch` command's write path, which already does this correctly). Always written
+            // regardless of mode — `summaries-only` still needs a live entries row so the file
+            // is summarizable.
             store.upsert_entries(&[(**entry).clone()])?;
-            store.upsert_chunks(&chunk_records)?;
+            // `summaries-only` never persists chunk rows — that's the entire ~100× size win;
+            // `summarize_file` re-parses the file itself (via the default registry) when no
+            // chunks are stored, so nothing downstream needs these in the store.
+            if summary_mode != SummaryMode::SummariesOnly {
+                store.upsert_chunks(&chunk_records)?;
+            }
             total_chunks += chunk_records.len();
 
             // Persist the file's code-graph edges (imports/defines) keyed on the same
@@ -646,21 +675,24 @@ pub(crate) async fn cmd_deep(
         }
         if no_embed {
             println!("  indexed {total_chunks} new chunks (FTS only, no embeddings).");
+        } else if summary_mode == SummaryMode::SummariesOnly {
+            println!(
+                "  parsed {total_chunks} chunks (summaries-only — not stored; entries + code graph updated)."
+            );
         } else {
             println!("  embedded {total_chunks} new chunks.");
         }
     }
 
-    // Enqueue summarization for non-Augment modes or always to populate the queue
-    if summary_mode != SummaryMode::SummariesOnly {
-        for root in &roots {
-            match enqueue_subtree(&mut store, root) {
-                Ok(n) if n > 0 => println!(
-                    "  enqueued {n} items for background summarization. Run `indexa worker` or use the web UI."
-                ),
-                Ok(_) => {}
-                Err(e) => println!("  warning: failed to enqueue summaries: {e}"),
-            }
+    // Enqueue summarization for every mode — `summaries-only` needs this MOST, since the
+    // summary is the only artifact this mode produces (no chunks/embeddings are stored above).
+    for root in &roots {
+        match enqueue_subtree(&mut store, root) {
+            Ok(n) if n > 0 => println!(
+                "  enqueued {n} items for background summarization. Run `indexa worker` or use the web UI."
+            ),
+            Ok(_) => {}
+            Err(e) => println!("  warning: failed to enqueue summaries: {e}"),
         }
     }
 

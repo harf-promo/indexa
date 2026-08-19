@@ -14,7 +14,7 @@ use super::{cmd_deep, cmd_scan, cmd_summarize};
 pub(crate) async fn cmd_index(
     paths: Vec<String>,
     embed_model: Option<String>,
-    mode: String,
+    mode: Option<String>,
     passes: Option<u32>,
     contextual: bool,
     contextual_prefix: bool,

@@ -16,6 +16,10 @@ tracing = { workspace = true }
 indexa-core = { path = "../core" }
 indexa-embed = { path = "../embed" }
 indexa-llm = { path = "../llm" }
+# `summarize_file`'s no-stored-chunks fallback parses the file directly (rather than reading
+# raw bytes) so summaries-only mode still gets real extracted text for PDFs/DOCX/etc. `parsers`
+# has no dependency back on `query`, so this edge is acyclic.
+indexa-parsers = { path = "../parsers" }
 async-trait.workspace = true
 regex = { workspace = true }
 candle-core = { workspace = true }

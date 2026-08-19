@@ -7,6 +7,7 @@ use super::{finalize_cancelled, finalize_done, finalize_failed, walk_for_job};
 use crate::jobs::{broadcast_only, push, JobEvent, JobHandle};
 use crate::AppState;
 use indexa_core::{
+    config::SummaryMode,
     resource::WatchdogState,
     store::{chunk_content_hash, ChunkRecord, EdgeRecord, SymbolRecord},
     walker::EntryKind,
@@ -86,8 +87,18 @@ pub(crate) async fn run_deep_phase(
     let spec = state.machine_spec.clone();
     let headroom = resource_cfg.effective_headroom_bytes();
 
+    // `summaries-only` never stores chunks (that's the ~100× size win), so every model call
+    // that only exists to enrich a stored chunk — embeddings, contextual blurbs, image
+    // captions, audio transcription, PDF OCR, video frame captions — is wasted work here.
+    // Parsing + entries/edges/symbols still run: `summarize_file` re-parses the file itself
+    // (`sample_via_parse` in `indexa_query::summarize`) when no chunks are stored, so this
+    // phase doesn't need to feed it a sample — but that means the describer prompt comes from
+    // the default 800/100-word registry, not this server's `[chunking]`/parser config.
+    let summary_mode = cfg.mode.clone();
+    let skip_embed_work = summary_mode == SummaryMode::SummariesOnly;
+
     // Build a contextual-retrieval LLM if the feature is enabled.
-    let ctx_llm: Option<OllamaLlm> = if cfg.contextual_retrieval {
+    let ctx_llm: Option<OllamaLlm> = if cfg.contextual_retrieval && !skip_embed_work {
         let base_url = OllamaLlm::resolve_base_url(Some(&cfg.base_url));
         Some(OllamaLlm::new(&base_url, &cfg.file_model).with_num_ctx(cfg.num_ctx))
     } else {
@@ -95,13 +106,13 @@ pub(crate) async fn run_deep_phase(
     };
 
     // Optional video frame captioning (opt-in, v0.16).
-    let video_caption = state.config.parsers.video.caption;
+    let video_caption = state.config.parsers.video.caption && !skip_embed_work;
     // Optional image captioning (opt-in): a vision model adds a caption chunk per image.
     // The same OllamaLlm handle drives BOTH image and video captioning, so build it when
     // EITHER is enabled — otherwise enabling only `video.caption` would silently no-op
     // (frames extracted, nothing captioned). The image caption model is used as the handle's
     // default; per-frame video calls pass `video_model` explicitly.
-    let image_caption = state.config.parsers.image.caption;
+    let image_caption = state.config.parsers.image.caption && !skip_embed_work;
     let captioner: Option<OllamaLlm> = if image_caption || video_caption {
         let base_url = OllamaLlm::resolve_base_url(Some(&cfg.base_url));
         Some(
@@ -113,11 +124,11 @@ pub(crate) async fn run_deep_phase(
     };
     let caption_model = state.config.parsers.image.caption_model().to_owned();
     // Optional audio transcription (opt-in): a whisper.cpp-style CLI per audio file.
-    let transcribe = state.config.parsers.audio.transcribe;
+    let transcribe = state.config.parsers.audio.transcribe && !skip_embed_work;
     let transcribe_binary = state.config.parsers.audio.transcribe_binary().to_owned();
     let transcribe_model = state.config.parsers.audio.model.clone();
     // Optional PDF OCR (opt-in): pdftoppm + tesseract for scanned PDFs with no text layer.
-    let ocr_enabled = state.config.parsers.pdf.ocr_enabled();
+    let ocr_enabled = state.config.parsers.pdf.ocr_enabled() && !skip_embed_work;
     let ocr_binary = state.config.parsers.pdf.ocr_binary().to_owned();
     let ocr_lang = state.config.parsers.pdf.ocr_lang.clone();
     let video_ffmpeg = state.config.parsers.video.ffmpeg_binary().to_owned();
@@ -132,6 +143,9 @@ pub(crate) async fn run_deep_phase(
     // M5 success tracking: distinguish "nothing to do" from "everything failed".
     let mut skipped = 0u64; // files already current (legitimate no-op)
     let mut chunks_written = 0u64; // chunks actually upserted
+                                   // Entries successfully upserted — the success signal in `summaries-only` mode, where
+                                   // `chunks_written` stays 0 by design (see the M5 check at the end of this function).
+    let mut entries_written = 0u64;
     let mut hard_errors = 0u64; // parse/panic/upsert failures
                                 // Rolling throughput: ring buffer of (instant, items_done) samples, last ~5s.
     let mut samples: std::collections::VecDeque<(std::time::Instant, u64)> =
@@ -168,6 +182,10 @@ pub(crate) async fn run_deep_phase(
         // possibly-stale `modified_s`: the standalone Deep job (run_deep_phase_standalone)
         // skips the scan stage, so an edited file would otherwise be wrongly skipped.
         // Mirrors `cmd_deep`; falls back to the stored check when no mtime is available.
+        // NOTE: in `summaries-only` mode this check can never see a chunk row (none are ever
+        // stored), so it always re-parses every file on every pass — cheap relative to
+        // embedding, but the dominant cost once nothing is embedded. Known, not a bug; a real
+        // fix needs a freshness marker independent of the chunks table.
         let mtime_secs = entry
             .modified
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -456,182 +474,191 @@ pub(crate) async fn run_deep_phase(
                     .map(|c| chunk_content_hash(&c.text))
                     .collect();
 
-                // Load cached embeddings for this file (hash → Vec<f32>). Fail-open.
-                let hash_cache = {
-                    let store = state.store.lock().await;
-                    store
-                        .cached_embeddings_by_hash(&path_str)
-                        .unwrap_or_default()
-                };
-
-                // Partition into cache-hits and misses.
-                let mut cache_hits: Vec<Option<Vec<f32>>> = vec![None; extracted.chunks.len()];
-                let mut miss_indices: Vec<usize> = Vec::new();
-                for (i, hash) in chunk_hashes.iter().enumerate() {
-                    if let Some(v) = hash_cache.get(hash) {
-                        cache_hits[i] = Some(v.clone());
-                    } else {
-                        miss_indices.push(i);
-                    }
-                }
-
-                // Build a document-level context string for contextual retrieval.
-                // Uses the shared `build_doc_context` helper (single source of truth).
-                // Built from the full file regardless of which chunks are misses.
-                let doc_context: Option<String> = if ctx_llm.is_some() {
-                    let texts: Vec<&str> =
-                        extracted.chunks.iter().map(|c| c.text.as_str()).collect();
-                    Some(build_doc_context(&texts))
+                // `summaries-only` never persists the chunk at all, so computing an embedding
+                // for it is wasted work — skip straight to an all-None vector, exactly like the
+                // CLI's `--no-embed` path.
+                let all_embeddings: Vec<Option<Vec<f32>>> = if skip_embed_work {
+                    vec![None; extracted.chunks.len()]
                 } else {
-                    None
-                };
+                    // Load cached embeddings for this file (hash → Vec<f32>). Fail-open.
+                    let hash_cache = {
+                        let store = state.store.lock().await;
+                        store
+                            .cached_embeddings_by_hash(&path_str)
+                            .unwrap_or_default()
+                    };
 
-                // Phase 1 — materialize embed text for cache-miss chunks only. With contextual
-                // retrieval enabled, each miss chunk gets a situating blurb; otherwise the embed
-                // text is just the chunk text.
-                let miss_raw_texts: Vec<&str> = miss_indices
-                    .iter()
-                    .map(|&i| extracted.chunks[i].text.as_str())
-                    .collect();
-                let miss_embed_texts: Vec<String> = if !miss_raw_texts.is_empty() {
-                    if let (Some(ref llm), Some(ref doc)) = (&ctx_llm, &doc_context) {
-                        let ps = path_str.clone();
-                        let model_name = cfg.file_model.clone();
-                        let h = handle.clone();
-                        contextual_embed_texts(
-                            llm,
-                            doc,
-                            &miss_raw_texts,
-                            None,
-                            &path_str,
-                            move |event| match event {
-                                ContextualEvent::BlurbFragment { fragment, .. } => {
-                                    broadcast_only(
-                                        &h,
-                                        JobEvent::LlmFragment {
-                                            item_path: ps.clone(),
-                                            model: model_name.clone(),
-                                            stage: "context_blurb".to_owned(),
-                                            fragment,
-                                        },
-                                    );
-                                }
-                                ContextualEvent::BlurbFailed { error, .. } => {
-                                    push(
-                                        &h,
-                                        JobEvent::Warning {
-                                            stage: "deep".to_owned(),
-                                            item_path: Some(ps.clone()),
-                                            message: format!("context blurb failed: {error:#}"),
-                                            pressure: None,
-                                        },
-                                    );
-                                }
-                            },
+                    // Partition into cache-hits and misses.
+                    let mut cache_hits: Vec<Option<Vec<f32>>> = vec![None; extracted.chunks.len()];
+                    let mut miss_indices: Vec<usize> = Vec::new();
+                    for (i, hash) in chunk_hashes.iter().enumerate() {
+                        if let Some(v) = hash_cache.get(hash) {
+                            cache_hits[i] = Some(v.clone());
+                        } else {
+                            miss_indices.push(i);
+                        }
+                    }
+
+                    // Build a document-level context string for contextual retrieval.
+                    // Uses the shared `build_doc_context` helper (single source of truth).
+                    // Built from the full file regardless of which chunks are misses.
+                    let doc_context: Option<String> = if ctx_llm.is_some() {
+                        let texts: Vec<&str> =
+                            extracted.chunks.iter().map(|c| c.text.as_str()).collect();
+                        Some(build_doc_context(&texts))
+                    } else {
+                        None
+                    };
+
+                    // Phase 1 — materialize embed text for cache-miss chunks only. With contextual
+                    // retrieval enabled, each miss chunk gets a situating blurb; otherwise the embed
+                    // text is just the chunk text.
+                    let miss_raw_texts: Vec<&str> = miss_indices
+                        .iter()
+                        .map(|&i| extracted.chunks[i].text.as_str())
+                        .collect();
+                    let miss_embed_texts: Vec<String> = if !miss_raw_texts.is_empty() {
+                        if let (Some(ref llm), Some(ref doc)) = (&ctx_llm, &doc_context) {
+                            let ps = path_str.clone();
+                            let model_name = cfg.file_model.clone();
+                            let h = handle.clone();
+                            contextual_embed_texts(
+                                llm,
+                                doc,
+                                &miss_raw_texts,
+                                None,
+                                &path_str,
+                                move |event| match event {
+                                    ContextualEvent::BlurbFragment { fragment, .. } => {
+                                        broadcast_only(
+                                            &h,
+                                            JobEvent::LlmFragment {
+                                                item_path: ps.clone(),
+                                                model: model_name.clone(),
+                                                stage: "context_blurb".to_owned(),
+                                                fragment,
+                                            },
+                                        );
+                                    }
+                                    ContextualEvent::BlurbFailed { error, .. } => {
+                                        push(
+                                            &h,
+                                            JobEvent::Warning {
+                                                stage: "deep".to_owned(),
+                                                item_path: Some(ps.clone()),
+                                                message: format!("context blurb failed: {error:#}"),
+                                                pressure: None,
+                                            },
+                                        );
+                                    }
+                                },
+                            )
+                            .await
+                        } else if cfg.contextual_prefix {
+                            // Deterministic, local, no-LLM contextual prefix (mirrors the CLI deep
+                            // path). Prepend the file path, section heading, and a doc-context snippet
+                            // to each miss chunk's embed input; the stored/hashed text is untouched.
+                            let all_raw: Vec<&str> =
+                                extracted.chunks.iter().map(|c| c.text.as_str()).collect();
+                            let doc_ctx = build_doc_context(&all_raw);
+                            let miss_headings: Vec<&str> = miss_indices
+                                .iter()
+                                .map(|&i| extracted.chunks[i].heading.as_str())
+                                .collect();
+                            indexa_query::contextual::contextual_prefix_texts(
+                                &doc_ctx,
+                                &miss_headings,
+                                &miss_raw_texts,
+                                &path_str,
+                            )
+                        } else {
+                            miss_raw_texts.iter().map(|s| s.to_string()).collect()
+                        }
+                    } else {
+                        Vec::new()
+                    };
+
+                    // Watchdog: pause if memory is tight before the (batched) embeds below. On a
+                    // Critical pause we unload the embedder (and the contextual-retrieval LLM, if
+                    // enabled) so their RAM frees and the recovery check can resume us.
+                    run_watchdog_check(
+                        &mut wdog,
+                        &spec,
+                        headroom,
+                        handle,
+                        "deep",
+                        Some(state.embedder.as_ref()),
+                        ctx_llm
+                            .as_ref()
+                            .map(|l| l as &(dyn Describer + Send + Sync)),
+                    )
+                    .await;
+
+                    // Phase 2 — embed only the cache-miss chunks in batched round-trips.
+                    let miss_refs: Vec<&str> =
+                        miss_embed_texts.iter().map(|s| s.as_str()).collect();
+                    let mut miss_embeddings = if !miss_refs.is_empty() {
+                        indexa_embed::embed_all(
+                            state.embedder.as_ref(),
+                            &miss_refs,
+                            indexa_embed::EMBED_BATCH_SIZE,
                         )
                         .await
-                    } else if cfg.contextual_prefix {
-                        // Deterministic, local, no-LLM contextual prefix (mirrors the CLI deep
-                        // path). Prepend the file path, section heading, and a doc-context snippet
-                        // to each miss chunk's embed input; the stored/hashed text is untouched.
-                        let all_raw: Vec<&str> =
-                            extracted.chunks.iter().map(|c| c.text.as_str()).collect();
-                        let doc_ctx = build_doc_context(&all_raw);
-                        let miss_headings: Vec<&str> = miss_indices
-                            .iter()
-                            .map(|&i| extracted.chunks[i].heading.as_str())
-                            .collect();
-                        indexa_query::contextual::contextual_prefix_texts(
-                            &doc_ctx,
-                            &miss_headings,
-                            &miss_raw_texts,
-                            &path_str,
-                        )
                     } else {
-                        miss_raw_texts.iter().map(|s| s.to_string()).collect()
-                    }
-                } else {
-                    Vec::new()
-                };
+                        Vec::new()
+                    };
 
-                // Watchdog: pause if memory is tight before the (batched) embeds below. On a
-                // Critical pause we unload the embedder (and the contextual-retrieval LLM, if
-                // enabled) so their RAM frees and the recovery check can resume us.
-                run_watchdog_check(
-                    &mut wdog,
-                    &spec,
-                    headroom,
-                    handle,
-                    "deep",
-                    Some(state.embedder.as_ref()),
-                    ctx_llm
-                        .as_ref()
-                        .map(|l| l as &(dyn Describer + Send + Sync)),
-                )
-                .await;
-
-                // Phase 2 — embed only the cache-miss chunks in batched round-trips.
-                let miss_refs: Vec<&str> = miss_embed_texts.iter().map(|s| s.as_str()).collect();
-                let mut miss_embeddings = if !miss_refs.is_empty() {
-                    indexa_embed::embed_all(
-                        state.embedder.as_ref(),
-                        &miss_refs,
-                        indexa_embed::EMBED_BATCH_SIZE,
-                    )
-                    .await
-                } else {
-                    Vec::new()
-                };
-
-                // Drop any embedding whose dim ≠ the configured `[embedding] dim` (a model/config
-                // mismatch) — storing it would corrupt dense search. The chunk stays BM25-searchable.
-                let (dim_mismatch, sample_dim) = indexa_embed::enforce_embedding_dim(
-                    &mut miss_embeddings,
-                    state.config.embedding.dim,
-                );
-                if dim_mismatch > 0 {
-                    push(
-                        handle,
-                        JobEvent::Warning {
-                            stage: "deep".to_owned(),
-                            item_path: Some(path_str.clone()),
-                            message: format!(
-                                "{dim_mismatch} chunk(s) embedded at dim {} ≠ configured {} — stored \
-                                 text-only; fix [embedding] model/dim and re-run deep",
-                                sample_dim.unwrap_or(0),
-                                state.config.embedding.dim
-                            ),
-                            pressure: None,
-                        },
+                    // Drop any embedding whose dim ≠ the configured `[embedding] dim` (a model/config
+                    // mismatch) — storing it would corrupt dense search. The chunk stays BM25-searchable.
+                    let (dim_mismatch, sample_dim) = indexa_embed::enforce_embedding_dim(
+                        &mut miss_embeddings,
+                        state.config.embedding.dim,
                     );
-                }
-                let embed_failures = miss_embeddings.iter().filter(|e| e.is_none()).count();
-                if embed_failures > 0 {
-                    push(
-                        handle,
-                        JobEvent::Warning {
-                            stage: "deep".to_owned(),
-                            item_path: Some(path_str.clone()),
-                            message: format!(
-                                "{embed_failures}/{} chunks failed to embed",
-                                miss_embeddings.len()
-                            ),
-                            pressure: None,
-                        },
-                    );
-                }
-
-                // Merge cache hits and fresh embeddings into one aligned vector.
-                let mut miss_iter = miss_embeddings.into_iter();
-                let mut all_embeddings: Vec<Option<Vec<f32>>> =
-                    Vec::with_capacity(extracted.chunks.len());
-                for slot in cache_hits.iter_mut().take(extracted.chunks.len()) {
-                    if slot.is_some() {
-                        all_embeddings.push(slot.take());
-                    } else {
-                        all_embeddings.push(miss_iter.next().unwrap_or(None));
+                    if dim_mismatch > 0 {
+                        push(
+                            handle,
+                            JobEvent::Warning {
+                                stage: "deep".to_owned(),
+                                item_path: Some(path_str.clone()),
+                                message: format!(
+                                    "{dim_mismatch} chunk(s) embedded at dim {} ≠ configured {} — stored \
+                                     text-only; fix [embedding] model/dim and re-run deep",
+                                    sample_dim.unwrap_or(0),
+                                    state.config.embedding.dim
+                                ),
+                                pressure: None,
+                            },
+                        );
                     }
-                }
+                    let embed_failures = miss_embeddings.iter().filter(|e| e.is_none()).count();
+                    if embed_failures > 0 {
+                        push(
+                            handle,
+                            JobEvent::Warning {
+                                stage: "deep".to_owned(),
+                                item_path: Some(path_str.clone()),
+                                message: format!(
+                                    "{embed_failures}/{} chunks failed to embed",
+                                    miss_embeddings.len()
+                                ),
+                                pressure: None,
+                            },
+                        );
+                    }
+
+                    // Merge cache hits and fresh embeddings into one aligned vector.
+                    let mut miss_iter = miss_embeddings.into_iter();
+                    let mut merged: Vec<Option<Vec<f32>>> =
+                        Vec::with_capacity(extracted.chunks.len());
+                    for slot in cache_hits.iter_mut().take(extracted.chunks.len()) {
+                        if slot.is_some() {
+                            merged.push(slot.take());
+                        } else {
+                            merged.push(miss_iter.next().unwrap_or(None));
+                        }
+                    }
+                    merged
+                };
 
                 let mut chunk_records = Vec::with_capacity(extracted.chunks.len());
                 for ((chunk, embedding), hash) in extracted
@@ -652,7 +679,12 @@ pub(crate) async fn run_deep_phase(
                         ),
                         language: chunk.language.clone(),
                         embedding,
-                        embed_model: Some(embed_model.clone()),
+                        // No model produced a vector when embedding work is skipped → leave NULL.
+                        embed_model: if skip_embed_work {
+                            None
+                        } else {
+                            Some(embed_model.clone())
+                        },
                         content_hash: Some(hash),
                     });
                 }
@@ -663,32 +695,43 @@ pub(crate) async fn run_deep_phase(
                 // entry-less paths) and silently deleted the next time `prune_orphans` runs
                 // (every `indexa scan`, once ANY entries row exists), wiping the embedding work
                 // this pass just paid for. `upsert_entries` is an idempotent ON-CONFLICT upsert
-                // (matches the CLI `watch`/`cmd_deep` write paths, which already do this).
-                if let Err(e) = store.upsert_entries(&[(**entry).clone()]) {
-                    push(
-                        handle,
-                        JobEvent::Warning {
-                            stage: "deep".to_owned(),
-                            item_path: Some(path_str.clone()),
-                            message: format!("upsert_entries failed: {e:#}"),
-                            pressure: None,
-                        },
-                    );
-                    hard_errors += 1;
-                }
-                match store.upsert_chunks(&chunk_records) {
-                    Ok(()) => chunks_written += chunk_records.len() as u64,
+                // (matches the CLI `watch`/`cmd_deep` write paths, which already do this). Always
+                // written regardless of mode — `summaries-only` still needs a live entries row so
+                // the file is summarizable, and is the success signal the M5 check below uses
+                // since `chunks_written` stays 0 by design in that mode.
+                match store.upsert_entries(&[(**entry).clone()]) {
+                    Ok(()) => entries_written += 1,
                     Err(e) => {
                         push(
                             handle,
                             JobEvent::Warning {
                                 stage: "deep".to_owned(),
                                 item_path: Some(path_str.clone()),
-                                message: format!("upsert_chunks failed: {e:#}"),
+                                message: format!("upsert_entries failed: {e:#}"),
                                 pressure: None,
                             },
                         );
                         hard_errors += 1;
+                    }
+                }
+                // `summaries-only` never persists chunk rows — that's the entire ~100× size win;
+                // `summarize_file` re-parses the file itself (via the default registry) when no
+                // chunks are stored, so nothing downstream needs these in the store.
+                if !skip_embed_work {
+                    match store.upsert_chunks(&chunk_records) {
+                        Ok(()) => chunks_written += chunk_records.len() as u64,
+                        Err(e) => {
+                            push(
+                                handle,
+                                JobEvent::Warning {
+                                    stage: "deep".to_owned(),
+                                    item_path: Some(path_str.clone()),
+                                    message: format!("upsert_chunks failed: {e:#}"),
+                                    pressure: None,
+                                },
+                            );
+                            hard_errors += 1;
+                        }
                     }
                 }
                 // Persist the file's code-graph edges (imports/defines), keyed on the same
@@ -776,7 +819,15 @@ pub(crate) async fn run_deep_phase(
     // already current, and at least one file hard-errored, the phase genuinely
     // failed — don't let the caller report "complete". (A folder of binary/empty
     // files that simply yields no chunks is NOT a failure and still returns true.)
-    if !files.is_empty() && chunks_written == 0 && skipped == 0 && hard_errors > 0 {
+    // `summaries-only` never writes chunks by design, so `chunks_written` alone would
+    // misfire here on any hard error even when most files succeeded — `entries_written`
+    // is that mode's real success signal instead.
+    let nothing_written = if skip_embed_work {
+        entries_written == 0
+    } else {
+        chunks_written == 0
+    };
+    if !files.is_empty() && nothing_written && skipped == 0 && hard_errors > 0 {
         finalize_failed(
             handle,
             "deep",

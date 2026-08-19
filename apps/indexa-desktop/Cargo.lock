@@ -2749,6 +2749,7 @@ dependencies = [
  "indexa-core",
  "indexa-embed",
  "indexa-llm",
+ "indexa-parsers",
  "regex",
  "serde",
  "serde_json",
