@@ -99,16 +99,70 @@ async function fireBuildContext(path, node) {  // eslint-disable-line no-unused-
       var projects = await r.json();
       var kids = (projects || []).filter(function (p) { return p.path !== path; });
       if (kids.length >= 2) {
-        if (typeof toast === 'function') {
-          toast('This folder has ' + kids.length + ' projects. Build context on one of them — not the whole tree.', 'warn');
-        }
-        if (typeof loadWelcomeProjects === 'function') loadWelcomeProjects();
+        // H3: render a chooser modal from the response already fetched above (correctly
+        // scoped to this folder's own children) instead of loadWelcomeProjects() — that
+        // re-fetches unscoped and lists index-wide projects into a sidebar container that
+        // showSummary() overwrites the instant anything else is selected, so the
+        // remediation this refusal points at could never actually render again. A modal
+        // works from any tab, including chat, where fireBuildContext is also reachable.
+        if (typeof showProjectChooserModal === 'function') showProjectChooserModal(path, kids);
         return;
       }
     }
   } catch (_) { /* fail open: still start the job */ }
   var kind = chooseBuildKind(node) || 'summarize';
   return fireJob(kind, path);
+}
+
+/* H3: modal listing the projects found directly under `path`, each with a Build context
+   button (via buildProjectRow, 11-onboarding.js) — the remediation for fireBuildContext's
+   "too many projects" refusal above. `kids` is already correctly scoped to this folder. */
+function showProjectChooserModal(path, kids) {
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay confirm-overlay';
+  overlay.style.display = 'flex';
+  var label = path.split('/').pop() || path;
+
+  var modal = document.createElement('div');
+  modal.className = 'modal project-chooser-modal';
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+  modal.setAttribute('aria-label', 'Choose a project to build context for');
+
+  var h = document.createElement('h2');
+  h.textContent = 'Choose a project under ‘' + label + '’';
+  var msg = document.createElement('p');
+  msg.className = 'confirm-msg';
+  msg.textContent = 'This folder has ' + kids.length + ' projects — build context on one at a time.';
+  var list = document.createElement('div');
+  list.className = 'project-chooser-list';
+
+  function close() {
+    if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    document.removeEventListener('keydown', onKey);
+  }
+  function onKey(e) { if (e.key === 'Escape') close(); }
+
+  kids.forEach(function (p) { list.appendChild(buildProjectRow(p, close)); });
+
+  var actions = document.createElement('div');
+  actions.className = 'modal-actions';
+  var cancelBtn = document.createElement('button');
+  cancelBtn.className = 'modal-btn';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', close);
+  actions.appendChild(cancelBtn);
+
+  modal.appendChild(h);
+  modal.appendChild(msg);
+  modal.appendChild(list);
+  modal.appendChild(actions);
+  overlay.appendChild(modal);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(overlay);
+  var firstBtn = list.querySelector('button');
+  if (firstBtn) firstBtn.focus();
 }
 
 function buildTreeNode(node) {

@@ -9,6 +9,8 @@ use axum::{
     Json,
 };
 
+use indexa_core::store::Store;
+
 use crate::dto::{err_json, file_name_of, PathQuery, ProjectResponse};
 use crate::AppState;
 
@@ -17,7 +19,16 @@ pub(crate) async fn api_projects(
     Query(params): Query<PathQuery>,
 ) -> Response {
     let prefix = params.path.as_deref().unwrap_or("");
-    let store = state.store.lock().await;
+    // Open a fresh, short-lived read connection instead of locking the shared store for
+    // the whole per-project coverage loop (3 subtree scans each, ~195ms/16 projects
+    // measured live) — mirrors tree.rs's api_tree so a slow projects list no longer
+    // serializes every other web request that needs the store.
+    let store = match Store::open(&state.db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"));
+        }
+    };
     match projects_from(&store, prefix) {
         Ok(rows) => Json(rows).into_response(),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
