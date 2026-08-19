@@ -22,9 +22,6 @@ pub struct Config {
     pub parsers: ParsersConfig,
     /// Resource-awareness settings: memory headroom, model selection, ETA.
     pub resource: ResourceConfig,
-    /// Per-directory overrides. Matched by path prefix (longest wins).
-    #[serde(default)]
-    pub region: Vec<RegionConfig>,
     /// Optional cloud-provider API keys persisted to config.toml.
     #[serde(default)]
     pub api_keys: ApiKeysConfig,
@@ -839,20 +836,6 @@ impl VideoParserConfig {
     }
 }
 
-// ── Per-region overrides ──────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegionConfig {
-    /// Directory path (supports ~ expansion).
-    pub path: String,
-    /// Optional parser overrides for this region.
-    #[serde(default)]
-    pub parsers: Option<ParsersConfig>,
-    /// Optional embedding override for this region.
-    #[serde(default)]
-    pub embedding: Option<EmbeddingConfig>,
-}
-
 // ── Resource configuration ────────────────────────────────────────────────────
 
 /// Controls how aggressively Indexa uses system resources.
@@ -1081,28 +1064,6 @@ pub fn save(cfg: &Config, path: &Path) -> Result<()> {
             .with_context(|| format!("writing config: {}", path.display()))?;
     }
     Ok(())
-}
-
-// ── Region matching ───────────────────────────────────────────────────────────
-
-impl Config {
-    /// Find the region config whose path is the longest prefix of `target`.
-    /// Performs ~ expansion on region paths before comparing.
-    pub fn region_for(&self, target: &Path) -> Option<&RegionConfig> {
-        self.region
-            .iter()
-            .filter_map(|r| {
-                let expanded = shellexpand::tilde(&r.path);
-                let region_path = Path::new(expanded.as_ref()).to_path_buf();
-                if target.starts_with(&region_path) {
-                    Some((region_path.components().count(), r))
-                } else {
-                    None
-                }
-            })
-            .max_by_key(|(depth, _)| *depth)
-            .map(|(_, r)| r)
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1337,45 +1298,6 @@ rerank_model = "mixedbread-ai/mxbai-rerank-base-v1"
         assert_eq!(cfg.retrieval.rrf_k, 60);
         assert_eq!(cfg.retrieval.rerank_backend, "llm");
         assert_eq!(cfg.describer.model, "gemma3:12b");
-    }
-
-    #[test]
-    fn region_matching_picks_longest_prefix() {
-        let toml = r#"
-[[region]]
-path = "/tmp"
-[region.parsers.audio]
-transcribe = true
-
-[[region]]
-path = "/tmp/voice"
-[region.parsers.audio]
-transcribe = false
-"#;
-        let cfg: Config = toml::from_str(toml).unwrap();
-
-        let hit = cfg.region_for(Path::new("/tmp/voice/memo.m4a"));
-        assert!(hit.is_some());
-        // longest prefix "/tmp/voice" should win over "/tmp"
-        let region = hit.unwrap();
-        assert!(region.path.contains("voice"));
-        let audio_transcribe = region
-            .parsers
-            .as_ref()
-            .map(|p| p.audio.transcribe)
-            .unwrap_or(false);
-        assert!(!audio_transcribe); // /tmp/voice overrides /tmp
-
-        let hit2 = cfg.region_for(Path::new("/tmp/other/file.txt"));
-        assert!(hit2.is_some());
-        let r2 = hit2.unwrap();
-        // /tmp/other only matches /tmp
-        let audio_transcribe2 = r2
-            .parsers
-            .as_ref()
-            .map(|p| p.audio.transcribe)
-            .unwrap_or(false);
-        assert!(audio_transcribe2); // /tmp region has transcribe=true
     }
 
     #[test]
