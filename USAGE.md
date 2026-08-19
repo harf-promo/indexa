@@ -217,11 +217,16 @@ auto_select_model = true     # downgrade the model if the preferred one won't fi
 keep_alive_secs = 0          # 0 = profile default
 micro_benchmark = true       # measure real throughput at job start for accurate ETAs
 
-[api_keys]                   # fallback when the matching env var is unset; stored 0600
+[api_keys]                   # fallback when the matching env var is unset; kept 0600
 openai = ""
 anthropic = ""
 google = ""
 ```
+
+**API key storage:** Indexa always writes `config.toml` 0600 (web Settings, `multimodal --enable`,
+…); a hand-edited file with `[api_keys]` values set is auto-tightened to 0600 the next time it's
+loaded, so a stray `chmod 644` from an editor doesn't leave keys group/other-readable. `indexa doctor`
+reports the file's permission status when keys are present, including if an auto-tighten ever fails.
 
 **Storage modes** (`[describer] mode`): `augment` (chunks + summaries, best recall) · `compress`
 (summarize, then drop chunks — ~10× smaller) · `summaries-only` (skip chunking — ~100× smaller, no
