@@ -139,6 +139,18 @@ impl PartialOrd for Candidate {
     }
 }
 
+/// Sort `(chunk_id, rrf_score)` pairs best-first, deterministically.
+///
+/// `ranked` is built by draining a `HashMap`, so its incoming order (and thus the order
+/// equal-score entries arrive in) varies by process — a `partial_cmp`-only sort left ties
+/// in that random order, so the same query against the same index could return different
+/// chunks across server restarts (two arms of the RRF fusion produce bit-identical scores
+/// for same-rank hits: `1.0 / (rrf_k + rank + 1.0)`). Break ties on `id` ascending (lower
+/// id wins), matching `Candidate::cmp`'s tie-break convention above.
+fn rank_by_rrf_score(ranked: &mut [(i64, f64)]) {
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+}
+
 /// Map a row from the `entries` + `summary_queue` join (used by `search_paths`
 /// and `tree_level`) into a `TreeNode`.
 /// Column order: path, kind, size, file_count, chunk_count, summary_state,
@@ -288,7 +300,7 @@ impl Store {
         }
 
         let mut ranked: Vec<(i64, f64)> = scores.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        rank_by_rrf_score(&mut ranked);
         ranked.truncate(limit);
 
         // ── Fetch chunk details for top results ──────────────────────────────
@@ -835,7 +847,29 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_fts_query, fts5_quote};
+    use super::{build_fts_query, fts5_quote, rank_by_rrf_score};
+
+    #[test]
+    fn rank_by_rrf_score_breaks_ties_deterministically_on_id() {
+        // Two chunk ids tied at the same score (the exact case an FTS-only hit and a
+        // dense-only hit produce at the same rank: 1.0 / (rrf_k + rank + 1.0) is
+        // bit-identical either way) must always resolve the same way, regardless of
+        // the order they arrive in — draining a HashMap gives no such guarantee upstream.
+        let mut a = vec![(30i64, 0.5f64), (10i64, 0.5), (20i64, 0.5)];
+        let mut b = vec![(20i64, 0.5f64), (30i64, 0.5), (10i64, 0.5)];
+        rank_by_rrf_score(&mut a);
+        rank_by_rrf_score(&mut b);
+        assert_eq!(a, b);
+        // Lower id wins a tie, matching `Candidate::cmp`'s convention.
+        assert_eq!(a, vec![(10, 0.5), (20, 0.5), (30, 0.5)]);
+    }
+
+    #[test]
+    fn rank_by_rrf_score_sorts_by_score_first() {
+        let mut ranked = vec![(1i64, 0.1f64), (2, 0.9), (3, 0.5)];
+        rank_by_rrf_score(&mut ranked);
+        assert_eq!(ranked, vec![(2, 0.9), (3, 0.5), (1, 0.1)]);
+    }
 
     #[test]
     fn build_fts_query_phrase_or_terms_for_multiword() {
