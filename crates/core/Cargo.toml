@@ -19,7 +19,6 @@ rusqlite = { workspace = true }
 directories = { workspace = true }
 bytemuck = { version = "1", features = ["derive"] }
 toml = { workspace = true }
-shellexpand = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 mime_guess = "2"

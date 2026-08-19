@@ -293,6 +293,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.sig` published) so existing installs still update, but a signature that IS present and fails to
   verify is a hard error. Download requests also gained connect/request timeouts.
 
+### Removed
+
+- **`[[region]]` per-directory config overrides.** `Config::region` / `RegionConfig` /
+  `Config::region_for` parsed, validated, and were unit-tested, but had zero production callers —
+  nothing in the CLI, web, or MCP surfaces ever consulted `region_for`, so a user following
+  `docs/config.md`'s own worked example (a `~/Pictures` image-captioning region, a
+  `~/Documents/Voice Memos` transcription region) got silently no effect. Deleted rather than
+  wired up — a real implementation would need per-region embedding-dimension reconciliation that
+  isn't worth building without a concrete need. Removed the field, struct, method, its tests, and
+  the `docs/config.md` section and worked examples that documented it.
+
 ## [0.76.0] — 2026-06-28
 
 ### Added
