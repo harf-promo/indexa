@@ -4,9 +4,12 @@
 # is blind to embedding-quality changes (contextual-prefix chunk embeddings) and to MMR (which
 # retrieve() skips entirely in sparse mode). This workflow installs Ollama + `nomic-embed-text`,
 # indexes this repo WITH embeddings, and scores the `retrieve()` ranking — MMR included — in RRF
-# (dense+sparse) mode against the committed golden set. Neither this job nor ci.yml's exercises the
-# rerank pass: that runs only in the real `ask` pipeline, after retrieve() returns, so a reranker
-# regression needs a manual `ask` A/B until an `--rerank` eval flag exists.
+# (dense+sparse) mode against the committed golden set. `indexa eval` also has a `--rerank` flag
+# now (routes through the SAME rerank pass `ask` uses), but this job doesn't pass it: the
+# `[describer]` here is a keyless `openai` stub (see below) specifically so preflight doesn't
+# demand the gemma3 models, so a real `"llm"`-backend rerank has nothing to call and would just
+# fail open silently. A reranker regression still needs a manual `ask` A/B (or a future job that
+# also installs a describer model and passes `--rerank`).
 #
 # `workflow_dispatch` ONLY — it never runs on push/PR, so it costs nothing unless a human triggers
 # it (this is a public repo → unlimited free Actions minutes regardless). Run it before promoting a

@@ -236,6 +236,7 @@ async fn main() -> Result<()> {
             min_hit_rate,
             baseline,
             max_regression,
+            rerank,
         } => {
             commands::cmd_eval(
                 golden,
@@ -246,6 +247,7 @@ async fn main() -> Result<()> {
                 min_hit_rate,
                 baseline,
                 max_regression,
+                rerank,
                 &cfg,
             )
             .await

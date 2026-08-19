@@ -38,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `indexa eval … --mode rrf` against a populated index (Ollama + `nomic-embed-text`), gating on
   hit_rate/MRR/recall/nDCG so a dense change (contextual-prefix, reranker) is promoted only when
   proven non-regressing. `docs/methodology.md` documents the baseline-vs-branch A/B recipe.
+- **`indexa eval --rerank`.** The eval gate scored `retrieve()` alone — it structurally could not
+  exercise the cross-encoder/LLM rerank pass, since that only runs afterward in the real `ask`
+  pipeline. The new flag threads eval's retrieval call through the exact same rerank dispatch `ask`
+  uses (`qa::synthesize::retrieve_and_rerank` and `qa::explain::explain_retrieval` now share it too,
+  via a new `rerank::apply_configured_rerank`, instead of three near-identical copies), so a
+  reranker regression is finally measurable via `indexa eval golden.json --rerank`. Off by default
+  (additive — no behavior change for existing callers/CI); preflights Ollama when configured, so an
+  unreachable LLM fails the run loudly rather than silently scoring an un-reranked pass as reranked.
+  Comments in `crates/query/src/eval.rs`, `crates/cli`, `ci.yml`, and `dense-eval.yml` that
+  (accurately, at the time) described the gap are updated to describe the fix.
 - **Configurable cross-encoder reranker model (`[retrieval] rerank_model`).** The candle DeBERTa-v2
   reranker's model was hardcoded to `mixedbread-ai/mxbai-rerank-xsmall-v1`; it's now a config knob.
   All three mxbai-rerank-**v1** variants share the same architecture, so `base-v1` (~370 MB) and

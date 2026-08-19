@@ -30,6 +30,8 @@ use indexa_core::store::SearchHit;
 use indexa_llm::Generator;
 use tokenizers::Tokenizer;
 
+use crate::qa::QaConfig;
+
 /// Reorders candidate documents by relevance to a query.
 ///
 /// Returns best-effort 0-based indices into `docs`, most-relevant first. The
@@ -315,6 +317,25 @@ pub(crate) async fn apply_rerank(
         }
     }
     reordered
+}
+
+/// Dispatch to the `cfg.rerank_backend`-selected reranker and apply it — the exact backend
+/// dispatch `qa::synthesize::retrieve_and_rerank` and `qa::explain::explain_retrieval` run after
+/// retrieval in the real `ask` pipeline. Callers gate this on `cfg.rerank` themselves (kept
+/// external rather than folded in here, since e.g. `explain_retrieval` also needs to know
+/// whether rerank ran to label its trace). `indexa eval --rerank` calls this too, so eval's
+/// optional rerank pass is the SAME code path `ask` uses, not a parallel copy that can drift.
+pub(crate) async fn apply_configured_rerank(
+    llm: &dyn Generator,
+    cfg: &QaConfig,
+    question: &str,
+    hits: Vec<SearchHit>,
+) -> Vec<SearchHit> {
+    if cfg.rerank_backend == "cross-encoder" {
+        apply_rerank(&CandleReranker::new(&cfg.rerank_model), question, hits).await
+    } else {
+        apply_rerank(&LlmReranker::new(llm), question, hits).await
+    }
 }
 
 #[cfg(test)]
