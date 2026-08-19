@@ -1,5 +1,10 @@
 /* ── Job helpers ── */
-async function fireJob(kind, path) {
+// `force` only matters for kind === 'summarize', and only from the explicit "↻ Regenerate"
+// button — it blanks stored hashes and re-summarizes the whole subtree even where content
+// hasn't changed (the only way to pick up a model/prompt change). Every other caller omits
+// it and stays incremental: only new-or-stale content is re-run, matching what `deep`/
+// `watch` already do. See `run_summarize_phase`'s `force` param on the Rust side.
+async function fireJob(kind, path, force) {
   // Pre-flight memory-fit gate for the model-loading kinds ("ask me first"):
   // summarize loads the dir-roll-up model; index runs deep + summarize. scan/deep
   // load no heavy model, so they skip the gate.
@@ -9,6 +14,7 @@ async function fireJob(kind, path) {
     if (choice === null) return; // user cancelled the build
     modelParams = choice; // '' (configured) or a recommended-model override
   }
+  if (force && kind === 'summarize') modelParams += '&force=true';
   try {
     const r = await fetch('/api/jobs/' + kind + '?path=' + encodeURIComponent(path) + modelParams, { method: 'POST' });
     if (!r.ok) {
