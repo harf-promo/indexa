@@ -89,7 +89,9 @@ pub struct AskParams {
     pub agentic: Option<bool>,
     /// Enable cross-encoder reranking after retrieval (adds latency; improves ranking quality).
     /// Defaults to the server's `[retrieval] rerank`. Use with `rerank_backend` to choose
-    /// between `"llm"` (listwise, default) or `"cross-encoder"` (candle DeBERTa-v2).
+    /// between `"llm"` (listwise, default) or `"cross-encoder"` (candle DeBERTa-v2). Ignored
+    /// when `catalog: true` — catalog mode force-disables rerank regardless of this value (its
+    /// file-level dedup/resort would discard the reordering anyway; see `catalog` below).
     #[serde(default)]
     pub rerank: Option<bool>,
     /// Reranker backend when `rerank` is true: `"llm"` (default) or `"cross-encoder"`.
@@ -117,13 +119,14 @@ pub struct AskParams {
     /// own (stronger) model. Prefer `false` when you are a capable model and want the best answer.
     #[serde(default)]
     pub synthesize: Option<bool>,
-    /// Catalog (progressive-disclosure) mode. When `true`, Indexa runs its full retrieval
-    /// pipeline but returns only a scored list of files with their L0 one-line abstracts —
-    /// **no chunk bodies, no synthesis**. Use this to find which files are relevant, then
-    /// expand the ones you want with `get_summary`, `read_file`, or `get_chunk_context`.
-    /// This is the cheapest retrieval mode: minimal tokens, bounded KV-cache, no local LLM
-    /// call. Incompatible with `agentic`; ignored when `synthesize` is also set to `false`
-    /// (retrieval-only returns the full slice, which is richer than the catalog).
+    /// Catalog (progressive-disclosure) mode. When `true`, Indexa runs retrieval (hybrid +
+    /// boosts + MMR — rerank is force-disabled, see `rerank` above) but returns only a scored
+    /// list of files with their L0 one-line abstracts — **no chunk bodies, no synthesis**. Use
+    /// this to find which files are relevant, then expand the ones you want with `get_summary`,
+    /// `read_file`, or `get_chunk_context`. This is the cheapest retrieval mode: minimal tokens,
+    /// bounded KV-cache, no local LLM call at all. Incompatible with `agentic`; ignored when
+    /// `synthesize` is also set to `false` (retrieval-only returns the full slice, which is
+    /// richer than the catalog).
     #[serde(default)]
     pub catalog: Option<bool>,
 }
@@ -186,22 +189,42 @@ impl IndexaMcp {
         // `hybrid_search_with_ann` falls back to brute-force otherwise, so results are unchanged.
         let ann = self.ensure_ann().await;
         let mut store = self.store()?;
+        // `ext:`/`type:` filter after the SQL-side RRF fusion already truncated to `limit` — a
+        // real match ranked below that cutoff would be silently invisible ("no results" when a
+        // match genuinely exists further down). Over-fetch a larger candidate pool when a filter
+        // is active, THEN filter, THEN truncate to the real requested `limit` (mirrors the
+        // `limit * 3`-then-filter-then-`.take(limit)` pattern already used by
+        // `crates/web/src/handlers/packs.rs` / `apps/indexa/src/commands/pack.rs` for the same
+        // shape of problem). This narrows the gap a lot (`limit` → up to 200) but doesn't close
+        // it entirely: `hybrid_search_with_ann`'s own FTS/dense candidate pools are each hard-
+        // capped at 100 internally (shared with `ask`/web/CLI/eval, so not something to change
+        // here), so an ext/type match ranked below 100 in BOTH arms can still be missed. `.min(200)`
+        // just keeps `fetch_limit` from exceeding that real ceiling for pointlessly large `limit`s.
+        let fetch_limit = if ext_filter.is_some() {
+            limit.saturating_mul(5).min(200)
+        } else {
+            limit
+        };
         let mut hits = store
             .hybrid_search_with_ann(
                 search_text,
                 embedding.as_deref(),
                 &mode,
                 scope,
-                limit,
+                fetch_limit,
                 60.0,
                 ann.as_deref(),
             )
             .map_err(mcp_err)?;
         if let Some(exts) = &ext_filter {
+            // Case-insensitive both sides: `ext:RS` must match a stored `.rs` file and
+            // `ext:rs` must match a stored `.RS` file.
             hits.retain(|h| {
+                let path_lower = h.entry_path.to_ascii_lowercase();
                 exts.iter()
-                    .any(|e| h.entry_path.ends_with(&format!(".{e}")))
+                    .any(|e| path_lower.ends_with(&format!(".{}", e.to_ascii_lowercase())))
             });
+            hits.truncate(limit);
         }
 
         if hits.is_empty() {

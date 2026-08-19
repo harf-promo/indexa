@@ -310,8 +310,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gets better over time."
 
 - **Catalog retrieval mode — progressive disclosure.** `ask(catalog: true)` runs the full
-  retrieval pipeline (hybrid + boosts + rerank + MMR) but returns only a scored file list
-  with L0 one-line abstracts — no chunk bodies, no local LLM synthesis. Use it as the "table
+  retrieval pipeline (hybrid + boosts + MMR) but returns only a scored file list
+  with L0 one-line abstracts — no chunk bodies, no local LLM synthesis. Rerank is force-disabled
+  in this mode (a rerank pass would only reorder chunks that catalog's file-level dedup/resort
+  immediately discards — see Wave 7 fix), so it never pays for a rerank call regardless of the
+  server's `[retrieval] rerank` default. Use it as the "table
   of contents" step: ask the catalog, pick the interesting files, then expand them with
   `get_summary`/`read_file`/`get_chunk_context` and synthesize with your own (stronger) model.
   This is the cheapest retrieval mode: minimal tokens, bounded KV-cache, zero local model
