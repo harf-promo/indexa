@@ -21,6 +21,19 @@ pub(super) fn subtree_match(prefix: &str) -> (String, String) {
     (exact, child_pattern)
 }
 
+/// [`subtree_match`], but an empty `prefix` means "match every path" instead of only a
+/// literal empty-string path (which no row has). Several callers use an empty prefix as
+/// their documented "no scope restriction" value (batch review's `under=""`, the whole-index
+/// module list) — `subtree_match("")` alone would silently narrow those to nothing, since
+/// its `child_pattern` becomes `/%` (requires a leading slash) rather than "everything."
+pub(super) fn subtree_match_or_all(prefix: &str) -> (String, String) {
+    if prefix.is_empty() {
+        (String::new(), "%".to_owned())
+    } else {
+        subtree_match(prefix)
+    }
+}
+
 /// Delete chunks (and their FTS5 entries + code-graph edges + symbols) for the file at
 /// `exact` and every file strictly under `child_pattern`. Shared by `delete_subtree` and
 /// `delete_chunks_for_subtree`. Matching the exact path too means deleting a single file's

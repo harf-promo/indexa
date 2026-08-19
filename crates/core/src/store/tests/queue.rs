@@ -217,6 +217,71 @@ fn hybrid_search_scope_filters_by_path_prefix() {
 }
 
 #[test]
+fn hybrid_search_scope_excludes_prefix_siblings() {
+    // H4: "/proj" must NOT match "/projector" — a scoped search/ask used to leak sibling
+    // directories that merely shared the string prefix, indistinguishable from a real hit
+    // in the results. Covers both the FTS arm (this test) and the dense arm below.
+    let mut store = Store::open_in_memory().unwrap();
+    let chunks = vec![
+        dummy_chunk("/proj/a.rs", 0, "needle content here"),
+        dummy_chunk("/projector/b.rs", 0, "needle content here too"),
+    ];
+    store.upsert_chunks(&chunks).unwrap();
+
+    let hits = store
+        .hybrid_search("needle", None, &HybridMode::Sparse, Some("/proj"), 10, 60.0)
+        .unwrap();
+    assert_eq!(hits.len(), 1, "only the /proj hit, not /projector's");
+    assert_eq!(hits[0].entry_path, "/proj/a.rs");
+}
+
+#[test]
+fn cosine_search_scope_excludes_prefix_siblings() {
+    // Same bug, dense arm (cosine_search, reached via HybridMode::Dense).
+    let mut store = Store::open_in_memory().unwrap();
+    let mut a = dummy_chunk("/proj/a.rs", 0, "vector content");
+    a.embedding = Some(vec![1.0, 0.0, 0.0]);
+    let mut b = dummy_chunk("/projector/b.rs", 0, "vector content");
+    b.embedding = Some(vec![1.0, 0.0, 0.0]);
+    store.upsert_chunks(&[a, b]).unwrap();
+
+    let query_vec = vec![1.0_f32, 0.0, 0.0];
+    let hits = store
+        .hybrid_search(
+            "vector",
+            Some(&query_vec),
+            &HybridMode::Dense,
+            Some("/proj"),
+            10,
+            60.0,
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1, "only the /proj hit, not /projector's");
+    assert_eq!(hits[0].entry_path, "/proj/a.rs");
+}
+
+#[test]
+fn hybrid_search_scope_matches_the_exact_scoped_file_too() {
+    // subtree_match's "exact OR child" contract: scoping to a single file (not a directory)
+    // must still match that file itself, not just its (nonexistent) children.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_chunks(&[dummy_chunk("/proj/a.rs", 0, "needle content")])
+        .unwrap();
+    let hits = store
+        .hybrid_search(
+            "needle",
+            None,
+            &HybridMode::Sparse,
+            Some("/proj/a.rs"),
+            10,
+            60.0,
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+}
+
+#[test]
 fn fts5_quote_escapes_double_quotes() {
     let quoted = fts5_quote(r#"he said "hello""#);
     assert!(quoted.starts_with('"'));
