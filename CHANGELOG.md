@@ -171,6 +171,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slides whose speaker notes were each individually under the per-entry cap
   (`MAX_ZIP_ENTRY_BYTES`) could still sum to far more than the intended 64 MB total.
   Notes bytes are now added to the running total, same as slides and chart/diagram parts.
+- **`worker --auto-reindex` git-poll mode no longer silently adopts a stale baseline on
+  start.** Its in-memory baseline map resets empty on every worker restart, and the first
+  poll of each root previously treated "no baseline yet" as "nothing changed" — so any
+  content changed while the worker was down got adopted as the new baseline without ever
+  being reindexed. The first poll of a root now checks the same staleness sweep the
+  non-git interval fallback already runs (`last_indexed_at_for_root` vs the default
+  window); if the persisted index itself is stale, that first poll reindexes before
+  establishing a baseline, exactly like a real change would. Extracted the shared check
+  into `root_is_stale`, reused by both arms.
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
   open to the LLM reranker for every user who enabled it: candle's DeBERTa loader read the transformer
   at the safetensors root, but HF `DebertaV2ForSequenceClassification` checkpoints nest it under a

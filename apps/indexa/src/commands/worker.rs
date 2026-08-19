@@ -116,6 +116,17 @@ fn git_state_hash(root: &Path) -> Option<String> {
     Some(format!("{head}:{dirty}"))
 }
 
+/// Whether `root`'s indexed content hasn't been refreshed within the default staleness
+/// window (`stale_roots`, which also skips roots that were never deep-indexed). Used both
+/// by the non-git interval fallback below, and by `run_git_poll` to decide whether a git
+/// root's FIRST-seen-this-run baseline needs an initial reindex.
+fn root_is_stale(db_path: &Path, root: &str) -> bool {
+    Store::open(db_path)
+        .and_then(|store| stale_roots(&store, DEFAULT_REINDEX_SECS, now_unix()))
+        .map(|stale| stale.iter().any(|r| r == root))
+        .unwrap_or(false)
+}
+
 /// 3.3 — continuous git-poll auto-freshness: for each indexed root, watch its git state
 /// (HEAD + tracked-tree dirtiness) at an adaptive interval and re-index on change; a
 /// non-git root falls back to the same interval-based staleness check as the default mode.
@@ -142,11 +153,28 @@ async fn run_git_poll(db_path: PathBuf, cfg: Config) {
         for root in &roots {
             match git_state_hash(Path::new(root)) {
                 Some(hash) => {
-                    let changed = baselines.get(root).is_some_and(|prev| *prev != hash);
-                    if changed {
-                        println!(
-                            "git-poll: {root} changed (HEAD moved or tree dirty) — refreshing."
-                        );
+                    // On a KNOWN baseline, a hash mismatch means the root changed. On NO
+                    // baseline (first time this root is seen since the worker started —
+                    // including the very first poll), don't silently adopt whatever git
+                    // state exists RIGHT NOW as "nothing changed": a change made while the
+                    // worker was down would then never be detected or reindexed. Mirror the
+                    // non-git arm's staleness sweep instead — if the persisted index itself
+                    // hasn't been refreshed within DEFAULT_REINDEX_SECS, treat this first
+                    // poll as a change so it gets one reindex before the baseline is
+                    // established. (`stale_roots` still skips never-deep-indexed roots, same
+                    // as the non-git arm, so those keep seeding silently — that's existing,
+                    // intended behavior, not a gap.)
+                    let (should_reindex, reason) = match baselines.get(root) {
+                        Some(prev) if *prev != hash => (true, "changed (HEAD moved or tree dirty)"),
+                        Some(_) => (false, ""),
+                        None if root_is_stale(&db_path, root) => (
+                            true,
+                            "stale on worker start (before establishing a baseline)",
+                        ),
+                        None => (false, ""),
+                    };
+                    if should_reindex {
+                        println!("git-poll: {root} {reason} — refreshing.");
                         match cmd_index(
                             vec![root.clone()],
                             None,
@@ -174,27 +202,22 @@ async fn run_git_poll(db_path: PathBuf, cfg: Config) {
                 }
                 None => {
                     // Non-git root: fall back to the existing interval-based staleness check.
-                    if let Ok(store) = Store::open(&db_path) {
-                        let is_stale = stale_roots(&store, DEFAULT_REINDEX_SECS, now_unix())
-                            .map(|stale| stale.iter().any(|r| r == root))
-                            .unwrap_or(false);
-                        if is_stale {
-                            if let Err(e) = cmd_index(
-                                vec![root.clone()],
-                                None,
-                                "augment".to_owned(),
-                                None,
-                                false,
-                                false,
-                                true,
-                                &cfg,
-                            )
-                            .await
-                            {
-                                eprintln!(
-                                    "git-poll (interval fallback): failed to refresh {root}: {e:#}"
-                                );
-                            }
+                    if root_is_stale(&db_path, root) {
+                        if let Err(e) = cmd_index(
+                            vec![root.clone()],
+                            None,
+                            "augment".to_owned(),
+                            None,
+                            false,
+                            false,
+                            true,
+                            &cfg,
+                        )
+                        .await
+                        {
+                            eprintln!(
+                                "git-poll (interval fallback): failed to refresh {root}: {e:#}"
+                            );
                         }
                     }
                 }
@@ -379,6 +402,95 @@ mod tests {
         assert_eq!(
             before, after,
             "an untracked file must not trigger a poll cycle (--untracked-files=no)"
+        );
+    }
+
+    /// Seed a root dir entry + one chunk under it, then backdate the chunk's
+    /// `indexed_at` via a raw connection to the same file — `ChunkRecord`/`Store`
+    /// don't expose that column, it's always DB-defaulted to `unixepoch()` at
+    /// insert time, so a fresh `Store::open` + `upsert_chunks` can only produce
+    /// "just indexed", never "stale".
+    fn seed_root_with_indexed_at(db_path: &std::path::Path, root: &str, indexed_at: i64) {
+        {
+            let mut store = Store::open(db_path).unwrap();
+            store
+                .upsert_entries(&[indexa_core::walker::Entry {
+                    path: std::path::PathBuf::from(root),
+                    kind: indexa_core::walker::EntryKind::Dir,
+                    size: 0,
+                    modified: None,
+                    hint: None,
+                    is_binary: false,
+                }])
+                .unwrap();
+            store
+                .upsert_chunks(&[indexa_core::store::ChunkRecord {
+                    entry_path: format!("{root}/a.rs"),
+                    seq: 0,
+                    heading: String::new(),
+                    text: "fn main() {}".into(),
+                    language: None,
+                    embedding: None,
+                    embed_model: None,
+                    content_hash: None,
+                }])
+                .unwrap();
+        }
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.execute(
+            "UPDATE chunks SET indexed_at = ?1",
+            rusqlite::params![indexed_at],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn root_is_stale_true_when_last_indexed_past_the_default_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("idx.db");
+        let old = now_unix() - DEFAULT_REINDEX_SECS as i64 - 100;
+        seed_root_with_indexed_at(&db_path, "/proj", old);
+        assert!(
+            root_is_stale(&db_path, "/proj"),
+            "content indexed well past DEFAULT_REINDEX_SECS ago must count as stale"
+        );
+    }
+
+    #[test]
+    fn root_is_stale_false_when_recently_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("idx.db");
+        seed_root_with_indexed_at(&db_path, "/proj", now_unix());
+        assert!(
+            !root_is_stale(&db_path, "/proj"),
+            "content indexed just now must not count as stale"
+        );
+    }
+
+    #[test]
+    fn root_is_stale_false_for_a_root_that_was_never_deep_indexed() {
+        // An entry with no chunks under it — matches stale_roots' documented
+        // "never deep-indexed roots are skipped" semantics, which root_is_stale
+        // inherits: a git-poll root that's only ever been surface-scanned must
+        // seed its baseline silently on first sight, not force a reindex.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("idx.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .upsert_entries(&[indexa_core::walker::Entry {
+                    path: std::path::PathBuf::from("/proj"),
+                    kind: indexa_core::walker::EntryKind::Dir,
+                    size: 0,
+                    modified: None,
+                    hint: None,
+                    is_binary: false,
+                }])
+                .unwrap();
+        }
+        assert!(
+            !root_is_stale(&db_path, "/proj"),
+            "a root with no chunks (never deep-indexed) must not count as stale"
         );
     }
 }
