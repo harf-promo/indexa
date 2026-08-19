@@ -1,10 +1,18 @@
 //! Retrieval-quality evaluation backing `indexa eval`.
 //!
-//! Scores the exact `retrieve()` ranking the ask pipeline uses (hybrid search +
-//! summary/importance boosts) against a golden-questions file — retrieval only,
-//! no LLM synthesis, so a sparse-mode run is deterministic and needs no Ollama.
-//! This is the regression gate for retrieval-affecting changes (chunking,
-//! parsing, ranking).
+//! Scores the `retrieve()` ranking the ask pipeline uses (hybrid search + summary/
+//! importance boosts + MMR in non-sparse modes) against a golden-questions file —
+//! retrieval only, no LLM synthesis. **This does NOT cover the full production
+//! ranking**: `retrieve()` never applies the cross-encoder/LLM rerank pass — that
+//! happens afterward, only in the real `ask` pipeline (`qa::synthesize::retrieve_and_rerank`)
+//! — so this gate cannot detect a reranker regression regardless of mode. In sparse
+//! mode (CI's default) it additionally skips MMR entirely (`retrieve()` only applies
+//! MMR outside `HybridMode::Sparse`), so a sparse-mode run is deterministic and needs
+//! no Ollama, but is scoring strictly less of the ranking pipeline than `rrf`/`hybrid`
+//! mode does. This is the regression gate for retrieval-affecting changes (chunking,
+//! parsing, ranking) within that scope — see `docs/methodology.md` for the A/B recipe
+//! that covers dense-mode retrieval, and the roadmap note about adding rerank
+//! coverage (owner-gated; no `--rerank` flag exists yet).
 
 use anyhow::Result;
 use indexa_core::store::Store;
@@ -564,8 +572,10 @@ mod tests {
     /// Live dense/RRF A/B eval over the committed golden set against a populated index. The CI gate
     /// scores sparse-only (hermetic, no Ollama), so it can't see an embedding change; this is the
     /// opt-in counterpart that *can* — run it on `main` and on a branch to prove a contextual-prefix
-    /// embedding change (or a reranker swap) doesn't regress recall/nDCG before promoting it to
-    /// default. `#[ignore]`d: needs a real Ollama (`nomic-embed-text`) + a populated index.
+    /// embedding change doesn't regress recall/nDCG before promoting it to default. Like the CI
+    /// gate, this still calls bare `retrieve()` and does NOT exercise the rerank pass — it cannot
+    /// validate a reranker swap; that needs a manual `ask` A/B until an `--rerank` eval flag exists.
+    /// `#[ignore]`d: needs a real Ollama (`nomic-embed-text`) + a populated index.
     ///
     /// ```bash
     /// # uses the macOS default index unless INDEXA_TEST_INDEX_DB is set

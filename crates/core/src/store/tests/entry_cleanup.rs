@@ -248,6 +248,43 @@ fn prune_removes_orphan_directory_apps_but_keeps_entried() {
 }
 
 #[test]
+fn prune_removes_orphan_symbols_but_keeps_entried() {
+    // symbols is written by the same `deep` pass as edges (same delete-by-path-then-insert
+    // contract, same orphan risk) — C3: it had been left out of the orphan sweep, so a
+    // pruned file's stale symbol rows lingered and `symbol_context` kept citing them.
+    let mut store = Store::open_in_memory().unwrap();
+    let sym = |path: &str, name: &str| SymbolRecord {
+        path: path.to_owned(),
+        name: name.to_owned(),
+        kind: "fn".to_owned(),
+        start_line: 1,
+        end_line: 3,
+    };
+    store
+        .upsert_entries(&[dummy_entry("/keep.rs", EntryKind::File, 10)])
+        .unwrap();
+    store
+        .upsert_symbols(&[sym("/keep.rs", "kept_fn"), sym("/orphan.rs", "orphan_fn")])
+        .unwrap();
+
+    let before = store.count_orphans().unwrap();
+    assert_eq!(before.symbols, 1, "one orphan symbol row");
+
+    let removed = store.prune_orphans().unwrap();
+    assert_eq!(removed.symbols, 1, "the orphan symbol row is pruned");
+
+    // Orphan symbol gone; the entried file's symbol survives.
+    assert_eq!(store.count_orphans().unwrap().symbols, 0);
+    assert!(
+        store.symbols_in_file("/orphan.rs").unwrap().is_empty(),
+        "orphan.rs's symbol must be swept"
+    );
+    let kept = store.symbols_in_file("/keep.rs").unwrap();
+    assert_eq!(kept.len(), 1, "keep.rs's symbol is preserved");
+    assert_eq!(kept[0].name, "kept_fn");
+}
+
+#[test]
 fn prune_noops_on_entryless_index() {
     // `deep`/`summarize` without `scan` leaves chunks with zero entries — a legitimate,
     // intentional state. prune must NOT treat the whole index as orphaned and wipe it.
