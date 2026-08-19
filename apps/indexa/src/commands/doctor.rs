@@ -165,36 +165,61 @@ pub(crate) async fn cmd_doctor(
     // config* will use are pulled. This is the check that catches the #1 first-run failure:
     // "Ollama isn't running" or "the model was never pulled".
     println!("Ollama server (liveness)");
-    let ollama_base =
-        indexa_llm::OllamaLlm::resolve_base_url(Some(cfg.embedding.base_url.as_str()));
-    println!("  Base URL  {ollama_base}");
-    // Required models = those the current config routes through Ollama.
-    let mut required: Vec<(&str, &str)> = Vec::new();
-    if cfg.embedding.provider == "ollama" {
-        required.push((cfg.embedding.model.as_str(), "embeddings"));
-    }
-    if cfg.describer.provider == "ollama" {
-        required.push((cfg.describer.file_model.as_str(), "file summaries"));
-        if cfg.describer.dir_model != cfg.describer.file_model {
-            required.push((cfg.describer.dir_model.as_str(), "dir roll-ups / Q&A"));
+    // Required models = those the current config routes through Ollama, each carrying the
+    // base URL for ITS OWN provider — `cfg.embedding.base_url` and `cfg.describer.base_url`
+    // are independently settable (the web UI's `/api/config/provider` only ever writes the
+    // describer's), so the embedder and describer can point at two different Ollama hosts.
+    let required = super::helpers::ollama_requirements(&cfg);
+    // Distinct hosts actually in use, in first-seen order — usually 1 (the common case: one
+    // shared local Ollama for both providers), occasionally 2 when they diverge.
+    let mut bases: Vec<&str> = Vec::new();
+    for req in &required {
+        if !bases.contains(&req.base.as_str()) {
+            bases.push(&req.base);
         }
     }
-    match indexa_llm::ollama_list_models(&ollama_base).await {
-        Ok(installed) => {
-            println!("  ✅  reachable — {} model(s) installed", installed.len());
-            for (model, role) in &required {
-                if model_installed(&installed, model) {
-                    println!("  ✅  {model}  ({role})");
-                } else {
-                    println!("  ❌  {model} — not pulled; run: ollama pull {model}  ({role})");
-                    readiness_issues.push(format!("missing model: {model} (ollama pull {model})"));
-                }
+    // The describer's own resolved base — used below by the (opt-in) latency probe so it
+    // benchmarks the describer's actual host, never the embedder's.
+    let describer_base =
+        indexa_llm::OllamaLlm::resolve_base_url(Some(cfg.describer.base_url.as_str()));
+
+    if bases.is_empty() {
+        println!("  ℹ️   neither provider is configured for Ollama — nothing to check.");
+    }
+    let mut installed_by_base: std::collections::HashMap<&str, Vec<String>> =
+        std::collections::HashMap::new();
+    for base in &bases {
+        println!("  Base URL  {base}");
+        match indexa_llm::ollama_list_models(base).await {
+            Ok(installed) => {
+                println!("  ✅  reachable — {} model(s) installed", installed.len());
+                installed_by_base.insert(base, installed);
+            }
+            Err(e) => {
+                println!("  ❌  not reachable: {e:#}");
+                println!(
+                    "      Start Ollama and retry (macOS: open -a Ollama; or `ollama serve`)."
+                );
+                readiness_issues.push(format!("Ollama not reachable at {base}"));
             }
         }
-        Err(e) => {
-            println!("  ❌  not reachable: {e:#}");
-            println!("      Start Ollama and retry (macOS: open -a Ollama; or `ollama serve`).");
-            readiness_issues.push(format!("Ollama not reachable at {ollama_base}"));
+    }
+    for req in &required {
+        let Some(installed) = installed_by_base.get(req.base.as_str()) else {
+            continue; // that host was unreachable — already reported + flagged above.
+        };
+        if model_installed(installed, &req.model) {
+            println!("  ✅  {}  ({})", req.model, req.role);
+        } else {
+            println!(
+                "  ❌  {model} — not pulled; run: ollama pull {model}  ({role})",
+                model = req.model,
+                role = req.role
+            );
+            readiness_issues.push(format!(
+                "missing model: {model} (ollama pull {model})",
+                model = req.model
+            ));
         }
     }
     println!();
@@ -236,7 +261,7 @@ pub(crate) async fn cmd_doctor(
             }
         }
         if cfg.describer.provider == "ollama" {
-            let llm = indexa_llm::OllamaLlm::new(&ollama_base, &cfg.describer.file_model);
+            let llm = indexa_llm::OllamaLlm::new(&describer_base, &cfg.describer.file_model);
             let t = Instant::now();
             match llm.generate("Reply with the single word: ok").await {
                 Ok(_) => {
