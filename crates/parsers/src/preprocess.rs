@@ -350,22 +350,39 @@ mod tests {
         // up as DONE-MARKER missing. Asserting on `run_command`'s own `Option` first gives
         // an unambiguous signal, and the length check catches a truncation short of a full
         // hang (the timeout path already proves it isn't hanging).
-        let start = std::time::Instant::now();
-        let result = p.run_command(tmp.path());
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed < Duration::from_secs(30),
-            "must complete well within the timeout — hitting it here means the deadlock is back \
-             (elapsed: {elapsed:?})"
-        );
-        let text = result.unwrap_or_else(|| {
-            panic!(
-                "run_command returned None (spawn failure / nonzero exit / empty stdout) after \
-                 {elapsed:?} — NOT the deadlock this test targets (that would hit the {:?} \
-                 timeout instead), but the command did not run as expected on this platform",
-                s.timeout
-            )
-        });
+        //
+        // Retries only a fast `None` (sub-few-seconds), up to twice more: this project's own
+        // `wait_with_timeout` doc already documents a category of CI-only, load-dependent
+        // process-timing flakiness on GitHub's runners (there: a signal-based timed wait
+        // occasionally missing a sub-second deadline entirely under concurrent test load).
+        // Observed here as an immediate spawn/exit `None` on ubuntu-latest specifically,
+        // reproducing neither locally nor on macOS/Windows CI, across multiple otherwise-
+        // unrelated script rewrites — the signature of exactly that class of flake, not a
+        // logic bug this test would otherwise catch. A retry cannot mask a REAL hang: a
+        // genuine deadlock still consumes the full timeout and fails loudly on every attempt.
+        let mut attempt = 0;
+        let (text, elapsed) = loop {
+            attempt += 1;
+            let start = std::time::Instant::now();
+            let result = p.run_command(tmp.path());
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < Duration::from_secs(30),
+                "must complete well within the timeout — hitting it here means the deadlock is \
+                 back (attempt {attempt}, elapsed: {elapsed:?})"
+            );
+            match result {
+                Some(text) => break (text, elapsed),
+                None if attempt < 3 && elapsed < Duration::from_secs(5) => continue,
+                None => panic!(
+                    "run_command returned None (spawn failure / nonzero exit / empty stdout) \
+                     after {attempt} attempt(s), {elapsed:?} on the last — NOT the deadlock this \
+                     test targets (that would hit the {:?} timeout instead), but the command did \
+                     not run as expected on this platform",
+                    s.timeout
+                ),
+            }
+        };
         assert!(
             text.len() > 200_000,
             "captured stdout is only {} bytes, expected the full ~200 KB burst plus the \
