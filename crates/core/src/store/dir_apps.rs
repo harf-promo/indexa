@@ -7,8 +7,9 @@
 //! tree, so — unlike `classifications`, which can hold a user decision — these rows are cleared by
 //! the entry-delete paths and the prune orphan sweep (the classifications lifecycle).
 
-use super::entries::subtree_match;
+use super::entries::{subtree_match, subtree_match_or_all};
 use super::Store;
+use crate::pathutil::norm_sep;
 use anyhow::Result;
 use rusqlite::params;
 
@@ -113,7 +114,14 @@ impl Store {
     /// Primary detected apps at or under a path prefix — one row per directory. Used to annotate
     /// the project overview's child-directory lines in a single query.
     pub fn primary_apps_under(&self, prefix: &str) -> Result<Vec<DetectedApp>> {
-        let (exact, child) = subtree_match(prefix);
+        // `subtree_match_or_all`, not `subtree_match`: an empty prefix means "no
+        // scope restriction" here (the welcome "Build context" list's default,
+        // reached via `GET /api/projects` with no `path`). `subtree_match("")`
+        // alone produces the `/`-anchored LIKE pattern `/%`, which only matches
+        // "everything" by the coincidence that Unix absolute paths start with
+        // `/` — on Windows (`C:\...`) it matches nothing, so this call returned
+        // an empty project list unconditionally (M7).
+        let (exact, child) = subtree_match_or_all(prefix);
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {COLS} FROM directory_apps
               WHERE is_primary = 1 AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')
@@ -163,14 +171,23 @@ impl Store {
             .into_iter()
             .filter(|a| !is_project_noise_path(&a.path))
             .collect();
-        let paths: Vec<String> = kept.iter().map(|a| a.path.clone()).collect();
+        // Separator-normalize both sides of the nested-child check: a
+        // Windows-persisted child path uses `\`, so comparing it against a
+        // `/`-suffixed parent prefix without normalizing either side never
+        // matches (M7).
+        let paths: Vec<String> = kept
+            .iter()
+            .map(|a| norm_sep(&a.path).into_owned())
+            .collect();
         Ok(kept
             .into_iter()
-            .filter(|a| {
+            .zip(paths.iter())
+            .filter(|(_, this)| {
                 !paths
                     .iter()
-                    .any(|other| other != &a.path && a.path.starts_with(&format!("{other}/")))
+                    .any(|other| other != *this && this.starts_with(&format!("{other}/")))
             })
+            .map(|(a, _)| a)
             .collect())
     }
 }
@@ -201,5 +218,8 @@ pub fn is_project_noise_path(path: &str) -> bool {
         "/DerivedData/",
         "/Pods/",
     ];
-    FRAGMENTS.iter().any(|f| path.contains(f))
+    // Fragments are `/`-delimited literals; normalize first so a
+    // Windows-persisted path (`\`-separated) still matches (M7).
+    let normalized = norm_sep(path);
+    FRAGMENTS.iter().any(|f| normalized.contains(f))
 }
