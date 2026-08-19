@@ -90,9 +90,14 @@ jobs:
   # Retrieval-quality gate: index this very repo with `deep --no-embed` (FTS-only, so no
   # embedder / no Ollama / no models pulled — fully hermetic) and score the `retrieve()`
   # ranking against a committed golden set via `indexa eval`. NOT the full production
-  # ranking: sparse mode skips MMR (retrieve() only applies it outside HybridMode::Sparse),
-  # and no mode exercises the rerank pass — that runs only in the real `ask` pipeline,
-  # after retrieve() returns, so a reranker regression is invisible to this job either way.
+  # ranking: `--no-embed` stores zero chunk embeddings, so switching `--mode` here couldn't
+  # exercise MMR anyway — retrieve.rs's MMR step looks up per-chunk embeddings and no-ops
+  # when none are stored (and reaching that code at all needs an embedder, which this
+  # hermetic job deliberately doesn't install). `indexa eval` also has a `--rerank` flag
+  # (routes through the SAME rerank pass `ask` uses), left off here for the same reason —
+  # no local LLM is running in this job either. So this job cannot detect an MMR or reranker
+  # regression regardless of mode/flags; `dense-eval.yml` (`workflow_dispatch`, Ollama +
+  # nomic-embed-text, a real embedded index) is the counterpart that can exercise MMR.
   # Catches regressions in chunking / parsing / tokenization / the ranking this job DOES
   # cover that fmt/clippy/test cannot see. Golden probes are distinctive identifiers scored
   # in sparse (BM25) mode; the floor is set well below the measured 1.00 hit rate to

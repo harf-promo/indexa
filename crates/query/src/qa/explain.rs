@@ -10,7 +10,7 @@ use indexa_core::store::{AnnIndex, SearchHit, Store};
 use indexa_embed::Embedder;
 use indexa_llm::Generator;
 
-use crate::rerank::{apply_rerank, CandleReranker, LlmReranker};
+use crate::rerank::apply_configured_rerank;
 
 use super::retrieve::retrieve;
 use super::QaConfig;
@@ -118,11 +118,7 @@ pub async fn explain_retrieval(
     // Optional rerank (async, fails open) — mirrors `retrieve_and_rerank`.
     let final_hits = if cfg.rerank && !fused.is_empty() {
         final_label.push_str(" + rerank");
-        if cfg.rerank_backend == "cross-encoder" {
-            apply_rerank(&CandleReranker::new(&cfg.rerank_model), question, fused).await
-        } else {
-            apply_rerank(&LlmReranker::new(llm), question, fused).await
-        }
+        apply_configured_rerank(llm, cfg, question, fused).await
     } else {
         fused
     };

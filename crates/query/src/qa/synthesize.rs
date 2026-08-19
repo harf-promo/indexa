@@ -10,7 +10,7 @@ use indexa_core::store::{AnnIndex, SearchHit, Store};
 use indexa_embed::Embedder;
 use indexa_llm::Generator;
 
-use crate::rerank::{apply_rerank, CandleReranker, LlmReranker};
+use crate::rerank::apply_configured_rerank;
 
 use super::cluster::{cluster_hits, cluster_theme_prompt, Cluster};
 use super::confidence::confidence_for;
@@ -400,11 +400,7 @@ async fn retrieve_and_rerank(
     // 3. Optional cross-encoder rerank (fails open). Reaches every surface
     //    because they all call this helper.
     let hits = if cfg.rerank {
-        if cfg.rerank_backend == "cross-encoder" {
-            apply_rerank(&CandleReranker::new(&cfg.rerank_model), question, hits).await
-        } else {
-            apply_rerank(&LlmReranker::new(llm), question, hits).await
-        }
+        apply_configured_rerank(llm, cfg, question, hits).await
     } else {
         hits
     };

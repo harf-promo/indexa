@@ -2,12 +2,12 @@ use anyhow::{bail, Context, Result};
 use indexa_core::config::{Config, HybridMode};
 use indexa_core::store::Store;
 use indexa_query::{
-    aggregate, compare_to_baseline, evaluate_question, EvalSummary, GoldenSet, QaConfig,
-    QuestionMetrics,
+    aggregate, compare_to_baseline, evaluate_question, evaluate_question_reranked, EvalSummary,
+    GoldenSet, QaConfig, QuestionMetrics,
 };
 use serde::{Deserialize, Serialize};
 
-use super::helpers::{build_embedder, require_index_db};
+use super::helpers::{build_embedder, build_llm, preflight_ollama, require_index_db};
 
 #[derive(Serialize)]
 struct EvalJson<'a> {
@@ -24,8 +24,12 @@ struct BaselineFile {
 }
 
 /// `indexa eval <golden.json>` — regression-test retrieval quality against golden
-/// questions. Retrieval only (the same `retrieve()` the ask pipeline uses): no LLM,
-/// no rerank, and in sparse mode (the default) no embedder — so a CI run is hermetic.
+/// questions. Scores the `retrieve()` ranking the ask pipeline uses, in whichever
+/// `--mode` is given: no LLM synthesis, ever; no rerank unless `--rerank` opts in
+/// (retrieve() itself never reranks — the LLM/cross-encoder pass runs only afterward,
+/// in the real `ask` pipeline); and in sparse mode (the default) no embedder — so a
+/// plain run is hermetic and needs no Ollama. This is NOT the full production `ask`
+/// ranking unless both `--mode rrf`/`dense` (for MMR) and `--rerank` are set.
 /// Exits 1 when the aggregate hit rate falls below `--min-hit-rate`, or (with `--baseline`)
 /// when any aggregate metric regresses by more than `--max-regression`.
 #[allow(clippy::too_many_arguments)]
@@ -38,6 +42,7 @@ pub(crate) async fn cmd_eval(
     min_hit_rate: f64,
     baseline: Option<String>,
     max_regression: f64,
+    rerank: bool,
     cfg: &Config,
 ) -> Result<()> {
     if !(0.0..=1.0).contains(&min_hit_rate) {
@@ -93,9 +98,26 @@ pub(crate) async fn cmd_eval(
         rrf_k: cfg.retrieval.rrf_k as f32,
         summary_weight: cfg.retrieval.summary_weight,
         summary_depth_alpha: cfg.retrieval.summary_depth_alpha,
-        rerank: false, // rerank needs an LLM; eval stays hermetic
+        // Off by default so eval stays hermetic; `--rerank` opts into the same rerank pass
+        // `ask` uses (see `evaluate_question_reranked` below) — needs a local LLM.
+        rerank,
+        rerank_backend: cfg.retrieval.rerank_backend.clone(),
+        rerank_model: cfg.retrieval.rerank_model.clone(),
         use_weights: cfg.retrieval.use_weights,
         ..QaConfig::default()
+    };
+
+    // `--rerank` needs a reachable local model exactly like `ask` does. A gate that can't
+    // measure must fail, not silently pass (see the index checks above) — so when Ollama is
+    // the configured provider and it's unreachable, this is a hard error rather than letting
+    // `apply_rerank`'s fail-open behavior quietly score an un-reranked run as reranked.
+    if rerank {
+        preflight_ollama(cfg).await?;
+    }
+    let llm = if rerank {
+        Some(build_llm(cfg, None)?)
+    } else {
+        None
     };
 
     // Embed every question up front (rrf/dense only) so the retrieval loop below is
@@ -113,7 +135,13 @@ pub(crate) async fn cmd_eval(
 
     let mut per_question = Vec::with_capacity(questions.len());
     for (q, vec) in questions.iter().zip(&query_vecs) {
-        per_question.push(evaluate_question(&store, q, &qa_cfg, vec.as_deref())?);
+        let metrics = match &llm {
+            Some(llm) => {
+                evaluate_question_reranked(&store, q, &qa_cfg, vec.as_deref(), llm.as_ref()).await?
+            }
+            None => evaluate_question(&store, q, &qa_cfg, vec.as_deref())?,
+        };
+        per_question.push(metrics);
     }
     let summary = aggregate(&per_question);
 

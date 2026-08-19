@@ -317,15 +317,20 @@ pub enum Commands {
         action: SnapshotAction,
     },
 
-    /// Regression-test retrieval quality against a golden-questions file (no LLM).
+    /// Regression-test retrieval quality against a golden-questions file.
     ///
-    /// Runs each question through the same retrieval the `ask` pipeline uses and
-    /// scores the ranked hits against the paths you expect: hit@k, MRR, and citation
-    /// precision. Sparse mode (the default) needs no embedder or Ollama, so it can
-    /// gate CI. Golden file format: docs/how-to/evaluate-retrieval.md.
+    /// Runs each question through the same `retrieve()` the `ask` pipeline uses (in
+    /// whichever `--mode`) and scores the ranked hits against the paths you expect: hit@k,
+    /// MRR, recall, nDCG, and citation precision. No LLM synthesis, ever. By default no
+    /// rerank either (`retrieve()` itself never reranks — the LLM/cross-encoder pass runs
+    /// only afterward, in the real `ask` pipeline) and, in sparse mode (the default), no
+    /// embedder — so a plain run needs no Ollama and can gate CI. Pass `--rerank` to opt
+    /// into the ask pipeline's rerank pass too (needs a local LLM or the cross-encoder
+    /// model). Golden file format: docs/how-to/evaluate-retrieval.md.
     #[command(after_help = "Examples:
   indexa eval golden.json
   indexa eval golden.json --mode rrf --top-k 20
+  indexa eval golden.json --rerank              # also score the ask pipeline's rerank pass
   indexa eval golden.json --json --min-hit-rate 0.8   # exit 1 below 80% hit rate")]
     #[command(display_order = 38)]
     Eval {
@@ -362,6 +367,15 @@ pub enum Commands {
         /// drops by more than this fraction vs the baseline. `0.0` (default) = no regression allowed.
         #[arg(long, default_value_t = 0.0)]
         max_regression: f64,
+
+        /// Also route retrieval through the same rerank pass `ask` uses (off by default, so
+        /// existing callers/CI are unaffected). Needs a local LLM (`[retrieval] rerank_backend =
+        /// "llm"`, the default) or the cross-encoder model (`"cross-encoder"`). When the
+        /// describer is Ollama this preflights it — an unreachable Ollama is a hard error, so
+        /// the flag can never silently score an un-reranked run as if it had been reranked;
+        /// past that check, an individual rerank call still fails open on error (same as `ask`).
+        #[arg(long)]
+        rerank: bool,
     },
 
     /// Run several questions and render one document (answers + cited sources + TOC).
@@ -1597,6 +1611,7 @@ mod tests {
                 min_hit_rate,
                 baseline,
                 max_regression,
+                rerank,
             } => {
                 assert_eq!(golden, "golden.json");
                 assert_eq!(mode, "sparse", "hermetic sparse is the default");
@@ -1606,6 +1621,21 @@ mod tests {
                 assert!((min_hit_rate - 0.8).abs() < 1e-9);
                 assert!(baseline.is_none());
                 assert_eq!(max_regression, 0.0);
+                assert!(
+                    !rerank,
+                    "--rerank must default to off (additive, no behavior change)"
+                );
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_eval_rerank_flag() {
+        let cli = Cli::try_parse_from(["indexa", "eval", "golden.json", "--rerank"]).unwrap();
+        match cli.command {
+            Commands::Eval { rerank, .. } => {
+                assert!(rerank, "--rerank must thread through to true when passed");
             }
             _ => panic!("wrong command"),
         }
