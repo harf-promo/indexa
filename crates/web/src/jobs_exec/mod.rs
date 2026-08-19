@@ -8,7 +8,9 @@ use indexa_core::{
     resource::WatchdogState,
     walker::{walk, WalkConfig},
 };
-use indexa_query::{process_queue_item_with_passes, requeue_subtree, QueueOutcome, MAX_DIR_DEFERS};
+use indexa_query::{
+    enqueue_subtree, process_queue_item_with_passes, requeue_subtree, QueueOutcome, MAX_DIR_DEFERS,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -175,8 +177,11 @@ pub(crate) async fn run_index_job(
         return;
     }
 
-    // Phase 3: summarize
-    run_summarize_phase(&state, &path, None, &handle, model_override).await;
+    // Phase 3: summarize. `run_index_job` ("Index this folder") is a one-shot
+    // scan→deep→summarize pipeline, not a Regenerate action — always incremental
+    // (force: false), so re-running it after editing a few files doesn't re-pay full
+    // LLM cost for the whole subtree. See `run_summarize_phase`'s `force` doc.
+    run_summarize_phase(&state, &path, None, &handle, model_override, false).await;
 }
 
 /// Standalone scan: walks, scans, then finalises the job as done.
@@ -289,6 +294,12 @@ pub(crate) async fn run_summarize_phase(
     // Optional (file_model, dir_model, num_ctx) from the "ask me first" popover;
     // when None, the configured describer models are used.
     model_override: Option<(String, String, u32)>,
+    // `true` only from the web UI's explicit "↻ Regenerate" button — blanks stored hashes
+    // and re-runs the AI over the whole subtree even for byte-identical content (the only
+    // way to pick up a model/prompt change). `false` for every other trigger (plain "Build
+    // context", the welcome list, `run_index_job`'s summarize phase): those must stay
+    // incremental — see [`enqueue_subtree`] vs [`requeue_subtree`] below.
+    force: bool,
 ) {
     push(
         handle,
@@ -347,11 +358,20 @@ pub(crate) async fn run_summarize_phase(
         }
     };
 
-    // Force-requeue the whole subtree: reset any existing `done`/`failed` rows back
-    // to `pending` so Regenerate actually re-runs the AI, not just drains new items.
-    // `mark_for_resummary` (used internally) leaves `in_flight` rows untouched so
+    // `force` (Regenerate): reset any existing `done`/`failed` rows back to `pending` and
+    // blank stored hashes so the freshness gate can't skip byte-identical content — the
+    // only way to pick up a model/prompt change. Otherwise (every other trigger): only
+    // enqueue what's new or genuinely stale, via the same freshness gate `deep`/`watch`
+    // use — this was previously unconditional, which repaid full LLM cost for every file
+    // on every "Build context" click regardless of what had actually changed.
+    // `mark_for_resummary` (used internally by both) leaves `in_flight` rows untouched so
     // concurrent workers aren't double-claimed.
-    let newly_enqueued = match requeue_subtree(&mut job_store, &root) {
+    let requeue_result = if force {
+        requeue_subtree(&mut job_store, &root)
+    } else {
+        enqueue_subtree(&mut job_store, &root)
+    };
+    let newly_enqueued = match requeue_result {
         Ok(n) => n,
         Err(e) => {
             finalize_failed(handle, "summarize", &e);

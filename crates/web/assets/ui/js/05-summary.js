@@ -51,17 +51,20 @@ async function showSummary(path) {
     });
     var enqBtn = view.querySelector('#enqueue-btn');
     if (enqBtn) {
-      // Fire the draining summarize job (same path as Regenerate) instead of the bare
-      // /api/summarize enqueue, so items are actually processed — not just enqueued.
+      // Fire the draining summarize job (incremental — see the Regenerate button below
+      // for the force path) instead of the bare /api/summarize enqueue, so items are
+      // actually processed — not just enqueued.
       enqBtn.addEventListener('click', function() {
         if (typeof fireJob === 'function') fireJob('summarize', path);
       });
     }
-    // Regenerate button: triggers a new summarize job just like the row summarize action
+    // Regenerate button: force re-summarizes the whole subtree even where content hasn't
+    // changed (the only way to pick up a model/prompt change) — unlike the enqueue button
+    // above, which only processes new-or-stale items.
     var regenBtn = view.querySelector('#regen-btn');
     if (regenBtn) {
       regenBtn.addEventListener('click', function() {
-        if (typeof fireJob === 'function') fireJob('summarize', path);
+        if (typeof fireJob === 'function') fireJob('summarize', path, true);
       });
     }
     // "Ask about this file/folder" → switch to a scoped Ask for this selection.

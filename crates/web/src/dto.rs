@@ -518,6 +518,13 @@ pub(crate) struct JobPathQuery {
     pub(crate) file_model: Option<String>,
     pub(crate) dir_model: Option<String>,
     pub(crate) num_ctx: Option<u32>,
+    /// `POST /api/jobs/summarize` only — set by the web UI's "↻ Regenerate" button.
+    /// Omitted/`false` (every other summarize trigger) stays incremental: only new or
+    /// stale content is re-run. `true` blanks stored hashes first and re-summarizes the
+    /// whole subtree even where content hasn't changed — the only way to pick up a
+    /// model/prompt change. Ignored by the other job kinds.
+    #[serde(default)]
+    pub(crate) force: bool,
 }
 
 #[derive(Serialize)]
