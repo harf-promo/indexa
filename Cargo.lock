@@ -1997,6 +1997,7 @@ dependencies = [
  "indexa-query",
  "indexa-update",
  "indexa-web",
+ "rusqlite",
  "semver",
  "serde",
  "serde_json",

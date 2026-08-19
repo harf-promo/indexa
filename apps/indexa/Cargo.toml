@@ -42,3 +42,7 @@ indexa-update = { path = "../../crates/update" }
 semver = { workspace = true }
 # Scratch git repos for the git-poll (3.3) tests.
 tempfile = { workspace = true }
+# Already in the tree (via indexa-core); named directly so the git-poll staleness test
+# can backdate a chunk's `indexed_at` — `ChunkRecord`/`Store` don't expose that column,
+# it's always DB-defaulted to `unixepoch()` at insert time.
+rusqlite = { workspace = true }
