@@ -316,19 +316,13 @@ mod tests {
         // pipe. Permanent deadlock, and invisible to `wait_with_timeout` /
         // `max_output_bytes`, since neither is ever reached from a blocked write.
         // `run_command` passes the input file's path as argv[1] (`$1`) in addition to feeding
-        // its bytes on stdin — `cat "$1"` replays the file straight from disk as our large
-        // stdout burst, portably (the same idiom `parse_indexes_the_commands_stdout` above
-        // already relies on), without depending on `/dev/zero`/`tr` NUL-byte handling.
+        // its bytes on stdin — `cat "$1" -` (GNU/POSIX cat: multiple file operands, `-` means
+        // "then read stdin") replays the file straight from disk as our large stdout burst,
+        // THEN reads stdin, all in one command invocation — no multi-command pipeline, no
+        // `/dev/zero`/`tr` NUL-byte handling. Same idiom `parse_indexes_the_commands_stdout`
+        // above already relies on (`cat <path>`), just with a stdin operand appended.
         let script = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            script.path(),
-            "#!/bin/sh\n\
-             cat \"$1\"\n\
-             printf '\\n'\n\
-             cat > /dev/null\n\
-             echo DONE-MARKER\n",
-        )
-        .unwrap();
+        std::fs::write(script.path(), "#!/bin/sh\ncat \"$1\" -\necho DONE-MARKER\n").unwrap();
         std::fs::set_permissions(
             script.path(),
             std::os::unix::fs::PermissionsExt::from_mode(0o755),
@@ -337,8 +331,13 @@ mod tests {
 
         let tmp = tempfile::NamedTempFile::with_suffix(".txt").unwrap();
         std::fs::write(tmp.path(), vec![b'y'; 200_000]).unwrap(); // > one pipe buffer as stdin
-                                                                  // Generous timeout — this asserts "does not hang forever", not "is fast"; a loaded
-                                                                  // CI runner is not the failure mode this test exists to catch.
+        assert_eq!(
+            std::fs::metadata(tmp.path()).unwrap().len(),
+            200_000,
+            "input fixture must be fully written and visible before the child reads it"
+        );
+        // Generous timeout — this asserts "does not hang forever", not "is fast"; a loaded
+        // CI runner is not the failure mode this test exists to catch.
         let mut s = spec("*.txt", script.path().to_str().unwrap());
         s.timeout = Duration::from_secs(30);
         s.max_output_bytes = 1024 * 1024;
