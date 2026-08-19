@@ -576,6 +576,14 @@ pub(crate) async fn cmd_deep(
                 });
             }
 
+            // `deep` can run without a preceding `scan` (its own skip-if-unchanged comment
+            // above says so), so without this the file has no `entries` row — its chunks are
+            // orphans: never summarized (`entries_for_summarization`/`enqueue_subtree` skip
+            // entry-less paths) and silently deleted the next time `prune_orphans` runs (every
+            // `indexa scan`, once ANY entries row exists) — wiping the embedding work this pass
+            // just paid for. `upsert_entries` is an idempotent ON-CONFLICT upsert (matches the
+            // `watch` command's write path, which already does this correctly).
+            store.upsert_entries(&[(**entry).clone()])?;
             store.upsert_chunks(&chunk_records)?;
             total_chunks += chunk_records.len();
 

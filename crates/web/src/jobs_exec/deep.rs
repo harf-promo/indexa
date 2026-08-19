@@ -657,6 +657,25 @@ pub(crate) async fn run_deep_phase(
                     });
                 }
                 let mut store = state.store.lock().await;
+                // The standalone Deep job (this function) can run without a preceding scan, so
+                // without this the file has no `entries` row — its chunks would be orphans:
+                // never summarized (`entries_for_summarization`/`enqueue_subtree` skip
+                // entry-less paths) and silently deleted the next time `prune_orphans` runs
+                // (every `indexa scan`, once ANY entries row exists), wiping the embedding work
+                // this pass just paid for. `upsert_entries` is an idempotent ON-CONFLICT upsert
+                // (matches the CLI `watch`/`cmd_deep` write paths, which already do this).
+                if let Err(e) = store.upsert_entries(&[(**entry).clone()]) {
+                    push(
+                        handle,
+                        JobEvent::Warning {
+                            stage: "deep".to_owned(),
+                            item_path: Some(path_str.clone()),
+                            message: format!("upsert_entries failed: {e:#}"),
+                            pressure: None,
+                        },
+                    );
+                    hard_errors += 1;
+                }
                 match store.upsert_chunks(&chunk_records) {
                     Ok(()) => chunks_written += chunk_records.len() as u64,
                     Err(e) => {

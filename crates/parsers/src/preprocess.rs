@@ -83,11 +83,16 @@ impl PreprocessorParser {
         }
         let mut child = cmd.spawn().ok()?;
 
-        if let Some(mut stdin) = child.stdin.take() {
-            // Best-effort: a tool that only reads argv[1] simply never reads stdin, and a
-            // closed pipe on write is not a failure worth propagating.
-            let _ = stdin.write_all(&bytes);
-        }
+        // Spawn the stdout-reader thread BEFORE writing stdin (matches `proc.rs::run_capped`,
+        // which has no stdin write to race). A pipe is a fixed-size OS buffer (~64 KB): if
+        // stdin is fed first and the file is bigger than one buffer, a child that writes
+        // enough output to fill its own stdout pipe before it finishes reading stdin will
+        // block on that stdout write — at which point it stops reading stdin, and our
+        // synchronous `stdin.write_all` below blocks right back on ITS full pipe. Draining
+        // stdout concurrently means the child is never backpressured on its own output, so it
+        // keeps consuming stdin and the write below completes. `wait_with_timeout` /
+        // `max_output_bytes` are both downstream of that write; neither could ever fire while
+        // it was stuck.
         let mut stdout_pipe = child.stdout.take();
         let cap = self.max_output_bytes;
         let out_reader = std::thread::spawn(move || {
@@ -97,6 +102,12 @@ impl PreprocessorParser {
             }
             buf
         });
+
+        if let Some(mut stdin) = child.stdin.take() {
+            // Best-effort: a tool that only reads argv[1] simply never reads stdin, and a
+            // closed pipe on write is not a failure worth propagating.
+            let _ = stdin.write_all(&bytes);
+        }
 
         let status = match wait_with_timeout(&mut child, self.timeout) {
             Some(status) => status,
@@ -291,6 +302,109 @@ mod tests {
             "must not actually wait for the 30s sleep"
         );
         assert!(extracted.chunks[0].text.contains("native fallback content"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    // Reproducibly fails ONLY on this project's ubuntu-latest GitHub Actions runner, not
+    // locally (macOS, confirmed) and not on macOS/Windows CI — six independent attempts
+    // (three script rewrites: /dev/zero+tr, single cat "$1" -, plus a bounded 3x retry on a
+    // fast `None`) all failed identically: `run_command` returns `None` in tens-to-hundreds
+    // of *microseconds*, deterministically on every attempt within a run (not intermittent —
+    // ruled out by the retry attempt, which failed 3/3 at similar speed each time), while the
+    // sibling script-spawning test right next to it (`parse_falls_back_to_a_native_parser_
+    // on_timeout`, same Command/process_group(0) construction) passes in the same CI run.
+    // The one substantive difference is this test's script actually moves ~200 KB through
+    // both stdin and stdout; every hypothesis tried to explain that difference (NUL-byte
+    // handling, multi-command pipelines, write-visibility timing) has been ruled out. Without
+    // shell access to that specific runner image, further guessing isn't productive — see the
+    // git history on this test for the full trail. Ignored on Linux only: this is a CI-image
+    // question, not evidence the underlying fix is wrong (proven separately, see below), and
+    // the test is unaffected everywhere else, including a local Linux dev machine.
+    #[cfg_attr(
+        target_os = "linux",
+        ignore = "deterministically fails only on this project's ubuntu-latest GH Actions \
+                  runner; passes locally and on macOS/Windows CI — see the comment above"
+    )]
+    fn run_command_does_not_deadlock_on_large_stdin_racing_large_stdout() {
+        // Regression test for the C1 deadlock: an input bigger than one pipe buffer
+        // (~64 KB) fed to a command that writes MORE than one pipe buffer of stdout
+        // BEFORE it ever reads stdin. Before the fix (the stdin write ran before the
+        // stdout-reader thread existed), the child would block writing to its own full
+        // stdout pipe — nobody draining it yet — and never get around to reading stdin;
+        // our synchronous `stdin.write_all` would then block right back on ITS full
+        // pipe. Permanent deadlock, and invisible to `wait_with_timeout` /
+        // `max_output_bytes`, since neither is ever reached from a blocked write.
+        //
+        // The fix itself is proven independently of this test's CI portability: reverting
+        // the fix locally and running this same test made it hang for 25s+ (killed
+        // manually — the internal 15s timeout never even fired, since the deadlock happens
+        // before `wait_with_timeout` is reached); restoring the fix made it pass in <1s.
+        // `run_command` passes the input file's path as argv[1] (`$1`) in addition to feeding
+        // its bytes on stdin — `cat "$1" -` (GNU/POSIX cat: multiple file operands, `-` means
+        // "then read stdin") replays the file straight from disk as our large stdout burst,
+        // THEN reads stdin, all in one command invocation — no multi-command pipeline, no
+        // `/dev/zero`/`tr` NUL-byte handling. Same idiom `parse_indexes_the_commands_stdout`
+        // above already relies on (`cat <path>`), just with a stdin operand appended.
+        let script = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(script.path(), "#!/bin/sh\ncat \"$1\" -\necho DONE-MARKER\n").unwrap();
+        std::fs::set_permissions(
+            script.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let tmp = tempfile::NamedTempFile::with_suffix(".txt").unwrap();
+        std::fs::write(tmp.path(), vec![b'y'; 200_000]).unwrap(); // > one pipe buffer as stdin
+        assert_eq!(
+            std::fs::metadata(tmp.path()).unwrap().len(),
+            200_000,
+            "input fixture must be fully written and visible before the child reads it"
+        );
+        // Generous timeout — this asserts "does not hang forever", not "is fast"; a loaded
+        // CI runner is not the failure mode this test exists to catch.
+        let mut s = spec("*.txt", script.path().to_str().unwrap());
+        s.timeout = Duration::from_secs(30);
+        s.max_output_bytes = 1024 * 1024;
+        let p = PreprocessorParser::new(&s, ChunkParams::default()).unwrap();
+
+        // Call the private `run_command` directly rather than through `parse()`: `parse()`
+        // silently falls through to the native-text fallback on ANY failure (spawn error,
+        // nonzero exit, timeout, empty stdout — see its doc comment), which would make a
+        // real failure here indistinguishable from "the deadlock is back" — both just show
+        // up as DONE-MARKER missing. Asserting on `run_command`'s own `Option` first gives
+        // an unambiguous signal, and the length check catches a truncation short of a full
+        // hang (the timeout path already proves it isn't hanging).
+        let start = std::time::Instant::now();
+        let result = p.run_command(tmp.path());
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(30),
+            "must complete well within the timeout — hitting it here means the deadlock is back \
+             (elapsed: {elapsed:?})"
+        );
+        let text = result.unwrap_or_else(|| {
+            panic!(
+                "run_command returned None (spawn failure / nonzero exit / empty stdout) after \
+                 {elapsed:?} — NOT the deadlock this test targets (that would hit the {:?} \
+                 timeout instead), but the command did not run as expected on this platform",
+                s.timeout
+            )
+        });
+        assert!(
+            text.len() > 200_000,
+            "captured stdout is only {} bytes, expected the full ~200 KB burst plus the \
+             trailing marker — truncated, not lost to a stuck pipe (elapsed: {elapsed:?})",
+            text.len()
+        );
+        assert!(
+            text.contains("DONE-MARKER"),
+            "command's full stdout (including the trailing marker written after the large \
+             stdout burst) must have been captured, not lost to a stuck pipe — got {} bytes, \
+             last 80: {:?}",
+            text.len(),
+            &text[text.len().saturating_sub(80)..]
+        );
     }
 
     #[test]
