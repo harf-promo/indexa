@@ -64,6 +64,37 @@ fn graph_modules_for_scope_returns_only_modules_with_a_matching_member_but_keeps
 }
 
 #[test]
+fn graph_modules_for_scope_excludes_prefix_siblings() {
+    // H4: "/proj" must NOT match "/projector" — a scoped module-list query used to leak a
+    // sibling directory's modules purely because it shared the string prefix.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .replace_graph_modules(&[
+            module(0, "proj-mod", 1.0, &["/proj/a.rs"]),
+            module(1, "projector-mod", 1.0, &["/projector/b.rs"]),
+        ])
+        .unwrap();
+    let scoped = store.graph_modules_for_scope("/proj").unwrap();
+    assert_eq!(scoped.len(), 1);
+    assert_eq!(scoped[0].label, "proj-mod");
+}
+
+#[test]
+fn graph_modules_for_scope_empty_prefix_still_means_all() {
+    // graph_modules() itself calls graph_modules_for_scope(""), relying on an empty prefix
+    // meaning "no scope restriction" — subtree_match_or_all must preserve that, not narrow
+    // it to a literal empty-string path match (which no row has).
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .replace_graph_modules(&[
+            module(0, "a", 1.0, &["/repo/a.rs"]),
+            module(1, "b", 1.0, &["/repo/b.rs"]),
+        ])
+        .unwrap();
+    assert_eq!(store.graph_modules_for_scope("").unwrap().len(), 2);
+}
+
+#[test]
 fn graph_modules_empty_when_never_computed() {
     let store = Store::open_in_memory().unwrap();
     assert!(store.graph_modules().unwrap().is_empty());

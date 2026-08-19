@@ -68,6 +68,16 @@ impl DecisionType {
         })
     }
 
+    /// Whether this type's `subject` is a filesystem path (vs. e.g.
+    /// [`DecisionType::SymbolAmbiguity`]'s bare symbol name). Batch operations that scope by
+    /// directory (`answer_decisions_under`'s `--under`) must only apply path-boundary
+    /// matching (`/`-separated prefix, not a bare string-starts-with) to types where that
+    /// concept even applies — treating a symbol name as a path would silently stop
+    /// `--under` from matching any symbol-ambiguity question at all.
+    pub fn subject_is_path(self) -> bool {
+        !matches!(self, DecisionType::SymbolAmbiguity)
+    }
+
     /// Every type, for UI filters and `--type` validation.
     pub const ALL: [DecisionType; 6] = [
         DecisionType::Classification,

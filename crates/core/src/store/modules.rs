@@ -175,16 +175,20 @@ impl Store {
     /// modules) — each module's FULL member list is still returned, not just the
     /// prefix-matching members, so a scoped view still shows a module's true size/shape.
     pub fn graph_modules_for_scope(&self, prefix: &str) -> Result<Vec<GraphModule>> {
-        let pattern = super::search::like_prefix(prefix);
+        // `member_path = exact OR member_path LIKE child_pattern`, not a bare prefix `LIKE` —
+        // see the identical fix on the hybrid-search scoping in `search.rs`. An empty
+        // `prefix` (this function's own "all modules" convention, per `graph_modules()`
+        // above) is preserved via `subtree_match_or_all`.
+        let (exact, child) = super::entries::subtree_match_or_all(prefix);
         let mut stmt = self.conn.prepare(
             "SELECT module_id, label, cohesion, member_path FROM graph_modules
               WHERE module_id IN (
                   SELECT DISTINCT module_id FROM graph_modules
-                   WHERE member_path LIKE ?1 ESCAPE '\\'
+                   WHERE member_path = ?1 OR member_path LIKE ?2 ESCAPE '\\'
               )
               ORDER BY module_id, member_path",
         )?;
-        let rows = stmt.query_map(params![pattern], |r| {
+        let rows = stmt.query_map(params![exact, child], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
