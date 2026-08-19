@@ -9,6 +9,7 @@
 //! plus the crash-repair and expiry sweeps.
 
 use crate::config::ReviewConfig;
+use crate::pathutil::norm_sep;
 use crate::store::{abstract_from, DuplicateCluster, NewDecision, Store, SummaryRecord};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
@@ -183,7 +184,12 @@ fn dup_ext_is_asset(path: &str) -> bool {
 }
 
 fn dup_in_generated_dir(path: &str) -> bool {
-    DUP_SKIP_DIR_FRAGMENTS.iter().any(|f| path.contains(f))
+    // Fragments are `/`-delimited literals; a Windows-persisted path uses `\`
+    // and would never match without normalizing first (M7).
+    let normalized = norm_sep(path);
+    DUP_SKIP_DIR_FRAGMENTS
+        .iter()
+        .any(|f| normalized.contains(f))
 }
 
 /// Generated / vendored / toolchain-cache trees: never ask "archive this?" —
@@ -199,7 +205,10 @@ fn is_sibling_manifest(name: &str) -> bool {
 }
 
 fn parent_dir(path: &str) -> &str {
-    path.rsplit_once('/').map(|(p, _)| p).unwrap_or("")
+    // Match on both separators (rather than normalizing first) so this keeps
+    // returning a borrowed slice of the original path — a Windows-persisted
+    // path uses `\`, never `/` (M7).
+    path.rsplit_once(['/', '\\']).map(|(p, _)| p).unwrap_or("")
 }
 
 fn same_parent(paths: &[String]) -> bool {
@@ -232,8 +241,10 @@ fn duplicate_cluster_actionable(paths: &[String]) -> bool {
 }
 
 /// Extract the file name (basename without directory) from a path string.
+/// Matches on both separators — a Windows-persisted path uses `\`, never `/`
+/// (M7) — so this keeps returning a borrowed slice of the original path.
 fn basename(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// Do all members of a near-duplicate cluster share the same filename? A
