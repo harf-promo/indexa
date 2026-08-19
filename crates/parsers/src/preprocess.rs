@@ -83,11 +83,16 @@ impl PreprocessorParser {
         }
         let mut child = cmd.spawn().ok()?;
 
-        if let Some(mut stdin) = child.stdin.take() {
-            // Best-effort: a tool that only reads argv[1] simply never reads stdin, and a
-            // closed pipe on write is not a failure worth propagating.
-            let _ = stdin.write_all(&bytes);
-        }
+        // Spawn the stdout-reader thread BEFORE writing stdin (matches `proc.rs::run_capped`,
+        // which has no stdin write to race). A pipe is a fixed-size OS buffer (~64 KB): if
+        // stdin is fed first and the file is bigger than one buffer, a child that writes
+        // enough output to fill its own stdout pipe before it finishes reading stdin will
+        // block on that stdout write — at which point it stops reading stdin, and our
+        // synchronous `stdin.write_all` below blocks right back on ITS full pipe. Draining
+        // stdout concurrently means the child is never backpressured on its own output, so it
+        // keeps consuming stdin and the write below completes. `wait_with_timeout` /
+        // `max_output_bytes` are both downstream of that write; neither could ever fire while
+        // it was stuck.
         let mut stdout_pipe = child.stdout.take();
         let cap = self.max_output_bytes;
         let out_reader = std::thread::spawn(move || {
@@ -97,6 +102,12 @@ impl PreprocessorParser {
             }
             buf
         });
+
+        if let Some(mut stdin) = child.stdin.take() {
+            // Best-effort: a tool that only reads argv[1] simply never reads stdin, and a
+            // closed pipe on write is not a failure worth propagating.
+            let _ = stdin.write_all(&bytes);
+        }
 
         let status = match wait_with_timeout(&mut child, self.timeout) {
             Some(status) => status,
@@ -291,6 +302,56 @@ mod tests {
             "must not actually wait for the 30s sleep"
         );
         assert!(extracted.chunks[0].text.contains("native fallback content"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_does_not_deadlock_on_large_stdin_racing_large_stdout() {
+        // Regression test for the C1 deadlock: an input bigger than one pipe buffer
+        // (~64 KB) fed to a command that writes MORE than one pipe buffer of stdout
+        // BEFORE it ever reads stdin. Before the fix (the stdin write ran before the
+        // stdout-reader thread existed), the child would block writing to its own full
+        // stdout pipe — nobody draining it yet — and never get around to reading stdin;
+        // our synchronous `stdin.write_all` would then block right back on ITS full
+        // pipe. Permanent deadlock, and invisible to `wait_with_timeout` /
+        // `max_output_bytes`, since neither is ever reached from a blocked write.
+        let script = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            script.path(),
+            "#!/bin/sh\n\
+             head -c 200000 /dev/zero | tr '\\0' 'x'\n\
+             printf '\\n'\n\
+             cat > /dev/null\n\
+             echo DONE-MARKER\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            script.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let tmp = tempfile::NamedTempFile::with_suffix(".txt").unwrap();
+        std::fs::write(tmp.path(), vec![b'y'; 200_000]).unwrap(); // > one pipe buffer as stdin
+        let mut s = spec("*.txt", script.path().to_str().unwrap());
+        s.timeout = Duration::from_secs(15);
+        s.max_output_bytes = 1024 * 1024;
+        let p = PreprocessorParser::new(&s, ChunkParams::default()).unwrap();
+
+        let start = std::time::Instant::now();
+        let extracted = p.parse(tmp.path()).unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "must complete well within the timeout — hitting it here means the deadlock is back"
+        );
+        assert!(
+            extracted
+                .chunks
+                .iter()
+                .any(|c| c.text.contains("DONE-MARKER")),
+            "command's full stdout (including the trailing marker written after the large \
+             stdout burst) must have been captured, not lost to a stuck pipe"
+        );
     }
 
     #[test]
