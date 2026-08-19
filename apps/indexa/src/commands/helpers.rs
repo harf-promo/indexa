@@ -138,49 +138,109 @@ pub(crate) fn have(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// One model Indexa needs from Ollama: which host to check/pull it against (each provider's
+/// own resolved `base_url`), the model name, and a human-readable role label.
+///
+/// `cfg.embedding.base_url` and `cfg.describer.base_url` are independently settable (the web
+/// UI's `POST /api/config/provider` handler only ever writes the describer's URL), so the
+/// embedder and describer can legitimately point at two different Ollama hosts. Every entry
+/// here carries the base URL for *its own* provider — never a single base shared across both.
+pub(crate) struct OllamaRequirement {
+    pub base: String,
+    pub model: String,
+    pub role: &'static str,
+}
+
+/// Pure (no I/O) core of the Ollama readiness checks: given the current config, which models
+/// does Indexa need, and which Ollama host does each one belong to? Shared by
+/// [`preflight_ollama`] and `indexa doctor`'s liveness probe so both check/pull/benchmark each
+/// provider's models against that provider's own configured host, instead of a single base
+/// resolved only from `cfg.embedding.base_url`.
+pub(crate) fn ollama_requirements(cfg: &Config) -> Vec<OllamaRequirement> {
+    let mut required = Vec::new();
+    if cfg.embedding.provider == "ollama" {
+        let base = indexa_llm::OllamaLlm::resolve_base_url(Some(cfg.embedding.base_url.as_str()));
+        required.push(OllamaRequirement {
+            base,
+            model: cfg.embedding.model.clone(),
+            role: "embeddings",
+        });
+    }
+    if cfg.describer.provider == "ollama" {
+        let base = indexa_llm::OllamaLlm::resolve_base_url(Some(cfg.describer.base_url.as_str()));
+        required.push(OllamaRequirement {
+            base: base.clone(),
+            model: cfg.describer.file_model.clone(),
+            role: "file summaries",
+        });
+        if cfg.describer.dir_model != cfg.describer.file_model {
+            required.push(OllamaRequirement {
+                base,
+                model: cfg.describer.dir_model.clone(),
+                role: "dir roll-ups / Q&A",
+            });
+        }
+    }
+    required
+}
+
 /// Quick Ollama readiness check. Returns `Ok(())` if Ollama is reachable and all
 /// required models are pulled. On failure, prints actionable guidance and returns `Err`.
 ///
 /// Skips the check entirely when the embedding and describer providers are both non-Ollama
 /// (e.g. `claude-code`), so Claude-subscription users are never blocked.
+///
+/// Checks each provider's models against *that provider's own* resolved base URL (see
+/// [`ollama_requirements`]) — the embedder and describer can be configured to point at two
+/// different Ollama hosts — while still doing only one `/api/tags` call per distinct host
+/// (most setups run a single shared local Ollama for both providers).
 pub(crate) async fn preflight_ollama(cfg: &Config) -> anyhow::Result<()> {
-    // Only gate on Ollama providers. If neither provider is Ollama, skip silently.
-    let embed_is_ollama = cfg.embedding.provider == "ollama";
-    let describer_is_ollama = cfg.describer.provider == "ollama";
-    if !embed_is_ollama && !describer_is_ollama {
+    let required = ollama_requirements(cfg);
+    if required.is_empty() {
         return Ok(());
     }
 
-    let base = indexa_llm::OllamaLlm::resolve_base_url(Some(cfg.embedding.base_url.as_str()));
-
-    // Build the list of models the current config needs from Ollama.
-    let mut required: Vec<(&str, &str)> = Vec::new();
-    if embed_is_ollama {
-        required.push((cfg.embedding.model.as_str(), "embeddings"));
+    // Query each distinct Ollama host once, in first-seen order.
+    let mut bases: Vec<&str> = Vec::new();
+    for req in &required {
+        if !bases.contains(&req.base.as_str()) {
+            bases.push(&req.base);
+        }
     }
-    if describer_is_ollama {
-        required.push((cfg.describer.file_model.as_str(), "file summaries"));
-        if cfg.describer.dir_model != cfg.describer.file_model {
-            required.push((cfg.describer.dir_model.as_str(), "dir roll-ups / Q&A"));
+    let mut installed_by_base: std::collections::HashMap<&str, Vec<String>> =
+        std::collections::HashMap::new();
+    for base in bases {
+        match indexa_llm::ollama_list_models(base).await {
+            Ok(list) => {
+                installed_by_base.insert(base, list);
+            }
+            Err(_) => {
+                eprintln!("❌ Ollama is not reachable at {base}. Start it with: ollama serve");
+                anyhow::bail!("Ollama is not reachable at {base}");
+            }
         }
     }
 
-    let installed = match indexa_llm::ollama_list_models(&base).await {
-        Ok(list) => list,
-        Err(_) => {
-            eprintln!("❌ Ollama is not running. Start it with: ollama serve");
-            anyhow::bail!("Ollama is not reachable at {base}");
-        }
-    };
-
-    let mut missing = Vec::new();
-    for (model, _role) in &required {
-        if !model_installed_check(&installed, model) {
-            missing.push(*model);
+    // Missing models, grouped by the host they must be pulled from (preserves entry order).
+    let mut missing_by_base: Vec<(&str, Vec<&str>)> = Vec::new();
+    for req in &required {
+        let installed = installed_by_base
+            .get(req.base.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if !model_installed_check(installed, &req.model) {
+            match missing_by_base
+                .iter_mut()
+                .find(|(base, _)| *base == req.base.as_str())
+            {
+                Some((_, models)) => models.push(req.model.as_str()),
+                None => missing_by_base.push((req.base.as_str(), vec![req.model.as_str()])),
+            }
         }
     }
-    if !missing.is_empty() {
-        return offer_to_pull(&base, &missing).await;
+
+    for (base, missing) in &missing_by_base {
+        offer_to_pull(base, missing).await?;
     }
     Ok(())
 }
@@ -615,7 +675,8 @@ pub(crate) fn format_unix_timestamp(ts: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{finalize_export, resolve_roots, ExportSink};
+    use super::{finalize_export, ollama_requirements, resolve_roots, ExportSink};
+    use indexa_core::config::Config;
     use std::path::PathBuf;
 
     /// Build a sink that writes to `output` with all extras off; tests flip individual fields.
@@ -756,5 +817,87 @@ mod tests {
                 .unwrap();
         assert_eq!(got, super::resolve_roots(vec![arg], false).unwrap());
         let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// M9: with the embedder and describer both on Ollama but pointed at DIFFERENT hosts
+    /// (reachable via the web UI's `/api/config/provider`, which only ever writes the
+    /// describer's URL), each requirement must carry its OWN provider's base — never a single
+    /// base resolved only from `cfg.embedding.base_url`.
+    #[test]
+    fn ollama_requirements_resolves_each_provider_against_its_own_base() {
+        let mut cfg = Config::default();
+        cfg.embedding.provider = "ollama".into();
+        cfg.embedding.base_url = "http://embed-host:11434".into();
+        cfg.embedding.model = "nomic-embed-text".into();
+        cfg.describer.provider = "ollama".into();
+        cfg.describer.base_url = "http://describer-host:11434".into();
+        cfg.describer.file_model = "gemma3:4b".into();
+        cfg.describer.dir_model = "gemma3:12b".into();
+
+        let got = ollama_requirements(&cfg);
+        assert_eq!(got.len(), 3, "embed model + file model + dir model");
+
+        let embed = got.iter().find(|r| r.role == "embeddings").unwrap();
+        assert_eq!(embed.base, "http://embed-host:11434");
+        assert_eq!(embed.model, "nomic-embed-text");
+
+        let file = got.iter().find(|r| r.role == "file summaries").unwrap();
+        assert_eq!(
+            file.base, "http://describer-host:11434",
+            "the describer's model must check against the DESCRIBER's host, not the embedder's"
+        );
+        assert_eq!(file.model, "gemma3:4b");
+
+        let dir = got.iter().find(|r| r.role == "dir roll-ups / Q&A").unwrap();
+        assert_eq!(dir.base, "http://describer-host:11434");
+        assert_eq!(dir.model, "gemma3:12b");
+    }
+
+    /// When `describer.dir_model == describer.file_model` (a common config), only one
+    /// describer entry is emitted — no duplicate check for the same model.
+    #[test]
+    fn ollama_requirements_dedupes_identical_file_and_dir_model() {
+        let mut cfg = Config::default();
+        cfg.embedding.provider = "openai".into(); // embedder not on Ollama at all
+        cfg.describer.provider = "ollama".into();
+        cfg.describer.file_model = "gemma3:4b".into();
+        cfg.describer.dir_model = "gemma3:4b".into();
+
+        let got = ollama_requirements(&cfg);
+        assert_eq!(
+            got.len(),
+            1,
+            "identical file/dir model must not be listed twice, and a non-Ollama embedder \
+             must contribute nothing"
+        );
+        assert_eq!(got[0].model, "gemma3:4b");
+        assert_eq!(got[0].role, "file summaries");
+    }
+
+    /// A provider that isn't Ollama at all (e.g. `claude-code`) contributes no requirement —
+    /// no spurious Ollama dependency is introduced for a non-Ollama provider.
+    #[test]
+    fn ollama_requirements_empty_when_neither_provider_is_ollama() {
+        let mut cfg = Config::default();
+        cfg.embedding.provider = "openai".into();
+        cfg.describer.provider = "claude-code".into();
+        assert!(ollama_requirements(&cfg).is_empty());
+    }
+
+    /// The common case: both providers ARE Ollama and resolve to the SAME base (most users
+    /// run one local Ollama for everything). All three requirements should share that base —
+    /// exercised alongside `preflight_ollama`'s de-duplication (see module docs), which relies
+    /// on this to avoid a redundant duplicate `/api/tags` call per distinct host.
+    #[test]
+    fn ollama_requirements_same_host_for_both_providers_when_unset() {
+        let cfg = Config::default(); // both default to http://localhost:11434, both "ollama"
+        let got = ollama_requirements(&cfg);
+        assert_eq!(got.len(), 3);
+        let bases: std::collections::HashSet<&str> = got.iter().map(|r| r.base.as_str()).collect();
+        assert_eq!(
+            bases.len(),
+            1,
+            "default config: embed and describer share one Ollama host"
+        );
     }
 }
