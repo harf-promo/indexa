@@ -26,7 +26,7 @@ A trust-and-accuracy sprint, each release one theme:
 - **v0.22 — The Ledger** *(shipped)*: the Decision Ledger — Indexa asks instead of guessing (uncertain classifications, "which duplicate is canonical?") and remembers your answers as revision chains, across CLI / web / MCP.
 - **v0.23 — Measure It** *(shipped)*: the pitch becomes a measurement — token-savings telemetry, answer-confidence labels on `ask`, `status --deep` index health report, `indexa eval` retrieval regression harness, one-shot `mcp install`.
 - **v0.24 — Always Current** *(shipped)*: the index never lies about freshness — hash-gated incremental re-summarize, near-duplicate detection without the file cap (LSH), ledger archive questions, a real-browser web smoke test in CI.
-- **v0.25 — Deep Accuracy** *(this release)*: scoped call-graph resolution — same-file/same-dir/import tiers past bare-name matching, Decision Ledger phase 3, and a first experimental Linux desktop build (AppImage + .deb).
+- **v0.25 — Deep Accuracy** *(shipped)*: scoped call-graph resolution — same-file/same-dir/import tiers past bare-name matching, Decision Ledger phase 3, and a first experimental Linux desktop build (AppImage + .deb).
 
 ---
 

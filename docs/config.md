@@ -58,19 +58,25 @@ Controls how files are split into searchable pieces.
 
 ```toml
 [chunking]
-strategy = "structure"  # structure | fixed | recursive | semantic
+strategy = "structure"  # reserved — see below; today every value chunks the same way
 size     = 800          # target words per chunk
 overlap  = 100          # words of overlap between consecutive chunks
 ```
 
 ### Strategies
 
-| Strategy | Description |
+`strategy` is currently a **forward-looking / reserved field: nothing branches on it yet.**
+`structure` / `fixed` / `recursive` / `semantic` all run today's same structure-aware word-window
+chunker (headings in Markdown, AST nodes in code, pages in PDFs, falling back to fixed windows for
+plain text); `size`/`overlap` apply the same way under every value. Setting it to anything other
+than `structure` is accepted but has no effect yet:
+
+| Strategy | Planned behavior |
 |---|---|
-| `structure` | **Default.** Respects document structure: headings in Markdown, AST nodes in code, pages in PDFs. Falls back to fixed windows for plain text. |
-| `fixed` | Fixed-size windows with `overlap` word overlap. Simple and predictable. |
-| `recursive` | Future: split on paragraph/sentence boundaries. |
-| `semantic` | Future: embed full document and window embeddings (late chunking). |
+| `structure` | **Default**, and today's only real behavior (see above). |
+| `fixed` | Reserved: fixed-size windows only, no structure-awareness. |
+| `recursive` | Reserved: split on paragraph/sentence boundaries. |
+| `semantic` | Reserved: embed full document and window embeddings (late chunking). |
 
 ---
 
@@ -84,7 +90,9 @@ you can honor `.gitignore` and add your own patterns.
 [scan]
 respect_gitignore = true   # honor the scan root's .gitignore (its patterns, anchored at the root)
 ignore            = []     # extra gitignore-style patterns, e.g. ["build/", "*.log", "vendor/"]
-auto_reindex      = "off"  # "off" | "7d" | "30d" | "12h" … staleness interval for `worker --auto-reindex`
+auto_reindex      = "off"  # "off" | "7d" | "30d" | "12h" … | "git-poll" — see Scheduled / auto re-index below
+include_sensitive = false  # descend into .ssh/.gnupg/.aws/Keychains/browser profiles/… (also --include-sensitive)
+redact_at_index   = true   # redact obvious secrets (API keys, tokens, PEM blocks) from chunk text at index time
 skip_binary       = false  # NUL-sniff files during deep; skip binaries (executables/images/blobs) from parsing
 custom_ignore     = true   # honor .indexaignore files (see below); set false to disable entirely
 # threads         = 8      # walker worker threads; omit = all cores (min 4). Lower on a shared host.
@@ -114,7 +122,8 @@ prune is a separate, unconditional check. Gated on `respect_gitignore`; disable 
 
 ### Scheduled / auto re-index
 
-`auto_reindex` sets a **staleness interval**, not a scheduler. When you run:
+For an interval value (`"off"` / `"7d"` / `"30d"` / `"12h"` / …), `auto_reindex` sets a **staleness
+interval**, not a scheduler. When you run:
 
 ```bash
 indexa worker --auto-reindex
@@ -134,6 +143,14 @@ summaries), then drains the summary queue as usual. Roots that were never deep-i
   # 3 AM daily — refresh a specific project (incremental; cheap if nothing changed)
   0 3 * * *  indexa index ~/code/myproject >> ~/.indexa-cron.log 2>&1
   ```
+
+**`auto_reindex = "git-poll"` is the one exception — it IS a continuous scheduler.** Instead of a
+one-shot staleness check at launch, `indexa worker --auto-reindex` spawns a persistent background
+task that watches each indexed git root's HEAD + tracked-tree dirtiness at an adaptive interval (5s,
+growing with index size, capped at 60s) and re-indexes on change for the lifetime of the worker
+process. A non-git root under git-poll mode falls back to the same interval-based staleness check
+described above. The `--auto-reindex` flag must still be passed either way — an expensive rebuild
+never starts implicitly from the config value alone.
 
   Use `indexa worker --auto-reindex` when you want one long-running process that both keeps roots
   fresh and continuously drains summaries; use a cron'd `indexa index <path>` when you want a
@@ -265,6 +282,7 @@ max_children_per_summary = 30             # max child summaries fed into one dir
 passes_first             = 2              # refinement passes when no prior summary exists
 passes_refresh           = 1              # refinement passes when refreshing an existing summary
 passes_cap               = 3              # hard ceiling on the `--passes` flag (values above are clamped)
+claude_bin               = "claude"       # `claude` CLI path when provider = "claude-code"; empty = resolved on PATH
 ```
 
 `passes_*` implement multi-pass Self-Refine summarization: a first-time build runs `passes_first`
@@ -279,6 +297,7 @@ passes, a refresh runs `passes_refresh`, and any explicit `--passes` is clamped 
 | `openai` | Requires `OPENAI_API_KEY`. URL override: `OPENAI_BASE_URL`. Recommended: `gpt-4o-mini`. |
 | `anthropic` | Requires `ANTHROPIC_API_KEY`. Recommended: `claude-haiku-4-5-20251001`. |
 | `llamacpp` | llama.cpp in OpenAI-compat mode. Set `base_url` or `OPENAI_BASE_URL`. |
+| `claude-code` | Runs on your **Claude Pro/Max subscription** via the local `claude` CLI (`claude_bin`) — no API key, no per-token billing. See [Use your Claude Pro/Max subscription](../USAGE.md#use-your-claude-promax-subscription-no-api-key). |
 
 ---
 
@@ -291,9 +310,10 @@ detected specs, per-model memory table, and ETA estimates.
 
 ```toml
 [resource]
-profile         = "balanced"   # conservative | balanced | performance
-headroom_gb     = 0.0          # 0.0 = use the profile's built-in headroom; >0 overrides it (GB to keep free)
-keep_alive_secs = 0            # 0 = use the profile default; how long Ollama keeps a model resident
+profile           = "balanced"   # conservative | balanced | performance
+headroom_gb       = 0.0          # 0.0 = use the profile's built-in headroom; >0 overrides it (GB to keep free)
+auto_select_model = true         # downgrade to a smaller model if the preferred one won't fit the memory budget
+keep_alive_secs   = 0            # 0 = use the profile default; how long Ollama keeps a model resident
 ```
 
 | Profile | Behaviour |
@@ -392,6 +412,71 @@ compressed = false   # set true to index the DECOMPRESSED content of standalone 
 > the same size limit as zip archive entries — an oversized compressed file falls back to
 > metadata-only rather than exhausting memory, and a file that turns out not to actually match
 > its extension's codec also falls back cleanly.
+
+---
+
+## MCP server
+
+```toml
+[mcp]
+tool_profile = "full"   # "full" (every tool advertised + callable) | "core" (a small task-focused subset)
+```
+
+> `core` narrows the advertised **and** callable tool surface to `search` / `ask` / `dependencies` /
+> `who_calls` / `blast_radius` / `list_packs` / `search_pack` / `export_pack` / `add_note` /
+> `list_open_decisions` — cuts the per-session tool-schema token cost for subagents doing bounded
+> work; every other tool is un-advertised and rejected outright if called directly, not just hidden.
+> Unrecognized values fall open to `full`. `indexa mcp --tool-profile core` overrides this
+> per-invocation.
+
+---
+
+## Decision Ledger
+
+Knobs for the questions `indexa classify`/scan opens when a judgment is too uncertain to apply
+silently.
+
+```toml
+[review]
+auto_record_below = 0.8    # auto judgments below this confidence become open questions instead of applying silently
+max_open          = 50     # detectors stop opening new questions once this many are already open
+max_new_per_scan  = 20     # max questions a single scan/classify pass may open
+symbol_ambiguity  = false  # surface "which definition is authoritative?" for bare-name symbols defined in multiple files
+```
+
+> `symbol_ambiguity` is off by default — on idiomatic codebases (Rust `new`, `default`, `parse`,
+> `build`, …) these questions are near-unanswerable and flood the inbox. Opt in only with a real
+> polyglot symbol-resolution need.
+
+---
+
+## Remote sources
+
+Opt-in ingestion for `indexa pack add-url` (pull a web page / GitHub issue or PR into a Context
+Pack).
+
+```toml
+[sources]
+enabled      = false  # allow pack add-url to fetch remote content (also: INDEXA_REMOTE_FETCH_ALLOW=1 per-run)
+timeout_secs = 30     # HTTP timeout (seconds) for a remote fetch
+max_retries  = 2      # retry attempts on transient HTTP failures (429/5xx/timeouts)
+```
+
+> **Off by default** — fetching a URL reaches the network, so it must be explicitly enabled here
+> or via the environment variable.
+
+---
+
+## Model catalog
+
+```toml
+[models]
+# catalog_url = "https://example.com/models.json"   # optional catalog JSON refreshed by POST /api/models/catalog/refresh
+```
+
+> Unset by default. When set, `POST /api/models/catalog/refresh` fetches this URL and replaces the
+> served catalog; unset, that endpoint is a no-op and the bundled curated catalog is served. The
+> fetch fails open — any error leaves the bundled/prior catalog in place.
 
 ---
 

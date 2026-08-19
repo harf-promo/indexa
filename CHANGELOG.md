@@ -25,13 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   embed text **only** — the stored/hashed chunk text is untouched, so the embedding cache and FTS
   index are unaffected. Wired identically in the CLI and web deep paths; new pure helpers
   `build_context_prefix` / `contextual_prefix_texts` in `indexa_query::contextual` (unit-tested).
-- **`[chunking] size` / `overlap` are now honored by every parser.** The config existed but was
-  dead — all parsers hardcoded 800-word chunks / 100-word overlap. Chunk sizing now threads through
-  a defaulted `Parser::parse_chunked` trait method (the public `Parser` API and every external/plugin
-  parser are unaffected — the default delegates to `parse`), built once per run via
-  `Registry::with_chunk`. Defaults stay **800 / 100**, so an index built without a `[chunking]` block
-  is byte-identical to before. `strategy` remains a forward-looking selector (nothing branches on it
-  yet); it stays orthogonal to `[describer] contextual_prefix` (boundaries vs. embed input).
+- **`[chunking] size` / `overlap` are now honored by every word-window parser.** The config existed
+  but was dead — every word-window parser (PDF, Office, EPUB, email, HTML, Markdown, plain text, …)
+  hardcoded 800-word chunks / 100-word overlap. Chunk sizing now threads through a defaulted
+  `Parser::parse_chunked` trait method (the public `Parser` API and every external/plugin parser are
+  unaffected — the default delegates to `parse`), built once per run via `Registry::with_chunk`.
+  Code/image/media parsers don't word-window (`CodeParser` chunks by tree-sitter AST node instead),
+  so `size`/`overlap` don't apply to them — by design, not an oversight. Defaults stay **800 / 100**,
+  so an index built without a `[chunking]` block is byte-identical to before. `strategy` remains a
+  forward-looking selector (nothing branches on it yet); it stays orthogonal to `[describer]
+  contextual_prefix` (boundaries vs. embed input).
 - **Dense-mode retrieval eval recipe + manual workflow.** The hermetic CI gate scores sparse-only
   (no Ollama), so it can't measure an embedding change. A new `#[ignore]`-gated
   `dense_rrf_eval_over_golden` test and a `workflow_dispatch`-only `dense-eval` GitHub workflow run

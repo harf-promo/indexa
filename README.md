@@ -198,9 +198,12 @@ xattr -d com.apple.quarantine /usr/local/bin/indexa   # bypass Gatekeeper if pro
 # Windows x64:   indexa-x86_64-windows.exe
 ```
 
-Indexa runs on local models (one-time download, ~11 GB total; everything runs offline after this).
-The first time you `index`, Indexa **detects the missing models and offers to pull them for you** with a
-live progress bar — just say yes. To check your setup first, or pull manually:
+Indexa runs on local models via [Ollama](https://ollama.com) — install it first (`brew install --cask
+ollama-app` on macOS; see [docs/quickstart.md](docs/quickstart.md#prerequisites) for other platforms)
+and launch it once so it's listening on `:11434`. Models are a one-time download, ~11 GB total;
+everything runs offline after this. The first time you `index`, Indexa **detects the missing models
+and offers to pull them for you** with a live progress bar — just say yes. To check your setup first,
+or pull manually:
 
 ```bash
 indexa doctor                  # checks Ollama + which models are present, with fix-it hints
