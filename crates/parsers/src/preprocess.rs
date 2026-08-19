@@ -315,11 +315,15 @@ mod tests {
         // our synchronous `stdin.write_all` would then block right back on ITS full
         // pipe. Permanent deadlock, and invisible to `wait_with_timeout` /
         // `max_output_bytes`, since neither is ever reached from a blocked write.
+        // `run_command` passes the input file's path as argv[1] (`$1`) in addition to feeding
+        // its bytes on stdin — `cat "$1"` replays the file straight from disk as our large
+        // stdout burst, portably (the same idiom `parse_indexes_the_commands_stdout` above
+        // already relies on), without depending on `/dev/zero`/`tr` NUL-byte handling.
         let script = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             script.path(),
             "#!/bin/sh\n\
-             head -c 200000 /dev/zero | tr '\\0' 'x'\n\
+             cat \"$1\"\n\
              printf '\\n'\n\
              cat > /dev/null\n\
              echo DONE-MARKER\n",
