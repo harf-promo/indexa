@@ -177,12 +177,19 @@ impl IndexaMcp {
         });
         let ext_filter = ext_filter.filter(|exts| !exts.is_empty());
 
-        // Try to embed the query for the dense arm; fall back to sparse if the embedder is
-        // unavailable or the index has no embeddings.
-        let embedding = if matches!(mode, HybridMode::Sparse) {
-            None
-        } else {
-            self.embedder.embed(search_text).await.ok()
+        // Embed the query for the dense arm. In `dense` mode the embedding IS the search, so a
+        // failed embed is a hard error — silently falling through to an empty candidate pool
+        // would misreport an embedder outage as "No results", indistinguishable from a genuine
+        // no-match. In `rrf` mode the sparse arm still works, so fall back gracefully; `sparse`
+        // mode never embeds.
+        let embedding = match mode {
+            HybridMode::Sparse => None,
+            HybridMode::Dense => Some(self.embedder.embed(search_text).await.map_err(|e| {
+                mcp_err(format!(
+                    "mode 'dense' needs a query embedding, but the embedder is unavailable: {e:#}"
+                ))
+            })?),
+            HybridMode::Rrf => self.embedder.embed(search_text).await.ok(),
         };
 
         // Use the cached ANN index for the dense arm when available (unscoped, large index);
@@ -379,7 +386,9 @@ impl IndexaMcp {
         params: Parameters<GetChunkContextParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let GetChunkContextParams { path, seq, radius } = params.0;
-        let radius = radius.unwrap_or(1);
+        // Cap the neighbor window so a huge `radius` can't dump an entire large file (the
+        // tool's contract is "the surrounding context", not "the whole file" — that's `read_file`).
+        let radius = radius.unwrap_or(1).min(25);
         let mut store = self.store()?;
         let chunks = store.chunks_for_path(&path, 0).map_err(mcp_err)?;
         if chunks.is_empty() {
@@ -494,8 +503,12 @@ impl IndexaMcp {
         let ann = self.ensure_ann().await;
 
         // Catalog mode: return a scored file list with L0 abstracts — no chunk bodies,
-        // no synthesis. Cheap progressive disclosure for capable caller models.
-        if catalog {
+        // no synthesis. Cheap progressive disclosure for capable caller models. Deferred to
+        // the retrieval-only slice when `synthesize: false` (which is richer — the full
+        // packed context, not just a file list), matching the documented precedence on
+        // `AskParams::catalog` — this used to let `catalog: true` silently win even when the
+        // caller had explicitly asked for no synthesis.
+        if catalog && synthesize {
             let answer = indexa_query::answer_catalog_history(
                 &self.db_path,
                 self.embedder.as_ref(),
@@ -650,8 +663,11 @@ impl IndexaMcp {
             ),
             None => {}
         }
-        // Conversational Ask: tell the agent which id to reuse to continue the conversation.
-        if let Some(id) = &session_id {
+        // Conversational Ask: tell the agent which id to reuse to continue the conversation —
+        // but ONLY when this turn is actually persisted (synthesized answers; see the guard at
+        // the record-turn site below). A retrieval-only turn is never stored, so promising a
+        // follow-up under this id would hand the agent an empty conversation history.
+        if let (Some(id), true) = (&session_id, answer.synthesized) {
             out.push_str(&format!(
                 "\nConversation: {id} (pass the same session_id to follow up)\n"
             ));

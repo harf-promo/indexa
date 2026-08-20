@@ -232,6 +232,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP response caps + four agent-surface behavior fixes (FM-3, revives #374 against current
+  main).** Response caps, each with a truthful "N, showing first M" / "N of M" header:
+  `dependencies` caps imports/defines/calls (and, with `include_heritage`, extends/implements)
+  at 100 per group; `insights_duplicates` caps at 50 clusters; `list_classifications` /
+  `list_files_by_category` clamp `limit` to `[1, 500]`; `get_chunk_context` clamps `radius` to
+  25 (a 51-chunk window), so none of these can dump an unbounded response into an agent's
+  context. Behavior fixes on `ask`: `catalog: true` now defers to `synthesize: false` (the
+  richer retrieval-only slice) instead of silently winning, matching the documented precedence
+  on `AskParams::catalog`; the "pass the same session_id to follow up" footer now prints only
+  when the turn is actually recorded (`answer.synthesized`) — a retrieval-only turn stores
+  nothing, so promising a follow-up under that id was misleading. Separately, `search` with
+  `mode: "dense"` now returns an explicit "embedder unavailable" error instead of silently
+  falling back to an empty candidate pool and reporting a genuine-looking "No results" — `rrf`
+  mode is unaffected (still falls back to the sparse arm on an embedder failure). `search_pack`
+  and `export_pack` now record savings/impact telemetry like every other retrieval tool (they
+  were the only two pack tools that didn't); both use the existing untagged `record_tool_usage`
+  path, matching every other MCP recording site today — basis-tagging the MCP surface with
+  `BASIS_RENDERED_RESPONSE` (#457's `served_basis` constants) is still the separate, deferred
+  follow-up that PR called out, not done here. All 8 sub-fixes from the reference PR (#374,
+  originally scoped against a July `main`) were re-verified against current `main` and found
+  still present — none had been fixed by intervening work (`who_imports`'s existing "showing
+  first N" cap, added separately since #374 was opened, is reused here as the house style for
+  `dependencies`'s new cap, not a fix that made `dependencies` itself redundant). Live-verified
+  the `catalog`/`synthesize` precedence and session-footer fixes over a real MCP stdio JSON-RPC
+  handshake against a live index; the other six sub-fixes are covered by unit tests. Tool count
+  unchanged (50).
 - **Savings ledger now records what each row *measured* (`served_basis`) — core/CLI/web half.**
   The `tool_usage` ledger behind the "tokens saved" figures on `status` / `/api/impact` blended
   different accountings into one untagged column: web/CLI `ask` records answer text + delivered

@@ -162,12 +162,24 @@ impl IndexaMcp {
                 params.0.path
             )));
         }
-        let line = |prefix: &str, items: Vec<&str>| {
+        // Cap each group so a generated/huge file (thousands of imports/symbols/calls) can't
+        // flood the client's context; the header always reports the true total and, when
+        // truncated, says so — same "showing first N" convention as `who_imports` below.
+        const MAX_PER_GROUP: usize = 100;
+        let line = |prefix: &str, items: &[&str]| {
             items
                 .iter()
+                .take(MAX_PER_GROUP)
                 .map(|s| format!("  {prefix} {s}"))
                 .collect::<Vec<_>>()
                 .join("\n")
+        };
+        let trunc = |total: usize| {
+            if total > MAX_PER_GROUP {
+                format!(", showing first {MAX_PER_GROUP}")
+            } else {
+                String::new()
+            }
         };
         let imports: Vec<&str> = edges
             .iter()
@@ -187,9 +199,10 @@ impl IndexaMcp {
         let mut out = String::new();
         if !imports.is_empty() {
             out.push_str(&format!(
-                "Imports ({}):\n{}\n",
+                "Imports ({}{}):\n{}\n",
                 imports.len(),
-                line("→", imports)
+                trunc(imports.len()),
+                line("→", &imports)
             ));
         }
         if !defines.is_empty() {
@@ -197,16 +210,22 @@ impl IndexaMcp {
                 out.push('\n');
             }
             out.push_str(&format!(
-                "Defines ({}):\n{}",
+                "Defines ({}{}):\n{}",
                 defines.len(),
-                line("•", defines)
+                trunc(defines.len()),
+                line("•", &defines)
             ));
         }
         if !calls.is_empty() {
             if !out.is_empty() {
                 out.push('\n');
             }
-            out.push_str(&format!("\nCalls ({}):\n{}", calls.len(), line("↪", calls)));
+            out.push_str(&format!(
+                "\nCalls ({}{}):\n{}",
+                calls.len(),
+                trunc(calls.len()),
+                line("↪", &calls)
+            ));
         }
         if params.0.include_heritage {
             let extends: Vec<&str> = edges
@@ -224,9 +243,10 @@ impl IndexaMcp {
                     out.push('\n');
                 }
                 out.push_str(&format!(
-                    "\nExtends ({}):\n{}",
+                    "\nExtends ({}{}):\n{}",
                     extends.len(),
-                    line("▲", extends)
+                    trunc(extends.len()),
+                    line("▲", &extends)
                 ));
             }
             if !implements.is_empty() {
@@ -234,9 +254,10 @@ impl IndexaMcp {
                     out.push('\n');
                 }
                 out.push_str(&format!(
-                    "\nImplements ({}):\n{}",
+                    "\nImplements ({}{}):\n{}",
                     implements.len(),
-                    line("◇", implements)
+                    trunc(implements.len()),
+                    line("◇", &implements)
                 ));
             }
         }
