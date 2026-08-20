@@ -271,16 +271,18 @@ fn caption_budget_warning(
 /// `body.audio_binary.is_some()` alone would lock a caller out of every other,
 /// non-sensitive toggle the moment a binary path was ever configured — a no-op resend
 /// of the already-stored value is not a repoint attempt and must not require the gate.
-/// Only supplied fields are written; every other config section is preserved by the
-/// round-trip.
+///
+/// The "changed" comparison is against the freshly-`config::load`ed value below, NOT
+/// `state.config` — `AppState.config` is a snapshot taken once at server startup and is
+/// never refreshed, so comparing against it would let an ungated caller "restore" a
+/// value that was merely present at boot (stale-snapshot bypass), silently reverting a
+/// legitimate gated change made since startup. Comparing against the value this same
+/// request just loaded from disk is always current by construction. Only supplied
+/// fields are written; every other config section is preserved by the round-trip.
 pub(crate) async fn api_config_features_set(
     State(state): State<AppState>,
     Json(body): Json<FeaturesRequest>,
 ) -> Response {
-    let audio_binary_changed = matches!(&body.audio_binary, Some(v) if Some(v) != state.config.parsers.audio.binary.as_ref());
-    if audio_binary_changed && std::env::var("INDEXA_WEB_ALLOW_KEY_EDIT").as_deref() != Ok("1") {
-        return err_json(StatusCode::FORBIDDEN, "INDEXA_WEB_ALLOW_KEY_EDIT not set");
-    }
     let cfg_path = config::default_config_path();
     let mut cfg = match config::load(&cfg_path) {
         Ok(c) => c,
@@ -291,6 +293,11 @@ pub(crate) async fn api_config_features_set(
             )
         }
     };
+    let audio_binary_changed =
+        matches!(&body.audio_binary, Some(v) if Some(v) != cfg.parsers.audio.binary.as_ref());
+    if audio_binary_changed && std::env::var("INDEXA_WEB_ALLOW_KEY_EDIT").as_deref() != Ok("1") {
+        return err_json(StatusCode::FORBIDDEN, "INDEXA_WEB_ALLOW_KEY_EDIT not set");
+    }
     if let Some(v) = body.ann {
         cfg.retrieval.ann = v;
     }

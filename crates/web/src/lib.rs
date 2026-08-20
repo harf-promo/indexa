@@ -962,11 +962,20 @@ mod tests {
         // INDEXA_WEB_ALLOW_KEY_EDIT unset and no test in this binary sets it, so the
         // closed-gate path is deterministic (same convention as api_keys_post_is_forbidden…
         // above).
+        //
+        // The handler reads the REAL config::default_config_path() to compare against
+        // (see api_config_features_set's doc comment — this is deliberate, closes a
+        // stale-snapshot bypass) and only rejects when the posted value differs from
+        // what's on disk. This value MUST stay an obvious canary that could never
+        // coincidentally match a real config: if it ever matched, the "changed" check
+        // would read false, skip the gate, and this test would silently start writing
+        // into the developer's actual config.toml on every run instead of asserting
+        // FORBIDDEN. Do not change this to a plausible-looking path.
         let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
         let (status, json) = post_json(
             app,
             "/api/config/features",
-            serde_json::json!({ "audio_binary": "/usr/bin/whisper-cli" }),
+            serde_json::json!({ "audio_binary": "/nonexistent/h7-test-canary-binary-do-not-reuse" }),
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -976,33 +985,17 @@ mod tests {
             .contains("INDEXA_WEB_ALLOW_KEY_EDIT"));
     }
 
-    #[tokio::test]
-    async fn api_config_features_resending_unchanged_audio_binary_is_not_gated() {
-        // The Features panel always resends every field on Save, including the current
-        // audio_binary — gating on presence alone would lock a caller out of every other,
-        // non-sensitive toggle (ann, captioning, …) the instant a binary path was ever
-        // configured. Gating on CHANGE means a no-op resend of the already-stored value
-        // must succeed with no env var set, and the unrelated field change must land.
-        let mut cfg = indexa_core::config::Config::default();
-        cfg.parsers.audio.binary = Some("/usr/bin/whisper-cli".to_owned());
-        let mut state = state_with(Store::open_in_memory().unwrap());
-        state.config = std::sync::Arc::new(cfg);
-        let app = build_router(state, 7620);
-        let (status, json) = post_json(
-            app,
-            "/api/config/features",
-            serde_json::json!({
-                "audio_binary": "/usr/bin/whisper-cli",
-                "audio_transcribe": true,
-            }),
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "no-op resend must not be gated: {json}"
-        );
-    }
+    // No unit test exercises api_config_features_set's success path (the "no-op resend
+    // isn't gated" behavior): every config-write handler in this file (api_keys_set,
+    // api_config_provider_set, api_config_resource_set, api_config_features_set) reads
+    // and writes through the global config::default_config_path() — the REAL OS config
+    // directory, with no AppState-level injection point for tests to redirect it to a
+    // scratch path. A test that reaches past the gate into config::save would write test
+    // data into the developer's actual config.toml. This is why the one existing test in
+    // this area (api_keys_post_is_forbidden_without_env_gate, above) deliberately stops
+    // at the gate — same convention followed here. The no-op-resend behavior is verified
+    // live instead, via `indexa serve` against a HOME-overridden scratch profile (see the
+    // H7 PR description for the transcript) — that path never touches the real config.
 
     #[tokio::test]
     async fn api_packs_export_redacts_secrets() {
