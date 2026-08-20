@@ -147,17 +147,24 @@ pub async fn answer_stream_with_ann_history(
     on_chunk(AnswerChunk::Sources(sources.clone()));
 
     let prompt = build_prompt_clustered(question, &context, &history_block, clustered);
-    let mut full = String::new();
+    let mut trimmer = StreamTrimmer::new();
     {
         let mut on_frag = |frag: String| {
-            full.push_str(&frag);
-            on_chunk(AnswerChunk::Fragment(frag));
+            let safe = trimmer.push(&frag);
+            if !safe.is_empty() {
+                on_chunk(AnswerChunk::Fragment(safe));
+            }
         };
         llm.generate_stream(&prompt, &mut on_frag).await?;
     }
+    // Flush the legit withheld tail (nothing if a hallucinated continuation stopped the stream).
+    let tail = trimmer.flush();
+    if !tail.is_empty() {
+        on_chunk(AnswerChunk::Fragment(tail));
+    }
     Ok(Answer {
         question: question.to_owned(),
-        answer: full.trim().to_owned(),
+        answer: trimmer.finish(),
         sources,
         confidence,
         synthesized: true,
@@ -533,24 +540,141 @@ pub(crate) async fn synthesize_from_hits_clustered(
     })
 }
 
+/// Markers that begin a hallucinated next Q&A turn — see [`trim_continuation`]. The longest is
+/// `\n\nQUESTION` (10 bytes); [`StreamTrimmer::HOLDBACK`] is sized off this so a marker can never
+/// be split across an already-emitted/still-withheld boundary.
+const CONTINUATION_MARKERS: [&str; 5] = [
+    "\nQUESTION:",
+    "\nQuestion:",
+    "\nQ:",
+    "\nANSWER:",
+    "\n\nQUESTION",
+];
+
+/// Byte index of the earliest continuation marker in `text`, if any.
+fn first_marker(text: &str) -> Option<usize> {
+    CONTINUATION_MARKERS
+        .iter()
+        .filter_map(|m| text.find(m))
+        .min()
+}
+
+/// Longest byte length among [`CONTINUATION_MARKERS`], computed at compile time so
+/// [`StreamTrimmer::HOLDBACK`] is *derived* from the marker list rather than hand-kept in sync
+/// with it. Without this, a future marker longer than today's longest (`\n\nQUESTION`, 10 bytes)
+/// added to the list without also widening the holdback would let `StreamTrimmer::push`'s
+/// `self.full[self.emitted..cut]` slice panic (`cut < emitted`) instead of failing a test.
+const fn max_marker_len() -> usize {
+    let mut max = 0;
+    let mut i = 0;
+    while i < CONTINUATION_MARKERS.len() {
+        let len = CONTINUATION_MARKERS[i].len();
+        if len > max {
+            max = len;
+        }
+        i += 1;
+    }
+    max
+}
+
 /// Keep only the answer to the asked question. The `QUESTION:/ANSWER:` prompt frame can lead an
 /// instruct/base model to keep going with an invented next turn (observed live: it appended
 /// "QUESTION: what should you do when contributing? ANSWER: …"). Cut at the first such marker so
 /// the user never sees a fabricated extra Q&A. Defensive — the prompt also forbids it.
+///
+/// This is the NON-streaming trim: it runs once the model's full reply is already in hand
+/// (`synthesize_from_hits_clustered`). The streaming paths (`answer_stream_with_ann_history`,
+/// `agentic::answer_agentic_stream_history`) can't call this directly — by the time the whole
+/// reply exists, every fragment has already been displayed and persisted. They use
+/// [`StreamTrimmer`] instead, which applies the same `CONTINUATION_MARKERS` cut incrementally as
+/// tokens arrive, so a streamed answer never flashes (or saves) the fabricated turn either.
 pub(crate) fn trim_continuation(text: &str) -> String {
-    let mut end = text.len();
-    for marker in [
-        "\nQUESTION:",
-        "\nQuestion:",
-        "\nQ:",
-        "\nANSWER:",
-        "\n\nQUESTION",
-    ] {
-        if let Some(i) = text.find(marker) {
-            end = end.min(i);
+    let end = first_marker(text).unwrap_or(text.len());
+    text[..end].trim().to_owned()
+}
+
+/// Applies [`trim_continuation`]'s cut to a token stream *as it arrives*, instead of only after
+/// the full reply is assembled. Feed each fragment to [`push`](Self::push), which returns the
+/// slice now safe to display/emit (may be empty); call [`flush`](Self::flush) once the stream
+/// ends to release any legitimately-withheld tail; call [`finish`](Self::finish) for the final
+/// answer to persist (byte-identical to `trim_continuation` of the concatenated fragments — i.e.
+/// what the non-streaming path would have produced for the same generated text).
+///
+/// Mechanism: the longest marker is 10 bytes, so the last [`Self::HOLDBACK`] bytes of the
+/// accumulated text are always withheld — they could still be the unfinished prefix of a marker
+/// whose remaining bytes haven't streamed in yet. Once a complete marker appears, emission stops
+/// permanently and the fabricated portion is never handed to the caller.
+pub(crate) struct StreamTrimmer {
+    /// Everything received so far, markers included (used only by `first_marker`/`finish`).
+    full: String,
+    /// Byte offset into `full` up to which text has already been returned by `push`/`flush`.
+    emitted: usize,
+    /// Set once a complete marker is found; `push` returns nothing further after that.
+    stopped: bool,
+}
+
+impl StreamTrimmer {
+    /// The most bytes a not-yet-complete marker prefix can occupy at the tail of the
+    /// accumulated text: [`max_marker_len`] − 1, derived at compile time so this can never
+    /// silently drift out of sync with [`CONTINUATION_MARKERS`] (today: 10 − 1 = 9, for
+    /// `"\n\nQUESTION"`). See `max_marker_len`'s doc comment for what goes wrong if it does.
+    const HOLDBACK: usize = max_marker_len() - 1;
+
+    pub(crate) fn new() -> Self {
+        Self {
+            full: String::new(),
+            emitted: 0,
+            stopped: false,
         }
     }
-    text[..end].trim().to_owned()
+
+    /// Append a raw fragment; return the slice newly safe to display/emit (may be empty).
+    pub(crate) fn push(&mut self, frag: &str) -> String {
+        self.full.push_str(frag);
+        if self.stopped {
+            return String::new();
+        }
+        if let Some(cut) = first_marker(&self.full) {
+            // A complete marker appeared: release only up to it, then stop for good.
+            self.stopped = true;
+            let out = self.full[self.emitted..cut].to_owned();
+            self.emitted = cut;
+            return out;
+        }
+        // No marker (yet): release everything except the last HOLDBACK bytes, which might
+        // still turn into one as more fragments arrive. Snap to a char boundary so a
+        // multi-byte character straddling the window is never split mid-codepoint.
+        let want = self
+            .full
+            .len()
+            .saturating_sub(Self::HOLDBACK)
+            .max(self.emitted);
+        let safe = indexa_core::text::floor_char_boundary(&self.full, want);
+        if safe <= self.emitted {
+            return String::new();
+        }
+        let out = self.full[self.emitted..safe].to_owned();
+        self.emitted = safe;
+        out
+    }
+
+    /// Release the legitimately-withheld tail once the stream ends normally. Returns empty when
+    /// a marker already stopped emission, or nothing is left to release.
+    pub(crate) fn flush(&mut self) -> String {
+        if self.stopped || self.emitted >= self.full.len() {
+            return String::new();
+        }
+        let out = self.full[self.emitted..].to_owned();
+        self.emitted = self.full.len();
+        out
+    }
+
+    /// The final answer to persist/return — identical to `trim_continuation` applied to all
+    /// fragments concatenated, so a streamed answer matches what the non-streaming path would
+    /// have produced for the same generated text.
+    pub(crate) fn finish(&self) -> String {
+        trim_continuation(&self.full)
+    }
 }
 
 pub(crate) fn pack_context(

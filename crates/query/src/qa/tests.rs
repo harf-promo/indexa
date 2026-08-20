@@ -8,7 +8,7 @@ use super::retrieve::{
 use super::synthesize::{
     build_prompt, build_prompt_clustered, fence_context, neutralize_fence, pack_context,
     pack_context_clustered, render_history_block, split_history_budget, trim_continuation,
-    DATA_FENCE_CLOSE, DATA_FENCE_OPEN,
+    StreamTrimmer, DATA_FENCE_CLOSE, DATA_FENCE_OPEN,
 };
 use super::PriorTurn;
 use super::*;
@@ -316,6 +316,116 @@ fn trim_continuation_keeps_legit_inline_question_word() {
     // an inline mention must survive untouched.
     let s = "The function answers the user's Question: header in the request and returns it.";
     assert_eq!(trim_continuation(s), s);
+}
+
+// ── StreamTrimmer: the streaming path must apply the same cut as trim_continuation ─────────
+
+/// Feed `full` through a [`StreamTrimmer`] one fragment at a time (fixed `chunk` byte size,
+/// snapped to char boundaries — mirrors how a real `Generator::generate_stream` hands over
+/// arbitrarily-sized fragments), concatenate everything `push` returns plus the final
+/// `flush`, and return that streamed text alongside the trimmer for `finish()`.
+fn stream_in_chunks(full: &str, chunk: usize) -> (String, StreamTrimmer) {
+    let mut t = StreamTrimmer::new();
+    let mut out = String::new();
+    let bytes = full.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let mut end = (i + chunk).min(bytes.len());
+        while end < bytes.len() && !full.is_char_boundary(end) {
+            end += 1;
+        }
+        out.push_str(&t.push(&full[i..end]));
+        i = end;
+    }
+    out.push_str(&t.flush());
+    (out, t)
+}
+
+#[test]
+fn stream_trimmer_clean_answer_streams_verbatim_and_matches_finish() {
+    let full = "The auth flow uses JWTs signed with RS256, verified on every request.";
+    for chunk in [1, 3, 7, 200] {
+        let (streamed, t) = stream_in_chunks(full, chunk);
+        assert_eq!(
+            streamed, full,
+            "chunk={chunk}: a clean answer streams whole"
+        );
+        assert_eq!(t.finish(), trim_continuation(full));
+        assert_eq!(t.finish(), full, "no marker present ⇒ finish is unchanged");
+    }
+}
+
+#[test]
+fn stream_trimmer_stops_at_a_hallucinated_continuation_regardless_of_chunking() {
+    // The exact failure shape this bug is about: the model keeps going past the real
+    // answer with an invented next QUESTION:/ANSWER: turn. The non-streaming path already
+    // catches this (`trim_continuation`); the streaming path must too — the fabricated
+    // text must never reach `push`'s caller (i.e. never be displayed), regardless of how
+    // the upstream generator happens to chunk its fragments.
+    let full = "Real answer here.\n\nQUESTION: what else?\nANSWER: invented.";
+    for chunk in [1, 2, 5, 500] {
+        let (streamed, t) = stream_in_chunks(full, chunk);
+        assert!(
+            !streamed.contains("QUESTION"),
+            "chunk={chunk}: streamed/displayed text must not contain the hallucinated turn: {streamed:?}"
+        );
+        assert_eq!(streamed.trim(), "Real answer here.");
+        assert_eq!(
+            t.finish(),
+            trim_continuation(full),
+            "chunk={chunk}: the persisted answer must match what the non-streaming path would produce"
+        );
+        assert_eq!(t.finish(), "Real answer here.");
+    }
+}
+
+#[test]
+fn stream_trimmer_finish_always_equals_trim_continuation_of_the_full_text() {
+    for full in [
+        "Just an answer.",
+        "Answer.\nQUESTION: next?\nANSWER: no.",
+        "Answer with a lone\nnewline but no marker.",
+        "Answer.\nQ: short marker form.",
+        "",
+    ] {
+        let (_streamed, t) = stream_in_chunks(full, 1);
+        assert_eq!(
+            t.finish(),
+            trim_continuation(full),
+            "finish() must equal trim_continuation() for {full:?}"
+        );
+    }
+}
+
+#[test]
+fn stream_trimmer_multibyte_tail_never_panics_or_splits() {
+    // Emoji + accented/CJK chars land inside the holdback window at various points as this
+    // streams byte-by-byte; none may ever be split mid-codepoint (which would panic on the
+    // `&full[..n]` slice).
+    let full = "Café ☕ déjà vu — naïve façade 日本語 🚀";
+    let (streamed, t) = stream_in_chunks(full, 1);
+    assert_eq!(streamed, full);
+    assert_eq!(t.finish(), full);
+}
+
+#[test]
+fn stream_trimmer_dangling_marker_prefix_at_stream_end_is_not_swallowed() {
+    // Generation can end (EOS / token limit) mid-way through what LOOKS like it could become a
+    // marker but never does — e.g. "\n\nQUESTIO" with no trailing colon and nothing after it.
+    // No marker ever completes, so `trim_continuation` would never match it either: the dangling
+    // text must stream through and persist verbatim, not get silently dropped by the holdback
+    // logic that withholds it while more fragments might still be coming. This is the case that
+    // would expose an off-by-one in `StreamTrimmer::HOLDBACK` (see `max_marker_len`).
+    let full = "Answer.\n\nQUESTIO";
+    for chunk in [1, 3, 500] {
+        let (streamed, t) = stream_in_chunks(full, chunk);
+        assert_eq!(
+            streamed, full,
+            "chunk={chunk}: a never-completed marker prefix must not be dropped"
+        );
+        assert_eq!(t.finish(), trim_continuation(full));
+        assert_eq!(t.finish(), full);
+    }
 }
 
 // ── Conversational Ask: history block budgeting ────────────────────────────
@@ -858,6 +968,91 @@ async fn answer_stream_no_match_emits_guidance_as_one_fragment() {
     );
 }
 
+/// Generator that streams a real answer, then keeps going with a fabricated next
+/// `QUESTION:/ANSWER:` turn — the exact live-observed hallucination `trim_continuation`
+/// guards against on the non-streaming path. The marker itself is split across a fragment
+/// boundary (`"\n\nQUES"` / `"TION: …"`), so a test built on this generator only passes if
+/// the streaming trim detects the marker incrementally rather than by getting lucky with
+/// where a single fragment happens to end.
+struct HallucinatingStreamGen;
+#[async_trait::async_trait]
+impl Generator for HallucinatingStreamGen {
+    async fn generate(&self, _prompt: &str) -> Result<String> {
+        Ok("unused".to_owned())
+    }
+    async fn generate_stream(
+        &self,
+        _prompt: &str,
+        on_fragment: &mut (dyn FnMut(String) + Send),
+    ) -> Result<String> {
+        let mut full = String::new();
+        for part in [
+            "Ferris is the Rust mascot.",
+            "\n\nQUES",
+            "TION: what else is there?\n",
+            "ANSWER: invented continuation.",
+        ] {
+            on_fragment(part.to_owned());
+            full.push_str(part);
+        }
+        Ok(full)
+    }
+}
+
+/// The bug this PR fixes: the non-streaming path already trims a hallucinated continuation
+/// (`trim_continuation`, see the tests above), but the streaming path pushed every fragment
+/// straight through and returned the un-trimmed `full.trim()`. This proves `answer_stream`
+/// now (a) never displays the fabricated turn in the streamed `Fragment`s, and (b) persists/
+/// returns the same trimmed text the non-streaming path would produce for identical model
+/// output.
+#[tokio::test]
+async fn answer_stream_trims_a_hallucinated_continuation_like_the_non_streaming_path() {
+    let (_dir, path) = temp_index_with_chunk("ferris the crab is the rust mascot");
+    let embedder = CountingEmbedder {
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let cfg = QaConfig {
+        mode: HybridMode::Sparse,
+        ..QaConfig::default()
+    };
+
+    let mut frags = String::new();
+    let ans = {
+        let mut on_chunk = |c: AnswerChunk| match c {
+            AnswerChunk::Sources(_) => {}
+            AnswerChunk::Fragment(t) => frags.push_str(&t),
+            AnswerChunk::Step(..) => unreachable!("one-shot stream emits no Step"),
+        };
+        answer_stream(
+            &path,
+            &embedder,
+            &HallucinatingStreamGen,
+            "ferris",
+            &cfg,
+            &mut on_chunk,
+        )
+        .await
+        .unwrap()
+    };
+
+    let full_model_output =
+        "Ferris is the Rust mascot.\n\nQUESTION: what else is there?\nANSWER: invented continuation.";
+    assert_eq!(
+        ans.answer, "Ferris is the Rust mascot.",
+        "the persisted/returned answer must have the fabricated turn trimmed"
+    );
+    assert_eq!(
+        ans.answer,
+        trim_continuation(full_model_output),
+        "streamed result must match what the non-streaming path produces for identical model output"
+    );
+    assert!(
+        !frags.contains("QUESTION"),
+        "displayed fragments must never include the hallucinated turn: {frags:?}"
+    );
+    assert_eq!(frags.trim(), "Ferris is the Rust mascot.");
+}
+
 // ── Agentic ask ───────────────────────────────────────────────────────────
 
 /// Generator that returns scripted replies in order (so an agentic-loop test can
@@ -1143,6 +1338,58 @@ async fn agentic_stream_emits_steps_before_sources_and_answer() {
     let first_answer = order.iter().position(|k| *k != "step").unwrap();
     assert!(order[..first_answer].iter().all(|k| *k == "step"));
     assert_eq!(order[first_answer], "sources");
+}
+
+/// The agentic streaming synthesis path (`answer_agentic_stream_history`) had the same bug as
+/// `answer_stream_with_ann_history`: it pushed raw fragments straight through and returned
+/// `full.trim()` with no continuation trim. `max_steps: 1` and `rerank: false` keep the hop
+/// loop to exactly one retrieval (no decide/rerank `generate` calls), so the only LLM call is
+/// the streamed synthesis — isolating this test to the same fix as the one-shot stream test
+/// above (`HallucinatingStreamGen` is reused verbatim).
+#[tokio::test]
+async fn agentic_stream_trims_a_hallucinated_continuation_like_the_non_streaming_path() {
+    let (_d, path) = temp_index_with_chunks(&[("/a.md", "alpha subsystem overview")]);
+    let embedder = CountingEmbedder {
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let cfg = QaConfig {
+        mode: HybridMode::Sparse,
+        max_steps: 1,
+        rerank: false,
+        ..QaConfig::default()
+    };
+
+    let mut frags = String::new();
+    let ans = {
+        let mut on_chunk = |c: AnswerChunk| match c {
+            AnswerChunk::Step(..) | AnswerChunk::Sources(_) => {}
+            AnswerChunk::Fragment(t) => frags.push_str(&t),
+        };
+        answer_agentic_stream(
+            &path,
+            &embedder,
+            &HallucinatingStreamGen,
+            "alpha",
+            &cfg,
+            None,
+            &mut on_chunk,
+        )
+        .await
+        .unwrap()
+    };
+
+    let full_model_output =
+        "Ferris is the Rust mascot.\n\nQUESTION: what else is there?\nANSWER: invented continuation.";
+    assert_eq!(
+        ans.answer, "Ferris is the Rust mascot.",
+        "agentic streaming must also persist the trimmed answer"
+    );
+    assert_eq!(ans.answer, trim_continuation(full_model_output));
+    assert!(
+        !frags.contains("QUESTION"),
+        "agentic streaming must never display the hallucinated turn: {frags:?}"
+    );
+    assert_eq!(frags.trim(), "Ferris is the Rust mascot.");
 }
 
 /// Generator whose reply depends on which prompt it's fed: the listwise rerank prompt
