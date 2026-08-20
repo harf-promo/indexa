@@ -84,6 +84,14 @@ function chooseBuildKind(node) {
     var covered = node.covered || 0;
     if (total > 0 && covered >= total && node.summary_state === 'done') return null;
     if (total === 0 && node.summary_state === 'done') return null;
+    // Deliberately does NOT special-case node.partial > 0: `partial` counts
+    // summary_queue rows still pending/in_flight, which is true both while a job
+    // is actively draining them AND after a standalone `deep` enqueues work with
+    // nobody running yet (verified live — `indexa deep` alone leaves items
+    // pending with no worker). Hiding Build here on the tree row would drop the
+    // only prominent way to start that work in exactly the state where it's
+    // needed; `coverageGlyph`'s ◐ already signals "in progress" without removing
+    // the action.
     return 'summarize';
   }
   return node.summary_state === 'done' ? null : 'summarize';

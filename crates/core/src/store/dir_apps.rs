@@ -132,7 +132,12 @@ impl Store {
     }
 
     /// Chunk + summary coverage for one path (the path itself and everything under it).
-    /// `covered`/`total` are directory-summary rollups — same contract as `TreeNode`.
+    /// `covered`/`partial`/`total` are directory-summary rollups — same contract as
+    /// `TreeNode` (`store/search.rs`'s `tree_level`/`row_to_tree_node`): `covered` counts
+    /// `done` dir summaries, `partial` counts dir summaries still `pending`/`in_flight`
+    /// (queued for a build — not necessarily one actively running right now; a
+    /// standalone `deep` enqueues rows with no worker draining them until
+    /// `summarize`/`index` runs), `total` counts subtree dirs.
     pub fn path_coverage(&self, path: &str) -> Result<PathCoverage> {
         let (exact, child) = subtree_match(path);
         let chunk_count: i64 = self.conn.query_row(
@@ -148,6 +153,13 @@ impl Store {
             params![exact, child],
             |r| r.get(0),
         )?;
+        let partial: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM summary_queue
+             WHERE kind = 'dir' AND state IN ('pending', 'in_flight')
+               AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
+            params![exact, child],
+            |r| r.get(0),
+        )?;
         let total: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM entries
              WHERE kind = 'dir' AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
@@ -158,6 +170,7 @@ impl Store {
             chunk_count: chunk_count as u64,
             has_summary: self.summary_exists(&exact)?,
             covered: covered as u64,
+            partial: partial as u64,
             total: total as u64,
         })
     }
@@ -199,6 +212,11 @@ pub struct PathCoverage {
     pub has_summary: bool,
     /// Directory summaries in the subtree whose queue state is `done`.
     pub covered: u64,
+    /// Directory summaries in the subtree still queued (`pending`/`in_flight`) —
+    /// work waiting to be built, distinct from "nothing queued at all". Not a
+    /// guarantee that a job is running against it *right now*: a standalone
+    /// `deep` enqueues these rows before any `summarize`/`index` job drains them.
+    pub partial: u64,
     /// Directory entries in the subtree.
     pub total: u64,
 }

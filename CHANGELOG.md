@@ -647,6 +647,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   forward — a `/proj/build`-style already-**open** question, however, *does* now get swept on the
   next `index`/`prune` (`sweep_filtered_noise` runs on every pass and the corrected filter finally
   recognizes it as noise), same as the interior-path case already did.
+- **A building project still read "no summaries" (P1-partial).** `PathCoverage`
+  (`store/dir_apps.rs`) and `ProjectResponse` (`GET /api/projects`) only ever counted
+  `done` dir summaries, with no notion of "queued" — so the welcome view's project list
+  kept saying a project had no summaries for as long as a build ran against it. Added a
+  `partial` count (dir summaries `pending`/`in_flight`, the same split
+  `store/search.rs`'s `tree_level` already computes for the file tree) and threaded it
+  through to the web UI: a project row now shows a "◐ … — building…" readout with a
+  "Resume build" action instead of "Build context" while work is queued, and the welcome
+  header distinguishes "have no summaries" from "are being built" / "aren't built yet
+  (N in progress)" instead of collapsing both into one "no summaries" message. `partial`
+  counts *queued* work, not necessarily a job actively draining it this instant — a
+  standalone `deep` (no following `summarize`/`index`) leaves rows `pending` with nobody
+  working on them, and the UI treats that the same as an active build rather than
+  stranding the only "Build context" affordance on that row. New
+  `path_coverage_reports_partial_for_in_progress_builds` test in
+  `store/tests/dir_apps.rs`.
+- **Folder-scoped Export, after a build finishes, exported nothing.** The "Export context
+  for your AI tool" button in the post-build "Context ready!" panel
+  (`11-onboarding.js`'s `onContextReady`) called `doExport('', 'xml')` — an empty scope.
+  `doExport`'s own empty-path guard (`05-summary.js`, present since `fad408c`, long before
+  this fix) turns that into a "Select a folder first" toast and exports nothing, so the
+  button had never actually worked, not "exported the whole index" as originally
+  triaged. It now resolves the path of the deep/index job that just completed (from the
+  shared `activeJobs` job-tracking state) and exports that folder specifically. Also
+  routes the click through `addEventListener` with the path captured in a closure instead
+  of interpolating it into an `onclick="..."` attribute — the same stored-XSS-shaped
+  pattern already closed in `13-classify.js`/`16-context-packs.js`/`17-weights.js`.
+  Verified live: built a scratch project via the web UI's "Build context" flow, confirmed
+  the resulting `Context ready!` panel's Export button produced `/api/export?path=<that
+  project's real path>` and rendered only that project's tree, not the other indexed
+  projects.
 - **`cargo test --workspace` could read — and chmod — the developer's real config.toml.** Every
   web config-write handler (`api_keys_set`, `api_config_provider_set`, `api_config_passes`,
   `api_config_resource_set`, `api_config_features_set`) called the global
