@@ -113,6 +113,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ours, 0.13.4 already pulled in by Tauri's updater) collapse into one; `brotli`/`pcre2` stay pinned
   at their existing versions; the desktop app was re-verified `cargo check`/`clippy --locked` clean
   against the new lock. The topbar now shows folder-summary coverage (`N of M folders summarized (P%)`) next to files/chunks, and the "context not built" banner is **path-aware** — a handful of summaries in one repo no longer hide that the selected folder has none. Hover actions collapse to one **Build context** verb (deep+summarize if the folder isn't searchable yet, summarize if it is); Re-scan / Refresh / Remove move into a ⋯ menu. Starting a job stays on the current view and offers "Watch progress" on the toast instead of yanking you into Activity. **Build context** on a folder that contains several detected projects refuses the whole-tree job and points at the per-project list. `GET /api/health` adds `summaries` + `thin_context`; a third banner names a thin hierarchical layer without calling it "stale". New `GET /api/projects` lists top-level detected apps with coverage so the welcome view can offer per-project Build context. Ask's **Agentic** toggle is labeled **Think harder**; a scoped answer on an unsummarized folder says so and offers the same button.
+- **`tower-http` 0.5 → 0.7 (dependency bump, #328 superseded).** `crates/web/Cargo.toml`'s only
+  direct tower-http dependency (`cors` + `trace` features, backing the web UI's `CorsLayer`) moves
+  0.5.2 → 0.7.0; `reqwest` 0.13's own separate transitive `tower-http 0.6.11` is untouched
+  (confirmed via `cargo tree -i tower-http@0.6.11`/`@0.7.0`, two independent entries). No source
+  changes were needed — the `tower_http::cors::CorsLayer::new().allow_origin(...).allow_methods(...)
+  .allow_headers(...)` builder chain at `crates/web/src/lib.rs:562` compiles unchanged across the
+  0.5→0.7 jump. **This is the security-relevant bump this sweep flagged for live re-verification,
+  not just a green compile** — the actual cross-origin-POST-returns-403 and bad-Host-returns-403
+  behavior turned out to live entirely in the hand-written `guard::request_guard` middleware
+  (`crates/web/src/guard.rs`), not in tower-http's `CorsLayer` (which only shapes the
+  `Access-Control-Allow-*` headers browsers use to gate reading a cross-origin response; it never
+  itself emits the 403 status). Verified live against a scratch `indexa serve --port 7699` booted
+  over a `cp -c` clone of the real index DB (nothing real touched): cross-origin `POST
+  /api/classifications/confirm` with `Origin: http://evil.example.com` → `403`; the same POST with
+  a spoofed `Host: evil.example.com` header → `403`; the same POST with a matching
+  `Origin: http://localhost:7699` or no `Origin` header at all → `422` (passes the security layer,
+  rejected downstream by ordinary body validation — not a security block); a plain same-origin
+  `GET /api/stats` → `200`. An `OPTIONS` CORS preflight against `/api/stats` returns
+  `access-control-allow-origin: http://localhost:7699` regardless of the request's own `Origin`
+  header, in both the evil-origin and matching-origin cases — the fixed single-origin allow-list
+  behavior is unchanged, so a browser (unlike curl) still can't read a cross-origin response.
+  `apps/indexa-desktop/Cargo.lock` (workspace-excluded, separately committed) was regenerated with
+  a targeted `cargo update --manifest-path apps/indexa-desktop/Cargo.toml -p tower-http@0.5.2
+  --precise 0.7.0`; the diff is scoped to the two `tower-http` package entries only, and the
+  deliberately-pinned `brotli` (8.0.2) / `brotli-decompressor` (5.0.3) / `pcre2` (0.2.11) versions
+  are byte-identical before and after. (Same nested-worktree Cargo workspace-discovery quirk noted
+  in the candle-bump entry above hit `cargo generate-lockfile` here too — worked around this time
+  by temporarily giving `apps/indexa-desktop/Cargo.toml` its own empty `[workspace]` table for the
+  duration of the `cargo update` call, then reverting it before committing, since
+  `generate-lockfile` itself turned out to force a full 786-package re-resolution in this
+  environment where the targeted `cargo update -p` did not.)
 - **Review inbox noise (detectors + web).** Archive questions no longer fire on generated/toolchain caches (`/build/`, `SourcePackages`, `.xcframework`, `DerivedData`, `Pods`, gradle wrappers, `/gen/`). Duplicate questions skip ubiquitous sibling manifests (`Cargo.toml`, `package.json`, `go.mod`, …) unless they are exact copies in the same folder. `sweep_filtered_noise` retro-dismisses the existing inbox on the next `index`/`prune`. The Review drawer groups cards by type and pre-fills the batch "under" folder when every open question of that type shares a path prefix.
 - **Surface the product (web).** The toolbar **Export** menu lists named Context Packs and can create a pack from the selected folder — no need to open Settings. Map now opens on the coverage **Treemap** at whole-disk scope (the graph is a hairball there) and switches to **Graph** once you select a project-depth folder; an explicit tab click still sticks. Settings tucks passes / resources / insights / packs / weights under **More settings**. `docs/COMPETITIVE.md` "still open" list no longer claims Decision Ledger or token-savings are unshipped.
 - **`deep --dry-run` estimates instead of fully parsing a large tree.** The preview used to parse
