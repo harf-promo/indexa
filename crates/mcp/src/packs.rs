@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use indexa_core::{config::HybridMode, store::Store};
 
-use crate::{mcp_err, ok_text, IndexaMcp};
+use crate::{mcp_err, ok_text, record_usage, IndexaMcp};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetPackParams {
@@ -193,10 +193,18 @@ impl IndexaMcp {
             graph_format.as_deref().unwrap_or("text"),
         )?;
         // Record the export (4.1) — best-effort, a history-write hiccup must never fail an
-        // otherwise-successful export.
-        if let Ok(Some(pack)) = store.pack_by_name(&name) {
+        // otherwise-successful export. Also record savings telemetry (like every other
+        // retrieval/export tool) — the export (buf) vs. the counterfactual of reading every
+        // pack file whole. Both best-effort — a failed lookup just records a zero counterfactual.
+        let counterfactual = if let Ok(Some(pack)) = store.pack_by_name(&name) {
             let _ = store.record_pack_exported(&pack.id, fmt);
-        }
+            let paths = store.pack_paths(&pack.id).unwrap_or_default();
+            let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+            store.counterfactual_bytes_for_paths(&refs).unwrap_or(0)
+        } else {
+            0
+        };
+        record_usage(&mut store, "export_pack", buf.len(), counterfactual);
         Ok(ok_text(buf))
     }
 
@@ -298,7 +306,7 @@ impl IndexaMcp {
         let limit = limit.unwrap_or(20).min(100);
 
         let embedding = self.embedder.embed(&query).await.ok();
-        let store = self.store()?;
+        let mut store = self.store()?;
 
         let pack = store
             .pack_by_name(&name)
@@ -357,10 +365,13 @@ impl IndexaMcp {
             })
             .collect::<Vec<_>>()
             .join("\n\n");
-        Ok(ok_text(format!(
-            "{} result(s) in pack \"{name}\":\n\n{body}",
-            hits.len()
-        )))
+        let out = format!("{} result(s) in pack \"{name}\":\n\n{body}", hits.len());
+        // Savings telemetry (like every other retrieval tool): the snippets served vs. reading
+        // the matched files whole. Best-effort; a lookup failure records a zero counterfactual.
+        let paths: Vec<&str> = hits.iter().map(|h| h.entry_path.as_str()).collect();
+        let counterfactual = store.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
+        record_usage(&mut store, "search_pack", out.len(), counterfactual);
+        Ok(ok_text(out))
     }
 }
 
