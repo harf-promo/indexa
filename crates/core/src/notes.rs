@@ -9,6 +9,7 @@
 //! write a local file → `add_pack_paths` → index. No new schema; notes inherit
 //! secret redaction on export automatically (they live inside a pack).
 
+use crate::store::hex_digest;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -71,7 +72,7 @@ pub fn write_note_file_anchored(
         .map_err(|e| anyhow::anyhow!("creating notes dir {}: {e}", dir.display()))?;
 
     let slug = slugify(title);
-    let sha = format!("{:x}", Sha256::digest(body.as_bytes()));
+    let sha = hex_digest(Sha256::digest(body.as_bytes()));
     let filename = format!("{slug}-{}.md", &sha[..8]);
     let path = dir.join(&filename);
 

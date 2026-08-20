@@ -17,7 +17,7 @@ pub(super) fn embedding_to_blob(v: &[f32]) -> Vec<u8> {
 /// Decode a little-endian byte blob back into an `f32` vector.
 ///
 /// Any trailing bytes that don't form a complete 4-byte chunk are silently
-/// dropped (via `chunks_exact`), matching the historical behavior at the
+/// dropped (via `as_chunks`), matching the historical behavior at the
 /// summary call sites. Callers that need strict alignment validation should
 /// check `b.len().is_multiple_of(4)` before calling.
 pub(super) fn blob_to_embedding(b: &[u8]) -> Vec<f32> {
