@@ -70,32 +70,61 @@ pub(crate) async fn cmd_deep(
 
     if dry_run {
         println!("Dry run — nothing will be written to the index.\n");
-        let mut total_files = 0usize;
-        let mut total_chunks = 0usize;
-        let mut by_mime: std::collections::HashMap<String, usize> =
+        // Collect the file set (path + size) across roots up front; family is classified by
+        // extension (cheap, no parse) so it's always exact and independent of the chunk-count
+        // sampling below — deliberately a coarser, faster axis than the old MIME-sniffed
+        // breakdown (see `classify_file_by_extension`'s `category` — extension-based
+        // classification misses files with wrong/missing extensions that MIME sniffing would
+        // have caught, e.g. an extensionless script or a mislabeled `.txt`).
+        let mut all_files: Vec<(std::path::PathBuf, u64)> = Vec::new();
+        let mut by_family: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
-
         for root in &roots {
             let entries = walk(root, &walk_cfg)?;
-            let files: Vec<_> = entries
+            for e in entries
                 .iter()
                 .filter(|e| e.kind == indexa_core::walker::EntryKind::File && !e.is_binary)
-                .collect();
-            total_files += files.len();
-            for entry in files {
-                if let Ok(ex) = registry.parse_guarded(&entry.path, entry.size, max_parse_bytes) {
-                    total_chunks += ex.chunks.len();
-                    let family = ex.mime.split('/').next().unwrap_or("other").to_owned();
-                    *by_mime.entry(family).or_default() += 1;
-                }
+            {
+                let family = indexa_core::surface::classify_file_by_extension(&e.path)
+                    .map(|h| h.category.to_owned())
+                    .unwrap_or_else(|| "other".to_owned());
+                *by_family.entry(family).or_default() += 1;
+                all_files.push((e.path.clone(), e.size));
             }
         }
+        let total_files = all_files.len();
+        // `walk()` honors `[scan] threads` and returns entries in whatever order the parallel
+        // walk completed in — nondeterministic across runs. Sort before sampling so the
+        // evenly-spaced sample (and therefore the estimate below) is a deterministic function of
+        // the file set: an unchanged tree reports the same estimated chunk count every time,
+        // rather than a different sample producing a different number on each `--dry-run`.
+        all_files.sort();
 
-        println!("Would parse {total_files} files:");
-        let mut pairs: Vec<_> = by_mime.into_iter().collect();
+        // Chunk count: a tree at or below `DRY_RUN_SAMPLE_MAX` files is parsed in full (the
+        // sample IS the whole set, so the count is exact). A larger tree parses an
+        // evenly-spaced sample of that many files and extrapolates chunks-per-byte to the
+        // whole tree — trading a few percent of accuracy for a preview that doesn't take
+        // nearly as long as the real deep run it's previewing. See `estimate_total_chunks`.
+        const DRY_RUN_SAMPLE_MAX: usize = 64;
+        let (total_chunks, sampled, was_sampled) =
+            estimate_total_chunks(&all_files, DRY_RUN_SAMPLE_MAX, max_parse_bytes, |p, sz| {
+                registry
+                    .parse_guarded(p, sz, max_parse_bytes)
+                    .ok()
+                    .map(|ex| ex.chunks.len())
+            });
+
+        if was_sampled {
+            println!(
+                "Would parse {total_files} files (chunks estimated from a {sampled}-file sample):"
+            );
+        } else {
+            println!("Would parse {total_files} files:");
+        }
+        let mut pairs: Vec<_> = by_family.into_iter().collect();
         pairs.sort_by_key(|b| std::cmp::Reverse(b.1));
-        for (mime, n) in pairs {
-            println!("  {:>5}  {mime}", n);
+        for (family, n) in pairs {
+            println!("  {:>5}  {family}", n);
         }
         println!("\nEstimated embedding calls: {total_chunks} chunks");
         // Use the calibrated ETA table instead of the old hardcoded 300 chunks/min.
@@ -698,4 +727,231 @@ pub(crate) async fn cmd_deep(
 
     println!("\nDeep index done. Run `indexa ask \"<question>\"` to query.");
     Ok(())
+}
+
+/// Estimates `deep --dry-run`'s chunk count for a file population: exactly for a small tree, or
+/// via an evenly-spaced sample extrapolated by chunks-per-byte for a large one.
+///
+/// File size alone is a poor predictor of chunk count — code chunks per function, far
+/// finer-grained than prose — so a pure size heuristic can underestimate a real corpus by
+/// multiples. Sampling actual parses and extrapolating their chunks-per-byte ratio to the whole
+/// tree is the accurate-yet-cheap middle ground: a `deep --dry-run` preview no longer has to
+/// nearly-fully parse a huge tree (the cost it exists to help someone avoid) just to report a
+/// count.
+///
+/// `chunks_of` is injected (rather than this function calling the real parser registry directly)
+/// so the selection + extrapolation logic stays pure and unit-testable over a synthetic
+/// population; production wires it to `registry.parse_guarded`.
+///
+/// Returns `(estimated_total_chunks, files_actually_parsed, was_sampled)`. A tree at or below
+/// `sample_max` files is parsed in full — the "sample" and "everything" are the same set, so the
+/// count is exact and `was_sampled` is `false`.
+fn estimate_total_chunks(
+    files: &[(std::path::PathBuf, u64)],
+    sample_max: usize,
+    max_parse_bytes: u64,
+    mut chunks_of: impl FnMut(&std::path::Path, u64) -> Option<usize>,
+) -> (usize, usize, bool) {
+    // A file over the parse-size cap is truncated at parse time (`parse_guarded` refuses it
+    // outright above `max_parse_bytes`), so it never contributes more than that many parseable
+    // bytes. Clamp both the sample's and the whole tree's byte totals to match, or a tree with a
+    // few oversized files skews the chunks-per-byte ratio.
+    let effective_bytes = |sz: u64| {
+        if max_parse_bytes == 0 {
+            sz
+        } else {
+            sz.min(max_parse_bytes)
+        }
+    };
+
+    if files.len() <= sample_max {
+        let mut total_chunks = 0usize;
+        for (path, size) in files {
+            if let Some(n) = chunks_of(path, *size) {
+                total_chunks += n;
+            }
+        }
+        return (total_chunks, files.len(), false);
+    }
+
+    let step = (files.len() / sample_max).max(1);
+    let mut sample_chunks = 0usize;
+    let mut sample_bytes = 0u64;
+    let mut sampled = 0usize;
+    for (path, size) in files.iter().step_by(step) {
+        // Accumulated unconditionally — even when the parse below fails — so the sample's byte
+        // basis matches `total_bytes`'s below. Gating this on parse success (as the file's chunk
+        // count already is) would inflate chunks-per-byte by the unparseable fraction, since the
+        // numerator (chunks) and denominator (bytes) would no longer describe the same files.
+        sample_bytes += effective_bytes(*size);
+        if let Some(n) = chunks_of(path, *size) {
+            sample_chunks += n;
+        }
+        sampled += 1;
+    }
+    let total_bytes: u64 = files.iter().map(|(_, size)| effective_bytes(*size)).sum();
+    let estimated = if sample_bytes == 0 {
+        0
+    } else {
+        ((sample_chunks as f64 / sample_bytes as f64) * total_bytes as f64).round() as usize
+    };
+    (estimated, sampled, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::estimate_total_chunks;
+    use std::path::PathBuf;
+
+    /// A synthetic population with real chunks-per-byte VARIANCE (not a fixed ratio) — code-like
+    /// files chunk far more densely per byte than prose-like ones — so the extrapolation is
+    /// actually exercised, not just algebra that cancels out.
+    fn synthetic_population(
+        n: usize,
+    ) -> (Vec<(PathBuf, u64)>, std::collections::HashMap<usize, usize>) {
+        let mut files = Vec::with_capacity(n);
+        let mut true_chunks = std::collections::HashMap::new();
+        for i in 0..n {
+            let path = PathBuf::from(format!("/corpus/file_{i}.txt"));
+            // Alternate two size/density profiles so the population isn't uniform.
+            let (size, chunks) = if i.is_multiple_of(3) {
+                (4_000u64, 12usize) // code-like: dense
+            } else {
+                (2_000u64, 2usize) // prose-like: sparse
+            };
+            true_chunks.insert(i, chunks);
+            files.push((path, size));
+        }
+        (files, true_chunks)
+    }
+
+    fn chunks_for(
+        path: &std::path::Path,
+        true_chunks: &std::collections::HashMap<usize, usize>,
+    ) -> Option<usize> {
+        let idx: usize = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_prefix("file_"))
+            .and_then(|s| s.parse().ok())
+            .expect("synthetic path shape");
+        true_chunks.get(&idx).copied()
+    }
+
+    #[test]
+    fn small_tree_is_parsed_exactly_not_sampled() {
+        let (files, truth) = synthetic_population(40);
+        let exact_total: usize = truth.values().sum();
+        let (estimated, parsed, was_sampled) =
+            estimate_total_chunks(&files, 64, 0, |p, _sz| chunks_for(p, &truth));
+        assert!(!was_sampled, "40 files with sample_max 64 must not sample");
+        assert_eq!(parsed, 40);
+        assert_eq!(
+            estimated, exact_total,
+            "at/below sample_max must be exact, not estimated"
+        );
+    }
+
+    #[test]
+    fn large_tree_estimate_is_within_tolerance_of_true_total() {
+        let (files, truth) = synthetic_population(2_000);
+        let exact_total: usize = truth.values().sum();
+        let (estimated, parsed, was_sampled) =
+            estimate_total_chunks(&files, 64, 0, |p, _sz| chunks_for(p, &truth));
+        assert!(was_sampled, "2000 files with sample_max 64 must sample");
+        // `step_by`'s count is `ceil(len / step)`, and `step` itself is a floor division, so the
+        // actual sample can land a few files above `sample_max` (e.g. 65 for this population) —
+        // assert "approximately the sample size", not the exact bound, while still catching a
+        // sampling failure that degenerates into a full parse (2000 files).
+        assert!(
+            parsed <= 64 + 8,
+            "must sample ~sample_max files, not the whole tree; parsed {parsed}"
+        );
+        // Don't assert exact equality — that's the whole point of sampling. Assert the estimate
+        // lands within a generous tolerance of the true total (real-corpus PR measurements were
+        // ~4% off; this synthetic population's alternating profile is a harder case, so allow
+        // more headroom while still catching a badly broken extrapolation).
+        let tolerance = (exact_total as f64 * 0.20).ceil() as usize;
+        let diff = estimated.abs_diff(exact_total);
+        assert!(
+            diff <= tolerance,
+            "estimate {estimated} vs true {exact_total} (diff {diff}) exceeds {tolerance} tolerance"
+        );
+    }
+
+    #[test]
+    fn unparseable_files_dont_inflate_the_estimate() {
+        // Half of ALL files (not just sampled ones) always fail to parse (return None) — e.g. a
+        // binary misdetected as text, or a format the parser doesn't handle. The correct ground
+        // truth here is what running this SAME (partially-failing) parse function over the whole
+        // tree would produce, not the idealized "every file parses" total — a consistently
+        // failing subset would contribute zero chunks in a real exact run too.
+        let (files, truth) = synthetic_population(2_000);
+        let flaky_chunks_of = |p: &std::path::Path, _sz: u64| -> Option<usize> {
+            let idx: usize = p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.strip_prefix("file_"))
+                .and_then(|s| s.parse().ok())
+                .unwrap();
+            if idx.is_multiple_of(2) {
+                None // simulate a parse failure
+            } else {
+                truth.get(&idx).copied()
+            }
+        };
+        let full_total: usize = files
+            .iter()
+            .filter_map(|(p, sz)| flaky_chunks_of(p, *sz))
+            .sum();
+
+        let (estimated, _parsed, was_sampled) =
+            estimate_total_chunks(&files, 64, 0, flaky_chunks_of);
+        assert!(was_sampled);
+
+        // Regression guard: if the byte basis were gated on parse success instead of accumulated
+        // unconditionally, chunks-per-byte would be computed over only the successfully-parsed
+        // sampled bytes but multiplied by the WHOLE tree's bytes (successes + failures) —
+        // roughly doubling the estimate versus `full_total`. The unconditional basis keeps the
+        // sample and total byte counts on the same footing, so this should land close.
+        let tolerance = (full_total as f64 * 0.35).ceil() as usize; // sampling noise headroom
+        let diff = estimated.abs_diff(full_total);
+        assert!(
+            diff <= tolerance,
+            "estimate {estimated} vs full-parse total {full_total} (diff {diff}) exceeds \
+             {tolerance} — byte basis likely regressed to gate on parse success"
+        );
+    }
+
+    #[test]
+    fn oversized_files_are_clamped_on_both_sides() {
+        // One file is far larger than `max_parse_bytes` on both sample and total sides; without
+        // clamping, its huge byte count would swamp the ratio even though `parse_guarded` would
+        // refuse to parse more than the cap in the real path.
+        let mut files = vec![(PathBuf::from("/corpus/huge.bin"), 10_000_000u64)];
+        let mut truth = std::collections::HashMap::new();
+        truth.insert(usize::MAX, 0usize); // the huge file never parses (over the cap)
+        for i in 0..200 {
+            files.push((PathBuf::from(format!("/corpus/file_{i}.txt")), 1_000));
+            truth.insert(i, 3);
+        }
+        let max_parse_bytes = 5_000u64;
+        let (estimated, _parsed, was_sampled) =
+            estimate_total_chunks(&files, 64, max_parse_bytes, |p, _sz| {
+                if p.file_name().unwrap() == "huge.bin" {
+                    None // over the cap: parse_guarded would refuse it
+                } else {
+                    chunks_for(p, &truth)
+                }
+            });
+        assert!(was_sampled);
+        // Without clamping, the ~10MB file alone would make the denominator ~200x too large,
+        // crushing the estimate toward ~0. With clamping it should land close to the ~600 true
+        // chunks from the 200 small files (huge.bin contributes 0 chunks either way).
+        let true_total = 200 * 3;
+        assert!(
+            estimated > true_total / 2,
+            "estimate {estimated} collapsed toward zero — oversized file likely wasn't clamped"
+        );
+    }
 }
