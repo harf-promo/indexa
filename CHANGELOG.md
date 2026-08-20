@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.77.0] — 2026-08-20
+
 ### Added
 
 - **MCP tools now carry `ToolAnnotations` read-only/destructive hints (all 51 tools).** Every
