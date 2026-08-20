@@ -1311,4 +1311,224 @@ overlap = 50
         assert_eq!(cfg.chunking.strategy, ChunkStrategy::Fixed);
         assert_eq!(cfg.chunking.size, 500);
     }
+
+    // ── docs/config.md coverage ─────────────────────────────────────────────
+    //
+    // Rust has no runtime struct-field reflection, so there's no way to derive this list
+    // automatically from `Config`'s type definition. `non_default_keys`'s `toml::Value` walk
+    // (above in this file) was considered as that generic source instead of a hand list —
+    // and rejected: TOML has no null, so the toml crate's serializer *omits* any `Option<T>`
+    // field whose value is `None`, and every one of those fields defaults to `None`
+    // (`models.catalog_url`, the PDF/image/audio/video parser-override fields, all of
+    // `api_keys`). Those are exactly the fields most likely to go undocumented, so a walk
+    // that can't see them isn't a safe sole source here.
+    //
+    // `all_config_fields_list_stays_in_sync_with_the_struct` below machine-checks this list
+    // against that same walk anyway — it can't prove completeness (it can't see the
+    // `None`-valued fields either), but it does catch the common drift case: a new
+    // non-Option field added to `Config` and forgotten here.
+
+    /// Every serde field across `Config` and its nested structs, as a dotted path
+    /// (`section.field`, or `section.subsection.field` for one level of nesting — matches
+    /// how deep `Config`'s struct tree actually goes). **Keep this in sync with `Config`**:
+    /// when you add a field, add its dotted path here AND a real `docs/config.md` entry for
+    /// it (or, rarely, note it's deliberately internal in a comment next to the field in
+    /// `Config` itself if it's not meant for end-user docs — e.g. `describer.model_fallback`
+    /// is `#[serde(skip)]`, a runtime flag never read from or written to config.toml, and is
+    /// intentionally NOT listed below for that reason).
+    const ALL_CONFIG_FIELDS: &[&str] = &[
+        "embedding.provider",
+        "embedding.model",
+        "embedding.dim",
+        "embedding.base_url",
+        "chunking.strategy",
+        "chunking.size",
+        "chunking.overlap",
+        "retrieval.hybrid",
+        "retrieval.rrf_k",
+        "retrieval.top_k",
+        "retrieval.rerank",
+        "retrieval.summary_weight",
+        "retrieval.summary_depth_alpha",
+        "retrieval.context_budget",
+        "retrieval.ann",
+        "retrieval.ann_min_chunks",
+        "retrieval.use_weights",
+        "retrieval.agentic",
+        "retrieval.agentic_max_steps",
+        "retrieval.recency_boost",
+        "retrieval.recency_days",
+        "retrieval.mmr_lambda",
+        "retrieval.rerank_backend",
+        "retrieval.rerank_model",
+        "retrieval.archive_segments",
+        "retrieval.archive_penalty",
+        "retrieval.broad_per_file_cap",
+        "retrieval.graphrag_clusters",
+        "retrieval.graphrag_max_clusters",
+        "retrieval.graphrag_cluster_sim",
+        "retrieval.graphrag_summarize",
+        "retrieval.staleness_flags",
+        "retrieval.query_predicates",
+        "describer.provider",
+        "describer.model",
+        "describer.base_url",
+        "describer.contextual_retrieval",
+        "describer.contextual_prefix",
+        "describer.file_model",
+        "describer.dir_model",
+        "describer.num_ctx",
+        "describer.mode",
+        "describer.queue_concurrency",
+        "describer.max_children_per_summary",
+        "describer.passes_first",
+        "describer.passes_refresh",
+        "describer.passes_cap",
+        "describer.claude_bin",
+        "parsers.pdf.backend",
+        "parsers.pdf.ocr_binary",
+        "parsers.pdf.ocr_lang",
+        "parsers.image.caption",
+        "parsers.image.model",
+        "parsers.audio.transcribe",
+        "parsers.audio.binary",
+        "parsers.audio.model",
+        "parsers.video.caption",
+        "parsers.video.model",
+        "parsers.video.binary",
+        "parsers.video.fps_sample",
+        "parsers.video.max_frames",
+        "parsers.max_file_mb",
+        "parsers.encoding",
+        "parsers.preprocessor",
+        "parsers.preprocessor.glob",
+        "parsers.preprocessor.command",
+        "parsers.preprocessor.timeout_s",
+        "parsers.preprocessor.max_output_mb",
+        "parsers.compressed",
+        "resource.profile",
+        "resource.headroom_gb",
+        "resource.auto_select_model",
+        "resource.keep_alive_secs",
+        "api_keys.openai",
+        "api_keys.anthropic",
+        "api_keys.google",
+        "models.catalog_url",
+        "scan.respect_gitignore",
+        "scan.ignore",
+        "scan.auto_reindex",
+        "scan.include_sensitive",
+        "scan.redact_at_index",
+        "scan.skip_binary",
+        "scan.custom_ignore",
+        "scan.threads",
+        "review.auto_record_below",
+        "review.max_open",
+        "review.max_new_per_scan",
+        "review.symbol_ambiguity",
+        "sources.enabled",
+        "sources.timeout_secs",
+        "sources.max_retries",
+        "mcp.tool_profile",
+        "graph.modules",
+    ];
+
+    /// Collect every leaf (non-table) dotted path in a serialized `toml::Value` tree —
+    /// mirrors `diff_toml_values` above but collects every path rather than diffing.
+    fn collect_toml_leaf_paths(prefix: &str, v: &toml::Value, out: &mut Vec<String>) {
+        match v {
+            toml::Value::Table(t) => {
+                for (k, vv) in t {
+                    let p = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{prefix}.{k}")
+                    };
+                    collect_toml_leaf_paths(&p, vv, out);
+                }
+            }
+            _ => out.push(prefix.to_owned()),
+        }
+    }
+
+    /// Catches the common drift case for `ALL_CONFIG_FIELDS`: a new non-`Option` field added
+    /// to `Config` (or a nested struct) and forgotten in the hand-maintained list above. Every
+    /// leaf path `Config::default()` actually serializes to must already be listed — this is
+    /// a subset check, not a full equivalence, because (as explained above) `Option<T>` fields
+    /// defaulting to `None` never appear in this walk at all, so it can't validate those.
+    #[test]
+    fn all_config_fields_list_stays_in_sync_with_the_struct() {
+        let cfg = Config::default();
+        let val = toml::Value::try_from(&cfg).expect("Config::default() must serialize to TOML");
+        let mut leaves = Vec::new();
+        collect_toml_leaf_paths("", &val, &mut leaves);
+        let missing: Vec<&str> = leaves
+            .iter()
+            .map(String::as_str)
+            .filter(|p| !ALL_CONFIG_FIELDS.contains(p))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "Config field(s) serialize but aren't listed in ALL_CONFIG_FIELDS — add them \
+             there and to docs/config.md: {missing:?}"
+        );
+    }
+
+    /// `docs/config.md` must mention every real `Config` field somewhere, or a user has no
+    /// way to discover a knob short of reading `config.rs` directly — the doc-side
+    /// counterpart of `doc_tool_count_matches_code` (`crates/mcp/src/lib.rs`).
+    ///
+    /// Checks each dotted path segment-by-segment rather than as one joined string or just
+    /// the leaf name: several sections share a leaf field name (`model` appears in five
+    /// structs; `openai`/`anthropic`/`google` already appear elsewhere as *provider* names,
+    /// not as `[api_keys]` fields), so a leaf-only check would call a field "documented" on a
+    /// false-positive text collision. Requiring every segment present — including the section
+    /// name — catches that: `api_keys.openai` only counts as covered once "api_keys" itself
+    /// is mentioned somewhere, not just "openai". This is still a per-word presence check,
+    /// not a structural one — it can't tell that a mention of "binary" in the `[parsers.audio]`
+    /// prose doesn't also cover `[parsers.video] binary`; document real fields precisely
+    /// regardless of what this test can mechanically prove.
+    #[test]
+    fn every_config_field_is_mentioned_in_docs() {
+        let docs_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/config.md");
+        let docs = std::fs::read_to_string(&docs_path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", docs_path.display()));
+
+        fn word_present(haystack: &str, needle: &str) -> bool {
+            let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
+            let mut from = 0usize;
+            while let Some(rel) = haystack[from..].find(needle) {
+                let start = from + rel;
+                let end = start + needle.len();
+                let before_ok = haystack[..start]
+                    .chars()
+                    .next_back()
+                    .map(|c| !is_word_char(c))
+                    .unwrap_or(true);
+                let after_ok = haystack[end..]
+                    .chars()
+                    .next()
+                    .map(|c| !is_word_char(c))
+                    .unwrap_or(true);
+                if before_ok && after_ok {
+                    return true;
+                }
+                from = start + 1;
+            }
+            false
+        }
+
+        let undocumented: Vec<&str> = ALL_CONFIG_FIELDS
+            .iter()
+            .filter(|path| !path.split('.').all(|seg| word_present(&docs, seg)))
+            .copied()
+            .collect();
+        assert!(
+            undocumented.is_empty(),
+            "Config field(s) with no mention in docs/config.md — add a doc entry (or, if \
+             genuinely not user-facing, note why in the ALL_CONFIG_FIELDS doc comment and \
+             exclude it there instead): {undocumented:?}"
+        );
+    }
 }

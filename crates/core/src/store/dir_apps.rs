@@ -223,6 +223,13 @@ pub struct PathCoverage {
 
 /// Detected-app paths that are not useful "Build context" targets: vendored
 /// copies, generated trees, nested Xcode project bundles.
+///
+/// Also used (B3) to drop vendored/minified noise from the code graph's edge list
+/// (`edges.rs::code_graph_scoped`) BEFORE it's sorted/truncated — so `.min.js` /
+/// `.bundle.js` here matter for *file* paths (graph edges), not just the directory
+/// paths `top_projects_under`'s welcome list checks. Both consumers share one list on
+/// purpose: a bundler output directory is exactly as useless as a "Build context"
+/// target as its minified files are as call-graph nodes.
 pub fn is_project_noise_path(path: &str) -> bool {
     const FRAGMENTS: &[&str] = &[
         "/vendor/",
@@ -235,6 +242,8 @@ pub fn is_project_noise_path(path: &str) -> bool {
         ".xcodeproj",
         "/DerivedData/",
         "/Pods/",
+        ".min.js",
+        ".bundle.js",
     ];
     // Fragments are `/`-delimited literals; normalize first so a
     // Windows-persisted path (`\`-separated) still matches (M7).

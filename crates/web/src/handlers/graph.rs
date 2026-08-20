@@ -173,7 +173,12 @@ pub(crate) async fn api_graph(
     State(state): State<AppState>,
     Query(q): Query<GraphQuery>,
 ) -> Response {
-    // Default scope: the largest indexed root (first /api/roots entry) when unset.
+    // Default scope when unset: the first `/api/roots` entry. `root_paths()`
+    // (`entries.rs`) orders `ORDER BY e1.path` — alphabetically, NOT by size — so this is
+    // "alphabetically-first indexed root", not "the largest" (a comment here previously
+    // claimed the latter). The client (`19-graph.js`) is the one that actually re-scopes
+    // to a real project via `/api/projects`; this fallback only matters when the caller
+    // passes no scope at all (e.g. a direct API request) — see B2 in CHANGELOG.md.
     let scope = match q.scope.filter(|s| !s.is_empty()) {
         Some(s) => s,
         None => {
