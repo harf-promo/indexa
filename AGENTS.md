@@ -46,6 +46,8 @@ cargo test --workspace
 cargo build --release
 ```
 
+**Touched a dependency anywhere in the graph?** `apps/indexa-desktop` is workspace-excluded with its own committed `Cargo.lock` — CI builds it `--locked`. Adding/removing a dep in a crate the desktop app pulls in (even transitively) leaves that lock stale and red-Xs `desktop build (macOS)` with no local signal, since `cargo build --workspace` never touches it. Regenerate it: `cargo generate-lockfile --manifest-path apps/indexa-desktop/Cargo.toml`, then diff it — only your actual dependency change should move; the pinned `brotli`/`pcre2` versions (see that Cargo.toml's own comment) must not float.
+
 UI changes: `indexa serve` → visually confirm at http://localhost:7620 (headless-CDP harness fallback: `memory/feedback_browser_verification.md`).
 
 ## Git workflow
