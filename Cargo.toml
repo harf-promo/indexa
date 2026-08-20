@@ -102,8 +102,10 @@ sysinfo = { version = "0.39" }
 # runs and binary versions, which rules out std's DefaultHasher)
 sha2 = "0.10"
 
-# HTTP client (all consumers must use rustls-tls, never native-tls)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# HTTP client (all consumers must use rustls, never native-tls). reqwest 0.13 renamed
+# the "rustls-tls" feature to "rustls" (TLS features consolidated; the rustls backend
+# now pulls in aws-lc-rs + rustls-platform-verifier instead of 0.12's webpki-roots/ring).
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 # Self-update
 semver = "1"
@@ -117,11 +119,13 @@ candle-nn = "0.9"
 candle-transformers = "0.9"
 # HuggingFace model hub — model file cache (Apache-2.0).
 # v0.5 + the `ureq` feature gives the sync download API backed by ureq 3, whose
-# default TLS is rustls + ring (NOT native-tls/openssl, NOT aws-lc). This keeps
-# the tree openssl-free so it cross-compiles to aarch64-linux — same crypto
-# provider (ring) the reqwest/rustls invariant already relies on. Do NOT enable
-# the `native-tls`/`default-tls` features: they pull openssl-sys and break the
-# Linux ARM64 cross build (the v0.43.0 release failure).
+# default TLS is rustls + ring (NOT native-tls/openssl, NOT aws-lc-sys). This keeps
+# ureq's own slice of the tree openssl-free. NOTE: since reqwest 0.13, the
+# reqwest/rustls invariant below no longer shares ring as its crypto provider —
+# reqwest's "rustls" feature now pulls aws-lc-rs (a from-source C/asm build via
+# aws-lc-sys, not the openssl-sys crate) instead. Do NOT enable the
+# `native-tls`/`default-tls` features on either dependency: they pull openssl-sys
+# and break the Linux ARM64 cross build (the v0.43.0 release failure).
 hf-hub = { version = "0.5", default-features = false, features = ["ureq"] }
 # HF tokenizer (Apache-2.0). onig = Oniguruma, compiled from bundled C source and
 # statically linked — same pattern as rusqlite's bundled SQLite, safe for notarization.
