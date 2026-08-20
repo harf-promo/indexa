@@ -35,6 +35,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Cheaper index hot loops (no change in results).** Two per-call patterns collapsed to batched
+  or streamed forms, reviving and re-verifying the stalled `perf-hot-loops-d9` work against
+  current `main`: `embeddings_for_chunks` (the MMR re-ranking pass's candidate-vector fetch) now
+  runs one `IN (…)` query instead of one `query_row` per chunk id, mirroring the existing
+  `paths_for_ids` pattern — a rough in-process before/after (interleaved, averaged over 100
+  iterations per batch size) showed a consistent ~1.1×–1.9× speedup from 12 to 500 ids, never a
+  regression. The MCP server's `ensure_ann` (builds/caches the in-memory ANN index for
+  `ask`/`search`/`explain_retrieval`) now streams embeddings straight into the HNSW via a new
+  `AnnIndex::build_from` + `Store::stream_chunk_embeddings`/`count_embedded_chunks`/
+  `first_embedding_dim`, instead of collecting every vector into a `Vec` first — halving transient
+  build memory on a large index; the built index indexes the identical set of vectors either way.
+  Opening the DB now also sets `PRAGMA mmap_size` (256 MB) and `cache_size` (64 MB) so the
+  blob-heavy dense scans fault pages in instead of paying a `read()` per row. Deliberately deferred
+  (would touch files outside this change's scope): batching `directory_apps` writes into one
+  transaction (the caller loop lives in `app_detect.rs`, not a store file) and mirroring the same
+  `ensure_ann` streaming fix into the web server's `crates/web/src/handlers/ask.rs` (its own,
+  separately-cached `ensure_ann`) — both still do their pre-existing, correct thing; only their
+  hot-loop shape is unchanged.
 - **`candle-core`/`candle-nn`/`candle-transformers` 0.9 → 0.11 (dependency bump, #428/#429/#430
   superseded).** A two-major-version jump for the pure-Rust inference stack behind the
   cross-encoder reranker (`crates/query/src/rerank.rs`, `[retrieval] rerank_backend =
