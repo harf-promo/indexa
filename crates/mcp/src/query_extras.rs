@@ -38,7 +38,8 @@ pub struct InspectPathParams {
 impl IndexaMcp {
     /// Synthesize a plain-language overview of the indexed project (or a scoped subtree).
     #[tool(
-        description = "Synthesize a plain-language overview of the whole indexed project (or the subtree at scope). Uses directory roll-up summaries to answer broad 'what is this project about?' questions. Much faster than ask for project-level context."
+        description = "Synthesize a plain-language overview of the whole indexed project (or the subtree at scope). Uses directory roll-up summaries to answer broad 'what is this project about?' questions. Much faster than ask for project-level context.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn project_overview(
         &self,
@@ -63,7 +64,8 @@ impl IndexaMcp {
 
     /// Return the full retrieval trace for a question (sparse / dense / fused stages with scores).
     #[tool(
-        description = "Return the full retrieval trace for a question: which sparse/dense/fused stages ran, top-k scores per stage, and why the top sources were selected. Use to understand or debug why ask returned specific sources."
+        description = "Return the full retrieval trace for a question: which sparse/dense/fused stages ran, top-k scores per stage, and why the top sources were selected. Use to understand or debug why ask returned specific sources.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn explain_retrieval(
         &self,
@@ -134,7 +136,8 @@ impl IndexaMcp {
 
     /// Return indexed facts about a path: kind, size, chunk count, summary, category, weight, edges.
     #[tool(
-        description = "Return indexed facts about a path: kind, size, modification time, chunk count, language, summary, model, classification category, importance weight, and outgoing code-graph edges. The same data the 'Indexed facts' panel shows in the web UI."
+        description = "Return indexed facts about a path: kind, size, modification time, chunk count, language, summary, model, classification category, importance weight, and outgoing code-graph edges. The same data the 'Indexed facts' panel shows in the web UI.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn inspect(
         &self,

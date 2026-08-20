@@ -169,7 +169,8 @@ pub struct CodeGraphParams {
 impl IndexaMcp {
     /// List a code file's dependencies from the code graph (imports + defined symbols).
     #[tool(
-        description = "List a code file's dependencies from the code graph: the modules/paths it imports and the symbols (functions, types, classes) it defines. Set `include_heritage: true` to also list `extends`/`implements` edges (2.2) — the base classes/traits this file's types derive from. Requires an absolute path to a file indexed with `indexa deep`."
+        description = "List a code file's dependencies from the code graph: the modules/paths it imports and the symbols (functions, types, classes) it defines. Set `include_heritage: true` to also list `extends`/`implements` edges — the base classes/traits this file's types derive from. Requires an absolute path to a file indexed with `indexa deep`.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn dependencies(
         &self,
@@ -288,7 +289,8 @@ impl IndexaMcp {
 
     /// Reverse dependency: which indexed files import a given module/path.
     #[tool(
-        description = "Reverse dependency lookup over the code graph: which indexed files import a given module/path (as written in source). Use to find a module's dependents."
+        description = "Reverse dependency lookup over the code graph: which indexed files import a given module/path (as written in source). Use to find a module's dependents.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn who_imports(
         &self,
@@ -328,7 +330,8 @@ impl IndexaMcp {
     /// D2 — which files call a given function or method name, grouped by how each
     /// call resolved (same-file / same-dir / import / bare).
     #[tool(
-        description = "D2 code-graph: which indexed files contain a call to the given function or method name (bare, unqualified — e.g. `parse`, `render`, `connect`). Each caller is resolved against the name's definition sites (same-file → same-dir → import-matched → bare-name fallback) and the output is grouped by that tier; only the bare group is approximate. Requires `indexa deep` to have been run on source files. Returns up to 100 results."
+        description = "Which indexed files contain a call to the given function or method name (bare, unqualified — e.g. `parse`, `render`, `connect`). Each caller is resolved against the name's definition sites (same-file → same-dir → import-matched → bare-name fallback) and the output is grouped by that tier; only the bare group is approximate. Requires `indexa deep` to have been run on source files. Returns up to 100 results.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn who_calls(
         &self,
@@ -399,7 +402,8 @@ impl IndexaMcp {
     /// D2 — blast radius for a symbol: direct callers and transitive callers to `depth` hops,
     /// with each transitive hop resolved (scoped) where possible.
     #[tool(
-        description = "D2 code-graph: compute the blast radius of changing a function or method — returns the direct callers plus files whose call to a frontier caller's exported symbol resolves back to that caller (same-dir/import resolution; bare-name matches are kept as a labeled fallback). Use to answer 'what breaks if I change X?'. `depth` controls how many hops of caller reachability to follow: 1 = direct callers only, 2 = direct + one transitive hop (default), up to 5 for transitive reach through chains. Set `strict: true` to drop the bare-name fallback on the transitive hops. Set `grouped: true` to group the file list by hop with a risk label (hop 1 'WILL BREAK', hop 2 'LIKELY AFFECTED', hop 3+ 'MAY NEED TESTING') plus a LOW/MEDIUM/HIGH risk summary, instead of a flat list. Set `include_heritage: true` to also treat a class/trait's subclasses/implementors as direct hits (2.2) — pass a class/trait/interface name as `symbol` to see what breaks if you change it. Returns up to 200 results."
+        description = "Compute the blast radius of changing a function or method — returns the direct callers plus files whose call to a frontier caller's exported symbol resolves back to that caller (same-dir/import resolution; bare-name matches are kept as a labeled fallback). Use to answer 'what breaks if I change X?'. `depth` controls how many hops of caller reachability to follow: 1 = direct callers only, 2 = direct + one transitive hop (default), up to 5 for transitive reach through chains. Set `strict: true` to drop the bare-name fallback on the transitive hops. Set `grouped: true` to group the file list by hop with a risk label (hop 1 'WILL BREAK', hop 2 'LIKELY AFFECTED', hop 3+ 'MAY NEED TESTING') plus a LOW/MEDIUM/HIGH risk summary, instead of a flat list. Set `include_heritage: true` to also treat a class/trait's subclasses/implementors as direct hits — pass a class/trait/interface name as `symbol` to see what breaks if you change it. Returns up to 200 results.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn blast_radius(
         &self,
@@ -470,7 +474,8 @@ impl IndexaMcp {
 
     /// File-to-file call graph for a scope (the v0.18 signature graph, as text).
     #[tool(
-        description = "Build the file-to-file call graph for files under a path scope: an edge 'A → B' means file A calls a function that file B defines. Each call is resolved against the symbol's definition sites (same-file → same-dir → import-matched); unresolvable calls fall back to bare-name matching and are labeled. Returns the heaviest edges (most shared symbols) as a 'caller → callee [weight]' list, the most central hub files by weighted PageRank (scored 0–100), plus node/edge/tier counts. Set `strict: true` to drop the bare-name fallback entirely, `cycles: true` to report dependency cycles (circular call chains), or `modules: true` to report the persisted architecture map (4.6, named functional-area clusters — run `indexa graph --compute-modules` first) instead of the edge/hub view. Languages: Rust, Python, JS, TS, Go, Java, C, C++."
+        description = "Build the file-to-file call graph for files under a path scope: an edge 'A → B' means file A calls a function that file B defines. Each call is resolved against the symbol's definition sites (same-file → same-dir → import-matched); unresolvable calls fall back to bare-name matching and are labeled. Returns the heaviest edges (most shared symbols) as a 'caller → callee [weight]' list, the most central hub files by weighted PageRank (scored 0–100), plus node/edge/tier counts. Set `strict: true` to drop the bare-name fallback entirely, `cycles: true` to report dependency cycles (circular call chains), or `modules: true` to report the persisted architecture map (named functional-area clusters — run `indexa graph --compute-modules` first) instead of the edge/hub view. Languages: Rust, Python, JS, TS, Go, Java, C, C++.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn code_graph(
         &self,
@@ -630,7 +635,8 @@ impl IndexaMcp {
 
     /// Files related to a file through the call graph, with resolution tiers.
     #[tool(
-        description = "Find files related to a given file through the call graph: files it calls into, or files that call into it, ranked by shared symbol count. Each relation is resolved (same-dir/import) where possible; unresolvable links fall back to bare-name matching and are labeled 'bare' (approximate). Set `include_co_change: true` to also list files that historically changed together with this one in git history (2.7) — a behavioral-coupling signal invisible to static analysis; requires `indexa graph --compute-co-change` to have been run first. Use to discover what to read alongside a file."
+        description = "Find files related to a given file through the call graph: files it calls into, or files that call into it, ranked by shared symbol count. Each relation is resolved (same-dir/import) where possible; unresolvable links fall back to bare-name matching and are labeled 'bare' (approximate). Set `include_co_change: true` to also list files that historically changed together with this one in git history — a behavioral-coupling signal invisible to static analysis; requires `indexa graph --compute-co-change` to have been run first. Use to discover what to read alongside a file.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn related_files(
         &self,
@@ -705,7 +711,8 @@ impl IndexaMcp {
     /// file's own outgoing references, in one call (replaces who_calls + dependencies +
     /// a manual heritage lookup).
     #[tool(
-        description = "360° view of a function/method/class/type name in one call: where it's defined (file, kind, line range when available), who calls it (with resolution tier), who extends/implements it (heritage, 2.2), and what its defining file(s) also import/call (file-granularity approximation of 'outgoing references'). Replaces separately calling who_calls + dependencies + checking heritage by hand. When the name is ambiguous (defined in multiple files) and a `symbol_ambiguity` decision has been answered, the pinned definer is used and noted; otherwise all definers are listed with an ambiguity warning."
+        description = "360° view of a function/method/class/type name in one call: where it's defined (file, kind, line range when available), who calls it (with resolution tier), who extends/implements it (heritage), and what its defining file(s) also import/call (file-granularity approximation of 'outgoing references'). Replaces separately calling who_calls + dependencies + checking heritage by hand. When the name is ambiguous (defined in multiple files) and a `symbol_ambiguity` decision has been answered, the pinned definer is used and noted; otherwise all definers are listed with an ambiguity warning.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn symbol_context(
         &self,
@@ -820,7 +827,8 @@ impl IndexaMcp {
 
     /// 2.4 — BFS shortest callee-direction path between two symbols/files.
     #[tool(
-        description = "Find the shortest call-graph path from one symbol/file to another — \"how does A reach B?\". `from`/`to` each accept an absolute indexed file path or a bare symbol name (resolved to its definer file(s)). Only structurally-confirmed edges (same-file/same-dir/import resolution) are traversed — bare-name matches are too unreliable to report as a concrete path, so no result found means 'no confirmed path within max_depth', not 'definitely unreachable'. Returns the ordered chain of files from `from` to `to`, each hop labeled with how it resolved. `max_depth` bounds the search (default 10, max 10)."
+        description = "Find the shortest call-graph path from one symbol/file to another — \"how does A reach B?\". `from`/`to` each accept an absolute indexed file path or a bare symbol name (resolved to its definer file(s)). Only structurally-confirmed edges (same-file/same-dir/import resolution) are traversed — bare-name matches are too unreliable to report as a concrete path, so no result found means 'no confirmed path within max_depth', not 'definitely unreachable'. Returns the ordered chain of files from `from` to `to`, each hop labeled with how it resolved. `max_depth` bounds the search (default 10, max 10).",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn trace_path(
         &self,
@@ -863,7 +871,8 @@ impl IndexaMcp {
     /// of "how does A reach B specifically", this answers "what's everything reachable
     /// from A" in one direction.
     #[tool(
-        description = "Open-ended transitive closure over the call graph, starting from `target` (an absolute indexed file path, or a bare symbol name resolved to its definer file(s)) — the complement to `trace_path`: `trace_path` finds the shortest path between two SPECIFIC known nodes (\"how does A reach B\"), this returns the FULL reachable set from one starting point (\"what's everything reachable from A\"). `direction: \"callee\"` (default) walks what `target` transitively depends on — its calls, and what those calls call, and so on. `direction: \"caller\"` walks what transitively depends on `target` — who calls it, and who calls those callers (the same caller-direction reachability `blast_radius` computes, generalized here to a file-or-symbol seed and an open-ended hop count). Each hop is resolved (same-dir/import) where possible; unresolved bare-name matches are kept as a labeled fallback unless `strict: true` drops them. Vendored/generated noise (vendor/, node_modules/, .min.js, build output, etc.) is excluded from the walk. `depth` bounds how many hops to traverse (default 3, clamped to 1-5). Returns up to 200 files, with a truthful count when the reachable set is larger."
+        description = "Open-ended transitive closure over the call graph, starting from `target` (an absolute indexed file path, or a bare symbol name resolved to its definer file(s)) — the complement to `trace_path`: `trace_path` finds the shortest path between two SPECIFIC known nodes (\"how does A reach B\"), this returns the FULL reachable set from one starting point (\"what's everything reachable from A\"). `direction: \"callee\"` (default) walks what `target` transitively depends on — its calls, and what those calls call, and so on. `direction: \"caller\"` walks what transitively depends on `target` — who calls it, and who calls those callers (the same caller-direction reachability `blast_radius` computes, generalized here to a file-or-symbol seed and an open-ended hop count). Each hop is resolved (same-dir/import) where possible; unresolved bare-name matches are kept as a labeled fallback unless `strict: true` drops them. Vendored/generated noise (vendor/, node_modules/, .min.js, build output, etc.) is excluded from the walk. `depth` bounds how many hops to traverse (default 3, clamped to 1-5). Returns up to 200 files, with a truthful count when the reachable set is larger.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn dependency_closure(
         &self,
@@ -932,7 +941,8 @@ impl IndexaMcp {
 
     /// 2.3 — diff → changed spans → symbols → blast radius, in one call.
     #[tool(
-        description = "\"What did I just touch and what does it break?\" — diffs a git repo, maps the changed line ranges to symbols (via the symbols table, populated by `indexa deep`), and runs `blast_radius` on each changed symbol, merging the results (grouped by hop, same risk labeling as `blast_radius`'s `grouped: true`). Set `scope` to `\"unstaged\"` (default — working tree vs the index), `\"staged\"` (index vs HEAD), or a git ref (branch/tag/commit) to diff the working tree against that ref. `root` defaults to the first indexed root; pass it explicitly in a multi-root index. Changed files with no symbol-level data (non-code files, or not yet `indexa deep`-indexed) are reported separately via file-level related-files lookup. `strict`, `depth`, and `include_heritage` have the same meaning as on `blast_radius`."
+        description = "\"What did I just touch and what does it break?\" — diffs a git repo, maps the changed line ranges to symbols (via the symbols table, populated by `indexa deep`), and runs `blast_radius` on each changed symbol, merging the results (grouped by hop, same risk labeling as `blast_radius`'s `grouped: true`). Set `scope` to `\"unstaged\"` (default — working tree vs the index), `\"staged\"` (index vs HEAD), or a git ref (branch/tag/commit) to diff the working tree against that ref. `root` defaults to the first indexed root; pass it explicitly in a multi-root index. Changed files with no symbol-level data (non-code files, or not yet `indexa deep`-indexed) are reported separately via file-level related-files lookup. `strict`, `depth`, and `include_heritage` have the same meaning as on `blast_radius`.",
+        annotations(read_only_hint = true)
     )]
     pub(crate) async fn changed_impact(
         &self,

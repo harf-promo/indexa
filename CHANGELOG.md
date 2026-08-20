@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **MCP tools now carry `ToolAnnotations` read-only/destructive hints (all 51 tools).** Every
+  tool exposed by `indexa mcp` now declares `read_only_hint`/`destructive_hint` via rmcp's
+  `#[tool(annotations(...))]`, so MCP clients can auto-approve safe reads and gate mutations —
+  a three-way split, not the binary read/mutate rmcp's own example shows: 38 read-only tools
+  (`read_only_hint = true` — search/retrieval, code graph including the new `dependency_closure`/
+  `changed_impact`/`symbol_context`/`trace_path`, packs listing/export/search, insights,
+  classification/weight/decision listing), 7 mutating-but-safe tools (`read_only_hint = false,
+  destructive_hint = false` — `create_pack`, `add_pack_paths`, `add_note`, `trigger_index`,
+  `confirm_classification`, `set_weight`, `delete_weight`: additive or trivially reversible via
+  another exposed tool), and 6 mutating-destructive tools (`destructive_hint = true` —
+  `remove_pack_paths`, `delete_pack`, `prune`, `ignore_classification`, `answer_decision`,
+  `dismiss_decision`: deletions or sticky state changes with no undo tool exposed over MCP).
+  Bumped `rmcp` 1.7 → 1.8 for the macro's `annotations(...)` argument (the desktop app doesn't
+  depend on `indexa-mcp`/`rmcp`, so its separately-committed lockfile is unaffected). Also
+  stripped internal milestone-number jargon (`v0.8`, `v0.10 Insights`, `D2 code-graph:`, `(2.2)`,
+  `(2.6)`, `(2.7)`, `(4.6, `) from tool-level description strings — the `Params` struct field
+  docs (also client-visible, via the generated inputSchema) are left as-is, out of scope for this
+  pass — and fixed a stale "46-tool golden list" code comment. New
+  `tools_carry_read_only_or_destructive_annotations` test pins the three-way split against the
+  golden tool list so a future tool can't ship unannotated or misclassified. Live-verified over a
+  real `indexa mcp` stdio handshake (`initialize` → `notifications/initialized` → `tools/list`)
+  that the JSON actually carries `readOnlyHint`/`destructiveHint` (the annotation fields are
+  `skip_serializing_if = "Option::is_none"`, so a destructive-only tool emits
+  `{"destructiveHint":true}` with no `readOnlyHint` key at all).
+
 - **Open-ended transitive dependency closure — new MCP tool `dependency_closure` (51 tools).**
   `trace_path` answers "how does A reach B specifically" (shortest path between two known
   nodes); this answers the complementary question — "what's everything reachable from A" —
