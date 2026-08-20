@@ -232,6 +232,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Agentic ask never reranked its merged pool; two intent gates ignored the rewritten query.**
+  Small revival of #383 — most of that PR's scope (conversation-rewrite driving retrieval, the
+  shared `apply_configured_rerank` helper) had already landed via other work in this sweep;
+  these were the two gaps left. `crates/query/src/qa/agentic.rs`'s hop loop only sorted its
+  merged candidate pool by fused RRF score across hops — it never called
+  `apply_configured_rerank` at all, so a multi-hop agentic answer's citations skipped the
+  cross-encoder/LLM rerank pass the one-shot `ask` path already ran. It now reranks the merged
+  pool (same call shape as `synthesize.rs`'s `retrieve_and_rerank`, fail-open) right before
+  returning it for synthesis — one extra LLM/cross-encoder call at the end of the loop when
+  `cfg.rerank` is on (skipped, same as the one-shot path, when the pool has fewer than two
+  hits). Separately, in `crates/query/src/qa/synthesize.rs`, the
+  `want_clusters` (GraphRAG) and project-overview-budget gates called `is_broad_intent` on the
+  raw follow-up `question` instead of the conversation-rewritten `search_query` retrieval
+  actually searched with — so a follow-up like "what about it" that only reads as broad *after*
+  being resolved to something like "what is this project about" got the narrow, non-broad
+  treatment. Both gates now key on `search_query`.
 - **MCP response caps + four agent-surface behavior fixes (FM-3, revives #374 against current
   main).** Response caps, each with a truthful "N, showing first M" / "N of M" header:
   `dependencies` caps imports/defines/calls (and, with `include_heritage`, extends/implements)

@@ -10,6 +10,8 @@ use indexa_core::store::{AnnIndex, SearchHit, Store};
 use indexa_embed::Embedder;
 use indexa_llm::Generator;
 
+use crate::rerank::apply_configured_rerank;
+
 use super::confidence::confidence_for;
 use super::retrieve::{build_project_overview, is_broad_intent, retrieve};
 use super::rewrite::resolve_search_query;
@@ -158,7 +160,10 @@ pub async fn answer_agentic_stream_history(
 /// Each hop reuses [`retrieve`], so `cfg.scope` and the summary/importance boosts
 /// apply on every hop (a follow-up never leaks outside the requested scope). The
 /// `&Store` is opened and dropped inside a sync block each hop so the future stays
-/// `Send` (required by the MCP/web servers).
+/// `Send` (required by the MCP/web servers). Once every hop is done, the merged pool is
+/// optionally reranked (`cfg.rerank`) before being handed to synthesis — the same
+/// `apply_configured_rerank` pass the one-shot path runs, so a multi-hop answer's
+/// citations benefit from reranking too.
 #[allow(clippy::too_many_arguments)]
 async fn agentic_retrieve(
     db_path: &Path,
@@ -216,7 +221,8 @@ async fn agentic_retrieve(
         }
     }
 
-    // Hits came from several searches; re-rank the merged pool before synthesis.
+    // Hits came from several searches; sort the merged pool by fused score before the
+    // overview + rerank below.
     pool.sort_by(|a, b| {
         b.rrf_score
             .partial_cmp(&a.rrf_score)
@@ -233,6 +239,15 @@ async fn agentic_retrieve(
         };
         let store = Store::open(db_path)?;
         build_project_overview(&store, &pool, cfg.scope.as_deref(), overview_budget)
+    };
+
+    // Optional cross-encoder rerank of the merged pool, same call shape as the one-shot
+    // path's `retrieve_and_rerank` (fails open on any error/empty result). Previously the
+    // agentic loop only sorted by fused RRF score and never reranked at all.
+    let pool = if cfg.rerank {
+        apply_configured_rerank(llm, cfg, question, pool).await
+    } else {
+        pool
     };
 
     Ok((pool, overview))
