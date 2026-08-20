@@ -70,6 +70,12 @@ const DUP_SKIP_EXTS: &[&str] = &[
 /// Path fragments marking generated / vendored / asset trees: members here are
 /// regenerated on build (icon sets) or are intentional collections — "dedupe
 /// these" is never the right ask. (v0.39 duplicate-noise filter.)
+///
+/// Scoped to the DUPLICATE detector only — `/assets/` and `/competitors/` are
+/// included deliberately here (near-identical icon-set/screenshot variants are
+/// never a "pick a canonical copy" ask), but they are real user-content
+/// directories, not generated/toolchain-cache trees, so the ARCHIVE detector
+/// uses its own [`ARCHIVE_SKIP_DIR_FRAGMENTS`] instead of this list. (M6 fix.)
 const DUP_SKIP_DIR_FRAGMENTS: &[&str] = &[
     ".xcassets/",
     "/icons/",
@@ -81,6 +87,35 @@ const DUP_SKIP_DIR_FRAGMENTS: &[&str] = &[
     "/.next/",
     "/target/",
     "/competitors/",
+    "/gen/",
+    "/SourcePackages/",
+    ".xcframework",
+    "/DerivedData/",
+    "/Pods/",
+    "/.gradle/",
+    "/gradle_wrapper/",
+    "/gradle/wrapper/",
+];
+
+/// Path fragments marking generated / vendored / toolchain-cache trees for the
+/// ARCHIVE detector specifically. A deliberately narrower list than
+/// [`DUP_SKIP_DIR_FRAGMENTS`]: that one also drops `/assets/` and
+/// `/competitors/`, but those are user-content directories (design assets,
+/// competitor research) — a stale one is exactly what the archive detector
+/// exists to ask about. Sharing the duplicate detector's list made those two
+/// directories silently un-askable *and* retro-dismissed already-open
+/// questions about them via `sweep_filtered_noise` → `archive_path_is_noise`
+/// — the user never saw the question and never learned it was suppressed.
+/// (M6 fix.)
+const ARCHIVE_SKIP_DIR_FRAGMENTS: &[&str] = &[
+    ".xcassets/",
+    "/icons/",
+    "/dist/",
+    "/build/",
+    "/node_modules/",
+    "/vendor/",
+    "/.next/",
+    "/target/",
     "/gen/",
     "/SourcePackages/",
     ".xcframework",
@@ -193,9 +228,27 @@ fn dup_in_generated_dir(path: &str) -> bool {
 }
 
 /// Generated / vendored / toolchain-cache trees: never ask "archive this?" —
-/// the user cannot usefully archive an xcframework or gradle wrapper.
+/// the user cannot usefully archive an xcframework or gradle wrapper. Uses its
+/// own [`ARCHIVE_SKIP_DIR_FRAGMENTS`], NOT `dup_in_generated_dir` — that
+/// function's list also (correctly, for its own purpose) skips `/assets/` and
+/// `/competitors/`, which are user-content directories the archive detector
+/// must still be able to ask about. (M6 fix.)
+///
+/// The fragments are bracketed segment literals (`"/build/"`) that only match
+/// when the segment has content on *both* sides — a directory whose own name
+/// literally IS the fragment (the tree's ROOT, nothing after it in the path)
+/// has no trailing separator to satisfy that, so `.../foo/build` (the `build`
+/// dir itself, not a path descending through it) would never match. Padding a
+/// trailing `/` onto the normalized path before matching closes that gap for
+/// every fragment uniformly — no second bespoke basename comparison needed —
+/// while leaving genuinely non-matching names (`buildsomething`) alone, since
+/// the padded string still requires the exact `/build/` segment boundary.
 fn archive_path_is_noise(path: &str) -> bool {
-    dup_in_generated_dir(path)
+    let normalized = norm_sep(path);
+    let padded = format!("{normalized}/");
+    ARCHIVE_SKIP_DIR_FRAGMENTS
+        .iter()
+        .any(|f| padded.contains(f))
 }
 
 fn is_sibling_manifest(name: &str) -> bool {

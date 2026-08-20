@@ -499,6 +499,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   isn't worth building without a concrete need. Removed the field, struct, method, its tests, and
   the `docs/config.md` section and worked examples that documented it.
 
+### Fixed
+
+- **Archive detector reused the duplicate detector's noise filter — wrong list, wrong reach.**
+  `archive_path_is_noise` was a pure delegate to `dup_in_generated_dir`, sharing
+  `DUP_SKIP_DIR_FRAGMENTS` with the near-duplicate detector. That list's `/assets/` and
+  `/competitors/` entries are user-content directories, not generated/toolchain-cache trees — so a
+  stale subtree under either was silently un-askable *and* got retro-dismissed by
+  `sweep_filtered_noise` on every subsequent scan, with no signal to the user that the question was
+  ever suppressed. Separately, the shared fragments are `/`-delimited substring checks (`"/build/"`)
+  that require content on **both** sides of the segment, so they could never match a tree's own
+  ROOT — a directory literally named `build`, `DerivedData`, or `SourcePackages` still generated
+  the exact noise question the filter was written to silence. Fixed with a dedicated
+  `ARCHIVE_SKIP_DIR_FRAGMENTS` (drops `/assets/`/`/competitors/`, keeps the toolchain/build-cache
+  fragments) and a padded-match check in `archive_path_is_noise` that closes the root-name gap for
+  every fragment. `dup_in_generated_dir` and its list are untouched — the duplicate detector still
+  correctly treats near-identical icon sets/screenshots under `/assets/`/`/competitors/` as
+  non-actionable. No retroactive sweep of already-dismissed `/assets/`/`/competitors/` decisions:
+  existing dismissals stand, and the corrected filter only changes what gets asked/dismissed going
+  forward — a `/proj/build`-style already-**open** question, however, *does* now get swept on the
+  next `index`/`prune` (`sweep_filtered_noise` runs on every pass and the corrected filter finally
+  recognizes it as noise), same as the interior-path case already did.
+
 ## [0.76.0] — 2026-06-28
 
 ### Added
