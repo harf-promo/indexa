@@ -8,7 +8,6 @@
 //! import-linked → bare-name fallback) before any surface renders it. Edge *recording*
 //! is unchanged, so existing indexes get the precision win without a re-deep.
 
-use super::search::like_prefix;
 use super::{CodeGraph, CodeGraphEdge, CodeGraphNode, EdgeRecord, RelatedFile, Store};
 use anyhow::Result;
 use rusqlite::params;
@@ -1252,14 +1251,11 @@ impl Store {
         max_edges: usize,
         strict: bool,
     ) -> Result<ScopedCodeGraph> {
-        // Normalize to a directory prefix so `/a/proj` doesn't also match `/a/projector`.
-        // `/` (whole disk) is left as-is → matches everything.
-        let dir = if prefix == "/" || prefix.ends_with('/') {
-            prefix.to_owned()
-        } else {
-            format!("{prefix}/")
-        };
-        let pattern = like_prefix(&dir);
+        // Boundary-scoped, separator-inferred `subtree_match` child pattern: `/a/proj`
+        // doesn't also match `/a/projector`, and `/` (whole disk) still matches
+        // everything (`subtree_match("/")` degenerates to `like_prefix("/")` = `"/%"`,
+        // same as the old hand-rolled special case).
+        let (_, pattern) = super::entries::subtree_match(prefix);
 
         // One pass over the scope's edges → per-caller and per-symbol context.
         let mut calls: Vec<(String, String)> = Vec::new();

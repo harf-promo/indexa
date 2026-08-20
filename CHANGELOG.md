@@ -165,6 +165,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Subtree-scoped queries silently under-counted on Windows, most visibly as a
+  real-looking-but-wrong "1/1 folders" in the web welcome list.** `subtree_match`
+  (`store/entries.rs`), the shared exact-or-descendant `LIKE` helper behind ~12 call sites,
+  hardcoded `/` twice: it only trimmed a trailing `/`, and always joined the child pattern with
+  `/`. On a Windows-persisted index (`C:\proj\...`, stored verbatim — paths are never rewritten
+  at write time) this built a `/`-anchored pattern that matched nothing, so every subtree query
+  silently degraded to "exact path only." Confirmed failure chain: `top_projects_under` →
+  `path_coverage` → `subtree_match(r"C:\dev\indexa")` → pattern `C:\\dev\\indexa/%` matches zero
+  rows → `coverage.total` collapses to 1 → the web UI renders a small, plausible, wrong number
+  for a project with dozens of real subfolders. Fixed with **query-time separator inference**,
+  not a write-time normalize-and-migrate: a given index is separator-homogeneous by construction
+  (every stored path comes from one machine's `PathBuf::to_string_lossy()`), so `subtree_match`
+  now infers `/` vs `\` from the last separator in the prefix it's handed. A prior in-tree
+  comment (removed as part of this fix, `store/search.rs`) argued the correct fix was
+  normalizing separators at write time; that's rejected here because `decisions.subject` is a
+  polymorphic column (path *or* cluster-key *or* symbol name — a blind rewrite would corrupt
+  non-path rows), `chunks_fts` is an FTS5 external-content table requiring matched delete+reinsert
+  to avoid desync, and roughly ten tables hold non-reconstructible user state (packs, notes,
+  weights, ask sessions, decisions, …), so "wipe and reindex on Windows" isn't an available
+  escape hatch either — a migration would be the only path, and a risky one given the polymorphic
+  column. Query-time inference needs none of that: zero SQL changes, zero schema bump, zero
+  migration, and every remaining hand-rolled `/`-only call site (`chunks.rs`, `edges.rs`,
+  `summaries.rs`'s two literal copies of the old helper body, `search.rs`'s `subtree_like` and
+  the Rust-side `bucket_of`/`boost_with_summaries` boundary checks) now routes through the one
+  fixed helper. Two call sites (`semantic_edges.rs`'s `semantic_file_edges`,
+  `store/decisions.rs`'s non-path `symbol_ambiguity` batch-answer branch) had **no** boundary at
+  all before this — for `semantic_edges.rs` that was a real, if usually latent, bug (a `/proj`
+  scope's SQL scan could pull in a `/projector` file explicitly passed in the caller's node set,
+  even though the two are unrelated projects), now fixed with its own regression test;
+  `decisions.rs`'s branch is deliberately left as a literal string-prefix match, since its
+  subject is a bare symbol name, not a path (see `DecisionType::subject_is_path`'s doc comment
+  and the pinned test guarding it) — routing it through a path-boundary helper would have broken
+  `--under <prefix> --type symbol_ambiguity` for virtually every real symbol name. The two
+  destructive call sites (`reconcile_entries`, `delete_subtree`) get their own explicit
+  Windows-style regression tests proving the sibling boundary (`C:\proj` vs `C:\projector`) still
+  holds post-fix, alongside a real-ghost-removal assertion — a boundary-only test would have
+  passed against the old, broken code too, since it fails safe by under-matching everything.
 - **CLI log filter had no per-crate targeting and silently ignored `RUST_LOG`'s global level.**
   `apps/indexa/src/main.rs` built its `EnvFilter` via `from_default_env().add_directive(INFO)`;
   the target-less `INFO` directive always overwrote whatever global level `RUST_LOG` set, so
