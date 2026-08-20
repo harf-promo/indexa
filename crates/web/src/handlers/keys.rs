@@ -30,13 +30,13 @@ pub(crate) async fn api_keys_set(
         );
     }
 
-    let cfg_path = config::default_config_path();
+    let cfg_path = &*state.config_path;
     // A parse error must NOT silently fall back to a default config — saving that would
     // OVERWRITE the user's config.toml (wiping every other setting AND existing API keys).
     // A missing file still loads as default (config::load returns Ok(default)), so first-time
     // key entry works; only a present-but-unparseable config is refused. Mirrors the
     // api_config_* handlers (handlers/config.rs).
-    let mut cfg = match config::load(&cfg_path) {
+    let mut cfg = match config::load(cfg_path) {
         Ok(c) => c,
         Err(e) => {
             return err_json(
@@ -60,8 +60,7 @@ pub(crate) async fn api_keys_set(
 
     // Never log key material — log only the provider name.
     let provider = &body.provider;
-    let _ = state.config.as_ref(); // keep state referenced
-    match config::save(&cfg, &cfg_path) {
+    match config::save(&cfg, cfg_path) {
         Ok(()) => {
             tracing::info!("API key updated for provider={provider}");
             Json(serde_json::json!({"saved": true, "restart_required": true})).into_response()
