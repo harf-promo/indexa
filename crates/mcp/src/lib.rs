@@ -57,7 +57,8 @@ pub use curation::{
 };
 pub use graph::{
     BlastRadiusParams, ChangedImpactParams, CodeGraphParams, DependenciesParams,
-    RelatedFilesParams, SymbolContextParams, TracePathParams, WhoCallsParams, WhoImportsParams,
+    DependencyClosureParams, RelatedFilesParams, SymbolContextParams, TracePathParams,
+    WhoCallsParams, WhoImportsParams,
 };
 pub use insights::{InsightsDaysParams, InsightsDuplicatesParams, InsightsLargestParams};
 pub use packs::{
@@ -1757,6 +1758,152 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(body.contains("No confirmed path"), "got: {body}");
+    }
+
+    /// `dependency_closure` — default direction ("callee") walks what the seed transitively
+    /// calls, across multiple hops, resolved and formatted end-to-end through the real tool
+    /// handler (not just the core function).
+    #[tokio::test]
+    async fn dependency_closure_walks_callee_direction_by_default() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_edges(&[
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/a.rs".into(),
+                        kind: "calls".into(),
+                        to_ref: "helper".into(),
+                    },
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/b.rs".into(),
+                        kind: "defines".into(),
+                        to_ref: "helper".into(),
+                    },
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/b.rs".into(),
+                        kind: "calls".into(),
+                        to_ref: "inner".into(),
+                    },
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/c.rs".into(),
+                        kind: "defines".into(),
+                        to_ref: "inner".into(),
+                    },
+                ])
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let text = mcp
+            .dependency_closure(Parameters(DependencyClosureParams {
+                target: "/proj/a.rs".into(),
+                direction: None,
+                depth: Some(2),
+                strict: false,
+            }))
+            .await
+            .unwrap();
+        let body = text
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("callee closure"), "got: {body}");
+        assert!(body.contains("/proj/b.rs"), "got: {body}");
+        assert!(body.contains("/proj/c.rs"), "got: {body}");
+    }
+
+    /// `dependency_closure` — `direction: "caller"` walks the reverse edge (who transitively
+    /// depends on the target), from the same fixture shape as the callee test above.
+    #[tokio::test]
+    async fn dependency_closure_walks_caller_direction_when_requested() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_edges(&[
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/a.rs".into(),
+                        kind: "calls".into(),
+                        to_ref: "helper".into(),
+                    },
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/b.rs".into(),
+                        kind: "defines".into(),
+                        to_ref: "helper".into(),
+                    },
+                ])
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let text = mcp
+            .dependency_closure(Parameters(DependencyClosureParams {
+                target: "/proj/b.rs".into(),
+                direction: Some("caller".into()),
+                depth: Some(1),
+                strict: false,
+            }))
+            .await
+            .unwrap();
+        let body = text
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("caller closure"), "got: {body}");
+        assert!(body.contains("/proj/a.rs"), "got: {body}");
+    }
+
+    /// `dependency_closure` — an unrecognized `direction` is a caller error (-32602), not a
+    /// silent fallback, matching `parse_hybrid_mode`'s convention for other enum-like params.
+    #[tokio::test]
+    async fn dependency_closure_rejects_invalid_direction_as_invalid_params() {
+        use rmcp::model::ErrorCode;
+
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        let err = mcp
+            .dependency_closure(Parameters(DependencyClosureParams {
+                target: "/proj/a.rs".into(),
+                direction: Some("sideways".into()),
+                depth: None,
+                strict: false,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "got: {}", err.message);
+        assert!(err.message.contains("sideways"), "got: {}", err.message);
+    }
+
+    /// `dependency_closure` — a target with no indexed edges reports the specific
+    /// "not found" phrasing instead of an empty success or an error.
+    #[tokio::test]
+    async fn dependency_closure_reports_unknown_target() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        let text = mcp
+            .dependency_closure(Parameters(DependencyClosureParams {
+                target: "/proj/nowhere.rs".into(),
+                direction: None,
+                depth: None,
+                strict: false,
+            }))
+            .await
+            .unwrap();
+        let body = text
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.contains("No indexed file or symbol found"),
+            "got: {body}"
+        );
     }
 
     /// 2.5 — `symbol_context` end-to-end: definitions (kind + line range from the

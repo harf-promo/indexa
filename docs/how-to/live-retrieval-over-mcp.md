@@ -74,7 +74,7 @@ should see a `browse_tree` or `search` call.
 
 ## 4. What the agent can do
 
-The server exposes 50 tools. The ones you'll see used most:
+The server exposes 51 tools. The ones you'll see used most:
 
 | Tool | Purpose |
 |---|---|
@@ -84,7 +84,7 @@ The server exposes 50 tools. The ones you'll see used most:
 | `read_file` | raw file text (confined to indexed roots) |
 | `ask` | grounded RAG answer (supports `scope`, `mode`, `agentic`, and `session_id` for multi-turn) |
 | `dependencies` / `who_imports` / `who_calls` / `blast_radius` / `code_graph` | code-graph navigation (see [debugging the code graph](debug-the-code-graph.md)) |
-| `changed_impact` / `trace_path` / `symbol_context` | diff→impact, shortest call-graph path, and a 360° symbol view |
+| `changed_impact` / `trace_path` / `symbol_context` / `dependency_closure` | diff→impact, shortest call-graph path, a 360° symbol view, and open-ended transitive dependency closure |
 | `create_pack` / `add_pack_paths` / `export_pack` | build and hand over Context Packs |
 
 The progressive-disclosure pattern (`l0` → `l1` → `l2`) is the point: the agent surveys with

@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Open-ended transitive dependency closure — new MCP tool `dependency_closure` (51 tools).**
+  `trace_path` answers "how does A reach B specifically" (shortest path between two known
+  nodes); this answers the complementary question — "what's everything reachable from A" —
+  with no destination required. New `Store::dependency_closure`
+  (`crates/core/src/store/edges.rs`) BFS-walks the call graph from a starting file-or-symbol
+  (resolved via the same seed logic `trace_path` uses — `edges_from`/`edges_to("defines", …)`
+  — so the two tools agree on where a given input starts) in a configurable
+  `ClosureDirection`: `Callee` follows what the seed transitively calls (forward — "what does
+  this depend on"), `Caller` follows what transitively calls into it (backward — "what depends
+  on this", generalizing `blast_radius`'s caller-direction walk to an arbitrary file-or-symbol
+  seed and open-ended hop count via a new `calls_of` helper mirroring the existing
+  `callers_of_exports`). `depth` bounds the hop count (1-5), `strict` drops bare-name
+  (no import/same-dir evidence) resolutions instead of keeping them as a labeled fallback, and
+  vendored/generated noise (`vendor/`, `node_modules/`, `.min.js`, build output, …) is filtered
+  via the existing `is_project_noise_path` before a candidate is counted or traversed further —
+  reusing `code_graph_scoped`'s noise filter rather than duplicating it. Results are capped at
+  200 files with a truthful pre-cap `total`, matching the "N, showing first M" convention other
+  graph tools use. `scoped`/`bare` counters only credit a resolution that leaves at least one
+  surviving (non-self/seed/visited/noise) file behind, so the header never claims a resolution
+  that produced zero visible files. Exposed in `crates/mcp/src/graph.rs` as `dependency_closure`
+  (`target`, `direction: "callee"|"caller"`, `depth`, `strict`) following the same parameter,
+  error-handling (unrecognized `direction` is `invalid_params`, matching `parse_hybrid_mode`'s
+  convention — not silently coerced), and response-formatting conventions as `dependencies` /
+  `blast_radius` / `trace_path`. Golden tool list and every doc's stated tool count (README,
+  AGENTS.md, USAGE.md, `docs/how-to/live-retrieval-over-mcp.md`) updated 50 → 51. Covered by 8
+  core-level tests (both directions on the same fixture, depth limiting, bare-symbol seed
+  resolution in either direction, cycle termination without including the seed, the noise
+  filter *and* its interaction with the tier counters, `strict`, and the cap-vs-truthful-total
+  contract) plus 4 MCP-handler-level tests (default/explicit direction, invalid-direction
+  rejection, unknown-target phrasing) calling the real tool function against a seeded store.
+
 - **Cross-file embed-batching primitive (`crates/embed/src/batcher.rs`, `MissBatcher`) — scoped
   salvage of #367, primitive only.** Today's deep-index loop calls the embedder once per FILE's
   cache-miss chunks, so a repo with thousands of files issues roughly one Ollama round-trip per
