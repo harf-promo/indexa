@@ -640,6 +640,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP `mode` typos silently ran a different search than the one asked for; internal MCP errors
+  dropped their cause chain.** `parse_hybrid_mode` (backing `search`/`ask`/`explain_retrieval`'s
+  `mode` param) fell through any unrecognized value to `rrf` — so `mode:"dnese"` (a typo of
+  `"dense"`) silently ran a full hybrid search instead of erroring, with no signal the caller had
+  been misunderstood. A present-but-unrecognized `mode` is now rejected as a JSON-RPC `-32602
+  invalid_params` error naming the bad value and the valid set (`sparse`, `dense`, `rrf`); `mode`
+  omitted still defaults to `rrf`, unchanged. Separately, `mcp_err` (the internal-failure → MCP
+  `-32603` mapping used across every tool) rendered only `anyhow::Error`'s outermost context frame
+  via `e.to_string()`, discarding every deeper `.context()` layer — so a failing tool call showed
+  an agent just `"opening index at ..."` instead of the actual root cause underneath. It now uses
+  `{e:#}` (anyhow's alternate `Display`), which renders the full chain. New `mcp_invalid` helper
+  (used inside `parse_hybrid_mode`, with `search`/`ask`/`explain_retrieval` propagating its
+  `Result` via `?`) reports a caller mistake distinctly from a server-side failure.
 - **Archive detector reused the duplicate detector's noise filter — wrong list, wrong reach.**
   `archive_path_is_noise` was a pure delegate to `dup_in_generated_dir`, sharing
   `DUP_SKIP_DIR_FRAGMENTS` with the near-duplicate detector. That list's `/assets/` and
