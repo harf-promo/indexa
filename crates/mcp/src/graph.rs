@@ -1,17 +1,18 @@
 //! Code-graph tools: `dependencies`, `who_imports`, `who_calls`,
-//! `blast_radius`, `code_graph`, `related_files`, and `changed_impact`.
+//! `blast_radius`, `code_graph`, `related_files`, `changed_impact`, `trace_path`,
+//! `symbol_context`, and `dependency_closure`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use indexa_core::gitdiff::{self, DiffScope};
-use indexa_core::store::{BlastRadius, ResolutionTier, Store};
+use indexa_core::store::{BlastRadius, ClosureDirection, ResolutionTier, Store};
 use rmcp::{
     handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router, ErrorData,
 };
 use serde::Deserialize;
 
-use crate::{mcp_err, ok_text, IndexaMcp};
+use crate::{mcp_err, mcp_invalid, ok_text, IndexaMcp};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DependenciesParams {
@@ -110,6 +111,26 @@ pub struct TracePathParams {
     /// Max hops to search. Default 10, clamped to 1..=10.
     #[serde(default)]
     pub max_depth: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DependencyClosureParams {
+    /// Starting point: an absolute indexed file path, or a bare function/method/symbol
+    /// name (resolved to its definer file(s)) — same either-form handling as `trace_path`.
+    pub target: String,
+    /// Which way to walk: `"callee"` (default) — everything `target` transitively
+    /// depends on (what it calls, and what those calls call, ...). `"caller"` —
+    /// everything that transitively depends on `target` (who calls it, and who calls
+    /// those callers, ...). Any other value is rejected.
+    #[serde(default)]
+    pub direction: Option<String>,
+    /// How many hops to traverse. Default 3, clamped to 1..=5.
+    #[serde(default)]
+    pub depth: Option<usize>,
+    /// Strict: drop bare-name (no import/same-dir evidence) resolutions instead of
+    /// keeping them as a labeled fallback. Default false.
+    #[serde(default)]
+    pub strict: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -838,6 +859,77 @@ impl IndexaMcp {
         )))
     }
 
+    /// Open-ended transitive dependency closure — the complement to `trace_path`: instead
+    /// of "how does A reach B specifically", this answers "what's everything reachable
+    /// from A" in one direction.
+    #[tool(
+        description = "Open-ended transitive closure over the call graph, starting from `target` (an absolute indexed file path, or a bare symbol name resolved to its definer file(s)) — the complement to `trace_path`: `trace_path` finds the shortest path between two SPECIFIC known nodes (\"how does A reach B\"), this returns the FULL reachable set from one starting point (\"what's everything reachable from A\"). `direction: \"callee\"` (default) walks what `target` transitively depends on — its calls, and what those calls call, and so on. `direction: \"caller\"` walks what transitively depends on `target` — who calls it, and who calls those callers (the same caller-direction reachability `blast_radius` computes, generalized here to a file-or-symbol seed and an open-ended hop count). Each hop is resolved (same-dir/import) where possible; unresolved bare-name matches are kept as a labeled fallback unless `strict: true` drops them. Vendored/generated noise (vendor/, node_modules/, .min.js, build output, etc.) is excluded from the walk. `depth` bounds how many hops to traverse (default 3, clamped to 1-5). Returns up to 200 files, with a truthful count when the reachable set is larger."
+    )]
+    pub(crate) async fn dependency_closure(
+        &self,
+        params: Parameters<DependencyClosureParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let store = self.store()?;
+        let direction = parse_closure_direction(params.0.direction.as_deref())?;
+        let depth = params.0.depth.unwrap_or(3).clamp(1, 5);
+        const LIMIT: usize = 200;
+        let closure = store
+            .dependency_closure(&params.0.target, direction, depth, params.0.strict, LIMIT)
+            .map_err(mcp_err)?;
+        if closure.seeds.is_empty() {
+            return Ok(ok_text(format!(
+                "No indexed file or symbol found for '{}'. Run `indexa deep` on source files \
+                 first.",
+                params.0.target
+            )));
+        }
+        let dir_word = match direction {
+            ClosureDirection::Callee => "callee",
+            ClosureDirection::Caller => "caller",
+        };
+        if closure.files.is_empty() {
+            return Ok(ok_text(format!(
+                "'{}' resolved to seed(s) {} but nothing is reachable in the {dir_word} \
+                 direction within {depth} hop(s).",
+                params.0.target,
+                closure.seeds.join(", ")
+            )));
+        }
+        let trunc = if closure.total > LIMIT {
+            format!(", showing first {LIMIT}")
+        } else {
+            String::new()
+        };
+        let body = closure
+            .files
+            .iter()
+            .map(|p| format!("📄 {p}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut out = format!(
+            "{dir_word} closure of '{}' (seed{}: {}; depth {depth}; {} file(s){trunc}):\n{body}\n\n\
+             {} resolution-confirmed + {} bare-name",
+            params.0.target,
+            if closure.seeds.len() > 1 { "s" } else { "" },
+            closure.seeds.join(", "),
+            closure.total,
+            closure.scoped,
+            closure.bare,
+        );
+        if params.0.strict {
+            out.push_str(" (strict: bare fallback disabled)");
+        }
+        if closure.bare > 0 {
+            out.push_str(&format!(
+                "\n⚠ {} link(s) are approximate: {}.",
+                closure.bare,
+                indexa_core::store::BARE_NAME_CAVEAT
+            ));
+        }
+        out.push_str(&notes_section(&store, &params.0.target));
+        Ok(ok_text(out))
+    }
+
     /// 2.3 — diff → changed spans → symbols → blast radius, in one call.
     #[tool(
         description = "\"What did I just touch and what does it break?\" — diffs a git repo, maps the changed line ranges to symbols (via the symbols table, populated by `indexa deep`), and runs `blast_radius` on each changed symbol, merging the results (grouped by hop, same risk labeling as `blast_radius`'s `grouped: true`). Set `scope` to `\"unstaged\"` (default — working tree vs the index), `\"staged\"` (index vs HEAD), or a git ref (branch/tag/commit) to diff the working tree against that ref. `root` defaults to the first indexed root; pass it explicitly in a multi-root index. Changed files with no symbol-level data (non-code files, or not yet `indexa deep`-indexed) are reported separately via file-level related-files lookup. `strict`, `depth`, and `include_heritage` have the same meaning as on `blast_radius`."
@@ -942,6 +1034,24 @@ impl IndexaMcp {
         }
 
         Ok(ok_text(out))
+    }
+}
+
+/// Parse `dependency_closure`'s `direction` param. `None`, or a blank/whitespace-only
+/// string, defaults to `"callee"` — matching how every other optional string param in this
+/// crate treats an empty value as "absent" (see `parse_hybrid_mode`). A *present, non-blank*
+/// but unrecognized value is a caller error — rejected as `invalid_params` — rather than
+/// silently coerced.
+fn parse_closure_direction(s: Option<&str>) -> Result<ClosureDirection, ErrorData> {
+    match s.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(ClosureDirection::Callee),
+        Some(v) => match v.to_lowercase().as_str() {
+            "callee" => Ok(ClosureDirection::Callee),
+            "caller" => Ok(ClosureDirection::Caller),
+            other => Err(mcp_invalid(format!(
+                "invalid direction '{other}' — expected one of: callee, caller"
+            ))),
+        },
     }
 }
 

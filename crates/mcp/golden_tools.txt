@@ -12,6 +12,7 @@ decision_history
 delete_pack
 delete_weight
 dependencies
+dependency_closure
 dismiss_decision
 explain_retrieval
 export_pack

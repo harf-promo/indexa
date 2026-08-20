@@ -164,6 +164,38 @@ pub struct ResolvedRelatedFile {
     pub tier: ResolutionTier,
 }
 
+/// Direction to walk in [`Store::dependency_closure`]: `Callee` follows what a file/symbol
+/// *calls* (forward — "what does this depend on"), `Caller` follows what *calls into* it
+/// (backward — "what depends on this", the same direction [`Store::blast_radius_resolved`]
+/// walks, generalized here to a file-or-symbol seed and an open-ended hop count).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClosureDirection {
+    Callee,
+    Caller,
+}
+
+/// Result of [`Store::dependency_closure`]: the transitively-reached files, plus how the
+/// walk resolved. `scoped`/`bare` count edges that contributed at least one surviving file
+/// to `total` (an edge whose only resolution targets are noise-filtered, self, or a seed
+/// contributes to neither counter) — so the two always describe what's actually reachable,
+/// never phantom resolutions.
+#[derive(Debug, Clone, Default)]
+pub struct DependencyClosure {
+    /// The resolved starting file(s): `target` itself if it was an indexed path, or the
+    /// definer file(s) if it was a bare symbol name. Empty means `target` resolved to
+    /// nothing indexed.
+    pub seeds: Vec<String>,
+    /// Files reached by the walk, sorted, capped at `limit`. Never includes a seed file.
+    pub files: Vec<String>,
+    /// Distinct files reached BEFORE the `limit` cap — the truthful count behind a
+    /// "N, showing first `limit`" header.
+    pub total: usize,
+    /// Edges that resolved (same-dir/import) to at least one surviving target file.
+    pub scoped: usize,
+    /// Edges kept on the bare-name fallback only (dropped entirely when `strict`).
+    pub bare: usize,
+}
+
 /// One file in a [`Store::trace_path`] result. `tier` is how the *previous* hop's call
 /// resolved into this file; the first hop (the resolved starting file) carries
 /// [`ResolutionTier::SameFile`] as a "start, no incoming edge" placeholder.
@@ -1206,6 +1238,178 @@ impl Store {
              SELECT DISTINCT from_path, to_ref FROM edges
               WHERE kind = 'calls'
                 AND to_ref IN (SELECT to_ref FROM caller_exports)
+              ORDER BY from_path, to_ref
+              LIMIT ?"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let cap_i = cap as i64;
+        let mut binds: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(frontier.len() + 1);
+        for f in frontier {
+            binds.push(f);
+        }
+        binds.push(&cap_i);
+        let rows = stmt.query_map(binds.as_slice(), |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Open-ended transitive dependency closure over the call graph — the complementary
+    /// query to [`Self::trace_path`]: `trace_path` answers "how does A reach B specifically",
+    /// this answers "what's everything reachable from A" in one direction.
+    ///
+    /// `target` may be an absolute file path already present as a `from_path` in `edges`, or
+    /// a bare symbol name — resolved to its definer file(s) via `edges_to("defines", …)` first
+    /// (the exact same either-form seed resolution [`Self::trace_path`] uses, so the two tools
+    /// agree on where a given input starts). `direction` picks which way to walk:
+    /// [`ClosureDirection::Callee`] follows what the seed(s) call (and what those calls call, …);
+    /// [`ClosureDirection::Caller`] follows who calls into the seed(s)' own exports (and who
+    /// calls THEM, …) — hop 1 here is therefore "who calls something a seed file defines", a
+    /// narrower start than [`Self::blast_radius_resolved`]'s hop 1 (which name-matches direct
+    /// callers of a symbol before any resolution filtering); every hop after that reuses
+    /// [`Self::classify_transitive`], the same resolver `blast_radius` uses from hop 2 onward.
+    ///
+    /// `depth` hops of reachability (`depth == 1` is the seed's own direct edges); `included`
+    /// doubles as the visited set so cycles terminate. Vendored/generated noise
+    /// ([`is_project_noise_path`]) is dropped from every candidate before it can be counted or
+    /// traversed further — the same filter [`Self::code_graph_scoped`] applies, applied here
+    /// directly since this walk never builds that function's whole-scope subgraph. `strict`
+    /// drops bare-tier (no import/same-dir evidence) resolutions entirely instead of keeping
+    /// them as a labeled fallback. `scoped`/`bare` count only edges that leave at least one
+    /// surviving file behind (self/seed/already-visited/noise targets don't inflate the count).
+    /// `files` is capped at `limit`; `total` is the true pre-cap count, for a truthful
+    /// "N, showing first `limit`" caller-side header. A symbol with more than
+    /// [`Self::CODE_GRAPH_COMMON_SYMBOL_CAP`] definers is skipped as too ambiguous to resolve
+    /// usefully (mirrors the same guard elsewhere in this module).
+    pub fn dependency_closure(
+        &self,
+        target: &str,
+        direction: ClosureDirection,
+        depth: usize,
+        strict: bool,
+        limit: usize,
+    ) -> Result<DependencyClosure> {
+        let seeds: Vec<String> = if !self.edges_from(target)?.is_empty() {
+            vec![target.to_string()]
+        } else {
+            self.edges_to("defines", target)?
+        };
+        if seeds.is_empty() {
+            return Ok(DependencyClosure::default());
+        }
+        let seed_set: HashSet<&str> = seeds.iter().map(String::as_str).collect();
+
+        let common_cap = Self::CODE_GRAPH_COMMON_SYMBOL_CAP as usize;
+        const TRANSITIVE_CANDIDATE_CAP: usize = 10_000;
+        let mut included: BTreeSet<String> = BTreeSet::new();
+        let mut def_cache: HashMap<String, DefinerIndex> = HashMap::new();
+        let mut import_cache: HashMap<String, ImportTargets> = HashMap::new();
+        let (mut scoped, mut bare) = (0usize, 0usize);
+
+        let mut frontier: Vec<String> = seeds.clone();
+        let mut hop = 1;
+        while hop <= depth && !frontier.is_empty() {
+            let frontier_set: HashSet<&str> = frontier.iter().map(String::as_str).collect();
+            let mut next: Vec<String> = Vec::new();
+            match direction {
+                ClosureDirection::Callee => {
+                    let candidates = self.calls_of(&frontier, TRANSITIVE_CANDIDATE_CAP)?;
+                    for (f, sym) in candidates {
+                        if !import_cache.contains_key(&f) {
+                            let imports = self.imports_of(&f)?;
+                            import_cache.insert(f.clone(), import_targets(&f, &imports));
+                        }
+                        if !def_cache.contains_key(&sym) {
+                            def_cache.insert(
+                                sym.clone(),
+                                DefinerIndex::new(self.edges_to("defines", &sym)?),
+                            );
+                        }
+                        let defs = &def_cache[&sym];
+                        if defs.all.is_empty() || defs.all.len() > common_cap {
+                            continue; // too ambiguous to resolve usefully
+                        }
+                        let (tier, targets) = resolve_call(&f, &import_cache[&f], defs);
+                        if tier == ResolutionTier::Bare && strict {
+                            continue;
+                        }
+                        // Count the tier only if this edge leaves at least one surviving
+                        // file — a resolution whose only targets are self/seed/visited/noise
+                        // must not inflate `scoped`/`bare` with zero files to show for it.
+                        let mut added_any = false;
+                        for t in targets {
+                            if t == f
+                                || seed_set.contains(t.as_str())
+                                || included.contains(&t)
+                                || is_project_noise_path(&t)
+                            {
+                                continue;
+                            }
+                            included.insert(t.clone());
+                            next.push(t);
+                            added_any = true;
+                        }
+                        if added_any {
+                            match tier {
+                                ResolutionTier::Bare => bare += 1,
+                                _ => scoped += 1,
+                            }
+                        }
+                    }
+                }
+                ClosureDirection::Caller => {
+                    let candidates =
+                        self.callers_of_exports(&frontier, TRANSITIVE_CANDIDATE_CAP)?;
+                    for (f, y) in candidates {
+                        if seed_set.contains(f.as_str())
+                            || included.contains(&f)
+                            || is_project_noise_path(&f)
+                        {
+                            continue;
+                        }
+                        if let Some(hit) = self.classify_transitive(
+                            &f,
+                            &y,
+                            &frontier_set,
+                            strict,
+                            &mut def_cache,
+                            &mut import_cache,
+                        )? {
+                            if hit {
+                                scoped += 1;
+                            } else {
+                                bare += 1;
+                            }
+                            included.insert(f.clone());
+                            next.push(f);
+                        }
+                    }
+                }
+            }
+            frontier = next;
+            hop += 1;
+        }
+
+        let total = included.len();
+        Ok(DependencyClosure {
+            seeds,
+            files: included.into_iter().take(limit).collect(),
+            total,
+            scoped,
+            bare,
+        })
+    }
+
+    /// Forward-direction analog of [`Self::callers_of_exports`]: `(from_path, to_ref)`
+    /// pairs of the `calls` edges originating in `frontier` — "what does the frontier
+    /// call" (vs. `callers_of_exports`'s "who calls the frontier's exports"). Feeds
+    /// [`Self::dependency_closure`]'s [`ClosureDirection::Callee`] walk.
+    fn calls_of(&self, frontier: &[String], cap: usize) -> Result<Vec<(String, String)>> {
+        if frontier.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; frontier.len()].join(",");
+        let sql = format!(
+            "SELECT DISTINCT from_path, to_ref FROM edges
+              WHERE kind = 'calls' AND from_path IN ({placeholders})
               ORDER BY from_path, to_ref
               LIMIT ?"
         );

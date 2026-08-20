@@ -926,3 +926,242 @@ fn trace_path_same_start_and_target_is_a_trivial_one_node_path() {
     assert_eq!(path.len(), 1);
     assert_eq!(path[0].path, "/p/a.rs");
 }
+
+// ── Dependency closure — open-ended transitive walk, complementary to trace_path ──────
+
+#[test]
+fn dependency_closure_callee_direction_depth_controls_reach() {
+    let mut store = Store::open_in_memory().unwrap();
+    // A callee chain (same dir throughout, so every hop resolves same-dir cleanly):
+    //   a.rs calls helper()                        → direct
+    //   helper defined in b.rs; b.rs calls inner()  → hop 2
+    //   inner defined in c.rs; c.rs calls leaf()    → hop 3
+    //   leaf defined in d.rs
+    store
+        .upsert_edges(&[
+            edge("/p/a.rs", "calls", "helper"),
+            edge("/p/b.rs", "defines", "helper"),
+            edge("/p/b.rs", "calls", "inner"),
+            edge("/p/c.rs", "defines", "inner"),
+            edge("/p/c.rs", "calls", "leaf"),
+            edge("/p/d.rs", "defines", "leaf"),
+        ])
+        .unwrap();
+
+    let d1 = store
+        .dependency_closure("/p/a.rs", ClosureDirection::Callee, 1, false, 200)
+        .unwrap();
+    assert_eq!(d1.seeds, vec!["/p/a.rs".to_string()]);
+    assert_eq!(d1.files, vec!["/p/b.rs".to_string()]);
+    assert_eq!(d1.total, 1);
+    assert_eq!(d1.scoped, 1);
+    assert_eq!(d1.bare, 0);
+
+    let d2 = store
+        .dependency_closure("/p/a.rs", ClosureDirection::Callee, 2, false, 200)
+        .unwrap();
+    assert_eq!(d2.files, vec!["/p/b.rs".to_string(), "/p/c.rs".to_string()]);
+    assert!(
+        !d2.files.contains(&"/p/d.rs".to_string()),
+        "d.rs is three hops out — excluded at depth 2"
+    );
+
+    let d3 = store
+        .dependency_closure("/p/a.rs", ClosureDirection::Callee, 3, false, 200)
+        .unwrap();
+    assert!(
+        d3.files.contains(&"/p/d.rs".to_string()),
+        "depth 3 reaches the far end of the chain"
+    );
+    assert_eq!(d3.total, 3);
+}
+
+#[test]
+fn dependency_closure_caller_direction_mirrors_the_callee_walk() {
+    let mut store = Store::open_in_memory().unwrap();
+    // Same chain as the callee test above — walked backward from the far end (d.rs).
+    store
+        .upsert_edges(&[
+            edge("/p/a.rs", "calls", "helper"),
+            edge("/p/b.rs", "defines", "helper"),
+            edge("/p/b.rs", "calls", "inner"),
+            edge("/p/c.rs", "defines", "inner"),
+            edge("/p/c.rs", "calls", "leaf"),
+            edge("/p/d.rs", "defines", "leaf"),
+        ])
+        .unwrap();
+
+    let d1 = store
+        .dependency_closure("/p/d.rs", ClosureDirection::Caller, 1, false, 200)
+        .unwrap();
+    assert_eq!(d1.files, vec!["/p/c.rs".to_string()]);
+
+    let d2 = store
+        .dependency_closure("/p/d.rs", ClosureDirection::Caller, 2, false, 200)
+        .unwrap();
+    assert_eq!(d2.files, vec!["/p/b.rs".to_string(), "/p/c.rs".to_string()]);
+
+    let d3 = store
+        .dependency_closure("/p/d.rs", ClosureDirection::Caller, 3, false, 200)
+        .unwrap();
+    assert_eq!(
+        d3.files,
+        vec![
+            "/p/a.rs".to_string(),
+            "/p/b.rs".to_string(),
+            "/p/c.rs".to_string()
+        ]
+    );
+}
+
+#[test]
+fn dependency_closure_accepts_a_bare_symbol_seed_in_either_direction() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_edges(&[
+            edge("/p/entry.rs", "defines", "entry_fn"),
+            edge("/p/entry.rs", "calls", "helper"),
+            edge("/p/helper.rs", "defines", "helper"),
+        ])
+        .unwrap();
+
+    // "entry_fn" is not a `from_path` in `edges` — it's a bare symbol, so the closure
+    // must resolve it to its definer file (/p/entry.rs) and start the callee walk there.
+    let callee = store
+        .dependency_closure("entry_fn", ClosureDirection::Callee, 1, false, 200)
+        .unwrap();
+    assert_eq!(callee.seeds, vec!["/p/entry.rs".to_string()]);
+    assert_eq!(callee.files, vec!["/p/helper.rs".to_string()]);
+
+    // "helper" likewise resolves to /p/helper.rs and the caller walk finds entry.rs.
+    let caller = store
+        .dependency_closure("helper", ClosureDirection::Caller, 1, false, 200)
+        .unwrap();
+    assert_eq!(caller.seeds, vec!["/p/helper.rs".to_string()]);
+    assert_eq!(caller.files, vec!["/p/entry.rs".to_string()]);
+}
+
+#[test]
+fn dependency_closure_excludes_seed_files_and_terminates_on_a_cycle_in_either_direction() {
+    let mut store = Store::open_in_memory().unwrap();
+    // Cycle: a.rs calls B (defined in b.rs); b.rs calls A (defined in a.rs).
+    store
+        .upsert_edges(&[
+            edge("/p/a.rs", "defines", "a_fn"),
+            edge("/p/a.rs", "calls", "b_fn"),
+            edge("/p/b.rs", "defines", "b_fn"),
+            edge("/p/b.rs", "calls", "a_fn"),
+        ])
+        .unwrap();
+
+    let callee = store
+        .dependency_closure("/p/a.rs", ClosureDirection::Callee, 5, false, 200)
+        .unwrap();
+    // b.rs is a real dependency; a.rs (the seed) must never appear in its own closure,
+    // even though the cycle loops back to it — and a high depth must not hang.
+    assert_eq!(callee.files, vec!["/p/b.rs".to_string()]);
+
+    let caller = store
+        .dependency_closure("/p/a.rs", ClosureDirection::Caller, 5, false, 200)
+        .unwrap();
+    assert_eq!(caller.files, vec!["/p/b.rs".to_string()]);
+}
+
+#[test]
+fn dependency_closure_on_unknown_target_returns_empty() {
+    let store = Store::open_in_memory().unwrap();
+    let closure = store
+        .dependency_closure("/nowhere.rs", ClosureDirection::Callee, 2, false, 200)
+        .unwrap();
+    assert!(closure.files.is_empty());
+    assert!(closure.seeds.is_empty());
+    assert_eq!(closure.total, 0);
+}
+
+#[test]
+fn dependency_closure_drops_noise_targets_without_inflating_tier_counters() {
+    let mut store = Store::open_in_memory().unwrap();
+    // a.rs's only call resolves to a vendored file — the noise filter must drop it
+    // from `files` AND must not leave `scoped`/`bare` claiming a resolution that
+    // produced zero visible files.
+    store
+        .upsert_edges(&[
+            edge("/p/a.rs", "calls", "vend"),
+            edge("/p/node_modules/v.js", "defines", "vend"),
+        ])
+        .unwrap();
+
+    let closure = store
+        .dependency_closure("/p/a.rs", ClosureDirection::Callee, 2, false, 200)
+        .unwrap();
+    assert!(closure.files.is_empty(), "vendored target must be dropped");
+    assert_eq!(closure.total, 0);
+    assert_eq!(
+        closure.scoped, 0,
+        "a resolution with no surviving files must not count as scoped"
+    );
+    assert_eq!(
+        closure.bare, 0,
+        "a resolution with no surviving files must not count as bare either"
+    );
+}
+
+#[test]
+fn dependency_closure_strict_drops_the_bare_tier_entirely() {
+    let mut store = Store::open_in_memory().unwrap();
+    // Different directories, no import edges recorded → resolves to the bare tier
+    // (no same-dir/import evidence linking the call to its definer).
+    store
+        .upsert_edges(&[
+            edge("/p/a.rs", "calls", "widget"),
+            edge("/q/other.rs", "defines", "widget"),
+        ])
+        .unwrap();
+
+    let loose = store
+        .dependency_closure("/p/a.rs", ClosureDirection::Callee, 1, false, 200)
+        .unwrap();
+    assert_eq!(loose.files, vec!["/q/other.rs".to_string()]);
+    assert_eq!(loose.bare, 1);
+    assert_eq!(loose.scoped, 0);
+
+    let strict = store
+        .dependency_closure("/p/a.rs", ClosureDirection::Callee, 1, true, 200)
+        .unwrap();
+    assert!(
+        strict.files.is_empty(),
+        "strict must drop the bare-tier result"
+    );
+    assert_eq!(strict.bare, 0);
+    assert_eq!(strict.scoped, 0);
+}
+
+#[test]
+fn dependency_closure_caps_files_but_reports_the_true_total() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_edges(&[
+            edge("/p/a.rs", "calls", "x"),
+            edge("/p/x.rs", "defines", "x"),
+            edge("/p/a.rs", "calls", "y"),
+            edge("/p/y.rs", "defines", "y"),
+            edge("/p/a.rs", "calls", "z"),
+            edge("/p/z.rs", "defines", "z"),
+        ])
+        .unwrap();
+
+    let closure = store
+        .dependency_closure("/p/a.rs", ClosureDirection::Callee, 1, false, 2)
+        .unwrap();
+    assert_eq!(closure.total, 3, "3 files are reachable before the cap");
+    assert_eq!(closure.files.len(), 2, "output is capped at `limit`");
+    assert_eq!(
+        closure.files,
+        vec!["/p/x.rs".to_string(), "/p/y.rs".to_string()],
+        "capped output keeps the first `limit` in sorted order"
+    );
+    assert_eq!(
+        closure.scoped, 3,
+        "the true resolved-edge count is unaffected by the cap"
+    );
+}

@@ -63,8 +63,8 @@ pub use co_change::CoChangePair;
 pub use communities::detect_communities;
 pub use dir_apps::{is_project_noise_path, DetectedApp, PathCoverage};
 pub use edges::{
-    BlastRadius, BlastRadiusRisk, ResolutionTier, ResolvedCaller, ResolvedRelatedFile,
-    ScopedCodeGraph, TraceHop, BARE_NAME_CAVEAT,
+    BlastRadius, BlastRadiusRisk, ClosureDirection, DependencyClosure, ResolutionTier,
+    ResolvedCaller, ResolvedRelatedFile, ScopedCodeGraph, TraceHop, BARE_NAME_CAVEAT,
 };
 pub use entries::CoverageEntry;
 pub use insights::{DuplicateCluster, LanguageStat, LargestEntry, StaleEntry, WeeklyDiff};
