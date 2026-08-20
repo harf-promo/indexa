@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Cross-file embed-batching primitive (`crates/embed/src/batcher.rs`, `MissBatcher`) — scoped
+  salvage of #367, primitive only.** Today's deep-index loop calls the embedder once per FILE's
+  cache-miss chunks, so a repo with thousands of files issues roughly one Ollama round-trip per
+  file even though `embed_all`'s real batch boundary (`EMBED_BATCH_SIZE` = 64) could span many
+  files' worth of chunks in a single call. `MissBatcher<M>` is a dependency-free accumulator that
+  buffers cache-miss embed-texts *across* files (`add_file`), reports when a real batch is ready
+  (`is_full`/`buffered`/`is_empty`), hands the caller the buffered texts to embed
+  (`batch_refs`), and scatters the results back to the exact originating file+chunk slot
+  (`scatter`), completing a file only once every one of its misses resolves so it can be upserted
+  exactly once, in FIFO order. It is deliberately passive — generic over an opaque per-file
+  payload `M`, never touches an `Embedder` or a store, and has no coupling to
+  `apps/indexa/src/commands/deep.rs`'s or `crates/web/src/jobs_exec/deep.rs`'s job/file-walking
+  logic — so a future integration PR can adopt it incrementally on both the CLI and web deep
+  paths. **This PR lands the primitive only; it is not wired into any indexing path yet, so it
+  does not speed anything up on its own.** Wiring it into the CLI `deep` command and the web deep
+  job is deliberate, separate follow-up work (tracked on #367, which now covers just that
+  integration). Covered by 8 hermetic unit tests (no Ollama/network needed): accumulating below
+  the batch size doesn't flush prematurely, hitting the batch size triggers a flush boundary at
+  the configured size, a file with more misses than one batch still completes exactly once, a
+  final partial batch only flushes when the caller explicitly drains it (tail flush), scattered
+  results route back to the correct originating file+slot without cross-file leakage even when a
+  flush mixes many files' misses, and dim-mismatch/embed-failure counts re-attribute to the
+  owning file despite a mixed flush.
+
 ### Changed
 
 - **Cheaper index hot loops (no change in results).** Two per-call patterns collapsed to batched
@@ -318,6 +344,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Streamed answers now trim a hallucinated next-turn like the non-streaming path does (revives
+  #380 against current main).** `ask` synthesis occasionally has the local model "keep going" past
+  the real answer with an invented next `QUESTION:`/`ANSWER:` turn (observed live — the
+  `QUESTION:/ANSWER:` prompt frame invites an instruct/base model to role-play a continuation).
+  `crates/query/src/qa/synthesize.rs`'s non-streaming path already caught this
+  (`trim_continuation`, cutting at the first `\nQUESTION:`/`\nQuestion:`/`\nQ:`/`\nANSWER:`/
+  `\n\nQUESTION` marker), but the **streaming** paths — `answer_stream_with_ann_history` here and
+  `agentic::answer_agentic_stream_history` — pushed every generated fragment straight through to
+  the caller and returned the untrimmed `full.trim()`, so a streamed answer could both *display*
+  and *persist* (session/conversation history) the fabricated turn. A new `StreamTrimmer` applies
+  the same marker cut incrementally: it withholds the last 9 bytes of the accumulated text (one
+  short of the longest marker, `\n\nQUESTION`) at every fragment, using the existing
+  `floor_char_boundary` helper (`crates/core/src/text.rs`, the same boundary-safe pattern
+  `qa/retrieve.rs`'s truncation already uses) so a multi-byte character is never split; once a
+  complete marker appears it stops emitting for good, and the final persisted answer
+  (`StreamTrimmer::finish`) is byte-identical to what `trim_continuation` would produce from the
+  same generated text. This is a distinct bug from the AGENTS.md "verified non-bug" note about
+  `trim_continuation`'s own byte-slicing (that note is about the function's internals never
+  splitting a UTF-8 boundary because every marker it looks for starts with an ASCII `\n`) — this
+  fix is about the streaming paths never calling any trim logic at all, and does not touch or
+  relitigate that internals question.
 - **Agentic ask never reranked its merged pool; two intent gates ignored the rewritten query.**
   Small revival of #383 — most of that PR's scope (conversation-rewrite driving retrieval, the
   shared `apply_configured_rerank` helper) had already landed via other work in this sweep;
