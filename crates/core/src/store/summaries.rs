@@ -1,6 +1,7 @@
 //! Hierarchical summary reads/writes and the L0-abstract derivation.
 
 use super::search::{blob_to_embedding, embedding_to_blob};
+use super::types::hex_digest;
 use super::{Store, SummaryRecord};
 use crate::text::snippet;
 use anyhow::Result;
@@ -27,7 +28,7 @@ pub fn file_source_hash(path: &std::path::Path) -> String {
             Err(_) => return String::new(),
         }
     }
-    format!("{:x}", hasher.finalize())
+    hex_digest(hasher.finalize())
 }
 
 /// Merkle-style roll-up hash for a directory: SHA-256 over the sorted
@@ -55,7 +56,7 @@ pub fn dir_source_hash(children: &[SummaryRecord]) -> String {
         hasher.update(hash.as_bytes());
         hasher.update([0u8]);
     }
-    format!("{:x}", hasher.finalize())
+    hex_digest(hasher.finalize())
 }
 
 /// Derive an L0 one-line abstract from a fuller (L1) summary: the first sentence,
