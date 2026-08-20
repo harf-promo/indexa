@@ -165,6 +165,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cross-encoder reranker: `unsafe impl Send`/`Sync` and a permanently-poisoned failed load.**
+  `CandleInner` (the loaded DeBERTa-v2 model + tokenizer) was marked `unsafe impl Send`/`Sync` so a
+  `&CandleInner` could be smuggled across the `spawn_blocking` boundary as a raw `usize` pointer cast
+  back on the other side — but `CandleInner` is naturally `Send + Sync` (candle CPU tensors and HF
+  tokenizers are structurally thread-safe), so both `unsafe impl`s and the pointer round-trip are
+  gone; the model is now loaded and used entirely on the blocking thread it's cached on. Separately,
+  the singleton cache was a `OnceLock<anyhow::Result<CandleInner>>` — once a load failed (a transient
+  file lock, disk hiccup, or OOM), the `Err` was cached forever and every later rerank call failed
+  too, even after the underlying problem cleared. Replaced with a small `RetryCache<T>` (`Mutex<Option
+  <Arc<CandleInner>>>`) that caches only a *successful* load: a failed load leaves the slot empty so
+  the next call retries, and concurrent callers serialize on the lock while a load is in flight rather
+  than each kicking off their own parallel attempt (no thundering herd on a still-broken load). No
+  ranking/scoring behavior change — `apply_configured_rerank` and the rerank algorithm are untouched.
 - **The "hierarchical %" coverage figure (web) was neither a file nor a folder
   percentage.** The topbar stat and the thin-context banner both computed
   `100 * summaries / entries`, but `summary_count`/`entry_count` are unfiltered
