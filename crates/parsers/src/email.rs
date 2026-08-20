@@ -155,8 +155,10 @@ fn read_mapi_string(comp: &mut cfb::CompoundFile<std::fs::File>, prop: u16) -> O
         let mut buf = Vec::new();
         if stream.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
             let u16s: Vec<u16> = buf
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
                 .collect();
             return Some(String::from_utf16_lossy(&u16s));
         }
