@@ -8,7 +8,7 @@ use anyhow::Result;
 ///
 /// **INVARIANT: bump this whenever the DDL or any migration in `init_schema` changes** — otherwise a
 /// DB stamped at the old value would skip the new migration and silently miss a column/table.
-pub(super) const SCHEMA_VERSION: i64 = 7;
+pub(super) const SCHEMA_VERSION: i64 = 8;
 
 /// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
 /// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
@@ -113,11 +113,23 @@ impl Store {
                 -- first_indexed_at (v0.10): original discovery time, never reset on rescan.
                 -- In the base DDL so fresh DBs skip the ALTER migration below — and so the
                 -- concurrent-open path never races on adding the column.
-                first_indexed_at INTEGER
+                first_indexed_at INTEGER,
+                -- scan_generation (D5): a monotonic id stamped on every row a scan run upserts, so
+                -- a streaming scan can prune ghosts by generation-not-equal-current instead of
+                -- holding a full live-path HashSet in memory. Nullable + in the base DDL so fresh
+                -- DBs skip the ALTER migration below; NULL means not yet stamped by a scan (a
+                -- watch upsert, or a row from before this column existed).
+                scan_generation INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_entries_parent ON entries(parent_path);
             CREATE INDEX IF NOT EXISTS idx_entries_kind   ON entries(kind);
             CREATE INDEX IF NOT EXISTS idx_entries_cat    ON entries(hint_cat);
+            -- Deliberately NO index on scan_generation: `reconcile_by_generation`'s query is
+            -- `(path = ?1 OR path LIKE ?2) AND (scan_generation IS NULL OR scan_generation != ?3)`
+            -- — ANDing two OR'd conditions defeats SQLite's OR-optimization entirely, so
+            -- `EXPLAIN QUERY PLAN` shows a full `SCAN entries` whether or not the index exists (it
+            -- even loses the covering-index scan the bare path-OR gets on its own). An index here
+            -- would be pure per-row write cost on every scan upsert for zero read benefit.
 
             -- Deep-scan chunks (text + embeddings).
             -- AUTOINCREMENT (not a bare rowid) so ids are never reused after a re-deep
@@ -471,6 +483,22 @@ impl Store {
             -- Insights (v0.10): first_indexed_at is populated separately via migration.
             ",
         )?;
+
+        // Migration (D5): add entries.scan_generation for streaming-scan ghost pruning by
+        // generation (see the base DDL comment above). Nullable, NO backfill — existing rows stay
+        // NULL until the next scan re-stamps whatever's still live; a NULL row under a scanned root
+        // that the scan does not re-see is pruned as a ghost by `reconcile_by_generation`, which is
+        // the intended semantics (it mirrors a genuinely-vanished file, since neither case was
+        // re-confirmed present by this scan). Deliberately no companion index — see the base DDL
+        // comment for why `reconcile_by_generation`'s query never uses one.
+        let has_scan_generation: bool = self
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'scan_generation'")?
+            .exists([])?;
+        if !has_scan_generation {
+            self.conn
+                .execute_batch("ALTER TABLE entries ADD COLUMN scan_generation INTEGER;")?;
+        }
 
         // Migration: add entries.first_indexed_at (v0.10) — the original discovery
         // timestamp. Unlike indexed_at (reset on every rescan), this is set once and

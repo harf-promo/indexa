@@ -90,27 +90,36 @@ pub(super) fn delete_chunks_under_prefix(
     )
 }
 
-/// Hard-delete every artifact (chunks + FTS + edges + summaries + queue + classification +
-/// dir-apps + the entry itself) for an EXACT set of paths, returning the number of `entries`
-/// rows removed. Batched `IN (…)` per table, chunked under SQLite's bound-variable cap so an
-/// arbitrarily large ghost set stays safe. The child tables have no FK `ON DELETE CASCADE`
-/// (see `store::schema`), so this is the manual-integrity cleanup path used by `reconcile_entries`.
+/// (table, scoping column) for every single-column entry-keyed child table — `edges` keys on
+/// `from_path`, `note_anchors` on `note_path`, the rest on `path`/`entry_path`. Shared by
+/// `delete_path_artifacts_exact` (exact-path deletes) and `delete_generation_ghosts`
+/// (generation-scoped deletes, D5) so the two delete cascades can never drift out of sync with
+/// each other — a table missing from either would silently leave orphans (there is no FK `ON
+/// DELETE CASCADE`; see the integrity note in `store::schema`). `co_change` is NOT in this list:
+/// it's keyed on a PAIR of columns (`path_a`/`path_b`), so each caller below handles it separately.
+const ENTRY_CHILD_TABLES: &[(&str, &str)] = &[
+    ("chunks_fts", "entry_path"),
+    ("chunks", "entry_path"),
+    ("edges", "from_path"),
+    ("symbols", "path"),
+    ("note_anchors", "note_path"),
+    ("summaries", "path"),
+    ("summary_queue", "path"),
+    ("classifications", "path"),
+    ("directory_apps", "path"),
+];
+
+/// Hard-delete every artifact (chunks + FTS + edges + symbols + note anchors + co_change +
+/// summaries + queue + classification + dir-apps + the entry itself) for an EXACT set of paths,
+/// returning the number of `entries` rows removed. Batched `IN (…)` per table, chunked under
+/// SQLite's bound-variable cap so an arbitrarily large ghost set stays safe. The child tables have
+/// no FK `ON DELETE CASCADE` (see `store::schema`), so this is the manual-integrity cleanup path
+/// used by `reconcile_entries`.
 fn delete_path_artifacts_exact(tx: &Transaction, paths: &[String]) -> rusqlite::Result<usize> {
     let mut removed = 0usize;
     for batch in paths.chunks(800) {
         let ph = vec!["?"; batch.len()].join(",");
-        // (table, scoping column) — `edges` keys on `from_path`, the rest on `path`/`entry_path`.
-        for (table, col) in [
-            ("chunks_fts", "entry_path"),
-            ("chunks", "entry_path"),
-            ("edges", "from_path"),
-            ("symbols", "path"),
-            ("note_anchors", "note_path"),
-            ("summaries", "path"),
-            ("summary_queue", "path"),
-            ("classifications", "path"),
-            ("directory_apps", "path"),
-        ] {
+        for &(table, col) in ENTRY_CHILD_TABLES {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE {col} IN ({ph})"),
                 rusqlite::params_from_iter(batch.iter()),
@@ -130,33 +139,95 @@ fn delete_path_artifacts_exact(tx: &Transaction, paths: &[String]) -> rusqlite::
     Ok(removed)
 }
 
+/// Delete every artifact (the same set as [`delete_path_artifacts_exact`] — see
+/// [`ENTRY_CHILD_TABLES`]) for `entries` rows under a root subtree whose `scan_generation` is NOT
+/// the current scan's — either an older generation or NULL (a watch upsert, or a pre-D5-migration
+/// row this scan did not re-see). The streaming-scan (D5) analogue of `delete_path_artifacts_exact`:
+/// subquery-based (no materialized ghost-path list held in memory), so a mostly-deleted root stays
+/// bounded-memory regardless of how many ghost rows it has. Returns the number of `entries` rows
+/// removed.
+fn delete_generation_ghosts(
+    tx: &Transaction,
+    exact: &str,
+    child_pattern: &str,
+    generation: i64,
+) -> rusqlite::Result<usize> {
+    // A ghost row's path: under the subtree, and not stamped with the current generation. `?1`/`?2`
+    // reuse the same subtree-boundary shape as `subtree_match`'s other consumers; `?3` is reused
+    // verbatim everywhere this subquery is inlined below (SQLite numbered params bind once
+    // regardless of how many times `?N` appears in the statement text).
+    const GHOST_PATHS: &str = "SELECT path FROM entries \
+         WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\') \
+           AND (scan_generation IS NULL OR scan_generation != ?3)";
+    for (table, col) in ENTRY_CHILD_TABLES {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE {col} IN ({GHOST_PATHS})"),
+            params![exact, child_pattern, generation],
+        )?;
+    }
+    // co_change is keyed on a PAIR of paths — same dual-column handling as
+    // `delete_path_artifacts_exact`, reusing the ghost-paths subquery for both sides.
+    tx.execute(
+        &format!(
+            "DELETE FROM co_change WHERE path_a IN ({GHOST_PATHS}) OR path_b IN ({GHOST_PATHS})"
+        ),
+        params![exact, child_pattern, generation],
+    )?;
+    tx.execute(
+        "DELETE FROM entries \
+         WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\') \
+           AND (scan_generation IS NULL OR scan_generation != ?3)",
+        params![exact, child_pattern, generation],
+    )
+}
+
 impl Store {
     // ── Surface-scan writes ───────────────────────────────────────────────────
 
-    /// Insert or update a batch of walker entries.
+    /// Insert or update a batch of walker entries WITHOUT stamping a scan generation (delegates to
+    /// [`Store::upsert_entries_with_generation`] with `generation: None`). Used by the watchers
+    /// (per-event upserts) and most tests; a scan run should call `upsert_entries_with_generation`
+    /// directly so its rows are stamped for [`Store::reconcile_by_generation`].
+    pub fn upsert_entries(&mut self, entries: &[Entry]) -> Result<()> {
+        self.upsert_entries_with_generation(entries, None)
+    }
+
+    /// Insert or update a batch of walker entries, stamping `entries.scan_generation` when
+    /// `generation` is `Some` (a scan run calling [`Store::next_scan_generation`] once up front).
+    /// `None` (a watch upsert, or [`Store::upsert_entries`]) leaves an existing row's generation
+    /// untouched via `COALESCE` — so a live-file change picked up between full scans doesn't make
+    /// the row look stale to the next [`Store::reconcile_by_generation`] sweep.
     ///
     /// Uses a non-destructive `ON CONFLICT … DO UPDATE` (not `INSERT OR REPLACE`) so an
     /// existing row keeps its identity across rescans: REPLACE would DELETE then INSERT,
     /// pointlessly churning the row (and resetting `first_indexed_at`). There is no FK
     /// `ON DELETE CASCADE` on the child tables — see the integrity note in `store::schema`.
-    pub fn upsert_entries(&mut self, entries: &[Entry]) -> Result<()> {
+    pub fn upsert_entries_with_generation(
+        &mut self,
+        entries: &[Entry],
+        generation: Option<i64>,
+    ) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
             // first_indexed_at is set once on INSERT and never overwritten on rescan.
+            // scan_generation (?9): stamped as-is on INSERT; on UPDATE, COALESCE keeps the row's
+            // existing generation when ?9 is NULL (a watch upsert) and overwrites it when a scan
+            // run supplies one — see the doc comment above.
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO entries
                  (path, parent_path, kind, size, modified_s, hint_label, hint_cat, deep_policy,
-                  first_indexed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch())
+                  scan_generation, first_indexed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, unixepoch())
                  ON CONFLICT(path) DO UPDATE SET
-                     parent_path = excluded.parent_path,
-                     kind        = excluded.kind,
-                     size        = excluded.size,
-                     modified_s  = excluded.modified_s,
-                     hint_label  = excluded.hint_label,
-                     hint_cat    = excluded.hint_cat,
-                     deep_policy = excluded.deep_policy,
-                     indexed_at  = unixepoch()",
+                     parent_path     = excluded.parent_path,
+                     kind            = excluded.kind,
+                     size            = excluded.size,
+                     modified_s      = excluded.modified_s,
+                     hint_label      = excluded.hint_label,
+                     hint_cat        = excluded.hint_cat,
+                     deep_policy     = excluded.deep_policy,
+                     scan_generation = COALESCE(excluded.scan_generation, scan_generation),
+                     indexed_at      = unixepoch()",
             )?;
 
             for e in entries {
@@ -188,11 +259,52 @@ impl Store {
                     label,
                     cat,
                     policy,
+                    generation,
                 ])?;
             }
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// The generation id to stamp on the next scan run: one past the max already stored (0 on an
+    /// empty/fresh index, so the first scan stamps generation 1). Call once at the start of a scan
+    /// run and reuse the same value across every `upsert_entries_with_generation` +
+    /// `reconcile_by_generation` call in that run, so files re-seen this run carry it and ghosts
+    /// keep whatever older value (or NULL) they had.
+    ///
+    /// **INVARIANT: one call per scan run, shared by every root that run scans** — never call this
+    /// again per-root within the same run. `MAX(scan_generation)` is computed over the WHOLE table,
+    /// not scoped to a root, so calling it a second time mid-run would hand root 2 a HIGHER
+    /// generation than root 1 already used. Nothing breaks immediately (each `reconcile_by_generation`
+    /// is still subtree-scoped to its own root), but it silently breaks the "one generation = one
+    /// consistent snapshot of this run" property a future cross-root reconcile could rely on — e.g.
+    /// reconciling a parent root after a child root finished would then see the child's rows as a
+    /// stale (lower) generation and wipe them, even though the child was freshly re-scanned this run.
+    pub fn next_scan_generation(&self) -> Result<i64> {
+        let g: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(scan_generation), 0) + 1 FROM entries",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(g)
+    }
+
+    /// Prune ghost rows under `root_prefix`: entries (and all their artifacts) whose
+    /// `scan_generation` is not `generation` — i.e. everything the just-completed scan of this root
+    /// did NOT re-stamp. The generation-based, bounded-memory replacement for
+    /// [`Store::reconcile_entries`]'s live-path `HashSet` diff — no live-path set is held here, so
+    /// this stays cheap even under a whole-computer scan. Also **interruption-safe**: a scan killed
+    /// mid-way leaves rows stamped at its generation but never calls this, so the survivors just
+    /// look stale to the NEXT full scan's `reconcile_by_generation`, which then prunes them —
+    /// self-healing without any separate crash-recovery logic. Subtree-scoped via `subtree_match`
+    /// so `/proj` never prunes `/projector`. Returns the count of `entries` rows removed.
+    pub fn reconcile_by_generation(&mut self, root_prefix: &str, generation: i64) -> Result<usize> {
+        let (exact, child_pattern) = subtree_match(root_prefix);
+        let tx = self.conn.transaction()?;
+        let removed = delete_generation_ghosts(&tx, &exact, &child_pattern, generation)?;
+        tx.commit()?;
+        Ok(removed)
     }
 
     // ── Queries ───────────────────────────────────────────────────────────────
