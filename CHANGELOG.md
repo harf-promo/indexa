@@ -12,6 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Coverage honesty (web).** The topbar now shows folder-summary coverage (`N of M folders summarized (P%)`) next to files/chunks, and the "context not built" banner is **path-aware** — a handful of summaries in one repo no longer hide that the selected folder has none. Hover actions collapse to one **Build context** verb (deep+summarize if the folder isn't searchable yet, summarize if it is); Re-scan / Refresh / Remove move into a ⋯ menu. Starting a job stays on the current view and offers "Watch progress" on the toast instead of yanking you into Activity. **Build context** on a folder that contains several detected projects refuses the whole-tree job and points at the per-project list. `GET /api/health` adds `summaries` + `thin_context`; a third banner names a thin hierarchical layer without calling it "stale". New `GET /api/projects` lists top-level detected apps with coverage so the welcome view can offer per-project Build context. Ask's **Agentic** toggle is labeled **Think harder**; a scoped answer on an unsummarized folder says so and offers the same button.
 - **Review inbox noise (detectors + web).** Archive questions no longer fire on generated/toolchain caches (`/build/`, `SourcePackages`, `.xcframework`, `DerivedData`, `Pods`, gradle wrappers, `/gen/`). Duplicate questions skip ubiquitous sibling manifests (`Cargo.toml`, `package.json`, `go.mod`, …) unless they are exact copies in the same folder. `sweep_filtered_noise` retro-dismisses the existing inbox on the next `index`/`prune`. The Review drawer groups cards by type and pre-fills the batch "under" folder when every open question of that type shares a path prefix.
 - **Surface the product (web).** The toolbar **Export** menu lists named Context Packs and can create a pack from the selected folder — no need to open Settings. Map now opens on the coverage **Treemap** at whole-disk scope (the graph is a hairball there) and switches to **Graph** once you select a project-depth folder; an explicit tab click still sticks. Settings tucks passes / resources / insights / packs / weights under **More settings**. `docs/COMPETITIVE.md` "still open" list no longer claims Decision Ledger or token-savings are unshipped.
+- **`deep --dry-run` estimates instead of fully parsing a large tree.** The preview used to parse
+  *every* file just to count chunks — nearly a whole real `deep` minus the embedding calls, so
+  previewing a large directory was slow. A tree of 64 files or fewer is still parsed in full (an
+  exact count, no downside); a larger tree now parses an evenly-spaced ~64-file sample and
+  extrapolates chunks-per-byte to the whole set, landing within a few percent of exact on real
+  corpora while staying fast. The report says so explicitly (`chunks estimated from an N-file
+  sample`). Deliberate accuracy-for-speed tradeoff #2 in the same command: the per-family
+  breakdown now classifies every file by **extension** (`classify_file_by_extension`'s category —
+  code/config/documents/media/data/archive/font/…) instead of by the MIME type from an actual
+  parse. This is cheap and covers every file (the old MIME-based breakdown silently dropped any
+  file that failed to parse), but extension-based classification can misjudge a file with a wrong
+  or missing extension where MIME-sniffing would have caught it.
 
 ### Added
 
