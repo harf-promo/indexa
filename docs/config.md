@@ -52,6 +52,25 @@ base_url = "http://localhost:11434"  # provider API base URL (optional — env v
 
 ---
 
+## API keys
+
+Optional cloud-provider API keys, persisted directly in `config.toml` as a fallback for the
+`embedding`/`describer` `provider = "openai" | "anthropic" | "google"` settings above.
+
+```toml
+[api_keys]
+# openai    = "sk-..."   # fallback for OPENAI_API_KEY
+# anthropic = "sk-..."   # fallback for ANTHROPIC_API_KEY
+# google    = "..."      # fallback for GOOGLE_API_KEY
+```
+
+> Unset by default — nothing is stored unless you set it here. The environment variable always
+> wins when both are set; a key in `[api_keys]` only applies when its env var is absent. Setting
+> any key here makes Indexa tighten `config.toml` to `0600` (owner read/write only) on load and on
+> every save, and keys are never written to logs.
+
+---
+
 ## Chunking
 
 Controls how files are split into searchable pieces.
@@ -169,6 +188,7 @@ rrf_k                = 60     # RRF rank constant (higher = less weight to top r
 top_k                = 12     # results to retrieve before reranking
 rerank               = true   # rerank hits before synthesis (default on; reuses the generation model — no extra dep — and fails open)
 rerank_backend       = "llm"  # "llm" (listwise, no download) | "cross-encoder" (DeBERTa-v2 ~85 MB, downloaded on first use)
+rerank_model         = "mixedbread-ai/mxbai-rerank-xsmall-v1"  # HF model for rerank_backend = "cross-encoder"; ignored otherwise
 mmr_lambda           = 0.5    # diversity vs relevance when re-ranking (1.0 = relevance only / MMR off; 0.0 = max diversity)
 summary_weight       = 0.0    # 0.0 disables the parent-summary boost; >0 blends folder-summary similarity into ranking
 summary_depth_alpha  = 0.15   # depth-boost coefficient for summary-aware retrieval
@@ -191,6 +211,13 @@ staleness_flags      = true   # flag cited files whose on-disk mtime is newer th
 query_predicates     = false  # recognize path:/ext:/type: predicates in free-text search/ask queries
 ```
 
+> **`rerank_model`** (v0.77+) picks the HuggingFace cross-encoder used when `rerank_backend =
+> "cross-encoder"` — ignored under the default `"llm"` backend. All three options share the same
+> DeBERTa-v2 architecture (drop-in, larger = higher quality/download): `mxbai-rerank-xsmall-v1`
+> (default, ~85 MB), `mxbai-rerank-base-v1` (~370 MB), `mxbai-rerank-large-v1` (~870 MB). Downloaded
+> from HuggingFace on first use and cached in `~/.cache/huggingface/hub/`; a load failure falls open
+> to `"llm"`.
+>
 > `broad_per_file_cap` (v0.69+) only acts on broad/thematic, **unscoped** questions — focused and
 > `--scope`d asks are never affected. When set (e.g. `2`), it stops a single chunk-dense file from
 > monopolising a broad answer's context by reordering so other files get a turn (it never drops a
@@ -275,7 +302,9 @@ model                    = "gemma3:12b"   # Q&A answer synthesis (Google gemma3:
 file_model               = "gemma3:4b"    # per-file summaries (smaller/faster)
 dir_model                = "gemma3:12b"   # directory roll-up summaries (stronger model)
 base_url                 = "http://localhost:11434"
-contextual_retrieval     = false          # Anthropic-style per-chunk prefix at index time
+contextual_retrieval     = false          # Anthropic-style per-chunk LLM prefix at index time (one extra call per chunk)
+contextual_prefix        = false          # DETERMINISTIC local sibling of contextual_retrieval — no LLM call, no extra cost; if both are set, contextual_retrieval wins
+num_ctx                  = 4096           # Ollama num_ctx sent on every summarization/Q&A call — keep in sync with the resource budget's KV-cache assumption
 mode                     = "augment"      # augment | compress | summaries-only
 queue_concurrency        = 2              # concurrent summary worker tasks
 max_children_per_summary = 30             # max child summaries fed into one directory roll-up
@@ -288,6 +317,11 @@ claude_bin               = "claude"       # `claude` CLI path when provider = "c
 `passes_*` implement multi-pass Self-Refine summarization: a first-time build runs `passes_first`
 passes, a refresh runs `passes_refresh`, and any explicit `--passes` is clamped to `passes_cap`
 (gains saturate after pass 2–3).
+
+`num_ctx` defaults to 4096 so Ollama's per-call KV-cache stays inside what the resource budget
+assumes — omitting it (or raising it) lets Ollama fall back to its own default (32,768 for many
+models), which can balloon the KV-cache roughly 8× past the budgeted footprint and drive swap
+blowout on memory-constrained machines. Raise it only with matching headroom in `[resource]`.
 
 ### Providers
 
@@ -330,6 +364,8 @@ Fine-tune how specific file types are handled.
 
 ```toml
 [parsers]
+max_file_mb = 100     # skip content parsing for files larger than this (MB); the entry is still
+                       # recorded (metadata-only), just not opened/parsed. 0 disables the cap.
 encoding = "auto"     # "auto" (default) transcodes UTF-16 (BOM-detected) to UTF-8 and lossy-
                        # decodes anything else; "utf-8" restores the old strict behavior (errors
                        # on invalid UTF-8) — see below.
@@ -344,8 +380,11 @@ binary     = "whisper-cli"  # transcription binary on PATH (external tool)
 model      = ""       # optional whisper model path passed to the binary
 
 [parsers.video]
-caption = false       # set true to caption sampled video frames with a local vision model (opt-in)
-model   = "gemma3:4b" # vision model (default: gemma3 summary model)
+caption     = false       # set true to caption sampled video frames with a local vision model (opt-in)
+model       = "gemma3:4b" # vision model (default: gemma3 summary model)
+binary      = "ffmpeg"    # ffmpeg binary on PATH, used for frame extraction (external tool)
+fps_sample  = 0.5         # frames per second to sample (default: one frame every 2s)
+max_frames  = 8           # max frames captioned per video (caps LLM cost)
 
 [parsers.pdf]
 backend    = "text"   # "text" = pdf-extract text layer only | "ocr" = also OCR scanned/image-only pages
