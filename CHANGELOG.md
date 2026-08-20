@@ -50,7 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a bodyless `304 Not Modified` instead of re-downloading the bundle every time. **Deliberately
   excluded:** the reference PR's `jobs.rs` Progress-event-coalescing fix — superseded by a more
   thorough fix already on `main` (a dedicated `last_progress` field), so reapplying it would
-  regress that. Two per-call patterns collapsed to batched
+  regress that.
+- **Cheaper index hot loops (no change in results).** Two per-call patterns collapsed to batched
   or streamed forms, reviving and re-verifying the stalled `perf-hot-loops-d9` work against
   current `main`: `embeddings_for_chunks` (the MMR re-ranking pass's candidate-vector fetch) now
   runs one `IN (…)` query instead of one `query_row` per chunk id, mirroring the existing
