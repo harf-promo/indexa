@@ -6,8 +6,8 @@ use axum::{
 };
 
 use crate::dto::{
-    err_json, file_name_of, CoverageStats, ImpactResponse, RootResponse, SearchQuery,
-    StatsResponse, ToolUsageDto, TreeNodeResponse, TreemapNodeDto, UsageWeekDto,
+    err_json, file_name_of, BasisUsageDto, CoverageStats, ImpactResponse, RootResponse,
+    SearchQuery, StatsResponse, ToolUsageDto, TreeNodeResponse, TreemapNodeDto, UsageWeekDto,
 };
 use crate::AppState;
 use indexa_core::store::{CoverageEntry, USAGE_WEEK_SECS};
@@ -33,16 +33,18 @@ pub(crate) async fn api_stats(State(state): State<AppState>) -> Response {
 }
 
 /// `GET /api/impact` — the token-savings "Impact" dashboard: weekly totals plus a
-/// per-tool breakdown. Fetched lazily when the Settings → Impact section opens, so
-/// the per-tool aggregate stays off the frequently-polled `/api/stats` path. The
-/// numbers are estimates by definition (see `store::usage`); the UI carries the
-/// ≈4 bytes/token caveat from `savings_line`.
+/// per-tool AND a per-`served_basis` breakdown (what `bytes_served` measured for each
+/// group — surfaces disagree, see `store::usage`). Fetched lazily when the Settings →
+/// Impact section opens, so these aggregates stay off the frequently-polled `/api/stats`
+/// path. The numbers are estimates by definition; the UI carries the ≈4 bytes/token
+/// caveat from `savings_line`.
 pub(crate) async fn api_impact(State(state): State<AppState>) -> Response {
     let store = state.store.lock().await;
     // Best-effort reads: an empty/zero dashboard over a 500 — telemetry must never
     // be the reason a settings panel fails to render.
     let week = store.usage_summary(USAGE_WEEK_SECS).unwrap_or_default();
     let by_tool = store.usage_by_tool(USAGE_WEEK_SECS).unwrap_or_default();
+    let by_basis = store.usage_by_basis(USAGE_WEEK_SECS).unwrap_or_default();
     Json(ImpactResponse {
         calls: week.calls,
         served: week.bytes_served,
@@ -57,14 +59,24 @@ pub(crate) async fn api_impact(State(state): State<AppState>) -> Response {
                 counterfactual: u.bytes_counterfactual,
             })
             .collect(),
+        by_basis: by_basis
+            .into_iter()
+            .map(|(basis, u)| BasisUsageDto {
+                basis,
+                calls: u.calls,
+                served: u.bytes_served,
+                counterfactual: u.bytes_counterfactual,
+            })
+            .collect(),
     })
     .into_response()
 }
 
 /// `GET /api/session-impact/:session_id` — cumulative token savings for ONE Conversational-Ask
 /// session (all-time, not the weekly window). Lets a conversation show how much it has saved
-/// versus serving whole files. `by_tool` is empty (a session is all `ask`); same estimate caveat
-/// as `/api/impact`. Best-effort: an unknown/empty session reads as a zero dashboard, never a 500.
+/// versus serving whole files. `by_tool` and `by_basis` are both empty (a session is all `ask`,
+/// one basis); same estimate caveat as `/api/impact`. Best-effort: an unknown/empty session
+/// reads as a zero dashboard, never a 500.
 pub(crate) async fn api_session_impact(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -77,6 +89,7 @@ pub(crate) async fn api_session_impact(
         counterfactual: s.bytes_counterfactual,
         savings_line: s.savings_line(),
         by_tool: Vec::new(),
+        by_basis: Vec::new(),
     })
     .into_response()
 }

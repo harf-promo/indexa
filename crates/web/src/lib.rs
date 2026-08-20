@@ -1322,6 +1322,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["calls"], 0);
         assert!(json["by_tool"].as_array().unwrap().is_empty());
+        assert!(json["by_basis"].as_array().unwrap().is_empty());
         // No usage ⇒ no savings sentence (matches UsageSummary::savings_line → None).
         assert!(json["savings_line"].is_null());
     }
@@ -1352,6 +1353,42 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("tokens saved"));
+    }
+
+    #[tokio::test]
+    async fn api_impact_reports_per_basis_breakdown_most_saving_first() {
+        // `served_basis` tags what `bytes_served` measured (surfaces disagree — see
+        // store::usage); `/api/impact` must split the blended weekly aggregate by it,
+        // same as it already does for `by_tool`.
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .record_tool_usage_with_basis("web", "ask", 100, 4000, None, "answer_citations")
+            .unwrap();
+        store
+            .record_tool_usage_with_basis("cli", "search", 50, 2000, None, "rendered_response")
+            .unwrap();
+        store
+            .record_tool_usage_with_basis("web", "ask", 100, 4000, None, "answer_citations")
+            .unwrap();
+        // Untagged (delegating) row reads back as "unspecified".
+        store
+            .record_tool_usage("cli", "search", 10, 100, None)
+            .unwrap();
+        let app = build_router(state_with(store), 7620);
+        let (status, json) = get_json(app, "/api/impact").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["calls"], 4);
+        let by_basis = json["by_basis"].as_array().unwrap();
+        assert_eq!(by_basis.len(), 3);
+        // Ordered by avoided bytes desc: answer_citations (2×3900) outranks the rest.
+        assert_eq!(by_basis[0]["basis"], "answer_citations");
+        assert_eq!(by_basis[0]["calls"], 2);
+        assert!(by_basis
+            .iter()
+            .any(|b| b["basis"] == "rendered_response" && b["calls"] == 1));
+        assert!(by_basis
+            .iter()
+            .any(|b| b["basis"] == "unspecified" && b["calls"] == 1));
     }
 
     #[tokio::test]
