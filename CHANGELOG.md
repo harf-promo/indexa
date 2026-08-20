@@ -181,6 +181,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   possible for a genuinely empty index — the scanned root itself always lands a
   `kind = 'dir'` row) has nothing hierarchical to warn about. Threshold stays 10%,
   applied to the true (smaller) directory population.
+- **Stored XSS in the web UI: a hostile filename, dirname, pack name, or weight target could
+  execute arbitrary JavaScript in Indexa's own origin.** Three JS fragments —
+  `13-classify.js` (`confirmClassification`/`ignoreClassification`/`undoClassification`),
+  `16-context-packs.js` (`openPackEditor`/`quickExportPack`/`deletePack`/`removePackPath`), and
+  `17-weights.js` (`deleteWeight`/`applyWeightSuggestions`) — built each button's click handler
+  by concatenating `JSON.stringify(untrustedValue)` straight into an `onclick="..."` HTML
+  attribute string and `innerHTML`-ing the result into the live DOM. `JSON.stringify` emits a
+  leading `"`, which closes the attribute early — a value containing `a"><img src=x
+  onerror=...>` didn't even need the quote to matter, since `>` alone terminates the enclosing
+  tag. The worst vector: filenames and directory names can legally contain `<`, `>`, `"` on
+  macOS/Linux, so indexing a repository containing a maliciously-named file and opening its
+  summary in the web UI ran the payload with zero further user action, with full authenticated
+  API access to every mutating endpoint (`indexa serve --host 0.0.0.0` is a documented LAN-share
+  mode, widening this beyond localhost). Pack names (`POST /api/packs` performs no charset
+  validation) and weight targets (`target`, as distinct from the already-validated
+  `target_kind`) were equally exploitable. Fixed by eliminating the `onclick="..."` string-building
+  pattern in all three fragments: every affected button is now built with no inline handler at
+  all and wired up afterward via `addEventListener` with the value captured in a closure, so the
+  untrusted string never touches HTML. A related sink in `13-classify.js`'s category `<select>`
+  built its `id` from the same untrusted path via `CSS.escape(path)`, on the assumption that
+  `CSS.escape` hex-escapes attribute-special characters — it doesn't: it backslash-*prefixes*
+  them (`"` becomes the two characters `\"`), and HTML attribute parsing doesn't honor backslash
+  escapes, so the real `"` `CSS.escape` still emits closes the attribute just the same. Fixed by
+  dropping the per-row id entirely — only one classification chip is ever rendered at a time, so
+  `confirmClassification` now finds the `<select>` by class, scoped to its container. A pinned test
+  (`fixed_xss_sink_fragments_build_no_onclick_attributes` in `crates/web/src/lib.rs`) fails the
+  build if any of the three fragments reintroduces an `onclick="..."` attribute. Also added a
+  `Content-Security-Policy` header (plus `X-Content-Type-Options: nosniff` and
+  `X-Frame-Options: DENY`) to every response as defense in depth
+  (`add_security_headers` in `crates/web/src/lib.rs`, pinned by
+  `root_response_carries_a_content_security_policy_header`); `script-src`/`style-src` still carry
+  `'unsafe-inline'` because dozens of *other*, unrelated buttons across the bundle — and
+  `index.html` itself (80+ occurrences) — use literal, non-interpolated `onclick="..."` as an
+  ordinary UI mechanism, and dropping `'unsafe-inline'` would break navigation, every drawer, and
+  most of the app; eliminating inline handlers repo-wide so `script-src` can go fully strict is
+  real, separate follow-up work. Found and fixed ahead of the rest of the v0.77 review sweep
+  because of its severity.
+- **Enter always confirmed a confirmation dialog, even with Cancel focused — a real data-loss
+  bug.** `confirmModal`'s keydown handler (`08-util-palette-init.js`) fired the Confirm action on
+  Enter unconditionally, ignoring which button actually had keyboard focus: a user who Tabbed to
+  Cancel and pressed Enter got Confirm instead. Enter now checks `document.activeElement` against
+  the Cancel button and only confirms when Cancel does *not* have focus (the common case — nothing
+  Tabbed, initial focus on Confirm — still confirms on Enter, matching prior behavior). Also added
+  a `prevFocus` restore so closing the modal (via Cancel, Confirm, Escape, or backdrop click)
+  returns keyboard focus to whatever triggered it, which wasn't happening before.
 - **Subtree-scoped queries silently under-counted on Windows, most visibly as a
   real-looking-but-wrong "1/1 folders" in the web welcome list.** `subtree_match`
   (`store/entries.rs`), the shared exact-or-descendant `LIKE` helper behind ~12 call sites,

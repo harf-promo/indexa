@@ -14,6 +14,13 @@ function loadWeights() {  // eslint-disable-line no-unused-vars
     });
 }
 
+// Security note (stored-XSS fix): `target` is a user-set weight target — arbitrary path
+// or category text — so it must never be interpolated into an HTML attribute (the previous
+// code built each delete button's click handler by concatenating JSON.stringify(...)
+// straight into the attribute string, which let a hostile value break out of the
+// attribute and inject live markup). The per-row delete buttons below carry no identity
+// in their markup at all; they're wired up afterward via addEventListener with the real
+// `w` object captured in a closure, so the untrusted value never touches HTML.
 function renderWeightsList(weights) {
   var el = document.getElementById('weights-list');
   if (!el) return;
@@ -29,10 +36,15 @@ function renderWeightsList(weights) {
         + '<td style="padding:3px 6px;color:var(--muted)">' + escapeHtml(w.target_kind) + '</td>'
         + '<td style="padding:3px 6px;text-align:right;color:' + color + '">' + w.weight.toFixed(2) + '</td>'
         + '<td style="padding:3px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:250px" title="' + escapeHtml(w.target) + '">' + escapeHtml(w.target) + '</td>'
-        + '<td style="padding:3px 6px"><button class="btn-sm btn-danger" style="font-size:10px;padding:1px 6px" title="Delete weight" aria-label="Delete weight" onclick="deleteWeight(' + JSON.stringify(w.target_kind) + ',' + JSON.stringify(w.target) + ')">✕</button></td>'
+        + '<td style="padding:3px 6px"><button class="btn-sm btn-danger weight-delete-btn" style="font-size:10px;padding:1px 6px" type="button" title="Delete weight" aria-label="Delete weight">✕</button></td>'
         + '</tr>';
     }).join('')
     + '</table>';
+  var deleteBtns = el.querySelectorAll('.weight-delete-btn');
+  deleteBtns.forEach(function (btn, i) {
+    var w = weights[i];
+    btn.addEventListener('click', function () { deleteWeight(w.target_kind, w.target); });
+  });
 }
 
 function setWeight() {  // eslint-disable-line no-unused-vars
@@ -85,7 +97,12 @@ function suggestWeights() {  // eslint-disable-line no-unused-vars
       var el = document.getElementById('weights-list');
       if (!el) return;
       if (statusEl) statusEl.textContent = suggestions.length + ' suggestion(s) — click Apply to set them.';
-      el.innerHTML = '<div style="margin-bottom:6px"><button class="btn-sm" onclick="applyWeightSuggestions(' + JSON.stringify(suggestions) + ')">Apply all suggestions</button></div>'
+      // Security note (stored-XSS fix): `suggestions` carries `.path` values straight from
+      // the filesystem — never interpolate them (or this whole array) into an HTML
+      // attribute. `suggestions` is already a real JS array in scope here, so the Apply
+      // button is wired up afterward via addEventListener, closing over it directly —
+      // no JSON round-trip through HTML markup at all.
+      el.innerHTML = '<div style="margin-bottom:6px"><button class="btn-sm apply-weight-suggestions-btn" type="button">Apply all suggestions</button></div>'
         + '<table style="width:100%;border-collapse:collapse">'
         + suggestions.map(function (s) {
           return '<tr style="border-top:1px solid var(--border)">'
@@ -93,6 +110,8 @@ function suggestWeights() {  // eslint-disable-line no-unused-vars
             + '<td style="padding:3px 6px;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:300px">' + escapeHtml(s.path) + '</td>'
             + '</tr>';
         }).join('') + '</table>';
+      var applyBtn = el.querySelector('.apply-weight-suggestions-btn');
+      if (applyBtn) applyBtn.addEventListener('click', function () { applyWeightSuggestions(suggestions); });
     })
     .catch(function (e) { if (statusEl) statusEl.textContent = 'Error: ' + e.message; });
 }
