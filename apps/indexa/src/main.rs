@@ -35,8 +35,18 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| tracing_appender::rolling::daily(&log_dir, "indexa.log"));
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
-    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
-        .add_directive(tracing::Level::INFO.into());
+    // `try_from_default_env()` (not `from_default_env().add_directive(INFO)`) for two reasons:
+    // 1. `add_directive` with a target-less directive overwrites any global level a user set via
+    //    RUST_LOG (e.g. RUST_LOG=debug or RUST_LOG=warn was silently clobbered back to `info`).
+    // 2. Per-crate targeting: `pdf_extract` and `lopdf` (both pulled in transitively for PDF text
+    //    extraction) emit noisy `log::warn!` diagnostics on real-world PDFs with imperfect trailer
+    //    dictionaries or non-core fonts — squelch them so they don't flood the log file every
+    //    user's `indexa doctor` output points them at. Reaches `log::warn!` callers because
+    //    `tracing_subscriber`'s default `tracing-log` feature installs the `log` compatibility
+    //    layer automatically when `.init()` runs below.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new("info,pdf_extract=error,lopdf=error")
+    });
 
     tracing_subscriber::registry()
         .with(
