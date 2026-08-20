@@ -192,13 +192,11 @@ impl Store {
     /// Newest chunk `indexed_at` among files under `root` (prefix match), or `None` when
     /// nothing under the root is deep-indexed. Drives auto-reindex staleness decisions.
     pub fn last_indexed_at_for_root(&self, root: &str) -> Result<Option<i64>> {
-        // Normalize to a directory prefix so `/a/proj` doesn't also match `/a/projector`.
-        let dir = if root == "/" || root.ends_with('/') {
-            root.to_owned()
-        } else {
-            format!("{root}/")
-        };
-        let pattern = super::search::like_prefix(&dir);
+        // `subtree_match`'s child pattern already boundary-scopes to `root`'s children
+        // (and infers `/` vs `\` from `root` itself) — only files strictly under `root`
+        // count here (a chunk exactly AT `root` would mean `root` is a file, which has
+        // no meaningful "under" set), so the exact half is unused.
+        let (_, pattern) = super::entries::subtree_match(root);
         let ts: Option<i64> = self.conn.query_row(
             "SELECT MAX(indexed_at) FROM chunks WHERE entry_path LIKE ?1 ESCAPE '\\'",
             params![pattern],
@@ -333,14 +331,14 @@ impl Store {
     /// signatures (code-skeleton) export. `limit == 0` means no limit.
     pub fn code_chunks_under(&self, prefix: &str, limit: usize) -> Result<Vec<ChunkRecord>> {
         let lim: i64 = if limit == 0 { -1 } else { limit as i64 };
-        let like = super::search::like_prefix(&format!("{}/", prefix.trim_end_matches('/')));
+        let (exact, like) = super::entries::subtree_match(prefix);
         let mut stmt = self.conn.prepare(
             "SELECT entry_path, seq, heading, text, language FROM chunks
               WHERE (entry_path = ?1 OR entry_path LIKE ?2 ESCAPE '\\')
                 AND language IS NOT NULL
               ORDER BY entry_path, seq LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![prefix, like, lim], |r| {
+        let rows = stmt.query_map(params![exact, like, lim], |r| {
             Ok(ChunkRecord {
                 entry_path: r.get::<_, String>(0)?,
                 seq: r.get::<_, i64>(1)? as usize,
