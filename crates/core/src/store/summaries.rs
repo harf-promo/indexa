@@ -1,6 +1,6 @@
 //! Hierarchical summary reads/writes and the L0-abstract derivation.
 
-use super::search::{blob_to_embedding, embedding_to_blob, like_prefix};
+use super::search::{blob_to_embedding, embedding_to_blob};
 use super::{Store, SummaryRecord};
 use crate::text::snippet;
 use anyhow::Result;
@@ -348,11 +348,10 @@ impl Store {
     /// direct child is created/removed/renamed, which is exactly when its roll-up
     /// (and its ancestors') goes stale without any surviving file changing.
     pub fn stale_summary_candidates(&self, root: &str) -> Result<Vec<(String, String)>> {
-        // Boundary-scoped (exact + "root/" children, mirroring delete_subtree):
-        // a bare prefix would bleed /projects-archive into /projects, stealing
-        // its staleness signal without the matching ancestor propagation.
-        let exact = root.trim_end_matches('/');
-        let child_pattern = like_prefix(&format!("{exact}/"));
+        // Boundary-scoped (exact + child, mirroring delete_subtree): a bare prefix
+        // would bleed /projects-archive into /projects, stealing its staleness
+        // signal without the matching ancestor propagation.
+        let (exact, child_pattern) = super::entries::subtree_match(root);
         // `>=`, not `>`: summarize stamps generated_at at the START of its run,
         // so an edit landing the same second (or during the LLM call) stays
         // flagged. False positives are free — the content-hash gate skips them.
@@ -376,8 +375,7 @@ impl Store {
     /// clearing the hash IS the force signal, so the gate itself stays
     /// parameter-free. Returns rows cleared.
     pub fn clear_summary_hashes_under(&mut self, root: &str) -> Result<usize> {
-        let exact = root.trim_end_matches('/');
-        let child_pattern = like_prefix(&format!("{exact}/"));
+        let (exact, child_pattern) = super::entries::subtree_match(root);
         self.conn
             .execute(
                 "UPDATE summaries SET source_hash = ''
