@@ -410,7 +410,7 @@ impl ServerHandler for IndexaMcp {
 
     // ── Resources (read-only index artifacts) ──────────────────────────────────
     // Hand-written (resources have no router macro); the inner methods live in
-    // `resources.rs`. Tools stay the source of truth for the 46-tool golden list —
+    // `resources.rs`. Tools stay the source of truth for the 51-tool golden list —
     // resources/prompts are a separate protocol surface and don't affect it.
 
     async fn list_resources(
@@ -1581,6 +1581,106 @@ mod tests {
                 tool.name
             );
         }
+    }
+
+    /// Every tool must carry a `ToolAnnotations` read-only/destructive hint (clients auto-approve
+    /// reads, gate safe mutations behind lighter confirmation, and gate destructive mutations
+    /// behind explicit confirmation) — locks the three-way split so a new tool can't silently
+    /// ship unannotated or misclassified.
+    ///
+    /// `dismiss_decision` and `ignore_classification` are destructive rather than "safe
+    /// mutating" by a consistent rule applied to every one of the 13 mutating tools: is there
+    /// another exposed tool that undoes this one's effect? `delete_weight` is undone by
+    /// `set_weight`; `confirm_classification` is undone by re-calling itself (even over an
+    /// `ignore_classification` tombstone — the store's upsert carries no guard). Neither
+    /// `dismiss_decision` nor `ignore_classification` has any such undo path through MCP (there is
+    /// no `un-ignore`/`un-dismiss` tool, and `decide_and_apply`'s ledger-level `revert_decision`
+    /// is CLI/web-only, never exposed here) — so both are sticky, hard-to-reverse state changes,
+    /// same bucket as `prune`/`delete_pack`/`remove_pack_paths`. `trigger_index` stays "safe
+    /// mutating" despite spawning `indexa index` (which can delete derived rows for files that
+    /// vanished from disk within its scope): `add_note` spawns the exact same `indexa index` call
+    /// on its notes directory and the task's own spec calls `add_note` non-destructive, so
+    /// spawning that reconciliation pass can't be what makes a tool destructive — only real user
+    /// data loss (not derived-artifact GC for already-gone files) earns the destructive hint here.
+    #[test]
+    fn tools_carry_read_only_or_destructive_annotations() {
+        let destructive: std::collections::HashSet<&str> = [
+            "remove_pack_paths",
+            "delete_pack",
+            "prune",
+            "ignore_classification",
+            "answer_decision",
+            "dismiss_decision",
+        ]
+        .into_iter()
+        .collect();
+        let safe_mutating: std::collections::HashSet<&str> = [
+            "create_pack",
+            "add_pack_paths",
+            "add_note",
+            "trigger_index",
+            "confirm_classification",
+            "set_weight",
+            "delete_weight",
+        ]
+        .into_iter()
+        .collect();
+        for tool in IndexaMcp::tool_router().list_all() {
+            let ann = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("tool '{}' has no annotations", tool.name));
+            if destructive.contains(tool.name.as_ref()) {
+                assert_eq!(
+                    ann.read_only_hint,
+                    Some(false),
+                    "destructive tool '{}' must set read_only_hint = false",
+                    tool.name
+                );
+                assert_eq!(
+                    ann.destructive_hint,
+                    Some(true),
+                    "destructive tool '{}' must set destructive_hint = true",
+                    tool.name
+                );
+            } else if safe_mutating.contains(tool.name.as_ref()) {
+                assert_eq!(
+                    ann.read_only_hint,
+                    Some(false),
+                    "safe-mutating tool '{}' must set read_only_hint = false",
+                    tool.name
+                );
+                assert_eq!(
+                    ann.destructive_hint,
+                    Some(false),
+                    "safe-mutating tool '{}' must set destructive_hint = false",
+                    tool.name
+                );
+            } else {
+                // Fallback: any tool absent from both named sets must be read-only. A future
+                // tool that lands in neither bucket fails loudly here instead of silently
+                // passing with no assertion made about it.
+                assert_eq!(
+                    ann.read_only_hint,
+                    Some(true),
+                    "read-only tool '{}' must set read_only_hint = true",
+                    tool.name
+                );
+            }
+        }
+        // Sanity: the three buckets partition the full 51-tool surface with no overlap and
+        // nothing left over.
+        let total = IndexaMcp::tool_router().list_all().len();
+        assert_eq!(
+            destructive.len() + safe_mutating.len(),
+            13,
+            "expected exactly 13 mutating tools (6 destructive + 7 safe)"
+        );
+        assert_eq!(
+            total - destructive.len() - safe_mutating.len(),
+            38,
+            "expected exactly 38 read-only tools"
+        );
     }
 
     /// Extract every "<N> tools" count from a doc body (digits immediately
