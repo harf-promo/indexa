@@ -222,14 +222,6 @@ pub fn is_broad_intent(question: &str) -> bool {
 
 // ── Project-overview composer ─────────────────────────────────────────────────
 
-/// Safely truncate `s` to at most `max_chars` chars at a UTF-8 boundary.
-pub(crate) fn truncate_on_boundary(s: &str, max_chars: usize) -> &str {
-    match s.char_indices().nth(max_chars) {
-        None => s,
-        Some((i, _)) => &s[..i],
-    }
-}
-
 /// Compute the nearest common ancestor (deepest shared directory prefix) of a
 /// set of file paths (using `/` as the separator). Returns `None` when `paths`
 /// is empty or has no common prefix.
@@ -257,7 +249,9 @@ pub(crate) fn common_ancestor(paths: &[String]) -> Option<String> {
 /// empty string when no dir summaries exist (the feature is then completely inert).
 ///
 /// Budget split:
-/// - `overview_budget` chars max for the overview block.
+/// - `overview_budget` BYTES max for the overview block (consistent with the byte-based
+///   loop guard below and the byte accounting where callers subtract the overview from
+///   their chunk budget).
 /// - Callers subtract `result.len()` from their chunk budget.
 pub fn build_project_overview(
     store: &Store,
@@ -366,12 +360,16 @@ pub fn build_project_overview(
         }
     }
 
-    // Hard-cap to overview_budget chars at a UTF-8 boundary.
-    truncate_on_boundary(&block, overview_budget).to_owned()
+    // Hard-cap to overview_budget BYTES at a UTF-8 boundary — consistent with the byte-based loop
+    // guard above (`block.len() + line.len() > overview_budget`) and the byte accounting where the
+    // overview is subtracted from the chunk budget. A char-based cap here could let a multibyte
+    // (Arabic/CJK/emoji-heavy) overview silently overrun its byte budget.
+    let end = indexa_core::text::floor_char_boundary(&block, overview_budget);
+    block[..end].to_owned()
 }
 
-/// Phrases that signal a question is about implementation/code, not prose. (v0.39)
-const CODE_INTENT_TERMS: [&str; 12] = [
+/// Phrases that strongly signal a question is about implementation/code, not prose. (v0.39)
+const CODE_INTENT_TERMS_STRONG: [&str; 10] = [
     "function",
     "implement",
     "method",
@@ -380,10 +378,39 @@ const CODE_INTENT_TERMS: [&str; 12] = [
     "fn ",
     "class ",
     "def ",
-    "which file",
     "in the code",
     "code that",
-    "where is",
+];
+
+/// Weak locator phrases: "where is X" / "which file …" are just as common for prose ("which
+/// file has the contract", "where is the budget spreadsheet") as for code, so on their own they
+/// must NOT trigger the code-intent boost. They count only when a named code file OR an
+/// implementation-action verb ([`CODE_ACTION_VERBS`]) co-occurs — see [`is_code_intent`].
+const CODE_INTENT_TERMS_WEAK: [&str; 2] = ["which file", "where is"];
+
+/// Implementation-action verbs: a weak locator that co-occurs with one of these is asking how
+/// something is *implemented*, not where a document lives — "where is the memory budget
+/// **computed**", "where is auth **handled**" — even when no filename is named. Deliberately
+/// excludes verbs that read equally well for documents/config ("saved", "stored", "signed",
+/// "scheduled") so plain file-location prose still stays out.
+const CODE_ACTION_VERBS: [&str; 17] = [
+    "computed",
+    "calculated",
+    "defined",
+    "declared",
+    "handled",
+    "parsed",
+    "called",
+    "invoked",
+    "initialized",
+    "configured",
+    "validated",
+    "assessed",
+    "determined",
+    "resolved",
+    "enforced",
+    "thrown",
+    "raised",
 ];
 
 /// How hard to lift a code-file hit when the question is code-intent. Modest and
@@ -397,14 +424,29 @@ const CODE_EXTS: [&str; 22] = [
     "php", "swift", "kt", "scala", "cs", "sh", "lua",
 ];
 
-/// Does the question ask about implementation/code? True on explicit code phrasing or a
-/// snake_case identifier (≥4 chars with an underscore) — a strong "they mean a symbol" tell.
+/// Does the question ask about implementation/code? True on explicit code phrasing, a
+/// snake_case identifier (≥4 chars with an underscore — a strong "they mean a symbol" tell), or
+/// a weak locator ("where is" / "which file") that co-occurs with a named code file OR an
+/// implementation-action verb ("computed", "handled", …).
 pub(crate) fn is_code_intent(question: &str) -> bool {
     let q = question.to_ascii_lowercase();
-    CODE_INTENT_TERMS.iter().any(|t| q.contains(t))
-        || question
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .any(|w| w.len() >= 4 && w.contains('_'))
+    // A snake_case token (≥4 chars with an underscore) is a strong code tell on its own.
+    let has_snake = question
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|w| w.len() >= 4 && w.contains('_'));
+    if has_snake || CODE_INTENT_TERMS_STRONG.iter().any(|t| q.contains(t)) {
+        return true;
+    }
+    // Weak locators only count when the question also names a code file (matched via
+    // `is_code_path` on whitespace-split tokens, each trimmed of surrounding punctuation, rather
+    // than a `.ext` substring scan so ".h"/".c" can't false-positive on "html"/"csv"/"conf"/
+    // "cfg") or names an implementation-action verb ("where is X computed/handled/…" — a
+    // question about behavior, not a document's location).
+    CODE_INTENT_TERMS_WEAK.iter().any(|t| q.contains(t))
+        && (q
+            .split_whitespace()
+            .any(|tok| is_code_path(tok.trim_matches(|c: char| !c.is_alphanumeric())))
+            || CODE_ACTION_VERBS.iter().any(|v| q.contains(v)))
 }
 
 fn is_code_path(path: &str) -> bool {
