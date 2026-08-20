@@ -210,6 +210,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Tabbed, initial focus on Confirm — still confirms on Enter, matching prior behavior). Also added
   a `prevFocus` restore so closing the modal (via Cancel, Confirm, Escape, or backdrop click)
   returns keyboard focus to whatever triggered it, which wasn't happening before.
+- **CLI log filter had no per-crate targeting and silently ignored `RUST_LOG`'s global level.**
+  `apps/indexa/src/main.rs` built its `EnvFilter` via `from_default_env().add_directive(INFO)`;
+  the target-less `INFO` directive always overwrote whatever global level `RUST_LOG` set, so
+  `RUST_LOG=debug` or `RUST_LOG=warn` silently became `info` regardless (verified: a `debug!`
+  event was dropped under `RUST_LOG=debug`, and an `info!` event leaked through under
+  `RUST_LOG=warn`). Same construction also gave `pdf_extract`/`lopdf` — both pulled in
+  transitively for PDF text extraction — no way to be quieted: their `log::warn!` diagnostics
+  (non-core-font substitution, trailer-dictionary `/Size` mismatches) are common on real-world
+  PDFs and flooded the one log file AGENTS.md and the desktop app both point users at for
+  diagnostics. Switched to `try_from_default_env()` with a
+  `"info,pdf_extract=error,lopdf=error"` fallback, so `RUST_LOG` now actually controls the
+  global level and the two noisy crates are pre-silenced by default. (Investigated but did not
+  find the reported `from_default_env()`-panics-on-malformed-`RUST_LOG` crash path — the pinned
+  `tracing-subscriber` 0.3.23 makes `from_default_env()` lossy, not panicking; see the PR
+  description for the reproduction.)
 - **A preprocessor hook could hang indexing forever.** `run_command`'s stdin write ran on the
   calling thread *before* the stdout-reader thread was spawned — once a child's stdout pipe
   filled (~64 KB) it stopped reading stdin, and once stdin filled the parent blocked in
@@ -506,6 +521,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wired up — a real implementation would need per-region embedding-dimension reconciliation that
   isn't worth building without a concrete need. Removed the field, struct, method, its tests, and
   the `docs/config.md` section and worked examples that documented it.
+
+### Fixed
+
+- **Archive detector reused the duplicate detector's noise filter — wrong list, wrong reach.**
+  `archive_path_is_noise` was a pure delegate to `dup_in_generated_dir`, sharing
+  `DUP_SKIP_DIR_FRAGMENTS` with the near-duplicate detector. That list's `/assets/` and
+  `/competitors/` entries are user-content directories, not generated/toolchain-cache trees — so a
+  stale subtree under either was silently un-askable *and* got retro-dismissed by
+  `sweep_filtered_noise` on every subsequent scan, with no signal to the user that the question was
+  ever suppressed. Separately, the shared fragments are `/`-delimited substring checks (`"/build/"`)
+  that require content on **both** sides of the segment, so they could never match a tree's own
+  ROOT — a directory literally named `build`, `DerivedData`, or `SourcePackages` still generated
+  the exact noise question the filter was written to silence. Fixed with a dedicated
+  `ARCHIVE_SKIP_DIR_FRAGMENTS` (drops `/assets/`/`/competitors/`, keeps the toolchain/build-cache
+  fragments) and a padded-match check in `archive_path_is_noise` that closes the root-name gap for
+  every fragment. `dup_in_generated_dir` and its list are untouched — the duplicate detector still
+  correctly treats near-identical icon sets/screenshots under `/assets/`/`/competitors/` as
+  non-actionable. No retroactive sweep of already-dismissed `/assets/`/`/competitors/` decisions:
+  existing dismissals stand, and the corrected filter only changes what gets asked/dismissed going
+  forward — a `/proj/build`-style already-**open** question, however, *does* now get swept on the
+  next `index`/`prune` (`sweep_filtered_noise` runs on every pass and the corrected filter finally
+  recognizes it as noise), same as the interior-path case already did.
 
 ## [0.76.0] — 2026-06-28
 
