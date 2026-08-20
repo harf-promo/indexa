@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Cross-file embed-batching primitive (`crates/embed/src/batcher.rs`, `MissBatcher`) — scoped
+  salvage of #367, primitive only.** Today's deep-index loop calls the embedder once per FILE's
+  cache-miss chunks, so a repo with thousands of files issues roughly one Ollama round-trip per
+  file even though `embed_all`'s real batch boundary (`EMBED_BATCH_SIZE` = 64) could span many
+  files' worth of chunks in a single call. `MissBatcher<M>` is a dependency-free accumulator that
+  buffers cache-miss embed-texts *across* files (`add_file`), reports when a real batch is ready
+  (`is_full`/`buffered`/`is_empty`), hands the caller the buffered texts to embed
+  (`batch_refs`), and scatters the results back to the exact originating file+chunk slot
+  (`scatter`), completing a file only once every one of its misses resolves so it can be upserted
+  exactly once, in FIFO order. It is deliberately passive — generic over an opaque per-file
+  payload `M`, never touches an `Embedder` or a store, and has no coupling to
+  `apps/indexa/src/commands/deep.rs`'s or `crates/web/src/jobs_exec/deep.rs`'s job/file-walking
+  logic — so a future integration PR can adopt it incrementally on both the CLI and web deep
+  paths. **This PR lands the primitive only; it is not wired into any indexing path yet, so it
+  does not speed anything up on its own.** Wiring it into the CLI `deep` command and the web deep
+  job is deliberate, separate follow-up work (tracked on #367, which now covers just that
+  integration). Covered by 8 hermetic unit tests (no Ollama/network needed): accumulating below
+  the batch size doesn't flush prematurely, hitting the batch size triggers a flush boundary at
+  the configured size, a file with more misses than one batch still completes exactly once, a
+  final partial batch only flushes when the caller explicitly drains it (tail flush), scattered
+  results route back to the correct originating file+slot without cross-file leakage even when a
+  flush mixes many files' misses, and dim-mismatch/embed-failure counts re-attribute to the
+  owning file despite a mixed flush.
+
 ### Changed
 
 - **`candle-core`/`candle-nn`/`candle-transformers` 0.9 → 0.11 (dependency bump, #428/#429/#430
