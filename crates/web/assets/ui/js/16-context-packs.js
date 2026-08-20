@@ -21,6 +21,15 @@ function loadPacks() {  // eslint-disable-line no-unused-vars
     });
 }
 
+// Security note (stored-XSS fix): `p.name` is a pack name taken raw from `POST /api/packs`
+// with no charset validation server-side, so it must never be interpolated into an HTML
+// attribute (the previous code built each row's Edit/Export/Delete handlers by
+// concatenating JSON.stringify(p.name) straight into the attribute string, which let a
+// hostile pack name break out of the attribute and inject live markup). The row buttons
+// below carry no identity in their markup at all; they're wired up afterward via
+// addEventListener with the real `p` object captured in a closure, so the untrusted value
+// never touches HTML. (`data-pack-name` above is still HTML-escaped via escapeHtml, same
+// as it always was — it's a plain attribute value, not part of a handler string.)
 function renderPackList(packs) {
   var list  = document.getElementById('packs-list');
   var empty = document.getElementById('packs-empty-msg');
@@ -36,12 +45,23 @@ function renderPackList(packs) {
     return '<div class="key-row" style="justify-content:space-between;flex-wrap:wrap;gap:4px" data-pack-name="' + escapeHtml(p.name) + '">'
       + '<span style="font-size:13px"><strong>' + escapeHtml(p.name) + '</strong>' + desc + ' <span style="color:var(--muted);font-size:11px">(' + p.path_count + ' path' + (p.path_count === 1 ? '' : 's') + ')</span></span>'
       + '<span style="display:flex;gap:4px">'
-      + '<button class="btn-sm" style="font-size:11px" onclick="openPackEditor(' + JSON.stringify(p.name) + ')">Edit</button>'
-      + '<button class="btn-sm" style="font-size:11px" onclick="quickExportPack(' + JSON.stringify(p.name) + ')">Export</button>'
-      + '<button class="btn-sm btn-danger" style="font-size:11px" onclick="deletePack(' + JSON.stringify(p.name) + ')">Delete</button>'
+      + '<button class="btn-sm pack-edit-btn" style="font-size:11px" type="button">Edit</button>'
+      + '<button class="btn-sm pack-export-btn" style="font-size:11px" type="button">Export</button>'
+      + '<button class="btn-sm btn-danger pack-delete-btn" style="font-size:11px" type="button">Delete</button>'
       + '</span>'
       + '</div>';
   }).join('');
+  var rows = list.children;
+  packs.forEach(function (p, i) {
+    var row = rows[i];
+    if (!row) return;
+    var editBtn = row.querySelector('.pack-edit-btn');
+    if (editBtn) editBtn.addEventListener('click', function () { openPackEditor(p.name); });
+    var exportBtn = row.querySelector('.pack-export-btn');
+    if (exportBtn) exportBtn.addEventListener('click', function () { quickExportPack(p.name); });
+    var deleteBtn = row.querySelector('.pack-delete-btn');
+    if (deleteBtn) deleteBtn.addEventListener('click', function () { deletePack(p.name); });
+  });
 }
 
 function createPack() {  // eslint-disable-line no-unused-vars
@@ -93,6 +113,11 @@ function closePackEditor() {  // eslint-disable-line no-unused-vars
   if (editor) editor.style.display = 'none';
 }
 
+// Security note (stored-XSS fix): `p` (a pack member path) must never be interpolated into
+// an HTML attribute — same class of bug as renderPackList above (previously each remove
+// button's handler was built by concatenating JSON.stringify(p) straight into the attribute
+// string). The remove buttons below carry no identity in their markup; they're wired up
+// afterward via addEventListener with the real path captured in a closure.
 function refreshPackEditorPaths(name) {
   fetch('/api/packs/' + encodeURIComponent(name) + '/paths')
     .then(function (r) { return r.json(); })
@@ -107,9 +132,14 @@ function refreshPackEditorPaths(name) {
       container.innerHTML = paths.map(function (p) {
         return '<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;gap:4px">'
           + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" title="' + escapeHtml(p) + '">' + escapeHtml(p) + '</span>'
-          + '<button class="btn-sm btn-danger" style="font-size:10px;padding:1px 6px;flex-shrink:0" title="Remove path" aria-label="Remove path" onclick="removePackPath(' + JSON.stringify(p) + ')">✕</button>'
+          + '<button class="btn-sm btn-danger pack-remove-path-btn" style="font-size:10px;padding:1px 6px;flex-shrink:0" type="button" title="Remove path" aria-label="Remove path">✕</button>'
           + '</div>';
       }).join('');
+      var rows = container.children;
+      paths.forEach(function (p, i) {
+        var btn = rows[i] && rows[i].querySelector('.pack-remove-path-btn');
+        if (btn) btn.addEventListener('click', function () { removePackPath(p); });
+      });
     })
     .catch(function () {});
 }

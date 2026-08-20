@@ -15,9 +15,29 @@ pub type CoverageEntry = (String, String, bool, u64, Option<String>);
 /// itself and everything strictly under it — but NOT a sibling that merely shares the
 /// string prefix (`/proj` must not match `/projector`). `child_pattern` is wildcard-escaped
 /// for use with `LIKE … ESCAPE '\'`.
+///
+/// Separator-agnostic by inference, not by matching both: a given index is
+/// separator-homogeneous by construction (every stored path comes from one machine's
+/// `PathBuf::to_string_lossy()` at write time, below — so within one index, paths are
+/// consistently `/`-separated or consistently `\`-separated, never mixed, barring a
+/// caller-supplied mixed-separator string). So the separator used to build
+/// `child_pattern` is taken from `prefix` itself: the last `/` or `\` in it, defaulting to
+/// `/` when it has none (a bare root or a single path segment). See `search.rs`'s
+/// module docs for why this beats normalize-at-write-time + migrate, and why matching
+/// both separators via `OR`-ed LIKE patterns or `REPLACE(...)` was rejected.
+///
+/// The separator is read from the ORIGINAL `prefix`, before trimming — not from `exact`.
+/// For a bare drive root (`C:\`) the trailing separator IS the only separator in the
+/// string; inferring from the already-trimmed `exact` (`C:`) would find none and
+/// silently default to `/`, reproducing this exact bug's failure shape for that one
+/// input. Every other case is unaffected: a trailing separator is itself a valid
+/// instance of the separator, so trimming never changes what `rfind` would have seen.
 pub(super) fn subtree_match(prefix: &str) -> (String, String) {
-    let exact = prefix.trim_end_matches('/').to_owned();
-    let child_pattern = like_prefix(&format!("{exact}/"));
+    let sep = prefix
+        .rfind(['/', '\\'])
+        .map_or('/', |i| prefix.as_bytes()[i] as char);
+    let exact = prefix.trim_end_matches(['/', '\\']).to_owned();
+    let child_pattern = like_prefix(&format!("{exact}{sep}"));
     (exact, child_pattern)
 }
 
@@ -490,5 +510,101 @@ impl Store {
                 },
             )
             .map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::subtree_match;
+
+    #[test]
+    fn unix_separator_inferred_and_boundary_preserved() {
+        let (exact, child) = subtree_match("/proj");
+        assert_eq!(exact, "/proj");
+        assert_eq!(child, "/proj/%");
+        // The boundary character itself must be a real `/`, not swallowed into a
+        // prefix-sibling match: `/proj/%` does not match `/projector`.
+        assert!(!like_matches(&child, "/projector"));
+        assert!(like_matches(&child, "/proj/a.rs"));
+    }
+
+    #[test]
+    fn windows_separator_inferred_from_prefix() {
+        let (exact, child) = subtree_match(r"C:\proj");
+        assert_eq!(exact, r"C:\proj");
+        // Escaped for `LIKE … ESCAPE '\'`: every literal `\` is doubled, including the
+        // freshly-appended separator (see the exact-escaping test below).
+        assert_eq!(child, r"C:\\proj\\%");
+        assert!(!like_matches(&child, r"C:\projector"));
+        assert!(like_matches(&child, r"C:\proj\a.rs"));
+    }
+
+    /// Pinned exact-escaping assertion (not just "some backslashes somewhere"): every
+    /// stored `\` — including the freshly-appended separator — is doubled by
+    /// `like_escape` for the SQL `ESCAPE '\'` clause, then a single bare `%` wildcard is
+    /// appended. Guards against double-escaping (escaping the separator twice) or
+    /// under-escaping (leaving a bare `\` SQLite would try to interpret as an escape
+    /// prefix for the next character instead of a literal path separator).
+    #[test]
+    fn windows_prefix_escapes_every_backslash_including_the_appended_separator() {
+        let (exact, child) = subtree_match(r"C:\dev\indexa");
+        assert_eq!(exact, r"C:\dev\indexa");
+        assert_eq!(child, r"C:\\dev\\indexa\\%");
+    }
+
+    #[test]
+    fn trailing_separator_trimmed_for_both_styles() {
+        assert_eq!(subtree_match("/proj/"), subtree_match("/proj"));
+        assert_eq!(subtree_match(r"C:\proj\"), subtree_match(r"C:\proj"));
+    }
+
+    #[test]
+    fn no_separator_in_prefix_defaults_to_forward_slash() {
+        // A bare single-segment prefix (no `/` or `\` anywhere) has nothing to infer
+        // from — default to `/`, matching every other empty-prefix/root convention in
+        // the store (`subtree_match_or_all`, `code_graph_scoped`'s `/` whole-disk case).
+        let (exact, child) = subtree_match("proj");
+        assert_eq!(exact, "proj");
+        assert_eq!(child, "proj/%");
+    }
+
+    #[test]
+    fn windows_drive_root_still_infers_backslash() {
+        // Regression: a bare drive root's only separator IS the trailing one that
+        // `exact` trims away. Inferring the separator from `exact` (post-trim) instead
+        // of `prefix` (pre-trim) would find no separator left to look at and silently
+        // fall back to `/`, reproducing this whole bug's failure shape for exactly the
+        // input a Windows "whole disk" scope would pass.
+        let (exact, child) = subtree_match(r"C:\");
+        assert_eq!(exact, "C:");
+        assert_eq!(child, r"C:\\%");
+        assert!(like_matches(&child, r"C:\proj"));
+        assert!(like_matches(&child, r"C:\proj\a.rs"));
+    }
+
+    /// Minimal stand-in for the SQL `LIKE … ESCAPE '\'` semantics `child_pattern` is
+    /// built for: `%` is a wildcard, `\%`/`\\`/`\_` are escaped literals. Enough to
+    /// assert the two properties the store relies on — sibling exclusion and child
+    /// inclusion — without spinning up a real SQLite connection for a pure-Rust helper.
+    fn like_matches(pattern: &str, candidate: &str) -> bool {
+        let mut lit = String::new();
+        let mut chars = pattern.chars().peekable();
+        let mut wildcard_tail = false;
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        lit.push(next);
+                    }
+                }
+                '%' if chars.peek().is_none() => wildcard_tail = true,
+                other => lit.push(other),
+            }
+        }
+        if wildcard_tail {
+            candidate.starts_with(&lit)
+        } else {
+            candidate == lit
+        }
     }
 }

@@ -456,17 +456,14 @@ impl Store {
             .collect();
 
         // The subtree to scan: `parent_path` and everything under it, expressed as a
-        // `LIKE` prefix (`"<parent>/%"`). For the root case (`parent_path == ""`) this
-        // is `like_prefix("/")` = `"/%"`, i.e. "every path beginning with `/`". On POSIX
-        // that IS the whole table (absolute paths all start with `/`), and bucketing then
-        // drops rows under no fetched child (e.g. a root's un-indexed FS parent). NOTE:
-        // this — like the `b'/'` boundary check in `bucket_of` and every other prefix-LIKE
-        // path query in the store — assumes `/`-separated stored paths. Windows native
-        // paths (`C:\proj\…`, stored verbatim) don't start with `/` and don't use `/`
-        // boundaries, so their subtree rollups under-count. Fixing that uniformly is a
-        // storage-layer concern (normalize separators at index time), not a per-query
-        // patch; tracked separately, not addressed here.
-        let subtree_like = like_prefix(&format!("{parent_path}/"));
+        // `LIKE` prefix via `subtree_match` (separator-inferred from `parent_path` itself —
+        // see `entries::subtree_match`'s docs for why query-time inference beats
+        // normalizing separators at write time). For the root case (`parent_path == ""`)
+        // this degenerates to `like_prefix("/")` = `"/%"`, i.e. "every path beginning with
+        // `/`" — on POSIX that IS the whole table (absolute paths all start with `/`), and
+        // bucketing then drops rows under no fetched child (e.g. a root's un-indexed FS
+        // parent).
+        let (_, subtree_like) = entries::subtree_match(parent_path);
 
         // Resolve a subtree path `P` to the index of the child it belongs to (the
         // unique child `c` with `P == c.path` or `P` startswith `c.path + "/"`), or
@@ -481,7 +478,7 @@ impl Store {
             // child is the unique one whose path + '/' prefixes `p`.
             for (i, c) in child_paths.iter().enumerate() {
                 if p.len() > c.len()
-                    && p.as_bytes()[c.len()] == b'/'
+                    && matches!(p.as_bytes()[c.len()], b'/' | b'\\')
                     && p.as_bytes()[..c.len()] == *c.as_bytes()
                 {
                     return Some(i);
@@ -681,8 +678,14 @@ impl Store {
         for hit in hits.iter_mut() {
             // Apply the score from the best matching summary (deepest parent wins).
             for (summary_path, sim) in &summaries {
+                // Separator-agnostic boundary check (same class of bug as `bucket_of`
+                // above): a Windows-persisted `summary_path` like `C:\proj\src` must
+                // still recognize `C:\proj\src\a.rs` as a descendant.
                 if hit.entry_path == *summary_path
-                    || hit.entry_path.starts_with(&format!("{summary_path}/"))
+                    || hit
+                        .entry_path
+                        .strip_prefix(summary_path.as_str())
+                        .is_some_and(|rest| rest.starts_with(['/', '\\']))
                 {
                     hit.rrf_score += (summary_weight as f64) * (*sim as f64);
                     break;

@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use rusqlite::params;
 
-use super::search::{blob_to_embedding, cosine_similarity, like_prefix, STUB_EXCLUDE_SQL};
+use super::search::{blob_to_embedding, cosine_similarity, STUB_EXCLUDE_SQL};
 use super::Store;
 
 impl Store {
@@ -35,13 +35,19 @@ impl Store {
         let want: HashSet<&str> = nodes.iter().map(String::as_str).collect();
 
         // One scoped, stub-excluded scan; accumulate a sum-vector + count per file (its centroid).
+        // Boundary-scoped via `subtree_match` (exact-or-child, separator-inferred) — a bare
+        // `LIKE scope%` would also pull in a sibling that merely shares the string prefix
+        // (`/proj` matching `/projector`). Correctness change, not just a Windows fix: the
+        // caller's `nodes`/`want` set already narrows the final output to requested paths, but
+        // the fetch itself was unbounded, so a `/projector` file explicitly passed in `nodes`
+        // used to be considered even when `scope` was `/proj`.
         let sql = format!(
             "SELECT entry_path, embedding FROM chunks \
-             WHERE embedding IS NOT NULL AND entry_path LIKE ?1 ESCAPE '\\'{STUB_EXCLUDE_SQL}"
+             WHERE embedding IS NOT NULL AND (entry_path = ?1 OR entry_path LIKE ?2 ESCAPE '\\'){STUB_EXCLUDE_SQL}"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let pattern = like_prefix(scope);
-        let mut rows = stmt.query(params![pattern])?;
+        let (exact, pattern) = super::entries::subtree_match(scope);
+        let mut rows = stmt.query(params![exact, pattern])?;
 
         let mut sums: HashMap<String, (Vec<f32>, usize)> = HashMap::new();
         while let Some(row) = rows.next()? {
@@ -174,5 +180,23 @@ mod tests {
             .semantic_file_edges("/p", &nodes, 0.5, 100)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn scope_excludes_prefix_sibling() {
+        // H4-class boundary bug: a `/proj` scope must not pull in `/projector`'s chunks,
+        // even when the caller explicitly passes a `/projector` file in `nodes` — the SQL
+        // scan itself must be boundary-scoped, not just filtered downstream by `want`.
+        // Before the fix this was a bare `LIKE '/proj%'`, which matches `/projector/b.rs`.
+        let (_d, s) = store_with(&[
+            ("/proj/a.rs", &[1.0, 0.0]),
+            ("/projector/b.rs", &[1.0, 0.0]), // sibling sharing the string prefix, identical vector
+        ]);
+        let nodes = vec!["/proj/a.rs".into(), "/projector/b.rs".into()];
+        let edges = s.semantic_file_edges("/proj", &nodes, 0.5, 100).unwrap();
+        assert!(
+            edges.is_empty(),
+            "/projector/b.rs must never be scanned under a /proj scope: {edges:?}"
+        );
     }
 }

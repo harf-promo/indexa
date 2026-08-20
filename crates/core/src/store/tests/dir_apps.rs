@@ -273,6 +273,35 @@ fn path_coverage_counts_chunks_and_summary() {
     assert_eq!(built.chunk_count, 1);
 }
 
+/// The test named by the comment above
+/// `top_projects_under_drops_nested_and_vendored_windows_style_paths`: `subtree_match`'s
+/// general (non-empty-prefix) case, exercised through `path_coverage` — the exact
+/// failure chain from the bug report (`top_projects_under` → `path_coverage` →
+/// `subtree_match(r"C:\dev\indexa")`). Before the Wave C fix, the `/`-only
+/// `subtree_match` built the pattern `C:\dev\indexa/%`, which matches none of these
+/// `\`-separated rows, so `total` collapsed to 1 (the exact-match root only) even
+/// though the project has two real subdirectories — the "1/1 folders" web UI bug.
+#[test]
+fn path_coverage_counts_subtree_for_windows_style_non_empty_prefix() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            dummy_entry(r"C:\dev\indexa", EntryKind::Dir, 0),
+            dummy_entry(r"C:\dev\indexa\crates", EntryKind::Dir, 0),
+            dummy_entry(r"C:\dev\indexa\crates\core", EntryKind::Dir, 0),
+            // A prefix sibling must NOT be swept into the count.
+            dummy_entry(r"C:\dev\indexator", EntryKind::Dir, 0),
+        ])
+        .unwrap();
+
+    let coverage = store.path_coverage(r"C:\dev\indexa").unwrap();
+    assert_eq!(
+        coverage.total, 3,
+        "the root dir plus its two real subdirectories — not the exact-match row alone, \
+         and not the C:\\dev\\indexator sibling"
+    );
+}
+
 fn file_summary_for(path: &str) -> crate::store::SummaryRecord {
     crate::store::SummaryRecord {
         path: path.to_owned(),

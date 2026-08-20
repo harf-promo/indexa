@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Coverage honesty (web).** The topbar now shows `N summaries (P%)` next to files/chunks, and the "context not built" banner is **path-aware** — a handful of summaries in one repo no longer hide that the selected folder has none. Hover actions collapse to one **Build context** verb (deep+summarize if the folder isn't searchable yet, summarize if it is); Re-scan / Refresh / Remove move into a ⋯ menu. Starting a job stays on the current view and offers "Watch progress" on the toast instead of yanking you into Activity. **Build context** on a folder that contains several detected projects refuses the whole-tree job and points at the per-project list. `GET /api/health` adds `summaries` + `thin_context`; a third banner names a thin hierarchical layer without calling it "stale". New `GET /api/projects` lists top-level detected apps with coverage so the welcome view can offer per-project Build context. Ask's **Agentic** toggle is labeled **Think harder**; a scoped answer on an unsummarized folder says so and offers the same button.
+- **Coverage honesty (web).** The topbar now shows folder-summary coverage (`N of M folders summarized (P%)`) next to files/chunks, and the "context not built" banner is **path-aware** — a handful of summaries in one repo no longer hide that the selected folder has none. Hover actions collapse to one **Build context** verb (deep+summarize if the folder isn't searchable yet, summarize if it is); Re-scan / Refresh / Remove move into a ⋯ menu. Starting a job stays on the current view and offers "Watch progress" on the toast instead of yanking you into Activity. **Build context** on a folder that contains several detected projects refuses the whole-tree job and points at the per-project list. `GET /api/health` adds `summaries` + `thin_context`; a third banner names a thin hierarchical layer without calling it "stale". New `GET /api/projects` lists top-level detected apps with coverage so the welcome view can offer per-project Build context. Ask's **Agentic** toggle is labeled **Think harder**; a scoped answer on an unsummarized folder says so and offers the same button.
 - **Review inbox noise (detectors + web).** Archive questions no longer fire on generated/toolchain caches (`/build/`, `SourcePackages`, `.xcframework`, `DerivedData`, `Pods`, gradle wrappers, `/gen/`). Duplicate questions skip ubiquitous sibling manifests (`Cargo.toml`, `package.json`, `go.mod`, …) unless they are exact copies in the same folder. `sweep_filtered_noise` retro-dismisses the existing inbox on the next `index`/`prune`. The Review drawer groups cards by type and pre-fills the batch "under" folder when every open question of that type shares a path prefix.
 - **Surface the product (web).** The toolbar **Export** menu lists named Context Packs and can create a pack from the selected folder — no need to open Settings. Map now opens on the coverage **Treemap** at whole-disk scope (the graph is a hairball there) and switches to **Graph** once you select a project-depth folder; an explicit tab click still sticks. Settings tucks passes / resources / insights / packs / weights under **More settings**. `docs/COMPETITIVE.md` "still open" list no longer claims Decision Ledger or token-savings are unshipped.
 
@@ -165,6 +165,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The "hierarchical %" coverage figure (web) was neither a file nor a folder
+  percentage.** The topbar stat and the thin-context banner both computed
+  `100 * summaries / entries`, but `summary_count`/`entry_count` are unfiltered
+  `COUNT(*)` queries over `summaries`/`entries` — both tables hold file AND dir rows
+  side by side, so the result was an uninterpretable mix of file and folder coverage,
+  and the topbar additionally mislabeled the dir-inclusive entry count as `" files"`.
+  Both now use `/api/map`'s already-computed, correctly-scoped figures: the topbar
+  shows `total_files` for the file count and `built`/`total_dirs` (true directory
+  coverage) for the percentage, explicitly labeled "folders"; the banner does the
+  same. `GET /api/health`'s `thin_context` trigger moved off the same blended ratio
+  onto the identical directory-only computation (`coverage_stats`), so the banner's
+  own gate now matches what its text says — a repo with strong file coverage but no
+  folder roll-ups yet correctly reads as thin, and a repo with zero directories (only
+  possible for a genuinely empty index — the scanned root itself always lands a
+  `kind = 'dir'` row) has nothing hierarchical to warn about. Threshold stays 10%,
+  applied to the true (smaller) directory population.
+- **Stored XSS in the web UI: a hostile filename, dirname, pack name, or weight target could
+  execute arbitrary JavaScript in Indexa's own origin.** Three JS fragments —
+  `13-classify.js` (`confirmClassification`/`ignoreClassification`/`undoClassification`),
+  `16-context-packs.js` (`openPackEditor`/`quickExportPack`/`deletePack`/`removePackPath`), and
+  `17-weights.js` (`deleteWeight`/`applyWeightSuggestions`) — built each button's click handler
+  by concatenating `JSON.stringify(untrustedValue)` straight into an `onclick="..."` HTML
+  attribute string and `innerHTML`-ing the result into the live DOM. `JSON.stringify` emits a
+  leading `"`, which closes the attribute early — a value containing `a"><img src=x
+  onerror=...>` didn't even need the quote to matter, since `>` alone terminates the enclosing
+  tag. The worst vector: filenames and directory names can legally contain `<`, `>`, `"` on
+  macOS/Linux, so indexing a repository containing a maliciously-named file and opening its
+  summary in the web UI ran the payload with zero further user action, with full authenticated
+  API access to every mutating endpoint (`indexa serve --host 0.0.0.0` is a documented LAN-share
+  mode, widening this beyond localhost). Pack names (`POST /api/packs` performs no charset
+  validation) and weight targets (`target`, as distinct from the already-validated
+  `target_kind`) were equally exploitable. Fixed by eliminating the `onclick="..."` string-building
+  pattern in all three fragments: every affected button is now built with no inline handler at
+  all and wired up afterward via `addEventListener` with the value captured in a closure, so the
+  untrusted string never touches HTML. A related sink in `13-classify.js`'s category `<select>`
+  built its `id` from the same untrusted path via `CSS.escape(path)`, on the assumption that
+  `CSS.escape` hex-escapes attribute-special characters — it doesn't: it backslash-*prefixes*
+  them (`"` becomes the two characters `\"`), and HTML attribute parsing doesn't honor backslash
+  escapes, so the real `"` `CSS.escape` still emits closes the attribute just the same. Fixed by
+  dropping the per-row id entirely — only one classification chip is ever rendered at a time, so
+  `confirmClassification` now finds the `<select>` by class, scoped to its container. A pinned test
+  (`fixed_xss_sink_fragments_build_no_onclick_attributes` in `crates/web/src/lib.rs`) fails the
+  build if any of the three fragments reintroduces an `onclick="..."` attribute. Also added a
+  `Content-Security-Policy` header (plus `X-Content-Type-Options: nosniff` and
+  `X-Frame-Options: DENY`) to every response as defense in depth
+  (`add_security_headers` in `crates/web/src/lib.rs`, pinned by
+  `root_response_carries_a_content_security_policy_header`); `script-src`/`style-src` still carry
+  `'unsafe-inline'` because dozens of *other*, unrelated buttons across the bundle — and
+  `index.html` itself (80+ occurrences) — use literal, non-interpolated `onclick="..."` as an
+  ordinary UI mechanism, and dropping `'unsafe-inline'` would break navigation, every drawer, and
+  most of the app; eliminating inline handlers repo-wide so `script-src` can go fully strict is
+  real, separate follow-up work. Found and fixed ahead of the rest of the v0.77 review sweep
+  because of its severity.
+- **Enter always confirmed a confirmation dialog, even with Cancel focused — a real data-loss
+  bug.** `confirmModal`'s keydown handler (`08-util-palette-init.js`) fired the Confirm action on
+  Enter unconditionally, ignoring which button actually had keyboard focus: a user who Tabbed to
+  Cancel and pressed Enter got Confirm instead. Enter now checks `document.activeElement` against
+  the Cancel button and only confirms when Cancel does *not* have focus (the common case — nothing
+  Tabbed, initial focus on Confirm — still confirms on Enter, matching prior behavior). Also added
+  a `prevFocus` restore so closing the modal (via Cancel, Confirm, Escape, or backdrop click)
+  returns keyboard focus to whatever triggered it, which wasn't happening before.
+- **Subtree-scoped queries silently under-counted on Windows, most visibly as a
+  real-looking-but-wrong "1/1 folders" in the web welcome list.** `subtree_match`
+  (`store/entries.rs`), the shared exact-or-descendant `LIKE` helper behind ~12 call sites,
+  hardcoded `/` twice: it only trimmed a trailing `/`, and always joined the child pattern with
+  `/`. On a Windows-persisted index (`C:\proj\...`, stored verbatim — paths are never rewritten
+  at write time) this built a `/`-anchored pattern that matched nothing, so every subtree query
+  silently degraded to "exact path only." Confirmed failure chain: `top_projects_under` →
+  `path_coverage` → `subtree_match(r"C:\dev\indexa")` → pattern `C:\\dev\\indexa/%` matches zero
+  rows → `coverage.total` collapses to 1 → the web UI renders a small, plausible, wrong number
+  for a project with dozens of real subfolders. Fixed with **query-time separator inference**,
+  not a write-time normalize-and-migrate: a given index is separator-homogeneous by construction
+  (every stored path comes from one machine's `PathBuf::to_string_lossy()`), so `subtree_match`
+  now infers `/` vs `\` from the last separator in the prefix it's handed. A prior in-tree
+  comment (removed as part of this fix, `store/search.rs`) argued the correct fix was
+  normalizing separators at write time; that's rejected here because `decisions.subject` is a
+  polymorphic column (path *or* cluster-key *or* symbol name — a blind rewrite would corrupt
+  non-path rows), `chunks_fts` is an FTS5 external-content table requiring matched delete+reinsert
+  to avoid desync, and roughly ten tables hold non-reconstructible user state (packs, notes,
+  weights, ask sessions, decisions, …), so "wipe and reindex on Windows" isn't an available
+  escape hatch either — a migration would be the only path, and a risky one given the polymorphic
+  column. Query-time inference needs none of that: zero SQL changes, zero schema bump, zero
+  migration, and every remaining hand-rolled `/`-only call site (`chunks.rs`, `edges.rs`,
+  `summaries.rs`'s two literal copies of the old helper body, `search.rs`'s `subtree_like` and
+  the Rust-side `bucket_of`/`boost_with_summaries` boundary checks) now routes through the one
+  fixed helper. Two call sites (`semantic_edges.rs`'s `semantic_file_edges`,
+  `store/decisions.rs`'s non-path `symbol_ambiguity` batch-answer branch) had **no** boundary at
+  all before this — for `semantic_edges.rs` that was a real, if usually latent, bug (a `/proj`
+  scope's SQL scan could pull in a `/projector` file explicitly passed in the caller's node set,
+  even though the two are unrelated projects), now fixed with its own regression test;
+  `decisions.rs`'s branch is deliberately left as a literal string-prefix match, since its
+  subject is a bare symbol name, not a path (see `DecisionType::subject_is_path`'s doc comment
+  and the pinned test guarding it) — routing it through a path-boundary helper would have broken
+  `--under <prefix> --type symbol_ambiguity` for virtually every real symbol name. The two
+  destructive call sites (`reconcile_entries`, `delete_subtree`) get their own explicit
+  Windows-style regression tests proving the sibling boundary (`C:\proj` vs `C:\projector`) still
+  holds post-fix, alongside a real-ghost-removal assertion — a boundary-only test would have
+  passed against the old, broken code too, since it fails safe by under-matching everything.
 - **CLI log filter had no per-crate targeting and silently ignored `RUST_LOG`'s global level.**
   `apps/indexa/src/main.rs` built its `EnvFilter` via `from_default_env().add_directive(INFO)`;
   the target-less `INFO` directive always overwrote whatever global level `RUST_LOG` set, so

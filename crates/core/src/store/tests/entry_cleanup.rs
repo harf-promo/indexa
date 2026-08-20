@@ -87,6 +87,60 @@ fn reconcile_entries_spares_prefix_sibling_root() {
 }
 
 #[test]
+fn reconcile_entries_removes_windows_style_ghosts_but_spares_prefix_sibling() {
+    // Windows counterpart of `reconcile_entries_batch_removes_ghosts_leaves_no_orphans`
+    // + `reconcile_entries_spares_prefix_sibling_root`, combined: the fix broadens
+    // `subtree_match` to recognize `\`-separated Windows paths, which is the
+    // highest-risk part of this change (reconcile_entries is destructive). A
+    // boundary-only assertion (nothing gets removed) would pass trivially against the
+    // OLD, unfixed code too — it fails safe by under-matching everything under
+    // `C:\proj`, ghost or not. So this pins BOTH halves: a real ghost under `C:\proj`
+    // IS removed (the actual fix — proves Windows subtree matching now works, not just
+    // "doesn't crash"), while `C:\projector`, a sibling sharing only the string prefix,
+    // is untouched.
+    let mut store = Store::open_in_memory().unwrap();
+    seed_full_entry(&mut store, r"C:\proj\a.rs"); // live — must survive
+    seed_full_entry(&mut store, r"C:\proj\b.rs"); // ghost — must be removed
+    seed_full_entry(&mut store, r"C:\projector\x.rs"); // sibling sharing the string prefix
+
+    let live: std::collections::HashSet<String> =
+        [r"C:\proj\a.rs".to_owned()].into_iter().collect();
+    let removed = store.reconcile_entries(r"C:\proj", &live).unwrap();
+    assert_eq!(removed, 1, "only C:\\proj\\b.rs is a ghost");
+
+    assert_eq!(orphan_rows_for(&store, r"C:\proj\b.rs"), 0);
+    assert!(
+        orphan_rows_for(&store, r"C:\proj\a.rs") >= 6,
+        "the live file must survive intact"
+    );
+    assert!(
+        orphan_rows_for(&store, r"C:\projector\x.rs") >= 6,
+        "C:\\projector must survive a C:\\proj reconcile"
+    );
+    assert_eq!(store.entry_count().unwrap(), 2);
+}
+
+#[test]
+fn delete_subtree_spares_sibling_prefix_windows_style() {
+    // Windows counterpart of `delete_subtree_no_trailing_slash_spares_sibling_prefix`.
+    // Same highest-risk destructive path as above, from the other entry point.
+    let mut store = Store::open_in_memory().unwrap();
+    seed_full_entry(&mut store, r"C:\proj");
+    seed_full_entry(&mut store, r"C:\proj\src\a.rs");
+    seed_full_entry(&mut store, r"C:\projector\x.rs"); // sibling sharing the string prefix
+
+    let removed = store.delete_subtree(r"C:\proj").unwrap(); // no trailing separator
+    assert_eq!(removed, 2, "removes C:\\proj and C:\\proj\\src\\a.rs only");
+
+    assert_eq!(orphan_rows_for(&store, r"C:\proj"), 0);
+    assert_eq!(orphan_rows_for(&store, r"C:\proj\src\a.rs"), 0);
+    assert!(
+        orphan_rows_for(&store, r"C:\projector\x.rs") >= 6,
+        "C:\\projector must survive"
+    );
+}
+
+#[test]
 fn entries_for_summarization_spares_prefix_sibling_root() {
     // Same boundary bug on the summarize side: summarizing /proj must not enqueue /projector.
     // Bare entries (not seed_full_entry, which pre-enqueues and would be excluded).
