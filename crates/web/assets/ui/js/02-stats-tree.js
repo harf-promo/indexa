@@ -1,17 +1,31 @@
 /* ── Stats ── */
 async function loadStats() {
   try {
-    const r = await fetch('/api/stats');
-    const d = await r.json();
-    const summaries = d.summaries || 0;
-    const pct = d.entries > 0 ? Math.round((100 * summaries) / d.entries) : 0;
-    const text = d.entries.toLocaleString() + ' files \xb7 ' +
+    // `/api/stats`'s entries/chunks/summaries are unfiltered `COUNT(*)`s over tables that
+    // hold file AND dir rows side by side, so neither `entries` nor `summaries` is a true
+    // file-only or folder-only figure. `/api/map` already computes real per-kind counts
+    // (`total_files`, and directory coverage as `built`/`total_dirs`) — use those instead
+    // of inventing a new backend query. `d.chunks` and `d.usage_week` still come from
+    // `/api/stats` (chunks are file-only by construction; usage isn't in `/api/map`).
+    const [statsR, mapR] = await Promise.all([fetch('/api/stats'), fetch('/api/map')]);
+    // `r.ok` matters here, not just a resolved fetch: a server error still returns valid
+    // JSON (`{"error": …}` from `err_json`), so `.json()` would otherwise resolve as if
+    // it were real data and render a false "0 files … 0 of 0 folders (0%)". Route either
+    // endpoint's failure into the existing catch below instead.
+    if (!statsR.ok || !mapR.ok) throw new Error('stats/map unavailable');
+    const d = await statsR.json();
+    const m = await mapR.json();
+    const totalFiles = m.total_files || 0;
+    const totalDirs = m.total_dirs || 0;
+    const builtDirs = m.built || 0;
+    const pct = totalDirs > 0 ? Math.round((100 * builtDirs) / totalDirs) : 0;
+    const text = totalFiles.toLocaleString() + ' files \xb7 ' +
       d.chunks.toLocaleString() + ' chunks \xb7 ' +
-      summaries.toLocaleString() + ' summaries (' + pct + '%)';
+      builtDirs.toLocaleString() + ' of ' + totalDirs.toLocaleString() + ' folders summarized (' + pct + '%)';
     const statsEl = document.getElementById('stats');
     if (statsEl) {
       statsEl.textContent = text;
-      statsEl.title = 'Searchable chunks vs written summaries — Ask works on chunks; Export and folder overviews need summaries.';
+      statsEl.title = 'Files indexed and searchable chunks vs folders with an AI summary built — Ask works on chunks; Export and folder overviews need folder summaries.';
     }
     renderSavingsWidget(d.usage_week);
   } catch(e) { document.getElementById('stats').textContent = 'No context yet'; }

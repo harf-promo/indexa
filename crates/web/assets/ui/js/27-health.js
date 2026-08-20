@@ -67,27 +67,38 @@
     document.body.insertBefore(bar, document.body.firstChild);
   }
 
-  // Dismissal keys on the summaries COUNT, not a plain boolean: re-dismissing after every
+  // Dismissal keys on the BUILT-DIRS count, not a plain boolean: re-dismissing after every
   // reload with unchanged coverage was worse than no dismiss button, but a flat "never show
   // again" would hide a real regression (or the banner never confirming real progress). If
   // the count when the user dismissed differs from the current count, coverage moved since
-  // then — the banner is legitimately showing new information and returns.
-  var THIN_DISMISS_KEY = 'indexa_thin_dismissed_at_summaries';
+  // then — the banner is legitimately showing new information and returns. (Renamed from
+  // "…at_summaries" — this used to key on the blended file+dir summary count; it now keys
+  // on the real directory-coverage count `showThinContextBanner` actually displays, so a
+  // stale value from before that fix simply won't match and the banner re-evaluates once.)
+  var THIN_DISMISS_KEY = 'indexa_thin_dismissed_at_built_dirs';
 
-  function showThinContextBanner(h) {
+  // `m` is the `/api/map` response — the same `total_dirs`/`built` figures the Map →
+  // Table view shows as "N of M folders" — or `null` if that fetch failed/errored.
+  // `h.thin_context` (from `/api/health`) is already computed from these same counts
+  // server-side, so the banner still shows (it's the accurate trigger) even without
+  // `m`; only the percentage in its text is omitted when the real numbers aren't in.
+  function showThinContextBanner(h, m) {
     if (!h.thin_context || document.getElementById('thin-context-banner')) return;
-    var entries = h.entries || 0;
-    var summaries = h.summaries || 0;
+    var haveCounts = !!m && typeof m.total_dirs === 'number' && typeof m.built === 'number';
+    var totalDirs = haveCounts ? m.total_dirs : 0;
+    var built = haveCounts ? m.built : 0;
     var dismissedAt = localStorage.getItem(THIN_DISMISS_KEY);
-    if (dismissedAt !== null && Number(dismissedAt) === summaries) return;
-    var pct = entries ? Math.round((100 * summaries) / entries) : 0;
+    if (haveCounts && dismissedAt !== null && Number(dismissedAt) === built) return;
+    var pctText = haveCounts && totalDirs > 0
+      ? ' (' + Math.round((100 * built) / totalDirs) + '% of folders summarized)'
+      : '';
     var bar = makeBanner(
       'thin-context-banner',
-      'Hierarchical context is thin (' + pct + '% summarized) — folder overviews and Export need summaries. Pick a project and click Build context.'
+      'Hierarchical context is thin' + pctText + ' — folder overviews and Export need summaries. Pick a project and click Build context.'
     );
     var dismiss = dismissButton(bar, 'Dismiss thin-context warning');
     dismiss.addEventListener('click', function () {
-      localStorage.setItem(THIN_DISMISS_KEY, String(summaries));
+      if (haveCounts) localStorage.setItem(THIN_DISMISS_KEY, String(built));
     });
     bar.appendChild(dismiss);
     document.body.insertBefore(bar, document.body.firstChild);
@@ -100,7 +111,16 @@
         if (!h) return;
         showStaleIndexBanner(h);
         showCliSkewBanner(h);
-        showThinContextBanner(h);
+        // Separate, best-effort fetch: if `/api/map` fails or errors, the thin-context
+        // banner still renders off `h.thin_context` alone (see showThinContextBanner) —
+        // the stale/CLI-skew banners above never depended on it either way. `r.ok` is
+        // checked explicitly because a server error still returns valid JSON (`{"error":
+        // …}` from `err_json`), which `.json()` would otherwise resolve as if it were
+        // real coverage data.
+        fetch('/api/map')
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (m) { showThinContextBanner(h, m); })
+          .catch(function () { showThinContextBanner(h, null); });
       })
       .catch(function () { /* health is best-effort — never block the UI */ });
   });

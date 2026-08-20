@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Coverage honesty (web).** The topbar now shows `N summaries (P%)` next to files/chunks, and the "context not built" banner is **path-aware** — a handful of summaries in one repo no longer hide that the selected folder has none. Hover actions collapse to one **Build context** verb (deep+summarize if the folder isn't searchable yet, summarize if it is); Re-scan / Refresh / Remove move into a ⋯ menu. Starting a job stays on the current view and offers "Watch progress" on the toast instead of yanking you into Activity. **Build context** on a folder that contains several detected projects refuses the whole-tree job and points at the per-project list. `GET /api/health` adds `summaries` + `thin_context`; a third banner names a thin hierarchical layer without calling it "stale". New `GET /api/projects` lists top-level detected apps with coverage so the welcome view can offer per-project Build context. Ask's **Agentic** toggle is labeled **Think harder**; a scoped answer on an unsummarized folder says so and offers the same button.
+- **Coverage honesty (web).** The topbar now shows folder-summary coverage (`N of M folders summarized (P%)`) next to files/chunks, and the "context not built" banner is **path-aware** — a handful of summaries in one repo no longer hide that the selected folder has none. Hover actions collapse to one **Build context** verb (deep+summarize if the folder isn't searchable yet, summarize if it is); Re-scan / Refresh / Remove move into a ⋯ menu. Starting a job stays on the current view and offers "Watch progress" on the toast instead of yanking you into Activity. **Build context** on a folder that contains several detected projects refuses the whole-tree job and points at the per-project list. `GET /api/health` adds `summaries` + `thin_context`; a third banner names a thin hierarchical layer without calling it "stale". New `GET /api/projects` lists top-level detected apps with coverage so the welcome view can offer per-project Build context. Ask's **Agentic** toggle is labeled **Think harder**; a scoped answer on an unsummarized folder says so and offers the same button.
 - **Review inbox noise (detectors + web).** Archive questions no longer fire on generated/toolchain caches (`/build/`, `SourcePackages`, `.xcframework`, `DerivedData`, `Pods`, gradle wrappers, `/gen/`). Duplicate questions skip ubiquitous sibling manifests (`Cargo.toml`, `package.json`, `go.mod`, …) unless they are exact copies in the same folder. `sweep_filtered_noise` retro-dismisses the existing inbox on the next `index`/`prune`. The Review drawer groups cards by type and pre-fills the batch "under" folder when every open question of that type shares a path prefix.
 - **Surface the product (web).** The toolbar **Export** menu lists named Context Packs and can create a pack from the selected folder — no need to open Settings. Map now opens on the coverage **Treemap** at whole-disk scope (the graph is a hairball there) and switches to **Graph** once you select a project-depth folder; an explicit tab click still sticks. Settings tucks passes / resources / insights / packs / weights under **More settings**. `docs/COMPETITIVE.md` "still open" list no longer claims Decision Ledger or token-savings are unshipped.
 
@@ -165,6 +165,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The "hierarchical %" coverage figure (web) was neither a file nor a folder
+  percentage.** The topbar stat and the thin-context banner both computed
+  `100 * summaries / entries`, but `summary_count`/`entry_count` are unfiltered
+  `COUNT(*)` queries over `summaries`/`entries` — both tables hold file AND dir rows
+  side by side, so the result was an uninterpretable mix of file and folder coverage,
+  and the topbar additionally mislabeled the dir-inclusive entry count as `" files"`.
+  Both now use `/api/map`'s already-computed, correctly-scoped figures: the topbar
+  shows `total_files` for the file count and `built`/`total_dirs` (true directory
+  coverage) for the percentage, explicitly labeled "folders"; the banner does the
+  same. `GET /api/health`'s `thin_context` trigger moved off the same blended ratio
+  onto the identical directory-only computation (`coverage_stats`), so the banner's
+  own gate now matches what its text says — a repo with strong file coverage but no
+  folder roll-ups yet correctly reads as thin, and a repo with zero directories (only
+  possible for a genuinely empty index — the scanned root itself always lands a
+  `kind = 'dir'` row) has nothing hierarchical to warn about. Threshold stays 10%,
+  applied to the true (smaller) directory population.
 - **CLI log filter had no per-crate targeting and silently ignored `RUST_LOG`'s global level.**
   `apps/indexa/src/main.rs` built its `EnvFilter` via `from_default_env().add_directive(INFO)`;
   the target-less `INFO` directive always overwrote whatever global level `RUST_LOG` set, so
