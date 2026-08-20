@@ -5,6 +5,7 @@
 use crate::jobs::{broadcast_only, push, JobEvent, JobHandle, JobStatus, Jobs};
 use crate::AppState;
 use indexa_core::{
+    decisions::detectors::expire_vanished_decisions,
     resource::WatchdogState,
     walker::{walk, WalkConfig},
 };
@@ -267,6 +268,32 @@ async fn run_scan_phase_with_entries(
                 stage: "scan".to_owned(),
                 item_path: None,
                 message: format!("orphan prune skipped: {e:#}"),
+                pressure: None,
+            },
+        ),
+    }
+    // H1: expire open Review questions whose subject left the index. Only the CLI's
+    // `indexa index`/`indexa review` ran this (via run_detectors) — a web-only "Build
+    // context" workflow, or a subject later excluded by a `[scan] ignore` edit, could
+    // leave a stale question in the inbox forever. Runs alongside prune_orphans above:
+    // same "index hygiene after a scan" concern, same natural cadence.
+    match expire_vanished_decisions(&mut store, state.config.review.max_open) {
+        Ok(n) if n > 0 => push(
+            handle,
+            JobEvent::Warning {
+                stage: "scan".to_owned(),
+                item_path: None,
+                message: format!("expired {n} Review question(s) whose subject left the index"),
+                pressure: None,
+            },
+        ),
+        Ok(_) => {}
+        Err(e) => push(
+            handle,
+            JobEvent::Warning {
+                stage: "scan".to_owned(),
+                item_path: None,
+                message: format!("decision-expiry sweep skipped: {e:#}"),
                 pressure: None,
             },
         ),

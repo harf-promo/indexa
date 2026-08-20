@@ -24,7 +24,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -32,7 +32,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache Cargo registry
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -52,20 +52,20 @@ jobs:
 
   # Headless-Chrome smoke test of the served web UI. The JS bundle is
   # compile-time-concatenated, so only executing the page in a real browser
-  # catches runtime ReferenceErrors that fmt/clippy/test cannot. Additive job —
-  # NOT in the branch-protection required-checks list.
+  # catches runtime ReferenceErrors that fmt/clippy/test cannot. Hermetic and
+  # fast — promoted to a branch-protection required check (M14).
   web-smoke:
     name: web smoke (headless Chrome)
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo registry
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -101,20 +101,20 @@ jobs:
   # Catches regressions in chunking / parsing / tokenization / the ranking this job DOES
   # cover that fmt/clippy/test cannot see. Golden probes are distinctive identifiers scored
   # in sparse (BM25) mode; the floor is set well below the measured 1.00 hit rate to
-  # tolerate cross-run tie-order drift. Additive job — NOT in the branch-protection
-  # required-checks list.
+  # tolerate cross-run tie-order drift. Promoted to a branch-protection required check
+  # (M14) now that C4's RRF tie-break fix made sparse-mode scoring deterministic.
   eval:
     name: retrieval eval (self-golden, hermetic)
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo registry
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -141,14 +141,14 @@ jobs:
   # only surfaced at release. This compiles it on every PR — a native arm64 build,
   # no bundling/signing (that stays in release.yml). RUSTFLAGS is cleared so a
   # warning in a third-party tauri dependency can't fail the build; we only want to
-  # catch our own compile errors here. Additive — NOT in branch-protection.
+  # catch our own compile errors here. Branch-protection required check.
   desktop-build:
     name: desktop build (macOS)
     runs-on: macos-latest
     env:
       RUSTFLAGS: ""
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
