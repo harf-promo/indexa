@@ -546,6 +546,29 @@ mod tests {
         }
     }
 
+    /// An embedder that always fails — for testing an embedder-outage error path
+    /// (`search` mode `"dense"`) without needing a real (or missing) Ollama.
+    struct FailingEmbedder;
+    #[async_trait::async_trait]
+    impl Embedder for FailingEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Err(anyhow::anyhow!("embedder offline"))
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+
+    /// Concatenate a `CallToolResult`'s text content blocks — the common shape every tool
+    /// call's assertions need to inspect.
+    fn tool_text(r: CallToolResult) -> String {
+        r.content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// An `IndexaMcp` over a fresh temp-file index. Returns the handle plus the `TempDir`
     /// guard for the DB (kept alive by the caller) and a closure-free seeded store.
     fn mcp_with_db(dbdir: &tempfile::TempDir) -> IndexaMcp {
@@ -890,6 +913,463 @@ mod tests {
         assert!(
             !body.contains("0123456789"),
             "offset read must NOT include the skipped prefix, got: {body}"
+        );
+    }
+
+    // ── FM-3: response caps + behavior fixes (revives #374 against current main) ──
+
+    #[tokio::test]
+    async fn dependencies_caps_each_group_and_says_so() {
+        // A file with huge fan-out (150 imports) must not dump them all — capped at 100 with a
+        // truthful "showing first 100" note; the header still reports the true total.
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let edges: Vec<indexa_core::store::EdgeRecord> = (0..150)
+                .map(|i| indexa_core::store::EdgeRecord {
+                    from_path: "/big.rs".into(),
+                    kind: "imports".into(),
+                    to_ref: format!("mod{i:03}"),
+                })
+                .collect();
+            store.upsert_edges(&edges).unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let res = mcp
+            .dependencies(Parameters(DependenciesParams {
+                path: "/big.rs".into(),
+                include_heritage: false,
+            }))
+            .await
+            .unwrap();
+        let text = tool_text(res);
+        assert!(
+            text.starts_with("Imports (150, showing first 100):"),
+            "expected a truncated header, got first line: {:?}",
+            text.lines().next().unwrap_or("")
+        );
+        assert_eq!(
+            text.lines()
+                .filter(|l| l.trim_start().starts_with('→'))
+                .count(),
+            100,
+            "body must list exactly 100 items, got:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn insights_duplicates_caps_clusters_and_says_so() {
+        use indexa_core::store::SummaryRecord;
+        // 51 exact-duplicate pairs (source_hash shared within each pair) — one more cluster
+        // than the 50-cluster cap.
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            for i in 0..51 {
+                for j in 0..2 {
+                    store
+                        .upsert_summary(&SummaryRecord {
+                            path: format!("/dup{i}_{j}.rs"),
+                            kind: "file".to_owned(),
+                            parent_path: None,
+                            depth: 0,
+                            summary: "x".to_owned(),
+                            summary_l0: None,
+                            embedding: None,
+                            child_count: 0,
+                            byte_size: 10,
+                            model: "t".to_owned(),
+                            source_hash: format!("hash{i}"),
+                            generated_at: 0,
+                        })
+                        .unwrap();
+                }
+            }
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let res = mcp
+            .insights_duplicates(Parameters(InsightsDuplicatesParams {
+                threshold: None,
+                exact: Some(true),
+            }))
+            .await
+            .unwrap();
+        let text = tool_text(res);
+        assert!(
+            text.starts_with("51 duplicate cluster(s), showing first 50:"),
+            "expected a truncated header, got first line: {:?}",
+            text.lines().next().unwrap_or("")
+        );
+        assert_eq!(
+            text.matches("Cluster ").count(),
+            50,
+            "body must list exactly 50 clusters, got:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_classifications_clamps_limit_to_at_least_one() {
+        // Without the clamp, `limit: 0` maps to the store's "no limit" sentinel (LIMIT -1) and
+        // would return all 3 seeded rows; `.clamp(1, 500)` turns it into exactly 1.
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_auto_classifications(&[
+                    ("/a".to_owned(), "file".to_owned(), "work".to_owned(), 0.9),
+                    ("/b".to_owned(), "file".to_owned(), "work".to_owned(), 0.8),
+                    ("/c".to_owned(), "file".to_owned(), "work".to_owned(), 0.7),
+                ])
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let res = mcp
+            .list_classifications(Parameters(ListClassificationsParams {
+                source: None,
+                limit: Some(0),
+            }))
+            .await
+            .unwrap();
+        let text = tool_text(res);
+        assert!(
+            text.starts_with("1 classification(s):"),
+            "limit:0 must clamp up to (at least) 1, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_files_by_category_clamps_limit_to_at_least_one() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_auto_classifications(&[
+                    ("/a".to_owned(), "file".to_owned(), "work".to_owned(), 0.9),
+                    ("/b".to_owned(), "file".to_owned(), "work".to_owned(), 0.8),
+                    ("/c".to_owned(), "file".to_owned(), "work".to_owned(), 0.7),
+                ])
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let res = mcp
+            .list_files_by_category(Parameters(ListFilesByCategoryParams {
+                category: "work".into(),
+                limit: Some(0),
+            }))
+            .await
+            .unwrap();
+        let text = tool_text(res);
+        assert!(
+            text.starts_with("1 file(s) classified as \"work\":"),
+            "limit:0 must clamp up to (at least) 1, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_chunk_context_clamps_radius_to_a_bounded_window() {
+        // A huge `radius` must not dump the whole file — it's clamped to a bounded neighbor
+        // window (2*25 + 1 = 51 chunks around the center seq), not all 100.
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let chunks: Vec<indexa_core::store::ChunkRecord> = (0..100)
+                .map(|i| indexa_core::store::ChunkRecord {
+                    entry_path: "/big.rs".into(),
+                    seq: i,
+                    heading: String::new(),
+                    text: format!("chunk {i}"),
+                    language: None,
+                    embedding: None,
+                    embed_model: None,
+                    content_hash: None,
+                })
+                .collect();
+            store.upsert_chunks(&chunks).unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let res = mcp
+            .get_chunk_context(Parameters(GetChunkContextParams {
+                path: "/big.rs".into(),
+                seq: Some(50),
+                radius: Some(9999),
+            }))
+            .await
+            .unwrap();
+        let text = tool_text(res);
+        assert!(
+            text.starts_with("51 chunk(s) from /big.rs"),
+            "radius should clamp to a 51-chunk window; got first line: {:?}",
+            text.lines().next().unwrap_or("")
+        );
+    }
+
+    fn ask_params(
+        session_id: Option<&str>,
+        synthesize: Option<bool>,
+        catalog: Option<bool>,
+    ) -> AskParams {
+        AskParams {
+            question: "what does this do".to_owned(),
+            scope: None,
+            mode: None,
+            agentic: None,
+            rerank: None,
+            rerank_backend: None,
+            explain_savings: None,
+            session_id: session_id.map(str::to_owned),
+            top_k: None,
+            synthesize,
+            catalog,
+        }
+    }
+
+    #[tokio::test]
+    async fn ask_synthesize_false_wins_over_catalog_true_and_omits_the_session_footer() {
+        // Sub-fixes 5+6: `synthesize:false` must win over `catalog:true` — the caller
+        // explicitly asked for no synthesis, so it must get the richer retrieval-only slice,
+        // not the catalog's file list. And because that turn is never persisted, the "pass the
+        // same session_id to follow up" footer must not appear either — its promise must match
+        // what actually happened.
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        let res = mcp
+            .ask(Parameters(ask_params(
+                Some("conv1"),
+                Some(false),
+                Some(true),
+            )))
+            .await
+            .unwrap();
+        let text = tool_text(res);
+        assert!(
+            text.starts_with("RETRIEVED CONTEXT"),
+            "synthesize:false must win over catalog:true — expected the retrieval-only slice \
+             header, got: {text}"
+        );
+        assert!(
+            !text.contains("Conversation: conv1"),
+            "a retrieval-only (unrecorded) turn must not promise a session follow-up, got: {text}"
+        );
+
+        // Confirm the turn really wasn't persisted — the footer's absence must be honest, not
+        // just cosmetic.
+        let dbpath = dbdir.path().join("idx.db");
+        let store = Store::open(&dbpath).unwrap();
+        assert!(
+            store.recent_turns("conv1", 10).unwrap().is_empty(),
+            "retrieval-only ask must not record a conversation turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_synthesized_answer_records_the_turn_and_shows_the_session_footer() {
+        // The positive case: when an answer IS synthesized (the default), the footer's promise
+        // is honest — the turn really is recorded under session_id.
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        let res = mcp
+            .ask(Parameters(ask_params(Some("conv2"), None, None)))
+            .await
+            .unwrap();
+        let text = tool_text(res);
+        assert!(
+            text.contains("Conversation: conv2"),
+            "a synthesized answer must show the session-continuity footer, got: {text}"
+        );
+
+        let dbpath = dbdir.path().join("idx.db");
+        let store = Store::open(&dbpath).unwrap();
+        assert!(
+            !store.recent_turns("conv2", 10).unwrap().is_empty(),
+            "a synthesized answer's turn must actually be recorded (the footer's promise must \
+             be true)"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_dense_mode_surfaces_embedder_outage_instead_of_a_misleading_no_results() {
+        // Sub-fix 7: in `dense` mode the embedding IS the search — a failed embed must be a
+        // hard, explicit error, not a silent fallback that reports "No results" and hides an
+        // embedder outage behind an indistinguishable empty-index message.
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        let _ = Store::open(&dbpath).unwrap();
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(FailingEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+        let err = mcp
+            .search(Parameters(SearchParams {
+                query: "widget".into(),
+                limit: None,
+                scope: None,
+                mode: Some("dense".into()),
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            err.message.contains("embedder is unavailable"),
+            "dense mode with a failing embedder must name the embedder outage, got: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn search_rrf_mode_falls_back_gracefully_when_the_embedder_fails() {
+        // The graceful-fallback half of the same fix: `rrf` mode must NOT propagate the
+        // embedder error — the sparse arm still works, so it returns its honest (here empty)
+        // result instead of failing the whole call.
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        let _ = Store::open(&dbpath).unwrap();
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(FailingEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+        let res = mcp
+            .search(Parameters(SearchParams {
+                query: "widget".into(),
+                limit: None,
+                scope: None,
+                mode: None, // default rrf
+            }))
+            .await;
+        assert!(
+            res.is_ok(),
+            "rrf mode must gracefully fall back to sparse-only on an embedder failure, got: {res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_pack_records_usage_telemetry() {
+        // Sub-fix 8: pack tool calls must record savings telemetry like every other
+        // retrieval tool — this was missing entirely for `search_pack`/`export_pack`.
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let id = store.create_pack("proj", None).unwrap();
+            store.add_pack_paths(&id, &["/root".to_owned()]).unwrap();
+            store
+                .upsert_chunks(&[indexa_core::store::ChunkRecord {
+                    entry_path: "/root/a.rs".into(),
+                    seq: 0,
+                    heading: String::new(),
+                    text: "unique_needle_xyz content".into(),
+                    language: None,
+                    embedding: None,
+                    embed_model: None,
+                    content_hash: None,
+                }])
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let res = mcp
+            .search_pack(Parameters(SearchPackParams {
+                name: "proj".into(),
+                query: "unique_needle_xyz".into(),
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        let text = tool_text(res);
+        assert!(
+            text.contains("result(s) in pack"),
+            "expected at least one hit, got: {text}"
+        );
+
+        let store = Store::open(&dbpath).unwrap();
+        // `since_secs` is measured from "now" (`WHERE at >= unixepoch() - since_secs`), so 0
+        // would race a second boundary between the insert and this read; use the same
+        // week-wide window every other `usage_by_tool` caller uses.
+        let usage = store
+            .usage_by_tool(indexa_core::store::USAGE_WEEK_SECS)
+            .unwrap();
+        assert!(
+            usage
+                .iter()
+                .any(|(tool, s)| tool == "search_pack" && s.calls > 0),
+            "search_pack must record usage telemetry, got: {usage:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_pack_records_usage_telemetry() {
+        use indexa_core::store::SummaryRecord;
+        use indexa_core::walker::{Entry, EntryKind};
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let id = store.create_pack("proj", None).unwrap();
+            store
+                .add_pack_paths(&id, &["/root/a.rs".to_owned()])
+                .unwrap();
+            store
+                .upsert_entries(&[Entry {
+                    path: "/root/a.rs".into(),
+                    kind: EntryKind::File,
+                    size: 42,
+                    modified: None,
+                    hint: None,
+                    is_binary: false,
+                }])
+                .unwrap();
+            store
+                .upsert_summary(&SummaryRecord {
+                    path: "/root/a.rs".to_owned(),
+                    kind: "file".to_owned(),
+                    parent_path: None,
+                    depth: 0,
+                    summary: "A summary.".to_owned(),
+                    summary_l0: None,
+                    embedding: None,
+                    child_count: 0,
+                    byte_size: 42,
+                    model: "t".to_owned(),
+                    source_hash: "h1".to_owned(),
+                    generated_at: 0,
+                })
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let res = mcp
+            .export_pack(Parameters(ExportPackParams {
+                name: "proj".into(),
+                format: None,
+                depth: None,
+                signatures: None,
+                changed_since: None,
+                category: None,
+                include_graph: false,
+                graph_format: None,
+            }))
+            .await
+            .unwrap();
+        let text = tool_text(res);
+        assert!(!text.is_empty(), "export must produce content");
+
+        let store = Store::open(&dbpath).unwrap();
+        // `since_secs` is measured from "now" (`WHERE at >= unixepoch() - since_secs`), so 0
+        // would race a second boundary between the insert and this read; use the same
+        // week-wide window every other `usage_by_tool` caller uses.
+        let usage = store
+            .usage_by_tool(indexa_core::store::USAGE_WEEK_SECS)
+            .unwrap();
+        assert!(
+            usage
+                .iter()
+                .any(|(tool, s)| tool == "export_pack" && s.calls > 0),
+            "export_pack must record usage telemetry, got: {usage:?}"
         );
     }
 

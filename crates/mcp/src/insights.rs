@@ -59,8 +59,13 @@ impl IndexaMcp {
         if clusters.is_empty() {
             return Ok(ok_text("No duplicates found."));
         }
+        // Cap the clusters listed so a heavily-duplicated tree can't flood the client's
+        // context; the header always reports the true total and, when truncated, says so.
+        const MAX_CLUSTERS: usize = 50;
+        let total = clusters.len();
         let lines: Vec<String> = clusters
             .iter()
+            .take(MAX_CLUSTERS)
             .enumerate()
             .map(|(i, c)| {
                 format!(
@@ -76,9 +81,13 @@ impl IndexaMcp {
                 )
             })
             .collect();
+        let trunc = if total > MAX_CLUSTERS {
+            format!(", showing first {MAX_CLUSTERS}")
+        } else {
+            String::new()
+        };
         Ok(ok_text(format!(
-            "{} duplicate cluster(s):\n\n{}",
-            clusters.len(),
+            "{total} duplicate cluster(s){trunc}:\n\n{}",
             lines.join("\n\n")
         )))
     }
