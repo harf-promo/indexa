@@ -18,7 +18,7 @@
 //! load failure, or timeout falls back to the original hit order — reranking must never make
 //! `ask` worse or produce an error.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
@@ -165,6 +165,46 @@ impl CandleInner {
     }
 }
 
+/// A lazily-loaded, retry-on-failure cache slot.
+///
+/// Similar to `OnceLock`, but a failed `load` does **not** permanently poison the slot:
+/// it stays empty, so the *next* call retries `load` instead of replaying a stale error
+/// forever (a transient failure — a file lock, a disk hiccup, no network on first use —
+/// shouldn't wedge the feature for the rest of the process). Concurrent callers serialize
+/// on the internal lock while a load is in flight, so a still-broken load is attempted
+/// once per caller in turn rather than every waiting caller kicking off its own parallel
+/// load (no thundering herd). Once a load succeeds, the value is cached behind a cheaply
+/// cloned `Arc`, so the lock is only ever held for the (short) check-or-set — never for
+/// however long the caller then spends using the value.
+struct RetryCache<T> {
+    slot: Mutex<Option<Arc<T>>>,
+}
+
+impl<T> RetryCache<T> {
+    const fn new() -> Self {
+        Self {
+            slot: Mutex::new(None),
+        }
+    }
+
+    /// Get the cached value, loading it via `load` if the slot is empty (first call, or
+    /// every prior call's `load` failed). A poisoned lock (a prior `load` panicked) is
+    /// recovered rather than propagated — the slot itself is untouched by a panic during
+    /// `load`, since it's only written after `load` returns `Ok`.
+    fn get_or_try_init<E>(&self, load: impl FnOnce() -> Result<T, E>) -> Result<Arc<T>, E> {
+        let mut guard = self
+            .slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(value) = guard.as_ref() {
+            return Ok(Arc::clone(value));
+        }
+        let loaded = Arc::new(load()?);
+        *guard = Some(Arc::clone(&loaded));
+        Ok(loaded)
+    }
+}
+
 /// Reranker backed by a local DeBERTa-v2 model via candle (pure Rust, CPU-only).
 ///
 /// The model is downloaded from HuggingFace on first use and memory-mapped from
@@ -172,16 +212,17 @@ impl CandleInner {
 /// queries). Fails open: if loading or scoring fails, `apply_rerank` returns the
 /// original order unchanged.
 pub(crate) struct CandleReranker {
-    /// Singleton model state — `OnceLock` so the 1–2 s load cost is paid once.
-    inner: &'static OnceLock<anyhow::Result<CandleInner>>,
+    /// Singleton model cache — see `RetryCache`. A failed load is retried by the next
+    /// call rather than cached forever.
+    inner: &'static RetryCache<CandleInner>,
     /// HuggingFace repo id of the DeBERTa-v2 reranker (from `[retrieval] rerank_model`).
     model_id: String,
 }
 
 // One global slot. `rerank_model` comes from config, which is fixed for the process
 // lifetime, so the single slot correctly caches the one configured model — whichever id
-// wins the first `get_or_init` is the only one used, and it's always the same id.
-static CANDLE_INNER: OnceLock<anyhow::Result<CandleInner>> = OnceLock::new();
+// wins the first successful load is the only one used, and it's always the same id.
+static CANDLE_INNER: RetryCache<CandleInner> = RetryCache::new();
 
 impl CandleReranker {
     pub(crate) fn new(model_id: &str) -> Self {
@@ -190,42 +231,31 @@ impl CandleReranker {
             model_id: model_id.to_string(),
         }
     }
-
-    fn get_inner(&self) -> anyhow::Result<&CandleInner> {
-        let result = self.inner.get_or_init(|| CandleInner::load(&self.model_id));
-        match result {
-            Ok(inner) => Ok(inner),
-            Err(e) => anyhow::bail!("candle reranker unavailable: {e:#}"),
-        }
-    }
 }
-
-// CandleInner: DebertaV2SeqClassificationModel and Tokenizer are both Send + Sync on CPU.
-// SAFETY: candle CPU tensors + HF tokenizers are thread-safe for read-only inference.
-unsafe impl Send for CandleInner {}
-unsafe impl Sync for CandleInner {}
 
 #[async_trait::async_trait]
 impl CrossEncoder for CandleReranker {
     async fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<usize>> {
-        // Pair strings for the blocking closure.
+        // Own the inputs for the blocking closure. `slot` is `&'static`, and `CandleInner`
+        // is naturally `Send + Sync` (candle CPU tensors + HF tokenizers are thread-safe
+        // for read-only inference), so no unsafe/raw-pointer smuggling across the blocking
+        // boundary is needed — the model is loaded and used entirely on the blocking thread.
         let query = query.to_owned();
         let docs: Vec<String> = docs.iter().map(|s| s.to_string()).collect();
-
-        // Get or initialize the model. Wrapping in a Mutex is not needed because
-        // we own the &'static reference via OnceLock; &CandleInner is Send.
-        let inner = match self.get_inner() {
-            Ok(i) => i as *const CandleInner as usize, // raw pointer for Send boundary
-            Err(e) => {
-                tracing::warn!("candle reranker load failed, keeping original order: {e:#}");
-                return Ok(Vec::new()); // apply_rerank treats empty as "keep original"
-            }
-        };
+        let slot = self.inner;
+        let model_id = self.model_id.clone();
 
         tokio::task::spawn_blocking(move || {
-            // SAFETY: the pointer is valid for the entire process lifetime
-            // (stored in a `'static OnceLock`), and we only read from it.
-            let inner = unsafe { &*(inner as *const CandleInner) };
+            // Load (and cache) the model on THIS blocking thread — the ~85 MB HF fetch +
+            // mmap must never run on a tokio worker. `RetryCache` caches only on success,
+            // so a failed load falls open here and is retried on a later call.
+            let inner = match slot.get_or_try_init(|| CandleInner::load(&model_id)) {
+                Ok(inner) => inner,
+                Err(e) => {
+                    tracing::warn!("candle reranker load failed, keeping original order: {e:#}");
+                    return Vec::new(); // apply_rerank treats empty as "keep original"
+                }
+            };
             let mut scored: Vec<(usize, f32)> = docs
                 .iter()
                 .enumerate()
@@ -418,6 +448,90 @@ mod tests {
         assert_eq!(parse_ranking("3,3,9,1", 3), vec![2, 0]);
         // no numbers → empty (caller fails open)
         assert!(parse_ranking("I cannot rank these", 3).is_empty());
+    }
+
+    /// A failed load must NOT be cached forever — the next call (after whatever caused the
+    /// failure is "fixed") should retry `load`, not replay the stale error.
+    #[test]
+    fn retry_cache_retries_after_failure() {
+        let cache: RetryCache<u32> = RetryCache::new();
+        let attempts = std::sync::atomic::AtomicU32::new(0);
+
+        // First call: loader fails (e.g. transient — no network, disk hiccup, OOM).
+        let err = cache
+            .get_or_try_init(|| {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err::<u32, &str>("transient failure")
+            })
+            .expect_err("first load should fail");
+        assert_eq!(err, "transient failure");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Second call ("fixed"): loader now succeeds — must not be stuck on the cached
+        // error from the first attempt.
+        let value = cache
+            .get_or_try_init(|| {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok::<u32, &str>(42)
+            })
+            .expect("retry after the underlying problem is fixed should succeed");
+        assert_eq!(*value, 42);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        // Third call: now cached on success — loader must not run again.
+        let value = cache
+            .get_or_try_init(|| {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok::<u32, &str>(99)
+            })
+            .expect("cached value should be returned without reloading");
+        assert_eq!(*value, 42, "must return the cached value, not reload");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// Concurrent callers hitting a still-broken (or still-loading) slot must serialize on
+    /// the cache's lock rather than each kicking off their own parallel `load` — no
+    /// thundering herd. Asserted directly: track how many `load` closures are executing at
+    /// once and require the observed max to be exactly 1.
+    #[test]
+    fn retry_cache_serializes_concurrent_loads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Barrier;
+        use std::thread;
+
+        const THREADS: usize = 8;
+        let cache = Arc::new(RetryCache::<u32>::new());
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(THREADS));
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                let in_flight = Arc::clone(&in_flight);
+                let max_in_flight = Arc::clone(&max_in_flight);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait(); // fire every thread at once
+                    cache.get_or_try_init(|| {
+                        let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_in_flight.fetch_max(now, Ordering::SeqCst);
+                        thread::sleep(std::time::Duration::from_millis(20));
+                        in_flight.fetch_sub(1, Ordering::SeqCst);
+                        Ok::<u32, &str>(7)
+                    })
+                })
+            })
+            .collect();
+
+        for h in handles {
+            assert_eq!(*h.join().unwrap().unwrap(), 7);
+        }
+        assert_eq!(
+            max_in_flight.load(Ordering::SeqCst),
+            1,
+            "concurrent callers must serialize on the cache lock, not each load in parallel"
+        );
     }
 
     /// Proves the config-supplied `[retrieval] rerank_model` id loads through the DeBERTa path
