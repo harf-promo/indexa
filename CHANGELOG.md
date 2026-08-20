@@ -51,8 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`notes.rs`, `decisions/detectors/mod.rs` ×6, `store/types.rs::chunk_content_hash`,
   `store/summaries.rs` ×2, `apps/indexa/src/commands/sources.rs`) instead of hand-rolling the
   hex fold at each site.
-  **Digest bytes proven identical, not assumed:** `hex_digest(Sha256::digest(b"test-input"))`
-  under sha2 0.10.9 and again under 0.11.0 both produce
+  **Digest bytes proven identical, not assumed:** hex-encoding `Sha256::digest(b"test-input")`
+  under sha2 0.10.9 (via the pre-bump `format!("{:x}", …)`) and again under 0.11.0 (via the new
+  `hex_digest` helper) both produce
   `ae1608896372720b6ebb58261e0c0092c608324b0804bc99267c1753990faaa8`, matching an
   independently-computed reference (`printf '%s' "test-input" | shasum -a 256`, outside the Rust
   build entirely) — now a permanent regression test
