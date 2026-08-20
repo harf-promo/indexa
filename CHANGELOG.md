@@ -35,7 +35,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Cheaper index hot loops (no change in results).** Two per-call patterns collapsed to batched
+- **Web server latency + memory hygiene (scoped revival of #371, three of its four sub-fixes;
+  re-derived against current `main` rather than reapplied verbatim — `packs.rs` had moved
+  substantially under the pack-refresh feature, #464).** `GET /api/packs/:name/search` now embeds
+  the query *before* taking the store lock (it used to hold the mutex across the whole embed
+  round-trip, blocking every other request — list/create/other packs' search — for the embed
+  call's full duration); `api_packs_suggest` and the newer `api_packs_refresh` already followed
+  this release-before-slow-op shape, so this brings `api_packs_search` in line with them.
+  `GET /api/logs/tail` now reads a bounded window (`read_tail_window`, ~512 bytes/line, clamped to
+  [4 KiB, 256 KiB]) from the *end* of the day's log via a seek instead of loading the whole file —
+  it also skips leading UTF-8 continuation bytes before the lossy decode, so a seek that lands
+  mid-character never turns into a stray replacement glyph in the response. The UI CSS/JS/HTML
+  bundle is now served with a content-hash `ETag`; a repeat load whose `If-None-Match` matches gets
+  a bodyless `304 Not Modified` instead of re-downloading the bundle every time. **Deliberately
+  excluded:** the reference PR's `jobs.rs` Progress-event-coalescing fix — superseded by a more
+  thorough fix already on `main` (a dedicated `last_progress` field), so reapplying it would
+  regress that. Two per-call patterns collapsed to batched
   or streamed forms, reviving and re-verifying the stalled `perf-hot-loops-d9` work against
   current `main`: `embeddings_for_chunks` (the MMR re-ranking pass's candidate-vector fetch) now
   runs one `IN (…)` query instead of one `query_row` per chunk id, mirroring the existing
