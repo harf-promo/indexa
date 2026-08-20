@@ -879,6 +879,18 @@ mod tests {
     }
 
     fn state_with_db(store: Store, db_path: PathBuf) -> AppState {
+        state_with_embedder(store, db_path, Arc::new(StubEmbedder))
+    }
+
+    /// Same as `state_with_db`, but with a caller-supplied embedder — the seam
+    /// `api_packs_search_does_not_hold_store_lock_across_embed` needs to inject a
+    /// `GatedEmbedder` whose `embed()` blocks until signaled, without touching `StubEmbedder`
+    /// (which every other test in this module implicitly relies on completing instantly).
+    fn state_with_embedder(
+        store: Store,
+        db_path: PathBuf,
+        embedder: Arc<dyn Embedder + Send + Sync + 'static>,
+    ) -> AppState {
         // The sender is dropped immediately; the receiver still yields its last value on
         // `borrow()`, and none of the tested handlers read telemetry anyway.
         let (_tx, telemetry) = tokio::sync::watch::channel(crate::dto::TelemetrySample::default());
@@ -891,7 +903,7 @@ mod tests {
         let config_path = Arc::new(temp_config_path(&format!("state-{tag}")));
         AppState {
             store: Arc::new(Mutex::new(store)),
-            embedder: Arc::new(StubEmbedder),
+            embedder,
             llm: Arc::new(StubGenerator),
             config: Arc::new(Config::default()),
             jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
@@ -942,6 +954,94 @@ mod tests {
         assert!(csp.contains("default-src 'self'"));
         assert!(csp.contains("object-src 'none'"));
         assert!(csp.contains("frame-ancestors 'none'"));
+    }
+
+    /// The static UI bundle (JS, and by construction CSS/HTML too — `cached_asset` is shared
+    /// code) must send a content-hash `ETag` and honor `If-None-Match` with a bodyless `304`,
+    /// so a repeat page load doesn't re-download the whole bundle every time.
+    #[tokio::test]
+    async fn ui_asset_sends_etag_and_304_on_match() {
+        use axum::http::header::{ETAG, IF_NONE_MATCH};
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+
+        // First load, no If-None-Match → 200 with a quoted content-hash ETag.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/app.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let etag = resp
+            .headers()
+            .get(ETAG)
+            .expect("ETag header missing from asset response")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            etag.starts_with('"') && etag.ends_with('"'),
+            "expected a quoted strong ETag, got: {etag}"
+        );
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            !body_bytes.is_empty(),
+            "first load must return the full bundle body"
+        );
+
+        // Repeat with a MATCHING If-None-Match → 304 Not Modified, empty body.
+        let resp2 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/app.js")
+                    .header(IF_NONE_MATCH, &etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::NOT_MODIFIED);
+        let body2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(body2.is_empty(), "304 response must not carry a body");
+
+        // A STALE/missing If-None-Match → full 200 with a fresh, matching ETag header again.
+        let resp3 = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/app.js")
+                    .header(IF_NONE_MATCH, "\"not-the-real-etag\"")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp3.status(), StatusCode::OK);
+        let etag3 = resp3
+            .headers()
+            .get(ETAG)
+            .expect("ETag header missing on stale-If-None-Match response")
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            etag3, etag,
+            "ETag must be stable across requests for an unchanged bundle"
+        );
+        let body3 = axum::body::to_bytes(resp3.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            !body3.is_empty(),
+            "stale If-None-Match must still return the full body"
+        );
     }
 
     #[tokio::test]
@@ -1492,6 +1592,95 @@ mod tests {
         let (status, json) = post_json(app, "/api/packs/nope/refresh", serde_json::json!({})).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(json.get("error").is_some());
+    }
+
+    /// An `Embedder` whose `embed()` blocks until released, notifying a caller-supplied
+    /// `Notify` on entry so a test can deterministically wait for the call to actually start
+    /// (rather than merely having been spawned) before asserting anything about concurrency.
+    struct GatedEmbedder {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait::async_trait]
+    impl Embedder for GatedEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(vec![0.0; 8])
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+
+    #[tokio::test]
+    async fn api_packs_search_does_not_hold_store_lock_across_embed() {
+        // Regression guard: `api_packs_search` used to take the store lock BEFORE embedding
+        // the query, holding the mutex across the entire embed round-trip and blocking every
+        // other request (e.g. a concurrent `GET /api/packs`) for its full duration. Proved
+        // deterministically — no elapsed-time assertion, which would flake under CI load —
+        // by gating the embed call on a `Notify` and asserting a second, unrelated lock-only
+        // request completes promptly while that embed call is still blocked in flight.
+        // Pre-fix, this test hangs until the 5s timeout and fails; post-fix it completes fast.
+        let mut store = Store::open_in_memory().unwrap();
+        let pack_id = store.create_pack("gated", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, &["/r/a.rs".to_owned()])
+            .unwrap();
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let embedder = Arc::new(GatedEmbedder {
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let state = state_with_embedder(store, PathBuf::from(":memory:"), embedder);
+        let app = build_router(state, 7620);
+
+        // Fire the search request; it blocks inside embed() until `release` fires.
+        let search_app = app.clone();
+        let search = tokio::spawn(async move {
+            search_app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/packs/gated/search?q=foo")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+
+        // Wait until the search request has genuinely entered embed(), not just been spawned.
+        entered.notified().await;
+
+        // While that embed call is still blocked, an unrelated lock-only request (list packs)
+        // must complete promptly — only possible if `api_packs_search` released (or never
+        // took) the store lock before calling embed().
+        let list_resp = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            app.clone().oneshot(
+                Request::builder()
+                    .uri("/api/packs")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect(
+            "a concurrent GET /api/packs should complete promptly while a pack search's \
+             embed() is in flight — the store lock must not be held across the embed call",
+        )
+        .unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+
+        // Release the blocked embed() and confirm the original search completes cleanly.
+        release.notify_one();
+        let search_resp = tokio::time::timeout(std::time::Duration::from_secs(5), search)
+            .await
+            .expect("search request should complete once embed() unblocks")
+            .unwrap();
+        assert_eq!(search_resp.status(), StatusCode::OK);
     }
 
     // ── WS8 additions: ask scope/agentic/empty, export empty/depth, stats summaries,
