@@ -3,7 +3,7 @@ use super::cluster::{cluster_hits, Cluster};
 use super::mmr::apply_mmr;
 use super::retrieve::{
     apply_archive_penalty, apply_code_intent_boost, cap_per_file, common_ancestor, is_code_intent,
-    path_is_historical, truncate_on_boundary,
+    path_is_historical,
 };
 use super::synthesize::{
     build_prompt, build_prompt_clustered, fence_context, neutralize_fence, pack_context,
@@ -175,11 +175,33 @@ fn code_intent_boost_lifts_implementation_over_docs() {
 
 #[test]
 fn is_code_intent_detects_code_questions_only() {
-    assert!(is_code_intent("which function does this?"));
+    assert!(is_code_intent("which function does this?")); // "function" is a strong term
     assert!(is_code_intent("how does apply_archive_penalty work")); // snake_case symbol
-    assert!(is_code_intent("where is the retrieve method"));
+    assert!(is_code_intent("where is the retrieve method")); // "method" (strong) corroborates
     assert!(!is_code_intent("what is the marketing strategy?"));
     assert!(!is_code_intent("summarize the quarterly results"));
+    // E-8: bare weak locators ("where is" / "which file") must NOT trigger code intent on
+    // their own — they're just as common in plain prose file questions.
+    assert!(!is_code_intent("where is the budget spreadsheet"));
+    assert!(!is_code_intent("which file has the meeting notes"));
+    // …but a weak locator that co-occurs with a NAMED code file still is code intent.
+    assert!(is_code_intent("where is parse defined in retrieve.rs"));
+    assert!(is_code_intent("which file imports config.py"));
+    // …and so does a weak locator paired with an implementation-action verb, even with no
+    // filename named — "where is X computed/handled/…" is asking about behavior, not a
+    // document's location. Guards CODE_ACTION_VERBS: if a future edit drops the list, this
+    // fails immediately instead of only showing up as a silent `indexa eval` MRR/nDCG dip.
+    assert!(is_code_intent(
+        "where is the memory budget computed from available RAM"
+    ));
+    assert!(is_code_intent("where is auth handled?"));
+    // Regression guard for the extension-matching fix: "which file" + a non-code file whose
+    // name merely CONTAINS a code extension as a substring (not a real `.ext` suffix) must
+    // still be prose, not code — precise `Path::extension()` matching, not a `.c`/`.h`
+    // substring scan (which would wrongly fire on "index.html"/"notes.csv"/"app.conf").
+    assert!(!is_code_intent(
+        "which file is the report saved as, index.html or notes.csv"
+    ));
 }
 
 /// The default historical-segment set (mirrors `indexa_core::config::default_archive_segments`),
@@ -1246,14 +1268,48 @@ fn build_prompt_contains_project_overview_guidance() {
 }
 
 #[test]
-fn truncate_on_boundary_respects_utf8() {
-    // "こんにちは" is 5 chars × 3 bytes = 15 bytes. Capping at 9 chars must land
-    // on a char boundary (not in the middle of a multi-byte sequence).
-    let s = "こんにちは world";
-    let result = truncate_on_boundary(s, 6);
-    // Must be valid UTF-8 (would panic on invalid slice otherwise)
-    assert!(std::str::from_utf8(result.as_bytes()).is_ok());
-    assert!(result.len() <= s.len());
+fn build_project_overview_caps_at_the_byte_budget_on_a_utf8_boundary() {
+    // Regression test for the char/byte mismatch: the overview composer used to hard-cap the
+    // finished block by CHAR count (`truncate_on_boundary`) even though every other budget
+    // check around it — the child-line loop guard (`block.len() + line.len() > overview_budget`)
+    // and the caller's `result.len()` subtraction from the chunk budget — is BYTE-based. Seed a
+    // dir summary that's entirely multibyte (Arabic, 2 bytes/char in UTF-8) so char-count and
+    // byte-count diverge enough to expose it: on the old char-capped code, a summary this long
+    // blows well past a 200-BYTE budget (~115 ASCII header bytes + up to 85 more chars capped at
+    // 2 bytes each ≈ 285 bytes); on the byte-capped fix it never exceeds 200.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.db");
+    let mut store = Store::open(&path).unwrap();
+    let arabic_summary = "مرحبا بكم في هذا المشروع التجريبي الطويل جدا ".repeat(20);
+    store
+        .upsert_summary(&indexa_core::store::SummaryRecord {
+            path: "/project".to_owned(),
+            kind: "dir".to_owned(),
+            parent_path: None,
+            depth: 0,
+            summary: arabic_summary,
+            summary_l0: None,
+            embedding: None,
+            child_count: 0,
+            byte_size: 0,
+            model: "test".to_owned(),
+            source_hash: "hash".to_owned(),
+            generated_at: 0,
+        })
+        .unwrap();
+
+    let budget = 200; // bytes
+    let out = build_project_overview(&store, &[], Some("/project"), budget);
+
+    assert!(
+        out.len() <= budget,
+        "must respect the BYTE budget: got {} bytes for a {budget}-byte budget",
+        out.len()
+    );
+    assert!(
+        std::str::from_utf8(out.as_bytes()).is_ok(),
+        "must not slice a multibyte character in half: {out:?}"
+    );
 }
 
 // ── MMR (Maximal Marginal Relevance) re-ranking ───────────────────────────

@@ -183,6 +183,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server's recording sites are a separate, deferred follow-up** — until that lands, every MCP-tool
   row (still the majority of usage on a real index) reads as `unspecified`, same as before this
   change; no MCP tool count or wire shape changed here.
+- **Retrieval polish: byte-consistent project-overview budget + tighter code-intent trigger.** The
+  project-overview block was assembled against a byte-based budget guard (the child-line loop and
+  the caller's chunk-budget subtraction) but hard-capped by *character* count at the end, so for
+  multibyte content (Arabic, CJK, emoji) it could silently overrun its byte budget; it's now capped
+  at the actual byte budget, still landing on a UTF-8 char boundary. Separately, the bare locators
+  "where is" / "which file" no longer trigger the ×1.6 code-intent boost on their own — they're just
+  as common in plain prose ("where is the budget spreadsheet") as in code questions — they now
+  require either a co-occurring named code file (e.g. "where is parse defined in `retrieve.rs`") or
+  an implementation-action verb ("where is X **computed**/**handled**/**parsed**/…", which is asking
+  about behavior, not a document's location — "where is auth handled?" and the self-golden "where is
+  the memory budget computed" still trigger it). Strong terms (`function`, `method`, `struct`, a
+  snake_case symbol, …) are unchanged, matched via exact `Path::extension()` rather than a `.ext`
+  substring scan so `.h`/`.c` can't false-positive on `.html`/`.csv`/`.conf`/`.cfg`.
 - **Code-graph edges migrations no longer risk silently dropping rows.** Both one-time table-recreates
   that widen the `edges.kind` CHECK constraint — to add `'calls'` (D2), and separately to add
   `'extends'`/`'implements'` (2.2, heritage edges) — copied rows with `INSERT OR IGNORE SELECT *`,
