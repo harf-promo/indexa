@@ -326,6 +326,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Streamed answers now trim a hallucinated next-turn like the non-streaming path does (revives
+  #380 against current main).** `ask` synthesis occasionally has the local model "keep going" past
+  the real answer with an invented next `QUESTION:`/`ANSWER:` turn (observed live — the
+  `QUESTION:/ANSWER:` prompt frame invites an instruct/base model to role-play a continuation).
+  `crates/query/src/qa/synthesize.rs`'s non-streaming path already caught this
+  (`trim_continuation`, cutting at the first `\nQUESTION:`/`\nQuestion:`/`\nQ:`/`\nANSWER:`/
+  `\n\nQUESTION` marker), but the **streaming** paths — `answer_stream_with_ann_history` here and
+  `agentic::answer_agentic_stream_history` — pushed every generated fragment straight through to
+  the caller and returned the untrimmed `full.trim()`, so a streamed answer could both *display*
+  and *persist* (session/conversation history) the fabricated turn. A new `StreamTrimmer` applies
+  the same marker cut incrementally: it withholds the last 9 bytes of the accumulated text (one
+  short of the longest marker, `\n\nQUESTION`) at every fragment, using the existing
+  `floor_char_boundary` helper (`crates/core/src/text.rs`, the same boundary-safe pattern
+  `qa/retrieve.rs`'s truncation already uses) so a multi-byte character is never split; once a
+  complete marker appears it stops emitting for good, and the final persisted answer
+  (`StreamTrimmer::finish`) is byte-identical to what `trim_continuation` would produce from the
+  same generated text. This is a distinct bug from the AGENTS.md "verified non-bug" note about
+  `trim_continuation`'s own byte-slicing (that note is about the function's internals never
+  splitting a UTF-8 boundary because every marker it looks for starts with an ASCII `\n`) — this
+  fix is about the streaming paths never calling any trim logic at all, and does not touch or
+  relitigate that internals question.
 - **Agentic ask never reranked its merged pool; two intent gates ignored the rewritten query.**
   Small revival of #383 — most of that PR's scope (conversation-rewrite driving retrieval, the
   shared `apply_configured_rerank` helper) had already landed via other work in this sweep;
