@@ -70,6 +70,16 @@ pub struct AppState {
     pub(crate) config: Arc<Config>,
     pub(crate) jobs: Jobs,
     pub(crate) db_path: Arc<std::path::PathBuf>,
+    /// The config.toml path every config-write handler reads and saves through — mirrors
+    /// `db_path`'s pattern of routing handlers through `AppState` instead of a global
+    /// resolver. In production this is `indexa_core::config::default_config_path()` (set in
+    /// `serve()`, below); the test constructor points it at a unique scratch path per
+    /// `AppState` so `cargo test` can never read, chmod, or overwrite the developer's real
+    /// `~/Library/Application Support/dev.indexa.Indexa/config.toml` (or platform
+    /// equivalent). Before this field existed, every config-write handler called
+    /// `indexa_core::config::default_config_path()` directly with no override seam — see the
+    /// git history on this file for the incident that motivated it.
+    pub(crate) config_path: Arc<std::path::PathBuf>,
     pub(crate) log_dir: Arc<std::path::PathBuf>,
     /// Limits concurrent filesystem walks to prevent rayon global-pool starvation.
     pub(crate) walk_semaphore: Arc<tokio::sync::Semaphore>,
@@ -205,6 +215,7 @@ pub async fn serve(
     config: Config,
 ) -> Result<()> {
     let db_path = Arc::new(store.db_path().to_path_buf());
+    let config_path = Arc::new(indexa_core::config::default_config_path());
     let log_dir = Arc::new(
         indexa_core::config::default_data_dir()
             .map(|d| d.join("logs"))
@@ -270,6 +281,7 @@ pub async fn serve(
         config,
         jobs,
         db_path,
+        config_path,
         log_dir,
         walk_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         machine_spec,
@@ -755,10 +767,34 @@ mod tests {
         p
     }
 
+    /// A unique temp config.toml path for tests that reach a config-write handler. Mirrors
+    /// `temp_db_path`'s process-id-keyed uniqueness (parallel `cargo test` runs must never
+    /// collide) and — critically — must NEVER be able to resolve to the real OS config path
+    /// (`indexa_core::config::default_config_path()`), which is exactly what
+    /// `state_with_db` below is for: routing every `AppState` built in this test module
+    /// through a fresh scratch file instead.
+    fn temp_config_path(tag: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "indexa-web-test-config-{}-{}.toml",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
     fn state_with_db(store: Store, db_path: PathBuf) -> AppState {
         // The sender is dropped immediately; the receiver still yields its last value on
         // `borrow()`, and none of the tested handlers read telemetry anyway.
         let (_tx, telemetry) = tokio::sync::watch::channel(crate::dto::TelemetrySample::default());
+        // Every AppState built for a test gets its OWN scratch config path, never the real
+        // one. `db_path` alone can't seed this — most callers pass the shared literal
+        // `":memory:"` — so a per-call counter keeps every state's config_path unique even
+        // across concurrently-running tests.
+        static CONFIG_TAG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tag = CONFIG_TAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let config_path = Arc::new(temp_config_path(&format!("state-{tag}")));
         AppState {
             store: Arc::new(Mutex::new(store)),
             embedder: Arc::new(StubEmbedder),
@@ -766,6 +802,7 @@ mod tests {
             config: Arc::new(Config::default()),
             jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             db_path: Arc::new(db_path),
+            config_path,
             log_dir: Arc::new(std::env::temp_dir()),
             walk_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             machine_spec: Arc::new(indexa_core::resource::detect_machine()),
@@ -1100,14 +1137,15 @@ mod tests {
         // closed-gate path is deterministic (same convention as api_keys_post_is_forbidden…
         // above).
         //
-        // The handler reads the REAL config::default_config_path() to compare against
-        // (see api_config_features_set's doc comment — this is deliberate, closes a
-        // stale-snapshot bypass) and only rejects when the posted value differs from
-        // what's on disk. This value MUST stay an obvious canary that could never
-        // coincidentally match a real config: if it ever matched, the "changed" check
-        // would read false, skip the gate, and this test would silently start writing
-        // into the developer's actual config.toml on every run instead of asserting
-        // FORBIDDEN. Do not change this to a plausible-looking path.
+        // The handler reads state.config_path to compare against (see
+        // api_config_features_set's doc comment — comparing against a freshly-loaded value
+        // rather than the AppState snapshot is deliberate, closes a stale-snapshot bypass)
+        // and only rejects when the posted value differs from what's on disk. Since
+        // `state_with` points config_path at a scratch file that starts absent, the load
+        // resolves to Config::default() (audio.binary == None), so ANY non-empty posted
+        // value already reads as "changed" here — the canary no longer needs to dodge a
+        // real on-disk value to stay deterministic, it's just belt-and-suspenders. Keep it
+        // obviously fake anyway: do not change this to a plausible-looking path.
         let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
         let (status, json) = post_json(
             app,
@@ -1122,17 +1160,57 @@ mod tests {
             .contains("INDEXA_WEB_ALLOW_KEY_EDIT"));
     }
 
-    // No unit test exercises api_config_features_set's success path (the "no-op resend
-    // isn't gated" behavior): every config-write handler in this file (api_keys_set,
-    // api_config_provider_set, api_config_resource_set, api_config_features_set) reads
-    // and writes through the global config::default_config_path() — the REAL OS config
-    // directory, with no AppState-level injection point for tests to redirect it to a
-    // scratch path. A test that reaches past the gate into config::save would write test
-    // data into the developer's actual config.toml. This is why the one existing test in
-    // this area (api_keys_post_is_forbidden_without_env_gate, above) deliberately stops
-    // at the gate — same convention followed here. The no-op-resend behavior is verified
-    // live instead, via `indexa serve` against a HOME-overridden scratch profile (see the
-    // H7 PR description for the transcript) — that path never touches the real config.
+    // No unit test exercises api_config_features_set's own success path (the "no-op resend
+    // isn't gated" behavior) — that stays verified live instead, via `indexa serve` against
+    // a HOME-overridden scratch profile (see the H7 PR description for the transcript).
+    // But every config-write handler now goes through `state.config_path` (see AppState's
+    // doc comment and `state_with_db` above) rather than the global
+    // `config::default_config_path()`, so a test CAN safely reach past a gate into
+    // `config::save` without ever touching the developer's real config.toml. The test below
+    // proves the seam actually routes writes there, using the one handler that needs no env
+    // gate to reach `config::save` (api_config_resource_set is deliberately ungated — see
+    // its doc comment in handlers/config.rs).
+
+    #[tokio::test]
+    async fn api_config_resource_set_writes_the_scratch_path_never_the_real_config() {
+        // Regression proof for the config-path test-injection seam (see AppState's
+        // `config_path` doc comment above): before this field existed, this handler called
+        // the GLOBAL indexa_core::config::default_config_path() directly and unconditionally
+        // — this exact test, run against that code, would have silently written into the
+        // developer's real OS config file. api_config_resource_set is the sharpest case: it
+        // has NO env gate at all (by design, see handlers/config.rs), so it was the handler
+        // the plan flagged as "no test hits it today; the first one that does corrupts the
+        // live config with no canary and no warning."
+        let state = state_with(Store::open_in_memory().unwrap());
+        let scratch = state.config_path.clone();
+        assert_ne!(
+            *scratch,
+            indexa_core::config::default_config_path(),
+            "a test AppState's config_path must never equal the real OS config path"
+        );
+        assert!(
+            !scratch.exists(),
+            "scratch config path must start absent, not reuse a leftover file"
+        );
+
+        let app = build_router(state.clone(), 7620);
+        let (status, json) = post_json(
+            app,
+            "/api/config/resource",
+            serde_json::json!({ "profile": "performance", "headroom_gb": 2.0 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["saved"], true);
+
+        // The write landed on the scratch path, with the posted values applied...
+        let saved = indexa_core::config::load(&scratch).unwrap();
+        assert_eq!(saved.resource.profile.as_str(), "performance");
+        assert_eq!(saved.resource.headroom_gb, 2.0);
+        // ...and the real OS config path is untouched: this test never called
+        // config::save with any path other than the scratch one above.
+        let _ = std::fs::remove_file(&*scratch);
+    }
 
     #[tokio::test]
     async fn api_packs_export_redacts_secrets() {
