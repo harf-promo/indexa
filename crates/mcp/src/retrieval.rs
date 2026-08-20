@@ -150,7 +150,7 @@ impl IndexaMcp {
             mode,
         } = params.0;
         let limit = limit.unwrap_or(20).min(100);
-        let mode = parse_hybrid_mode(mode.as_deref());
+        let mode = parse_hybrid_mode(mode.as_deref())?;
 
         // Predicate grammar (1.8, +type: sets): `path:`/`ext:`/`type:` tokens stripped from the
         // query and mapped onto the existing scope filter / a post-hoc extension filter. Off by
@@ -472,7 +472,7 @@ impl IndexaMcp {
             cfg.top_k = k.min(100);
         }
         if let Some(m) = mode.as_deref() {
-            cfg.mode = parse_hybrid_mode(Some(m));
+            cfg.mode = parse_hybrid_mode(Some(m))?;
         }
         cfg.scope = scope.filter(|s| !s.is_empty()).or(predicate_path);
         if let Some(r) = rerank {
