@@ -46,7 +46,7 @@ pub(crate) async fn register_job(jobs: &Jobs, kind: &str, path: String) -> (Uuid
 const MAX_CONCURRENT_JOBS: usize = 4;
 
 /// `Some(429 response)` when the concurrency cap is already reached, else `None` (proceed).
-async fn job_slot_available(jobs: &Jobs) -> Option<Response> {
+pub(crate) async fn job_slot_available(jobs: &Jobs) -> Option<Response> {
     let running = jobs
         .read()
         .await
