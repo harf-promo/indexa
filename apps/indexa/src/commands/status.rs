@@ -80,11 +80,24 @@ struct UsageWeekJson {
     /// be indistinguishable from "tool column unsupported"; it is always present
     /// when `usage_week` is, and is empty only on a telemetry read error.
     by_tool: Vec<ToolUsageJson>,
+    /// Per-`served_basis` breakdown (most-saving first) — what `bytes_served` measured
+    /// for each group (see `store::usage`). Always present alongside `by_tool` (same
+    /// "empty ⇒ read error" rule); untagged rows (including every MCP row until that
+    /// half is tagged too) group under `"unspecified"`.
+    by_basis: Vec<BasisUsageJson>,
 }
 
 #[derive(Serialize)]
 struct ToolUsageJson {
     tool: String,
+    calls: u64,
+    served: u64,
+    counterfactual: u64,
+}
+
+#[derive(Serialize)]
+struct BasisUsageJson {
+    basis: String,
     calls: u64,
     served: u64,
     counterfactual: u64,
@@ -150,6 +163,9 @@ pub(crate) async fn cmd_status(
         .unwrap_or_default();
     let usage_by_tool = store
         .usage_by_tool(indexa_core::store::USAGE_WEEK_SECS)
+        .unwrap_or_default();
+    let usage_by_basis = store
+        .usage_by_basis(indexa_core::store::USAGE_WEEK_SECS)
         .unwrap_or_default();
     let config_path = config::default_config_path().to_string_lossy().into_owned();
 
@@ -244,6 +260,15 @@ pub(crate) async fn cmd_status(
                         counterfactual: u.bytes_counterfactual,
                     })
                     .collect(),
+                by_basis: usage_by_basis
+                    .iter()
+                    .map(|(basis, u)| BasisUsageJson {
+                        basis: basis.clone(),
+                        calls: u.calls,
+                        served: u.bytes_served,
+                        counterfactual: u.bytes_counterfactual,
+                    })
+                    .collect(),
             }),
             coverage,
         };
@@ -297,6 +322,23 @@ pub(crate) async fn cmd_status(
                 if u.calls == 1 { "" } else { "s" },
                 saved
             );
+        }
+        // Per-basis reconciliation: `bytes_served` means different things across surfaces
+        // (MCP records the full rendered response; web/CLI `ask` record answer+citations), so
+        // only show this split once more than one basis contributed — otherwise the aggregate
+        // above already tells the whole story.
+        if usage_by_basis.len() > 1 {
+            println!("  by served basis:");
+            for (basis, u) in &usage_by_basis {
+                let saved = u.bytes_counterfactual.saturating_sub(u.bytes_served) / 4;
+                println!(
+                    "    {:<18} {} call{} · ~{} tokens saved",
+                    basis,
+                    u.calls,
+                    if u.calls == 1 { "" } else { "s" },
+                    saved
+                );
+            }
         }
     }
 

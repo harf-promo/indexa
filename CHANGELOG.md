@@ -210,6 +210,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Savings ledger now records what each row *measured* (`served_basis`) — core/CLI/web half.**
+  The `tool_usage` ledger behind the "tokens saved" figures on `status` / `/api/impact` blended
+  different accountings into one untagged column: web/CLI `ask` records answer text + delivered
+  citations, `cli search` records the full rendered response — so the aggregate mixed bases and
+  "show the math" couldn't reconcile per-surface. Each of these recording sites now tags its row
+  with a `served_basis` (canonical `BASIS_*` constants in `indexa_query::impact`), added as a
+  migration-guarded `tool_usage` column (`SCHEMA_VERSION` 5 → 6; existing indexes migrate in
+  place, legacy rows read as *unspecified*). `indexa status` (text and `--json`) and `/api/impact`
+  show a per-basis split (the text form only when more than one basis contributed). **The MCP
+  server's recording sites are a separate, deferred follow-up** — until that lands, every MCP-tool
+  row (still the majority of usage on a real index) reads as `unspecified`, same as before this
+  change; no MCP tool count or wire shape changed here.
 - **Retrieval polish: byte-consistent project-overview budget + tighter code-intent trigger.** The
   project-overview block was assembled against a byte-based budget guard (the child-line loop and
   the caller's chunk-budget subtraction) but hard-capped by *character* count at the end, so for
