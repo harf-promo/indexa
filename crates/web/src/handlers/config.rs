@@ -34,7 +34,10 @@ pub(crate) async fn api_config_get(State(state): State<AppState>) -> Json<Config
 /// model runs and can point at a remote endpoint, so they are not ungated like the
 /// non-secret resource profile. Only the fields present in the body are written;
 /// every other config section is preserved by the load → mutate → save round-trip.
-pub(crate) async fn api_config_provider_set(Json(body): Json<ProviderRequest>) -> Response {
+pub(crate) async fn api_config_provider_set(
+    State(state): State<AppState>,
+    Json(body): Json<ProviderRequest>,
+) -> Response {
     if std::env::var("INDEXA_WEB_ALLOW_KEY_EDIT").as_deref() != Ok("1") {
         return err_json(StatusCode::FORBIDDEN, "INDEXA_WEB_ALLOW_KEY_EDIT not set");
     }
@@ -48,10 +51,10 @@ pub(crate) async fn api_config_provider_set(Json(body): Json<ProviderRequest>) -
         }
     }
 
-    let cfg_path = config::default_config_path();
+    let cfg_path = &*state.config_path;
     // Err here = the file exists but failed to parse: never overwrite it (would wipe
     // [api_keys] etc.); the user can still fix it by hand. Mirrors api_config_passes.
-    let mut cfg = match config::load(&cfg_path) {
+    let mut cfg = match config::load(cfg_path) {
         Ok(c) => c,
         Err(e) => {
             return err_json(
@@ -79,7 +82,7 @@ pub(crate) async fn api_config_provider_set(Json(body): Json<ProviderRequest>) -
     set(&mut cfg.describer.base_url, body.base_url);
     set(&mut cfg.embedding.model, body.embed_model);
 
-    match config::save(&cfg, &cfg_path) {
+    match config::save(&cfg, cfg_path) {
         // restart_required: the running server holds an Arc<Config> snapshot and does
         // not hot-reload, so the change applies on the next `indexa serve`.
         Ok(_) => {
@@ -101,11 +104,11 @@ pub(crate) async fn api_config_passes(
     let first = body.passes_first.min(cap).max(1);
     let refresh = body.passes_refresh.min(cap).max(1);
 
-    let cfg_path = config::default_config_path();
+    let cfg_path = &*state.config_path;
     // A missing file loads as Config::default(); an Err here means the file EXISTS but
     // failed to parse — never overwrite (and silently wipe [api_keys]) a malformed config
     // the user can still fix by hand. (Previously `.unwrap_or_default()` clobbered it.)
-    let mut cfg = match config::load(&cfg_path) {
+    let mut cfg = match config::load(cfg_path) {
         Ok(c) => c,
         Err(e) => {
             return err_json(
@@ -117,7 +120,7 @@ pub(crate) async fn api_config_passes(
     cfg.describer.passes_first = first;
     cfg.describer.passes_refresh = refresh;
 
-    match config::save(&cfg, &cfg_path) {
+    match config::save(&cfg, cfg_path) {
         Ok(_) => Json(serde_json::json!({ "saved": true })).into_response(),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
@@ -155,7 +158,10 @@ pub(crate) async fn api_config_resource_get(
 ///   key material.
 /// - CORS is already locked to the localhost origin (see `serve()` in lib.rs), so the
 ///   worst case for an unguarded call is flipping a non-secret workload profile.
-pub(crate) async fn api_config_resource_set(Json(body): Json<ResourceRequest>) -> Response {
+pub(crate) async fn api_config_resource_set(
+    State(state): State<AppState>,
+    Json(body): Json<ResourceRequest>,
+) -> Response {
     // String → enum; unknown values fall back to the safe Balanced default.
     let profile = match body.profile.as_str() {
         "conservative" => ResourceProfile::Conservative,
@@ -163,11 +169,11 @@ pub(crate) async fn api_config_resource_set(Json(body): Json<ResourceRequest>) -
         _ => ResourceProfile::Balanced,
     };
 
-    let cfg_path = config::default_config_path();
+    let cfg_path = &*state.config_path;
     // A missing file loads as Config::default(); an Err here means the file EXISTS but
     // failed to parse — never overwrite (and silently wipe [api_keys]) a malformed config
     // the user can still fix by hand. (Previously `.unwrap_or_default()` clobbered it.)
-    let mut cfg = match config::load(&cfg_path) {
+    let mut cfg = match config::load(cfg_path) {
         Ok(c) => c,
         Err(e) => {
             return err_json(
@@ -187,7 +193,7 @@ pub(crate) async fn api_config_resource_set(Json(body): Json<ResourceRequest>) -
         0.0
     };
 
-    match config::save(&cfg, &cfg_path) {
+    match config::save(&cfg, cfg_path) {
         Ok(_) => Json(serde_json::json!({ "saved": true })).into_response(),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
@@ -283,8 +289,8 @@ pub(crate) async fn api_config_features_set(
     State(state): State<AppState>,
     Json(body): Json<FeaturesRequest>,
 ) -> Response {
-    let cfg_path = config::default_config_path();
-    let mut cfg = match config::load(&cfg_path) {
+    let cfg_path = &*state.config_path;
+    let mut cfg = match config::load(cfg_path) {
         Ok(c) => c,
         Err(e) => {
             return err_json(
@@ -334,7 +340,7 @@ pub(crate) async fn api_config_features_set(
             Some(v.trim().to_owned())
         };
     }
-    match config::save(&cfg, &cfg_path) {
+    match config::save(&cfg, cfg_path) {
         Ok(_) => {
             let caption_warning = caption_budget_warning(&cfg, &state.machine_spec);
             Json(serde_json::json!({
