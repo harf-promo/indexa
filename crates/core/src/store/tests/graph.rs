@@ -487,6 +487,231 @@ fn heritage_edges_migration_widens_old_check_constraint() {
         .unwrap();
 }
 
+// The four tests below lock the fix for a silent-row-loss bug in the two edges CHECK-widening
+// migrations (the 'calls' widening just above `edges_allows_calls`'s gate, and the heritage
+// widening covered by `heritage_edges_migration_widens_old_check_constraint` above): both used
+// `INSERT OR IGNORE INTO edges_new SELECT * FROM edges`, which silently drops any row that fails
+// to insert instead of failing the migration loudly. Both copies are now an explicit-column plain
+// `INSERT`. Row-preservation tests alone don't discriminate the fix from the bug — a normal valid
+// row inserts identically either way, since the CHECK is only ever *widened*, never narrowed, so
+// nothing a legitimate prior schema allowed can violate the new one. The "…fails_loudly…" tests
+// below construct a row that violates even the OLD CHECK (via `PRAGMA ignore_check_constraints`,
+// simulating already-corrupt data) to prove the two behaviors actually differ: verified by hand
+// that reverting schema.rs to `INSERT OR IGNORE` turns both red (`Store::open` then succeeds and
+// silently drops the offending row instead of erroring).
+
+#[test]
+fn migrates_legacy_edges_check_preserving_all_rows() {
+    // Pre-'calls' indexes had `edges.kind CHECK IN ('imports','defines')`. Store::open must widen
+    // the CHECK to include 'calls' AND preserve every legacy row — the table-recreate must not
+    // silently drop rows (the reason the copy is a plain explicit INSERT, not INSERT OR IGNORE).
+    // Note: starting from the 2-value CHECK with `user_version` at its default (0) runs BOTH
+    // migrations in one `init_schema` call (2-value → 3-value here, then 3-value → 5-value via the
+    // heritage migration, since its gate is also unmet) — this test exercises the 'calls' copy
+    // specifically via the row content (no 'extends'/'implements' rows involved), while
+    // `migrates_legacy_edges_heritage_check_preserving_all_rows` below isolates the heritage copy
+    // alone by starting from the already-3-value CHECK.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pre_calls.db");
+    {
+        // Minimal legacy edges table with the OLD 2-value CHECK + seeded imports/defines rows.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE edges (
+                 from_path TEXT NOT NULL,
+                 kind      TEXT NOT NULL CHECK(kind IN ('imports','defines')),
+                 to_ref    TEXT NOT NULL,
+                 PRIMARY KEY (from_path, kind, to_ref)
+             ) WITHOUT ROWID;
+             INSERT INTO edges (from_path, kind, to_ref) VALUES
+                 ('/a.rs','imports','std::fs'),
+                 ('/a.rs','defines','parse'),
+                 ('/b.rs','defines','run'),
+                 ('/b.rs','imports','/a.rs');",
+        )
+        .unwrap();
+    }
+
+    // Store::open runs the CHECK-widening migration(s).
+    let mut store = Store::open(&path).expect("must open & migrate a pre-'calls' index");
+
+    // 1) Row parity: all four legacy rows survive.
+    let mut got: Vec<(String, String, String)> = store
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.from_path, e.kind, e.to_ref))
+        .collect();
+    got.sort();
+    let mut want: Vec<(String, String, String)> = vec![
+        ("/a.rs", "defines", "parse"),
+        ("/a.rs", "imports", "std::fs"),
+        ("/b.rs", "defines", "run"),
+        ("/b.rs", "imports", "/a.rs"),
+    ]
+    .into_iter()
+    .map(|(f, k, t)| (f.to_string(), k.to_string(), t.to_string()))
+    .collect();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "every legacy edge must survive the CHECK-widening migration"
+    );
+
+    // 2) The CHECK is now wide enough for 'calls' edges (the point of the migration).
+    store
+        .upsert_edges(&[edge("/c.rs", "calls", "parse")])
+        .expect("'calls' edges must be accepted after migration");
+    assert_eq!(store.all_edges().unwrap().len(), 5);
+}
+
+#[test]
+fn migrates_legacy_edges_check_fails_loudly_on_a_corrupt_row() {
+    // A row that violates even the OLD 2-value CHECK (only constructable by bypassing SQLite's
+    // own enforcement, here via `PRAGMA ignore_check_constraints` — simulating data corruption
+    // that predates this fix) must fail the migration loudly, not vanish silently. This is the
+    // test that actually discriminates the fix from `INSERT OR IGNORE`: a merely-valid row
+    // inserts identically under both, so `migrates_legacy_edges_check_preserving_all_rows` alone
+    // would stay green even with the bug still in place.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("corrupt_pre_calls.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE edges (
+                 from_path TEXT NOT NULL,
+                 kind      TEXT NOT NULL CHECK(kind IN ('imports','defines')),
+                 to_ref    TEXT NOT NULL,
+                 PRIMARY KEY (from_path, kind, to_ref)
+             ) WITHOUT ROWID;
+             INSERT INTO edges (from_path, kind, to_ref) VALUES ('/a.rs','imports','std::fs');
+             PRAGMA ignore_check_constraints = ON;
+             INSERT INTO edges (from_path, kind, to_ref) VALUES ('/x.rs','bogus','y');
+             PRAGMA ignore_check_constraints = OFF;",
+        )
+        .unwrap();
+    }
+
+    // Store::open must surface an error, not silently open a DB missing the corrupt row.
+    assert!(
+        Store::open(&path).is_err(),
+        "a row the new CHECK rejects must fail the migration, not vanish silently"
+    );
+
+    // The IMMEDIATE transaction rolled back on failure: the original table (both rows, including
+    // the corrupt one) is untouched — nothing was lost, nothing was partially applied.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        count, 2,
+        "a failed migration must not lose or partially apply rows"
+    );
+}
+
+#[test]
+fn migrates_legacy_edges_heritage_check_preserving_all_rows() {
+    // Pre-heritage indexes had the 'calls'-widened `edges.kind CHECK IN ('imports','defines',
+    // 'calls')` (post site-1 migration, pre-2.2). Store::open must widen the CHECK further to
+    // include 'extends'/'implements' AND preserve every legacy row. Starting from the 3-value
+    // CHECK means `edges_allows_calls` is already true, so this isolates the heritage copy alone
+    // (the 'calls' copy above is skipped) — the companion test to
+    // `migrates_legacy_edges_check_preserving_all_rows` for the second migration site.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pre_heritage.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE edges (
+                 from_path TEXT NOT NULL,
+                 kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls')),
+                 to_ref    TEXT NOT NULL,
+                 PRIMARY KEY (from_path, kind, to_ref)
+             ) WITHOUT ROWID;
+             INSERT INTO edges (from_path, kind, to_ref) VALUES
+                 ('/a.rs','imports','std::fs'),
+                 ('/a.rs','defines','parse'),
+                 ('/b.rs','defines','run'),
+                 ('/b.rs','calls','parse');",
+        )
+        .unwrap();
+    }
+
+    let mut store = Store::open(&path).expect("must open & migrate a pre-heritage index");
+
+    // 1) Row parity: all four legacy rows survive.
+    let mut got: Vec<(String, String, String)> = store
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.from_path, e.kind, e.to_ref))
+        .collect();
+    got.sort();
+    let mut want: Vec<(String, String, String)> = vec![
+        ("/a.rs", "defines", "parse"),
+        ("/a.rs", "imports", "std::fs"),
+        ("/b.rs", "calls", "parse"),
+        ("/b.rs", "defines", "run"),
+    ]
+    .into_iter()
+    .map(|(f, k, t)| (f.to_string(), k.to_string(), t.to_string()))
+    .collect();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "every pre-heritage edge must survive the CHECK-widening migration"
+    );
+
+    // 2) The CHECK is now wide enough for 'extends'/'implements' (the point of the migration).
+    store
+        .upsert_edges(&[
+            edge("/c.rs", "extends", "Base"),
+            edge("/c.rs", "implements", "Trait"),
+        ])
+        .expect("heritage edges must be accepted after migration");
+    assert_eq!(store.all_edges().unwrap().len(), 6);
+}
+
+#[test]
+fn migrates_legacy_edges_heritage_check_fails_loudly_on_a_corrupt_row() {
+    // Companion to `migrates_legacy_edges_check_fails_loudly_on_a_corrupt_row` for the second
+    // migration site: a row that violates even the pre-heritage (3-value) CHECK must fail the
+    // heritage-widening migration loudly rather than vanish silently.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("corrupt_pre_heritage.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE edges (
+                 from_path TEXT NOT NULL,
+                 kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls')),
+                 to_ref    TEXT NOT NULL,
+                 PRIMARY KEY (from_path, kind, to_ref)
+             ) WITHOUT ROWID;
+             INSERT INTO edges (from_path, kind, to_ref) VALUES ('/a.rs','calls','parse');
+             PRAGMA ignore_check_constraints = ON;
+             INSERT INTO edges (from_path, kind, to_ref) VALUES ('/x.rs','bogus','y');
+             PRAGMA ignore_check_constraints = OFF;",
+        )
+        .unwrap();
+    }
+
+    assert!(
+        Store::open(&path).is_err(),
+        "a row the widened CHECK rejects must fail the migration, not vanish silently"
+    );
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        count, 2,
+        "a failed migration must not lose or partially apply rows"
+    );
+}
+
 #[test]
 fn changed_impact_merges_blast_radii_across_symbols_keeping_the_smallest_hop() {
     let mut store = Store::open_in_memory().unwrap();
