@@ -196,6 +196,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the memory budget computed" still trigger it). Strong terms (`function`, `method`, `struct`, a
   snake_case symbol, …) are unchanged, matched via exact `Path::extension()` rather than a `.ext`
   substring scan so `.h`/`.c` can't false-positive on `.html`/`.csv`/`.conf`/`.cfg`.
+- **Map tab was unusable at whole-disk scope — Treemap showed one cell, Graph was a
+  vendor-choked hairball.** Three fixes, one PR:
+  - **Treemap single-child descent (server-side).** `build_coverage_treemap`
+    (`handlers/stats.rs`) computed each root, then walked a fixed `max_depth` of 4 down
+    from it — but a whole-disk index's real structure is a synthesized root chained
+    through several single-child directories (`/` → `Users` → `name` → `development` →
+    `projects` → *first actual branch point*) before anything interesting happens, so the
+    depth budget was spent entirely on the boring chain and the treemap rendered exactly
+    one undifferentiated cell. Each root now walks down while it has exactly one
+    directory child **whose own child set isn't empty** (never landing on a node that
+    would render zero cells) and emits from the landing node instead — spending the full
+    depth budget below the interesting node. Fixed **server-side, not client-side**: a
+    client-only descent would burn depth walking the chain and could land on a node whose
+    `children` were never serialized at all (outside the depth-4 window), rendering "No
+    sub-directories" — strictly worse than today's one cell. The skipped chain is folded
+    into the emitted root's `name` (e.g. `development/projects`) so the breadcrumb keeps
+    its "up" trail; `12-treemap.js` carries a matching (normally-inert) client-side
+    descent as defense in depth, guarded the same way. Also fixed while in the area: (1)
+    zero-chunk sibling directories (the common case before `deep`/`summarize` has run)
+    all computed the *same* cell area under the old `size / totalSize` normalization —
+    `Math.max(size,1)` clamped the numerator but not the denominator, so every zero-chunk
+    child claimed 100% of the area and squarify's greedy row-fill only ever placed the
+    first one, silently dropping the rest; normalizing against the sum of the *clamped*
+    sizes fixes it without changing real (non-zero) layouts. (2) `renderRootPicker`
+    `insertBefore`d a new `.treemap-root-picker` on every `loadTreemap()` without removing
+    the last one, so pickers stacked up across the auto-refresh that follows a finished
+    job — now removes any existing picker first.
+  - **Graph default scope re-scoped to a real project, not the whole disk.**
+    `19-graph.js`'s `loadGraph()` populated the scope `<select>` from `/api/roots` and
+    defaulted to `roots[0]` — the alphabetically-first indexed root (`root_paths()` orders
+    `ORDER BY path`; a stale code comment at `handlers/graph.rs` claimed it picked "the
+    largest," which was never true and is now corrected). At whole-disk scope the call
+    graph is ~250 nodes / ~300 edges of unreadable hairball. It now populates the
+    selector from `GET /api/projects` (backed by `top_projects_under()` — already
+    filtered to real, non-nested, non-vendored project roots) and defaults to the first
+    detected project instead, falling back to `/api/roots` only when no projects have
+    been detected yet so the selector is never left empty. Seeds from the sidebar's
+    current selection when it's already at project depth. The Graph tab itself is
+    **not** gated/disabled — a disabled `<button>` would swallow the synthetic
+    `.click()` the ARIA tablist handler uses and drop out of keyboard tab order, and
+    `pickMapView()` can still programmatically select `'graph'` regardless.
+  - **Vendored/generated noise filtered out of the code graph, in core, before
+    truncation.** `code_graph_scoped` (`crates/core/src/store/edges.rs`) sorts its edge
+    list by weight and truncates to `max_edges` — filtering noise out *after* that point
+    (as the web handler alone could have done) recovers nothing, since a noisy edge has
+    already consumed a slot a real edge should have had. The existing
+    `is_project_noise_path` (already shared between `top_projects_under` and the
+    `/api/projects` welcome list) now also runs against the graph's edge list via
+    `raw.retain(...)` **before** sort+truncate, and gained two new fragments: `.min.js`
+    and `.bundle.js` (matched against file paths — the directory-fragment list like
+    `/vendor/`/`/node_modules/` already existed, these two are the file-suffix
+    counterpart). **Blast radius:** `is_project_noise_path` is shared, so this change
+    affects three consumers, not just the web Graph tab — the MCP `graph` tool
+    (`crates/mcp/src/graph.rs`, same `code_graph_scoped` call) and
+    `recompute_graph_modules` (`crates/query/src/modules.rs`), which **persists** the
+    architecture-map table to the database, so the module boundaries `indexa graph
+    --compute-modules` writes can shift on the next run now that vendored files can no
+    longer anchor a module. Existing `code_graph_scoped` test fixtures use no
+    vendor-shaped paths, so none of them changed behavior.
+  - `scripts/web-smoke.mjs`'s fixture gained a `wrap/{a,b}/` single-child-then-branch
+    shape (previously every fixture directory was either the root or a childless leaf,
+    which couldn't exercise the descent at all) and a new assertion that the Treemap
+    renders ≥2 cells on first paint through the app's own tab switcher — the required
+    `web smoke (headless Chrome)` CI job now locks this in.
 - **Code-graph edges migrations no longer risk silently dropping rows.** Both one-time table-recreates
   that widen the `edges.kind` CHECK constraint — to add `'calls'` (D2), and separately to add
   `'extends'`/`'implements'` (2.2, heritage edges) — copied rows with `INSERT OR IGNORE SELECT *`,

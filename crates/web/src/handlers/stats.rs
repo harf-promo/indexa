@@ -255,18 +255,106 @@ fn build_coverage_treemap(
         }
     }
 
-    // Phase 5: find tree roots and emit the nested DTO
-    let mut roots: Vec<&str> = nodes
+    // Phase 5: find tree roots, descend each through its single-child-directory chain
+    // (B1), then emit the nested DTO from the landing node.
+    let roots: Vec<&str> = nodes
         .iter()
         .filter(|(_, n)| n.is_dir && (n.parent.is_empty() || !nodes.contains_key(&n.parent)))
         .map(|(p, _)| p.as_str())
         .collect();
-    roots.sort_unstable_by(|a, b| nodes[*b].subtree_chunks.cmp(&nodes[*a].subtree_chunks));
 
-    roots
+    // Descend BEFORE sorting/sizing: a root whose only content is a boring single-child
+    // chain (`development` → `projects` → …) reports the landing node's own size here,
+    // not the chain's — a chain node can carry direct file children of its own, so the
+    // two aren't always equal — which keeps the root-picker's size order matching what's
+    // actually displayed after the descent.
+    let mut descended: Vec<(String, Vec<String>)> = roots
         .iter()
-        .map(|r| build_coverage_node(r, &nodes, 0, max_depth, max_children))
+        .map(|r| descend_single_child_chain(r, &nodes))
+        .collect();
+    descended.sort_unstable_by(|a, b| {
+        nodes[b.0.as_str()]
+            .subtree_chunks
+            .cmp(&nodes[a.0.as_str()].subtree_chunks)
+    });
+
+    descended
+        .into_iter()
+        .map(|(landing, skipped)| {
+            let mut node = build_coverage_node(&landing, &nodes, 0, max_depth, max_children);
+            if !skipped.is_empty() {
+                // Fold the collapsed hop into the emitted name (e.g. "development/projects")
+                // so the breadcrumb / root-picker don't lose the "up" provenance even though
+                // the intermediate nodes themselves are never emitted.
+                let mut segments: Vec<String> = skipped.iter().map(|p| node_basename(p)).collect();
+                segments.push(node.name);
+                node.name = segments.join("/");
+            }
+            node
+        })
         .collect()
+}
+
+fn node_basename(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// Directory children of `path` — same "is a dir" filter [`build_coverage_node`] uses to
+/// decide what counts as a drill-down cell vs a file.
+fn dir_children<'a>(
+    path: &str,
+    nodes: &'a std::collections::HashMap<String, CoverageNodeData>,
+) -> Vec<&'a str> {
+    nodes
+        .get(path)
+        .map(|n| {
+            n.children
+                .iter()
+                .filter(|c| nodes.get(c.as_str()).is_some_and(|cn| cn.is_dir))
+                .map(|c| c.as_str())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Walk down from `root` while it has exactly one directory child **and** that child
+/// itself has at least one directory child of its own — i.e. only through a "boring"
+/// single-child chain, never onto a node that would render with zero drill-down cells.
+/// Landing on a childless node would be *worse* than not descending: the skipped
+/// provenance would vanish and the emitted root would show "No sub-directories" instead
+/// of the one cell an un-fixed treemap shows today — so the walk stops one hop short of
+/// any terminal single-child leaf, which still shows exactly one cell (the leaf itself),
+/// never fewer than before.
+///
+/// This must run **server-side, before** [`build_coverage_node`]'s `max_depth` walk: the
+/// depth budget is spent *from the emitted root*, so descending first means the full
+/// budget is spent below the interesting node instead of being burned walking the chain.
+/// A client-side-only descent would do the opposite — and on a chain longer than
+/// `max_depth`, land on a node whose `children` were never serialized at all.
+///
+/// Returns `(landing_path, skipped_path_chain)` — `skipped` is root-to-child order,
+/// landing excluded, so the caller can fold the collapsed hop into the emitted node's
+/// `name` for breadcrumb provenance.
+fn descend_single_child_chain(
+    root: &str,
+    nodes: &std::collections::HashMap<String, CoverageNodeData>,
+) -> (String, Vec<String>) {
+    let mut skipped = Vec::new();
+    let mut current = root.to_string();
+    // A valid tree can't have more single-child hops than total nodes; this bound just
+    // keeps a malformed/cyclic map from hanging the request.
+    for _ in 0..nodes.len() {
+        let children = dir_children(&current, nodes);
+        if children.len() != 1 || dir_children(children[0], nodes).is_empty() {
+            break;
+        }
+        skipped.push(current.clone());
+        current = children[0].to_string();
+    }
+    (current, skipped)
 }
 
 fn build_coverage_node(
@@ -277,10 +365,7 @@ fn build_coverage_node(
     max_children: usize,
 ) -> TreemapNodeDto {
     let node = &nodes[path];
-    let name = std::path::Path::new(path)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string());
+    let name = node_basename(path);
 
     let children = if depth < max_depth {
         let mut dirs: Vec<(&str, u64)> = node
@@ -305,5 +390,92 @@ fn build_coverage_node(
         file_count: node.file_count,
         coverage: coverage_from_state(node.own_state.as_deref()).to_owned(),
         children,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir(path: &str, parent: &str) -> CoverageEntry {
+        (path.to_string(), parent.to_string(), true, 0, None)
+    }
+    fn file(path: &str, parent: &str, chunks: u64) -> CoverageEntry {
+        (path.to_string(), parent.to_string(), false, chunks, None)
+    }
+
+    /// B1: `/r` → `/r/a` → `/r/a/b` is a "boring" single-child chain; `b` branches into
+    /// `x` and `y`. The emitted root must land on `b` (not the original computed root),
+    /// showing 2 cells, and its name must carry the skipped provenance so the breadcrumb
+    /// still reads "up" to `r` and `a`.
+    #[test]
+    fn single_child_chain_descends_to_the_branch_point() {
+        let entries = vec![
+            dir("/r", ""),
+            dir("/r/a", "/r"),
+            dir("/r/a/b", "/r/a"),
+            dir("/r/a/b/x", "/r/a/b"),
+            dir("/r/a/b/y", "/r/a/b"),
+        ];
+        let roots = build_coverage_treemap(entries, 4, 30);
+        assert_eq!(roots.len(), 1);
+        let root = &roots[0];
+        assert_eq!(
+            root.path, "/r/a/b",
+            "landed on the branch point, not the original computed root"
+        );
+        assert_eq!(
+            root.name, "r/a/b",
+            "the skipped chain is folded into the name for breadcrumb provenance"
+        );
+        assert_eq!(
+            root.children.len(),
+            2,
+            "the branch point's own two children render as cells"
+        );
+    }
+
+    /// A chain that dead-ends in a files-only directory must stop one hop short of the
+    /// leaf: landing on it would render "No sub-directories", which is strictly worse
+    /// than the single cell an un-fixed treemap shows today. The descent-never-loses-cells
+    /// invariant: still exactly one cell, never zero.
+    #[test]
+    fn single_child_chain_stops_before_a_childless_leaf() {
+        let entries = vec![
+            dir("/r", ""),
+            dir("/r/a", "/r"),
+            dir("/r/a/b", "/r/a"), // leaf dir — no dir children of its own
+            file("/r/a/b/f.txt", "/r/a/b", 3),
+        ];
+        let roots = build_coverage_treemap(entries, 4, 30);
+        assert_eq!(roots.len(), 1);
+        let root = &roots[0];
+        assert_eq!(
+            root.path, "/r/a",
+            "must not descend onto the childless leaf 'b'"
+        );
+        assert_eq!(root.name, "r/a");
+        assert_eq!(
+            root.children.len(),
+            1,
+            "still shows one cell (b) — descending never renders fewer cells than before"
+        );
+        assert_eq!(root.children[0].name, "b");
+    }
+
+    /// No descent when the computed root already branches: behavior unchanged, and the
+    /// name stays a plain basename (no skipped-chain prefix) since nothing was skipped.
+    #[test]
+    fn a_root_that_already_branches_is_not_descended() {
+        let entries = vec![dir("/r", ""), dir("/r/a", "/r"), dir("/r/b", "/r")];
+        let roots = build_coverage_treemap(entries, 4, 30);
+        assert_eq!(roots.len(), 1);
+        let root = &roots[0];
+        assert_eq!(root.path, "/r");
+        assert_eq!(
+            root.name, "r",
+            "no chain was skipped, so no prefix is added"
+        );
+        assert_eq!(root.children.len(), 2);
     }
 }
