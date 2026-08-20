@@ -10,7 +10,7 @@ use indexa_core::store::{AnnIndex, SearchHit, Store};
 use indexa_embed::Embedder;
 use indexa_llm::Generator;
 
-use crate::rerank::{apply_rerank, CandleReranker, LlmReranker};
+use crate::rerank::apply_configured_rerank;
 
 use super::cluster::{cluster_hits, cluster_theme_prompt, Cluster};
 use super::confidence::confidence_for;
@@ -238,8 +238,11 @@ pub async fn answer_retrieval_only_history(
 /// ```
 ///
 /// Callers get bounded KV-cache: only the L0 abstracts (≤1 sentence each) are sent, not
-/// the full chunk bodies. The full retrieval pipeline still runs (hybrid + boosts + rerank +
-/// MMR + per-file cap), but results are deduplicated to the file level before returning.
+/// the full chunk bodies. The full retrieval pipeline still runs (hybrid + boosts + MMR +
+/// per-file cap), but results are deduplicated to the file level and re-sorted by RRF score
+/// before returning — so rerank is force-disabled regardless of `cfg.rerank` (see
+/// [`answer_catalog_history`]): a rerank pass would only reorder chunks that this dedup/resort
+/// immediately discards, paying for an LLM call whose result is never used.
 pub async fn answer_catalog(
     db_path: &Path,
     embedder: &dyn Embedder,
@@ -263,6 +266,15 @@ pub async fn answer_catalog_history(
     ann: Option<&AnnIndex>,
     history: &[PriorTurn],
 ) -> Result<Answer> {
+    // Catalog mode dedupes to file level and sorts by the pre-rerank `rrf_score` (below) —
+    // any reordering a rerank pass produces never survives that resort, so running it here
+    // is pure waste (an LLM/cross-encoder call paid for and then discarded). Force it off
+    // regardless of the caller's `cfg.rerank`, matching catalog's "zero local model calls"
+    // contract — this is a property of catalog's own output shape, not something every
+    // caller of this function should have to remember to disable.
+    let mut cfg = cfg.clone();
+    cfg.rerank = false;
+    let cfg = &cfg;
     let (hits, _overview, _clusters) =
         retrieve_and_rerank(db_path, embedder, llm, question, cfg, ann, history).await?;
 
@@ -400,11 +412,7 @@ async fn retrieve_and_rerank(
     // 3. Optional cross-encoder rerank (fails open). Reaches every surface
     //    because they all call this helper.
     let hits = if cfg.rerank {
-        if cfg.rerank_backend == "cross-encoder" {
-            apply_rerank(&CandleReranker::new(&cfg.rerank_model), question, hits).await
-        } else {
-            apply_rerank(&LlmReranker::new(llm), question, hits).await
-        }
+        apply_configured_rerank(llm, cfg, question, hits).await
     } else {
         hits
     };

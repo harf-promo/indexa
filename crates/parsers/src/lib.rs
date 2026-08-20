@@ -3,6 +3,7 @@
 pub mod archive;
 pub mod binary;
 pub mod code;
+pub mod compressed;
 pub mod email;
 pub mod epub;
 pub mod html;
@@ -13,6 +14,7 @@ pub mod media;
 pub mod office;
 pub mod org;
 pub mod pdf;
+pub mod preprocess;
 pub mod presentation;
 pub mod proc;
 pub mod registry;

@@ -36,10 +36,10 @@ async function toggleWatch(path) {
     if (d.error) { toast(d.error, 'error'); return; }
     if (!on && d.watching) {
       watchedPaths.add(path);
-      toast('Watching "' + escapeHtml(path.split('/').pop() || path) + '" — files re-indexed on save', 'info');
+      toast('Watching "' + (path.split('/').pop() || path) + '" — files re-indexed on save', 'info');
     } else if (on && d.stopped) {
       watchedPaths.delete(path);
-      toast('Stopped watching "' + escapeHtml(path.split('/').pop() || path) + '"', 'info');
+      toast('Stopped watching "' + (path.split('/').pop() || path) + '"', 'info');
     }
     updateWatchIcons();
   } catch(e) { toast('Watch error: ' + e.message, 'error'); }

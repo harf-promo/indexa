@@ -52,6 +52,20 @@ pub fn write_note_file(
     title: &str,
     body: &str,
 ) -> anyhow::Result<PathBuf> {
+    write_note_file_anchored(data_dir, pack, title, body, None)
+}
+
+/// [`write_note_file`] plus an optional anchor (2.6) — a code path or bare symbol name
+/// this note is about, recorded in the provenance header so it's visible in raw text too.
+/// The filename hash covers `body` only (unchanged from `write_note_file`) — anchoring an
+/// existing note is still idempotent by content, not a distinct revision.
+pub fn write_note_file_anchored(
+    data_dir: &Path,
+    pack: &str,
+    title: &str,
+    body: &str,
+    anchor: Option<&str>,
+) -> anyhow::Result<PathBuf> {
     let dir = data_dir.join("notes");
     std::fs::create_dir_all(&dir)
         .map_err(|e| anyhow::anyhow!("creating notes dir {}: {e}", dir.display()))?;
@@ -64,8 +78,13 @@ pub fn write_note_file(
     // Provenance header + title heading + body. The header is a Markdown comment so
     // it is ignored by renderers but visible in raw text, matching the remote-source
     // pattern (which uses `<!-- indexa remote source: … -->`).
-    let content =
-        format!("<!-- indexa note: pack={pack} title={title:?} -->\n\n# {title}\n\n{body}\n");
+    let anchor_field = match anchor {
+        Some(a) => format!(" anchor={a:?}"),
+        None => String::new(),
+    };
+    let content = format!(
+        "<!-- indexa note: pack={pack} title={title:?}{anchor_field} -->\n\n# {title}\n\n{body}\n"
+    );
     std::fs::write(&path, &content)
         .map_err(|e| anyhow::anyhow!("writing note {}: {e}", path.display()))?;
 

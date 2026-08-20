@@ -103,6 +103,11 @@ pub struct JobHandle {
     pub started_at: i64,
     pub status: Mutex<JobStatus>,
     pub history: Mutex<Vec<JobEvent>>,
+    /// The single most recent `Progress` event, stored separately from `history`.
+    /// `Progress` fires roughly once per file (hundreds of thousands for a large
+    /// scan) and no client ever reads more than the latest one, so it is never
+    /// appended to `history` — see `push` and `history_snapshot`.
+    pub last_progress: Mutex<Option<JobEvent>>,
     pub tx: broadcast::Sender<JobEvent>,
     /// Set true to request the running job stop at the next loop iteration.
     pub cancelled: std::sync::atomic::AtomicBool,
@@ -121,6 +126,7 @@ impl JobHandle {
                 .unwrap_or(0),
             status: Mutex::new(JobStatus::Running),
             history: Mutex::new(Vec::new()),
+            last_progress: Mutex::new(None),
             tx,
             cancelled: std::sync::atomic::AtomicBool::new(false),
         }
@@ -146,12 +152,41 @@ impl JobHandle {
         *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
     }
 
-    /// Poison-safe snapshot (clone) of the job's event history.
+    /// Poison-safe snapshot (clone) of the job's event history, including the
+    /// latest `Progress` event (which `push` keeps out of `history` proper —
+    /// see its doc comment) appended at the end so readers still see where a
+    /// running job currently stands.
+    ///
+    /// The append only happens while the job is still `Running`, AND only if
+    /// `history` doesn't already end in a terminal event (`Done`/`Failed`).
+    /// The second check closes a narrow race: `finalize_done`/`finalize_failed`
+    /// push the terminal event into `history` and only *then* call
+    /// `set_status`, so there's a brief window where `history` already ends in
+    /// `Done`/`Failed` but `status()` still reads `Running`. Without the check,
+    /// a snapshot taken in that window would append a stale `Progress` after
+    /// the terminal event, making a replay stream look like `Done` then
+    /// `Progress` — i.e. the job appears to restart after finishing.
     pub fn history_snapshot(&self) -> Vec<JobEvent> {
-        self.history
+        let mut history = self
+            .history
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .clone();
+        let ends_in_terminal = matches!(
+            history.last(),
+            Some(JobEvent::Done { .. }) | Some(JobEvent::Failed { .. })
+        );
+        if self.status() == JobStatus::Running && !ends_in_terminal {
+            if let Some(progress) = self
+                .last_progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
+                history.push(progress);
+            }
+        }
+        history
     }
 }
 
@@ -164,10 +199,21 @@ pub const MAX_STORED_WARNINGS: usize = 500;
 
 /// Push an event into a job's history and broadcast it to subscribers.
 ///
+/// `Progress` events are never stored in `history`: they fire roughly once per
+/// file processed (hundreds of thousands of events for a large scan) and no
+/// client ever reads more than the latest one. Instead the latest `Progress`
+/// overwrites `handle.last_progress`; `history_snapshot` folds it back in for
+/// readers. All other event kinds are appended to `history` as before.
+///
 /// Warning events are capped at `MAX_STORED_WARNINGS` to bound memory.
 /// The true count can be recovered from `stageCounts` on the client.
 pub fn push(handle: &Arc<JobHandle>, event: JobEvent) {
-    {
+    if matches!(event, JobEvent::Progress { .. }) {
+        *handle
+            .last_progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(event.clone());
+    } else {
         let mut history = handle.history.lock().unwrap_or_else(|e| e.into_inner());
         // For Warning events: cap stored history to avoid unbounded growth.
         if matches!(event, JobEvent::Warning { .. }) {
@@ -194,4 +240,155 @@ pub fn push(handle: &Arc<JobHandle>, event: JobEvent) {
 /// Use for high-volume streaming events (e.g. LlmFragment) to avoid memory bloat.
 pub fn broadcast_only(handle: &Arc<JobHandle>, event: JobEvent) {
     let _ = handle.tx.send(event);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn progress(current: u64) -> JobEvent {
+        JobEvent::Progress {
+            current,
+            total: 1000,
+            note: None,
+            current_path: None,
+            items_per_sec: None,
+            eta_secs: None,
+        }
+    }
+
+    /// Pushing many `Progress` events must not grow `history` unbounded — only the
+    /// latest one should surface, and only via `history_snapshot`, while the job
+    /// is still running.
+    #[test]
+    fn progress_events_do_not_grow_history() {
+        let handle = Arc::new(JobHandle::new("scan", "/tmp/x"));
+        for i in 0..1000u64 {
+            push(&handle, progress(i));
+        }
+
+        // Nothing ever landed in `history` proper — it should still be empty.
+        assert!(handle.history_snapshot().len() <= 1);
+
+        let snapshot = handle.history_snapshot();
+        let last = snapshot.last().expect("expected the folded-in Progress");
+        match last {
+            JobEvent::Progress { current, .. } => assert_eq!(*current, 999),
+            other => panic!("expected Progress, got {other:?}"),
+        }
+    }
+
+    /// After a job finishes, `history_snapshot` must end with the terminal event —
+    /// never a stale `Progress` appended after it (which would make a replay
+    /// stream look like the job restarted).
+    #[test]
+    fn terminal_event_is_never_followed_by_stale_progress() {
+        let handle = Arc::new(JobHandle::new("scan", "/tmp/x"));
+        push(&handle, progress(1));
+        push(&handle, progress(2));
+        push(
+            &handle,
+            JobEvent::Done {
+                summary: "done".into(),
+            },
+        );
+        handle.set_status(JobStatus::Done);
+
+        let snapshot = handle.history_snapshot();
+        match snapshot.last().expect("expected at least the Done event") {
+            JobEvent::Done { summary } => assert_eq!(summary, "done"),
+            other => panic!("expected Done as the last event, got {other:?}"),
+        }
+        // No Progress event should appear anywhere in the terminal snapshot —
+        // distinguishes "appended in the wrong place" from "correctly dropped".
+        assert!(
+            !snapshot
+                .iter()
+                .any(|e| matches!(e, JobEvent::Progress { .. })),
+            "terminal snapshot must not contain any Progress event: {snapshot:?}"
+        );
+    }
+
+    /// Mirrors the real call sequence used by job execution (`finalize_failed` in
+    /// `jobs_exec`): push the terminal event, THEN flip status. `history_snapshot`
+    /// taken in between must not append a stale Progress after `Failed` either.
+    #[test]
+    fn failed_terminal_event_is_never_followed_by_stale_progress() {
+        let handle = Arc::new(JobHandle::new("deep", "/tmp/x"));
+        push(&handle, progress(5));
+        push(
+            &handle,
+            JobEvent::Failed {
+                error: "boom".into(),
+                stage: None,
+                item_path: None,
+                chain: None,
+                code: None,
+            },
+        );
+        // Snapshot taken in the exact window where `history` already ends in
+        // Failed but status() hasn't been flipped yet — this is the race the
+        // `ends_in_terminal` guard in `history_snapshot` exists to close.
+        let snapshot = handle.history_snapshot();
+        assert!(matches!(snapshot.last(), Some(JobEvent::Failed { .. })));
+
+        handle.set_status(JobStatus::Failed);
+        let snapshot = handle.history_snapshot();
+        assert!(matches!(snapshot.last(), Some(JobEvent::Failed { .. })));
+    }
+
+    /// The existing Warning-cap behavior must survive the `push` restructuring
+    /// (Progress now takes an early-return branch that Warning must not hit).
+    #[test]
+    fn warning_events_are_still_capped_and_oldest_dropped() {
+        let handle = Arc::new(JobHandle::new("scan", "/tmp/x"));
+        for i in 0..(MAX_STORED_WARNINGS + 10) {
+            push(
+                &handle,
+                JobEvent::Warning {
+                    stage: "parse".into(),
+                    item_path: Some(format!("file-{i}.txt")),
+                    message: "oops".into(),
+                    pressure: None,
+                },
+            );
+        }
+
+        let snapshot = handle.history_snapshot();
+        let warnings: Vec<&JobEvent> = snapshot
+            .iter()
+            .filter(|e| matches!(e, JobEvent::Warning { .. }))
+            .collect();
+        assert_eq!(warnings.len(), MAX_STORED_WARNINGS);
+        // The oldest 10 warnings (file-0..file-9) should have been dropped, so
+        // the earliest surviving one is file-10.
+        match warnings.first().unwrap() {
+            JobEvent::Warning { item_path, .. } => {
+                assert_eq!(item_path.as_deref(), Some("file-10.txt"));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// `broadcast_only` must remain a pure live-broadcast path that never touches
+    /// `history` or `last_progress`.
+    #[test]
+    fn broadcast_only_does_not_touch_history_or_last_progress() {
+        let handle = Arc::new(JobHandle::new("scan", "/tmp/x"));
+        broadcast_only(
+            &handle,
+            JobEvent::LlmFragment {
+                item_path: "a.txt".into(),
+                model: "gemma3:4b".into(),
+                stage: "describe".into(),
+                fragment: "hello".into(),
+            },
+        );
+        assert!(handle.history_snapshot().is_empty());
+        assert!(handle
+            .last_progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none());
+    }
 }

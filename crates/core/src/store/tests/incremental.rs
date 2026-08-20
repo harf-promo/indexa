@@ -142,7 +142,9 @@ fn symbol_pin_narrows_who_calls_and_blast_radius() {
         .unwrap();
 
     // Unpinned: both callers are in the blast radius.
-    let br = store.blast_radius_resolved("parse", 100, false, 2).unwrap();
+    let br = store
+        .blast_radius_resolved("parse", 100, false, 2, false)
+        .unwrap();
     assert_eq!(br.direct, 2);
 
     // The user pins /other/tool.py as authoritative via the ledger.
@@ -164,11 +166,15 @@ fn symbol_pin_narrows_who_calls_and_blast_radius() {
 
     // Pinned: main.py's call import-resolves to /proj/lib (NOT the pin) → dropped;
     // the bare caller stays (no evidence either way) in non-strict mode.
-    let br = store.blast_radius_resolved("parse", 100, false, 2).unwrap();
+    let br = store
+        .blast_radius_resolved("parse", 100, false, 2, false)
+        .unwrap();
     assert_eq!(br.direct, 1, "import-resolved-elsewhere caller must drop");
     assert!(br.files.contains(&"/misc/script.py".to_owned()));
     // Strict also drops the bare caller.
-    let br = store.blast_radius_resolved("parse", 100, true, 2).unwrap();
+    let br = store
+        .blast_radius_resolved("parse", 100, true, 2, false)
+        .unwrap();
     assert_eq!(br.direct, 0);
 
     // who_calls resolves against the pinned definer only.

@@ -1,5 +1,6 @@
 //! Hybrid / cosine search and the shared FTS / embedding encoding helpers.
 
+use super::entries;
 use super::{AnnIndex, RegionSummary, SearchHit, Store, TreeNode};
 use crate::config::HybridMode;
 use rusqlite::{params, Row};
@@ -75,14 +76,18 @@ pub(super) fn build_fts_query(query: &str) -> String {
     }
 }
 
-/// Escape `%` and `_` wildcards in a path prefix before appending `%` for LIKE matching.
+/// Escape `%`, `_`, and `\` in `s` so it can be embedded in a `LIKE … ESCAPE '\'` pattern
+/// without its own characters being read as wildcards.
+pub(super) fn like_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// [`like_escape`] plus a trailing `%` — a prefix pattern for `LIKE … ESCAPE '\'`.
 /// Must be used with `LIKE ?n ESCAPE '\'` in the SQL clause.
 pub(super) fn like_prefix(prefix: &str) -> String {
-    let escaped = prefix
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    format!("{escaped}%")
+    format!("{}%", like_escape(prefix))
 }
 
 /// SQL `WHERE`-fragment (begins with ` AND `) that excludes content-free stub chunks from
@@ -114,6 +119,41 @@ pub(super) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     } else {
         dot / (mag_a * mag_b)
     }
+}
+
+/// A dense-search candidate, ordered so **greater == better**: higher cosine first, ties broken by
+/// LOWER id. Wrapped in `Reverse` it forms the bounded top-k **min-heap** in [`Store::cosine_search`]
+/// (the heap root is the current worst), and `into_sorted_vec` then yields best-first — reproducing
+/// the old stable-sort-by-similarity over rowid-ordered rows byte-for-byte.
+#[derive(PartialEq)]
+struct Candidate {
+    sim: f32,
+    id: i64,
+}
+impl Eq for Candidate {}
+impl Ord for Candidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.sim
+            .total_cmp(&other.sim)
+            .then_with(|| other.id.cmp(&self.id)) // equal score → lower id ranks higher
+    }
+}
+impl PartialOrd for Candidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Sort `(chunk_id, rrf_score)` pairs best-first, deterministically.
+///
+/// `ranked` is built by draining a `HashMap`, so its incoming order (and thus the order
+/// equal-score entries arrive in) varies by process — a `partial_cmp`-only sort left ties
+/// in that random order, so the same query against the same index could return different
+/// chunks across server restarts (two arms of the RRF fusion produce bit-identical scores
+/// for same-rank hits: `1.0 / (rrf_k + rank + 1.0)`). Break ties on `id` ascending (lower
+/// id wins), matching `Candidate::cmp`'s tie-break convention above.
+fn rank_by_rrf_score(ranked: &mut [(i64, f64)]) {
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 }
 
 /// Map a row from the `entries` + `summary_queue` join (used by `search_paths`
@@ -201,15 +241,20 @@ impl Store {
             HybridMode::Dense => Vec::new(),
             _ => {
                 let fts_query = build_fts_query(query_text);
+                // `entry_path = exact OR entry_path LIKE child_pattern`, not a bare
+                // `LIKE '{prefix}%'` — a plain prefix match has no path-separator boundary,
+                // so scoping to `/proj` also matched a sibling like `/projector` (and every
+                // chunk under it), silently widening a scoped ask/search to unrelated trees.
                 let (sql, scope_param) = if let Some(s) = scope {
                     (
                         format!(
                             "SELECT CAST(chunk_id AS INTEGER), entry_path, bm25(chunks_fts) AS score
                              FROM chunks_fts
-                             WHERE chunks_fts MATCH ?1 AND entry_path LIKE ?2 ESCAPE '\\'{STUB_EXCLUDE_SQL}
+                             WHERE chunks_fts MATCH ?1
+                               AND (entry_path = ?2 OR entry_path LIKE ?3 ESCAPE '\\'){STUB_EXCLUDE_SQL}
                              ORDER BY score LIMIT 100"
                         ),
-                        Some(like_prefix(s)),
+                        Some(entries::subtree_match_or_all(s)),
                     )
                 } else {
                     (
@@ -223,8 +268,8 @@ impl Store {
                     )
                 };
                 let mut stmt = self.conn.prepare(&sql)?;
-                let rows: Vec<(i64, String)> = if let Some(ref sp) = scope_param {
-                    stmt.query_map(params![fts_query, sp], |r| {
+                let rows: Vec<(i64, String)> = if let Some((ref exact, ref child)) = scope_param {
+                    stmt.query_map(params![fts_query, exact, child], |r| {
                         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?
@@ -265,7 +310,7 @@ impl Store {
         }
 
         let mut ranked: Vec<(i64, f64)> = scores.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        rank_by_rrf_score(&mut ranked);
         ranked.truncate(limit);
 
         // ── Fetch chunk details for top results ──────────────────────────────
@@ -292,7 +337,12 @@ impl Store {
 
     /// Search entries whose path contains `query` (case-insensitive LIKE).
     pub fn search_paths(&self, query: &str, limit: usize) -> Result<Vec<TreeNode>> {
-        let pattern = format!("%{query}%");
+        // `query` is caller-controlled (CLI arg, web `?q=`, MCP param) — escape its own
+        // `%`/`_`/`\` before embedding it as a substring pattern, or a query containing them
+        // is read as SQL wildcards: an unescaped `%` alone would match every path in the
+        // index, and `_` matches any single character (`test_helper` would also match
+        // `test-helper.rs`).
+        let pattern = format!("%{}%", like_escape(query));
         let mut stmt = self.conn.prepare(
             "SELECT e.path, e.kind, e.size,
                     (SELECT COUNT(*) FROM entries c
@@ -311,7 +361,7 @@ impl Store {
                        AND (d.path = e.path OR d.path LIKE e.path || '/%')) AS subtree_total
                FROM entries e
                LEFT JOIN summary_queue sq ON sq.path = e.path
-              WHERE e.path LIKE ?1
+              WHERE e.path LIKE ?1 ESCAPE '\\'
               ORDER BY LENGTH(e.path) ASC, e.path ASC
               LIMIT ?2",
         )?;
@@ -648,50 +698,90 @@ impl Store {
     }
 
     /// Brute-force cosine similarity over all stored embeddings.
-    /// Returns (chunk_id, entry_path) sorted by descending similarity.
-    fn cosine_search(
+    /// Returns `(chunk_id, entry_path)` sorted by descending similarity (ties broken by ascending
+    /// id — byte-identical to the previous stable-sort-over-rowid behaviour). Allocation-light: no
+    /// per-row `Vec<f32>` or path `String`; dot + norm are computed directly over the blob bytes,
+    /// only the top-`limit` ids survive a bounded min-heap, and paths are resolved once at the end.
+    /// `pub(super)` so the store test module can assert its output equals a brute-force oracle.
+    pub(super) fn cosine_search(
         &self,
         query: &[f32],
         limit: usize,
         scope: Option<&str>,
     ) -> Result<Vec<(i64, String)>> {
+        if limit == 0 || query.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Select `id, embedding` only — the per-row path `String` is gone (resolved after, via
+        // `paths_for_ids`). Same WHERE (incl. STUB_EXCLUDE) so the candidate set is identical.
+        // `entry_path = exact OR entry_path LIKE child_pattern`, not a bare prefix `LIKE` —
+        // see the identical fix + rationale on the FTS arm above.
         let sql = if scope.is_some() {
-            format!("SELECT id, entry_path, embedding FROM chunks WHERE embedding IS NOT NULL AND entry_path LIKE ?1 ESCAPE '\\'{STUB_EXCLUDE_SQL}")
+            format!("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL AND (entry_path = ?1 OR entry_path LIKE ?2 ESCAPE '\\'){STUB_EXCLUDE_SQL}")
         } else {
-            format!("SELECT id, entry_path, embedding FROM chunks WHERE embedding IS NOT NULL{STUB_EXCLUDE_SQL}")
+            format!(
+                "SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL{STUB_EXCLUDE_SQL}"
+            )
         };
         let mut stmt = self.conn.prepare(&sql)?;
 
-        let mut scored: Vec<(i64, String, f32)> = Vec::new();
-        let scope_pattern = scope.map(like_prefix);
-        let mut rows = if let Some(ref p) = scope_pattern {
-            stmt.query(params![p])?
+        // Hoist the query norm out of the per-row loop (was recomputed every row).
+        let query_norm = query.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let expected_bytes = query.len() * 4;
+
+        let scope_pattern = scope.map(entries::subtree_match_or_all);
+        let mut rows = if let Some((ref exact, ref child)) = scope_pattern {
+            stmt.query(params![exact, child])?
         } else {
             stmt.query([])?
         };
 
+        // Bounded top-k: a min-heap of at most `limit` candidates (root = current worst).
+        let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<Candidate>> =
+            std::collections::BinaryHeap::with_capacity(limit + 1);
+
         while let Some(row) = rows.next()? {
             let id: i64 = row.get(0)?;
-            let path: String = row.get(1)?;
-            let blob: Vec<u8> = row.get(2)?;
-
-            // Deserialize f32 little-endian bytes
-            if !blob.len().is_multiple_of(4) {
+            let blob = row.get_ref(1)?.as_blob()?;
+            // Dimension mismatch (also covers non-multiple-of-4 blobs, since expected_bytes is 4·dim).
+            if blob.len() != expected_bytes {
                 continue;
             }
-            let vec = blob_to_embedding(&blob);
-
-            if vec.len() != query.len() {
-                continue;
+            // dot(query, row) and ‖row‖² in ONE pass over the raw bytes — no intermediate `Vec<f32>`.
+            // Sequential accumulation in the same order as the old code ⇒ bit-identical `sim`.
+            let mut dot = 0.0f32;
+            let mut row_norm_sq = 0.0f32;
+            for (i, c) in blob.chunks_exact(4).enumerate() {
+                let v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                dot += query[i] * v;
+                row_norm_sq += v * v;
             }
+            // Same zero-norm rule as `cosine_similarity`.
+            let sim = if query_norm == 0.0 || row_norm_sq == 0.0 {
+                0.0
+            } else {
+                dot / (query_norm * row_norm_sq.sqrt())
+            };
 
-            let sim = cosine_similarity(query, &vec);
-            scored.push((id, path, sim));
+            let cand = Candidate { sim, id };
+            if heap.len() < limit {
+                heap.push(std::cmp::Reverse(cand));
+            } else if let Some(std::cmp::Reverse(worst)) = heap.peek() {
+                if cand > *worst {
+                    heap.pop();
+                    heap.push(std::cmp::Reverse(cand));
+                }
+            }
         }
 
-        scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(limit);
-        Ok(scored.into_iter().map(|(id, path, _)| (id, path)).collect())
+        // `into_sorted_vec` on the `Reverse`-wrapped min-heap yields best-first (sim DESC, id ASC);
+        // resolve the paths in one batched `IN (…)` query.
+        let ids: Vec<i64> = heap
+            .into_sorted_vec()
+            .into_iter()
+            .map(|std::cmp::Reverse(c)| c.id)
+            .collect();
+        self.paths_for_ids(&ids)
     }
 
     /// Dense top-`limit` candidates as `(chunk_id, entry_path)`, via the ANN index when one
@@ -774,7 +864,29 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_fts_query, fts5_quote};
+    use super::{build_fts_query, fts5_quote, rank_by_rrf_score};
+
+    #[test]
+    fn rank_by_rrf_score_breaks_ties_deterministically_on_id() {
+        // Two chunk ids tied at the same score (the exact case an FTS-only hit and a
+        // dense-only hit produce at the same rank: 1.0 / (rrf_k + rank + 1.0) is
+        // bit-identical either way) must always resolve the same way, regardless of
+        // the order they arrive in — draining a HashMap gives no such guarantee upstream.
+        let mut a = vec![(30i64, 0.5f64), (10i64, 0.5), (20i64, 0.5)];
+        let mut b = vec![(20i64, 0.5f64), (30i64, 0.5), (10i64, 0.5)];
+        rank_by_rrf_score(&mut a);
+        rank_by_rrf_score(&mut b);
+        assert_eq!(a, b);
+        // Lower id wins a tie, matching `Candidate::cmp`'s convention.
+        assert_eq!(a, vec![(10, 0.5), (20, 0.5), (30, 0.5)]);
+    }
+
+    #[test]
+    fn rank_by_rrf_score_sorts_by_score_first() {
+        let mut ranked = vec![(1i64, 0.1f64), (2, 0.9), (3, 0.5)];
+        rank_by_rrf_score(&mut ranked);
+        assert_eq!(ranked, vec![(2, 0.9), (3, 0.5), (1, 0.1)]);
+    }
 
     #[test]
     fn build_fts_query_phrase_or_terms_for_multiword() {

@@ -56,6 +56,22 @@ ignore = "0.4"
 notify = "8"
 notify-debouncer-full = "0.7"
 
+# Text encoding (UTF-16/BOM transcoding for the text-family parsers)
+encoding_rs = "0.8"
+
+# Subprocess timeout: kill a hung child instead of blocking indexing forever. Tiny
+# waitpid/WaitForSingleObject wrapper (MIT/Apache-2.0), no transitive deps.
+wait-timeout = "0.2"
+
+# YAML frontmatter for OKF pack bundle export (4.2) — already in Cargo.lock transitively
+# (via calamine), promoted to a direct dep at the same pinned version: zero new tree entries.
+serde_yaml = "0.8"
+
+# Glob matching for preprocessor hooks (4.4) — already in Cargo.lock transitively (via
+# `ignore`), promoted to a direct dep at the same pinned version: zero new tree entries.
+# Scoped to this one use; the fingerprint matcher's hand-rolled glob stays as-is.
+globset = "0.4"
+
 # Storage
 rusqlite = { version = "0.40", features = ["bundled"] }
 

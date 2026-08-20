@@ -50,6 +50,7 @@ pub(crate) async fn cmd_watch(
         &roots,
         cfg.scan.respect_gitignore,
         &cfg.scan.ignore,
+        cfg.scan.custom_ignore,
     );
     let include_sensitive = cfg.scan.include_sensitive;
     let redact_at_index = cfg.scan.redact_at_index;

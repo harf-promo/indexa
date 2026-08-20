@@ -45,15 +45,15 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --all-targets --all-features --locked
 
       - name: Tests
-        run: cargo test --all
+        run: cargo test --all --locked
 
   # Headless-Chrome smoke test of the served web UI. The JS bundle is
   # compile-time-concatenated, so only executing the page in a real browser
-  # catches runtime ReferenceErrors that fmt/clippy/test cannot. Additive job —
-  # NOT in the branch-protection required-checks list.
+  # catches runtime ReferenceErrors that fmt/clippy/test cannot. Hermetic and
+  # fast — promoted to a branch-protection required check (M14).
   web-smoke:
     name: web smoke (headless Chrome)
     runs-on: ubuntu-latest
@@ -75,7 +75,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build indexa (debug)
-        run: cargo build -p indexa
+        run: cargo build --locked -p indexa
 
       # ubuntu-latest runner images ship Google Chrome preinstalled at
       # /usr/bin/google-chrome — no setup action needed. Node >= 22 (global
@@ -88,12 +88,21 @@ jobs:
         run: node scripts/web-smoke.mjs
 
   # Retrieval-quality gate: index this very repo with `deep --no-embed` (FTS-only, so no
-  # embedder / no Ollama / no models pulled — fully hermetic) and score the EXACT
-  # production `retrieve()` ranking against a committed golden set via `indexa eval`.
-  # Catches regressions in chunking / parsing / tokenization / ranking that fmt/clippy/
-  # test cannot see. Golden probes are distinctive identifiers scored in sparse (BM25)
-  # mode; the floor is set well below the measured 1.00 hit rate to tolerate cross-run
-  # tie-order drift. Additive job — NOT in the branch-protection required-checks list.
+  # embedder / no Ollama / no models pulled — fully hermetic) and score the `retrieve()`
+  # ranking against a committed golden set via `indexa eval`. NOT the full production
+  # ranking: `--no-embed` stores zero chunk embeddings, so switching `--mode` here couldn't
+  # exercise MMR anyway — retrieve.rs's MMR step looks up per-chunk embeddings and no-ops
+  # when none are stored (and reaching that code at all needs an embedder, which this
+  # hermetic job deliberately doesn't install). `indexa eval` also has a `--rerank` flag
+  # (routes through the SAME rerank pass `ask` uses), left off here for the same reason —
+  # no local LLM is running in this job either. So this job cannot detect an MMR or reranker
+  # regression regardless of mode/flags; `dense-eval.yml` (`workflow_dispatch`, Ollama +
+  # nomic-embed-text, a real embedded index) is the counterpart that can exercise MMR.
+  # Catches regressions in chunking / parsing / tokenization / the ranking this job DOES
+  # cover that fmt/clippy/test cannot see. Golden probes are distinctive identifiers scored
+  # in sparse (BM25) mode; the floor is set well below the measured 1.00 hit rate to
+  # tolerate cross-run tie-order drift. Promoted to a branch-protection required check
+  # (M14) now that C4's RRF tie-break fix made sparse-mode scoring deterministic.
   eval:
     name: retrieval eval (self-golden, hermetic)
     runs-on: ubuntu-latest
@@ -115,7 +124,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build indexa (debug)
-        run: cargo build -p indexa
+        run: cargo build --locked -p indexa
 
       - name: Index this repo (FTS only — no embeddings, no Ollama)
         run: |
@@ -132,7 +141,7 @@ jobs:
   # only surfaced at release. This compiles it on every PR — a native arm64 build,
   # no bundling/signing (that stays in release.yml). RUSTFLAGS is cleared so a
   # warning in a third-party tauri dependency can't fail the build; we only want to
-  # catch our own compile errors here. Additive — NOT in branch-protection.
+  # catch our own compile errors here. Branch-protection required check.
   desktop-build:
     name: desktop build (macOS)
     runs-on: macos-latest

@@ -205,8 +205,15 @@ fn render_xml_node(node: &ExportNode, out: &mut String, indent: usize) {
         "{pad}  <abstract>{}</abstract>\n",
         xml_text(&node_abstract(node))
     ));
+    // Provenance attributes (1.4): SummaryRecord already carries model/generated_at/
+    // source_hash — every renderer used to drop them, so a consumer couldn't tell how stale
+    // a summary was or which model wrote it. Additive attributes; unknown/missing attributes
+    // on older exports are the OKF tolerant-consumer posture, not an error.
     out.push_str(&format!(
-        "{pad}  <summary>{}</summary>\n",
+        "{pad}  <summary model=\"{}\" generated_at=\"{}\" source_hash=\"{}\">{}</summary>\n",
+        xml_attr(&node.record.model),
+        node.record.generated_at,
+        xml_attr(&node.record.source_hash),
         xml_text(&node.record.summary)
     ));
     if !node.children.is_empty() {
@@ -246,6 +253,13 @@ fn render_md_node(node: &ExportNode, out: &mut String, level: usize) {
     };
     out.push_str(&format!("{prefix} {icon} {name}\n\n"));
     out.push_str(&format!("`{}`\n\n", node.record.path));
+    // Provenance (1.4), matching the notes.rs `<!-- indexa: … -->` comment convention:
+    // invisible in rendered Markdown, present in the raw export for a consumer to check
+    // staleness (source_hash vs. the live file) or which model wrote the summary.
+    out.push_str(&format!(
+        "<!-- indexa: model={} generated_at={} source_hash={} -->\n\n",
+        node.record.model, node.record.generated_at, node.record.source_hash
+    ));
     out.push_str(&format!("**Abstract:** {}\n\n", node_abstract(node)));
     out.push_str(&format!("{}\n\n", node.record.summary));
     for child in &node.children {
@@ -278,9 +292,22 @@ fn render_json_node(node: &ExportNode, out: &mut String, indent: usize) {
         "{inner}\"abstract\": {},\n",
         json_str(&node_abstract(node))
     ));
+    // Provenance fields (1.4) — see the XML renderer's comment for rationale.
     out.push_str(&format!(
-        "{inner}\"summary\": {}",
+        "{inner}\"summary\": {},\n",
         json_str(&node.record.summary)
+    ));
+    out.push_str(&format!(
+        "{inner}\"model\": {},\n",
+        json_str(&node.record.model)
+    ));
+    out.push_str(&format!(
+        "{inner}\"generated_at\": {},\n",
+        node.record.generated_at
+    ));
+    out.push_str(&format!(
+        "{inner}\"source_hash\": {}",
+        json_str(&node.record.source_hash)
     ));
     if !node.children.is_empty() {
         out.push_str(",\n");
@@ -297,6 +324,209 @@ fn render_json_node(node: &ExportNode, out: &mut String, indent: usize) {
         out.push('\n');
     }
     out.push_str(&format!("{pad}}}"));
+}
+
+// ── OKF (Open Knowledge Format) v0.1 pack bundle export (4.2) ────────────────────
+
+/// One item's OKF v0.1 frontmatter. `type` is the only field the spec requires; the rest are
+/// recommended and always populated here since Indexa has the data. `okf_version`/`model`/
+/// `source_hash` are Indexa-specific extension fields — OKF's tolerant-consumer contract
+/// means an unaware reader ignores them, and `pack import` (4.3) round-trips them verbatim.
+#[derive(serde::Serialize)]
+struct OkfFrontmatter {
+    #[serde(rename = "type")]
+    kind: String,
+    title: String,
+    description: String,
+    resource: String,
+    tags: Vec<String>,
+    timestamp: String,
+    okf_version: String,
+    model: String,
+    source_hash: String,
+}
+
+/// Format a Unix timestamp (seconds since epoch, UTC) as an ISO 8601 / RFC 3339 string
+/// (`YYYY-MM-DDTHH:MM:SSZ`) — OKF's `timestamp` field wants ISO 8601, and pulling in `chrono`
+/// for one field would be a new dependency for a solved, bounded problem: this is Howard
+/// Hinnant's `civil_from_days` calendar algorithm (public domain; see
+/// <http://howardhinnant.github.io/date_algorithms.html>), correct for the Gregorian
+/// calendar — leap seconds don't apply to a summary timestamp.
+fn unix_to_iso8601(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let secs_of_day = secs.rem_euclid(86_400);
+    let (h, m, s) = (
+        secs_of_day / 3600,
+        (secs_of_day / 60) % 60,
+        secs_of_day % 60,
+    );
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m_num = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if m_num <= 2 { y + 1 } else { y };
+
+    format!("{year:04}-{m_num:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+/// Flatten an export tree into every node (file AND directory), pre-order (parent before its
+/// children) — an OKF bundle gives every summarized node its own concept file, not just leaves.
+fn flatten_tree<'a>(node: &'a ExportNode, out: &mut Vec<&'a ExportNode>) {
+    out.push(node);
+    for child in &node.children {
+        flatten_tree(child, out);
+    }
+}
+
+/// One entry in `manifest.json` (4.3): the indexed path a bundle item came from, its
+/// content hash at export time, and the concept filename it round-trips to. `pack_import`
+/// compares `hash` against the path's CURRENT `source_hash` to detect drift since export.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ManifestItem {
+    pub path: String,
+    pub hash: String,
+    pub filename: String,
+    /// Whether this item was one of the PACK's own top-level `pack_paths` entries (the
+    /// `roots` passed to `render_okf_bundle`), as opposed to a descendant reached only by
+    /// walking a root's summary tree. `pack_import` must re-add ONLY the roots — re-adding
+    /// every descendant too would give the reconstructed pack a different (more granular)
+    /// shape than the original, and a later export would then double-list descendants (once
+    /// as their own top-level tree, once as a child of the root's tree). `#[serde(default)]`
+    /// so a hand-edited or older manifest without this field defaults to `false` (safe: it
+    /// just means nothing imports, rather than importing a wrong shape).
+    #[serde(default)]
+    pub is_root: bool,
+}
+
+/// `manifest.json` (4.3): everything `pack import` needs to reconstruct the pack without
+/// re-parsing every concept file's frontmatter. `#[serde(default)]` on every field make this
+/// tolerant to read even if a future/older writer omits one — OKF's "never reject unknown
+/// fields, preserve what you don't understand" contract, applied to imports of Indexa's own
+/// bundles too. Unknown top-level JSON keys are ignored by `serde_json` by default (no
+/// `deny_unknown_fields` here) — the same tolerant-consumer semantics for fields THIS struct
+/// doesn't know about.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+pub struct PackManifest {
+    #[serde(default)]
+    pub pack_format_version: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub items: Vec<ManifestItem>,
+}
+
+/// Render an OKF v0.1 bundle for a pack (4.2): one Markdown file per summarized node (file or
+/// directory) with YAML frontmatter, a progressive-disclosure `index.md` (one line per
+/// item — the token-savings pitch made physical), and a `log.md` changelog built from the
+/// pack's event history (4.1, `events` = `(event, detail, at)` triples in chronological
+/// order). Pure Markdown — OKF's `viz.html` is deliberately never emitted (never-HTML
+/// invariant). Returns `(relative_path, content)` pairs; the caller decides whether to write
+/// real files (CLI) or concatenate them into one response (MCP/web). Redaction is the
+/// caller's job (run `redact_secrets` over the concatenated/written content, same as every
+/// other export surface) — running it here too would double-redact when the caller also does.
+pub fn render_okf_bundle(
+    pack_name: &str,
+    roots: &[ExportNode],
+    events: &[(String, Option<String>, i64)],
+) -> Vec<(String, String)> {
+    let mut nodes: Vec<&ExportNode> = Vec::new();
+    for root in roots {
+        flatten_tree(root, &mut nodes);
+    }
+    let root_paths: HashSet<&str> = roots.iter().map(|r| r.record.path.as_str()).collect();
+
+    let mut used_names: HashSet<String> = HashSet::new();
+    let mut files: Vec<(String, String)> = Vec::new();
+    let mut index_lines: Vec<String> = Vec::new();
+    let mut manifest_items: Vec<ManifestItem> = Vec::new();
+
+    for node in &nodes {
+        let rec = &node.record;
+        let title = base_name(&rec.path);
+        let description = node_abstract(node);
+        let hash8 = &rec.source_hash[..rec.source_hash.len().min(8)];
+        let slug = indexa_core::notes::slugify(&title);
+        let mut filename = format!("{slug}-{hash8}.md");
+        let mut dedup = 1u32;
+        while !used_names.insert(filename.clone()) {
+            dedup += 1;
+            filename = format!("{slug}-{hash8}-{dedup}.md");
+        }
+
+        let fm = OkfFrontmatter {
+            kind: rec.kind.clone(),
+            title: title.clone(),
+            description: description.clone(),
+            resource: format!("{} (sha256:{})", rec.path, rec.source_hash),
+            tags: Vec::new(),
+            timestamp: unix_to_iso8601(rec.generated_at),
+            okf_version: "0.1".to_owned(),
+            model: rec.model.clone(),
+            source_hash: rec.source_hash.clone(),
+        };
+        // serde_yaml::to_string already opens with its own "---\n" document marker —
+        // prepending another one here produced a duplicate (caught via a real scratch-repo
+        // OKF export, not by the unit tests: they only checked `starts_with("---\n")`, which
+        // a doubled marker also satisfies).
+        let frontmatter = serde_yaml::to_string(&fm).unwrap_or_default();
+        let body = format!("{frontmatter}---\n\n# {title}\n\n{}\n", rec.summary);
+        index_lines.push(format!("* [{title}]({filename}) - {description}"));
+        manifest_items.push(ManifestItem {
+            path: rec.path.clone(),
+            hash: rec.source_hash.clone(),
+            filename: filename.clone(),
+            is_root: root_paths.contains(rec.path.as_str()),
+        });
+        files.push((filename, body));
+    }
+
+    let index_md = format!(
+        "# {pack_name}\n\nAn [OKF v0.1](https://github.com/GoogleCloudPlatform/knowledge-catalog) \
+         knowledge bundle exported from [Indexa](https://github.com/harf-promo/indexa).\n\n{}\n",
+        index_lines.join("\n")
+    );
+
+    let mut log_md = format!("# {pack_name} — changelog\n\n");
+    if events.is_empty() {
+        log_md.push_str("(no recorded history)\n");
+    } else {
+        for (event, detail, at) in events {
+            let ts = unix_to_iso8601(*at);
+            let label = if *event == "created" {
+                "Creation"
+            } else {
+                "Update"
+            };
+            match detail {
+                Some(d) => log_md.push_str(&format!("- **{label}** ({ts}): {event} — {d}\n")),
+                None => log_md.push_str(&format!("- **{label}** ({ts}): {event}\n")),
+            }
+        }
+    }
+
+    let manifest = PackManifest {
+        pack_format_version: "0.1".to_owned(),
+        name: pack_name.to_owned(),
+        description: None,
+        items: manifest_items,
+    };
+    let manifest_json = serde_json::to_string_pretty(&manifest).unwrap_or_else(|_| "{}".to_owned());
+
+    let mut out = vec![
+        ("index.md".to_owned(), index_md),
+        ("log.md".to_owned(), log_md),
+        ("manifest.json".to_owned(), manifest_json),
+    ];
+    out.extend(files);
+    out
 }
 
 // ── Optional appended sections (--include-weights / --include-graph) ────────────
@@ -414,6 +644,47 @@ pub fn render_graph(graph: &CodeGraph, format: &str) -> String {
             out
         }
     }
+}
+
+/// Escape a mermaid node label: `"` breaks the `["label"]` quoting, so replace it with the
+/// HTML-entity-style escape mermaid recognizes rather than trying to nest quotes.
+fn mermaid_escape(s: &str) -> String {
+    s.replace('"', "#quot;")
+}
+
+/// Render the file-to-file call graph as a fenced ```mermaid flowchart block (GitNexus's
+/// export-as-diagram idea) — pure text, no HTML, no library, renders natively in most AI
+/// tools and Markdown viewers (GitHub included). Node IDs are anonymized (`n0`, `n1`, …)
+/// since mermaid identifiers can't safely hold path characters (`/`, `.`, `-`); the file
+/// path becomes the node's label instead. Empty graph → "".
+pub fn render_graph_mermaid(graph: &CodeGraph) -> String {
+    if graph.edges.is_empty() {
+        return String::new();
+    }
+    let mut ids: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for e in &graph.edges {
+        let next = ids.len();
+        ids.entry(e.from.as_str()).or_insert(next);
+        let next = ids.len();
+        ids.entry(e.to.as_str()).or_insert(next);
+    }
+    let mut nodes: Vec<(&str, usize)> = ids.iter().map(|(&p, &id)| (p, id)).collect();
+    nodes.sort_by_key(|(_, id)| *id);
+
+    let mut out = String::from("```mermaid\nflowchart TD\n");
+    if graph.truncated {
+        out.push_str("  %% truncated — heaviest edges shown\n");
+    }
+    for (path, id) in &nodes {
+        out.push_str(&format!("  n{id}[\"{}\"]\n", mermaid_escape(path)));
+    }
+    for e in &graph.edges {
+        let from_id = ids[e.from.as_str()];
+        let to_id = ids[e.to.as_str()];
+        out.push_str(&format!("  n{from_id} -->|{}| n{to_id}\n", e.weight));
+    }
+    out.push_str("```\n");
+    out
 }
 
 // ── Signatures (code-skeleton) export ───────────────────────────────────────────
@@ -614,10 +885,29 @@ mod tests {
         assert!(xml.ends_with("</index>\n"));
         assert!(xml.contains("<directory "));
         assert!(xml.contains("<file "));
-        assert!(xml.contains("<summary>"));
+        assert!(xml.contains("<summary "));
         assert!(xml.contains("</summary>"));
         // Token estimate is present on the root element.
         assert!(xml.contains("approx_tokens=\""));
+    }
+
+    #[test]
+    fn xml_json_markdown_carry_summary_provenance() {
+        // 1.4: SummaryRecord's model/generated_at/source_hash must survive into every
+        // renderer — a consumer can no longer tell provenance/staleness without them.
+        let tree = make_tree();
+
+        let xml = render_xml(&tree, "2026-05-28");
+        assert!(xml.contains(r#"model="test""#));
+        assert!(xml.contains(r#"generated_at="0""#));
+
+        let json = render_json(&tree);
+        assert!(json.contains(r#""model": "test""#));
+        assert!(json.contains(r#""generated_at": 0"#));
+        assert!(json.contains(r#""source_hash""#));
+
+        let md = render_markdown(&tree);
+        assert!(md.contains("<!-- indexa: model=test generated_at=0"));
     }
 
     #[test]
@@ -777,6 +1067,48 @@ mod tests {
     }
 
     #[test]
+    fn mermaid_graph_renders_a_fenced_flowchart() {
+        use indexa_core::store::{CodeGraph, CodeGraphEdge, CodeGraphNode};
+        let graph = CodeGraph {
+            nodes: vec![CodeGraphNode {
+                path: "/r/main.rs".into(),
+                out_degree: 1,
+                in_degree: 0,
+                pagerank: 0.5,
+            }],
+            edges: vec![CodeGraphEdge {
+                from: "/r/main.rs".into(),
+                to: "/r/lib.rs".into(),
+                weight: 3,
+            }],
+            truncated: false,
+        };
+        let mmd = render_graph_mermaid(&graph);
+        assert!(mmd.starts_with("```mermaid\nflowchart TD\n"));
+        assert!(mmd.trim_end().ends_with("```"));
+        assert!(mmd.contains("n0[\"/r/main.rs\"]"));
+        assert!(mmd.contains("n1[\"/r/lib.rs\"]"));
+        assert!(mmd.contains("n0 -->|3| n1"));
+        // Empty graph renders nothing (matches render_graph's contract).
+        assert_eq!(
+            render_graph_mermaid(&CodeGraph {
+                nodes: vec![],
+                edges: vec![],
+                truncated: false,
+            }),
+            ""
+        );
+    }
+
+    #[test]
+    fn mermaid_escapes_double_quotes_in_labels() {
+        assert_eq!(
+            mermaid_escape(r#"a "quoted" path"#),
+            "a #quot;quoted#quot; path"
+        );
+    }
+
+    #[test]
     fn xml_escapes_special_chars() {
         let xml = xml_attr("a & b < c > d \"e\"");
         assert_eq!(xml, "a &amp; b &lt; c &gt; d &quot;e&quot;");
@@ -886,5 +1218,158 @@ mod tests {
         let json = render_signatures(&chunks, "json", true);
         assert!(json.contains("\"signatures\""));
         assert!(json.contains("\"path\": \"/r/lib.rs\""));
+    }
+
+    #[test]
+    fn unix_to_iso8601_matches_known_reference_points() {
+        assert_eq!(unix_to_iso8601(0), "1970-01-01T00:00:00Z");
+        assert_eq!(unix_to_iso8601(946_684_800), "2000-01-01T00:00:00Z");
+        assert_eq!(unix_to_iso8601(1_609_459_200), "2021-01-01T00:00:00Z");
+        assert_eq!(
+            unix_to_iso8601(1_609_459_200 + 3661),
+            "2021-01-01T01:01:01Z"
+        );
+    }
+
+    fn make_record_with_hash(
+        path: &str,
+        kind: &str,
+        hash: &str,
+        generated_at: i64,
+    ) -> SummaryRecord {
+        let mut r = make_record(path, kind, None, 0);
+        r.source_hash = hash.to_owned();
+        r.generated_at = generated_at;
+        r
+    }
+
+    #[test]
+    fn okf_bundle_emits_index_log_and_one_file_per_node() {
+        let root = ExportNode {
+            record: make_record_with_hash("/root", "dir", "aaaaaaaaaaaa", 1_609_459_200),
+            children: vec![ExportNode {
+                record: make_record_with_hash("/root/a.rs", "file", "bbbbbbbbbbbb", 1_609_459_260),
+                children: vec![],
+            }],
+        };
+        let events = vec![
+            ("created".to_owned(), Some("proj".to_owned()), 1_609_459_100),
+            ("exported".to_owned(), Some("okf".to_owned()), 1_609_459_300),
+        ];
+        let bundle = render_okf_bundle("proj", std::slice::from_ref(&root), &events);
+
+        let names: Vec<&str> = bundle.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"index.md"));
+        assert!(names.contains(&"log.md"));
+        assert!(names.contains(&"manifest.json"));
+        // One concept file per node (root dir + its one child file).
+        assert_eq!(
+            bundle.len(),
+            5,
+            "index.md + log.md + manifest.json + 2 nodes, got: {names:?}"
+        );
+
+        let (_, manifest_json) = bundle.iter().find(|(n, _)| n == "manifest.json").unwrap();
+        let manifest: PackManifest = serde_json::from_str(manifest_json).unwrap();
+        assert_eq!(manifest.pack_format_version, "0.1");
+        assert_eq!(manifest.name, "proj");
+        assert_eq!(manifest.items.len(), 2);
+        assert!(manifest.items.iter().any(|i| i.path == "/root/a.rs"
+            && i.hash == "bbbbbbbbbbbb"
+            && i.filename.starts_with("a-")));
+        // 4.3: only the top-level root (the ExportNode passed in, not its descendants) is
+        // flagged is_root — pack_import must re-add only this as a pack_path, never every
+        // summarized descendant too (that would give the reconstructed pack a different,
+        // more granular shape than the original).
+        let root_item = manifest.items.iter().find(|i| i.path == "/root").unwrap();
+        assert!(
+            root_item.is_root,
+            "the top-level node must be flagged is_root"
+        );
+        let child_item = manifest
+            .items
+            .iter()
+            .find(|i| i.path == "/root/a.rs")
+            .unwrap();
+        assert!(
+            !child_item.is_root,
+            "a descendant reached only via the tree walk must not be flagged is_root"
+        );
+
+        let (_, index) = bundle.iter().find(|(n, _)| n == "index.md").unwrap();
+        assert!(index.contains("# proj"));
+        assert!(index.contains("Abstract of /root/a.rs"));
+
+        let (_, log) = bundle.iter().find(|(n, _)| n == "log.md").unwrap();
+        assert!(log.contains("**Creation**"));
+        assert!(log.contains("**Update**"));
+        assert!(log.contains("2020-12-31T23:58:20Z")); // 1_609_459_100 in ISO 8601
+        assert!(log.contains("proj"));
+        assert!(log.contains("okf"));
+
+        let a_file = bundle
+            .iter()
+            .find(|(n, _)| n.starts_with("a-") && n.ends_with(".md"))
+            .unwrap();
+        assert!(
+            a_file.1.starts_with("---\n"),
+            "must open with YAML frontmatter"
+        );
+        assert!(
+            !a_file.1.starts_with("---\n---\n"),
+            "must not double up the frontmatter delimiter (serde_yaml emits its own leading \
+             '---\\n'): {}",
+            a_file.1
+        );
+        assert!(a_file.1.contains("type: file"));
+        assert!(a_file.1.contains("title: a.rs"));
+        assert!(
+            a_file.1.contains("okf_version: \"0.1\"") || a_file.1.contains("okf_version: '0.1'")
+        );
+        assert!(a_file.1.contains("source_hash: bbbbbbbbbbbb"));
+        assert!(a_file.1.contains("timestamp: \"2021-01-01T00:01:00Z\""));
+        assert!(
+            !a_file.1.contains("<"),
+            "must be pure Markdown, never HTML: {}",
+            a_file.1
+        );
+    }
+
+    #[test]
+    fn okf_bundle_dedupes_filenames_that_would_otherwise_collide() {
+        // Two files with the identical basename AND identical (truncated) hash prefix would
+        // otherwise collide on the same generated filename.
+        let root = ExportNode {
+            record: make_record_with_hash("/root", "dir", "cccccccccccc", 0),
+            children: vec![
+                ExportNode {
+                    record: make_record_with_hash("/root/a/mod.rs", "file", "dddddddddddd", 0),
+                    children: vec![],
+                },
+                ExportNode {
+                    record: make_record_with_hash("/root/b/mod.rs", "file", "dddddddddddd", 0),
+                    children: vec![],
+                },
+            ],
+        };
+        let bundle = render_okf_bundle("proj", std::slice::from_ref(&root), &[]);
+        let names: HashSet<&str> = bundle.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names.len(),
+            bundle.len(),
+            "every generated filename must be unique, got: {:?}",
+            bundle.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn okf_bundle_with_no_events_notes_no_history() {
+        let root = ExportNode {
+            record: make_record_with_hash("/root", "dir", "eeeeeeeeeeee", 0),
+            children: vec![],
+        };
+        let bundle = render_okf_bundle("proj", std::slice::from_ref(&root), &[]);
+        let (_, log) = bundle.iter().find(|(n, _)| n == "log.md").unwrap();
+        assert!(log.contains("no recorded history"));
     }
 }

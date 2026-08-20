@@ -41,6 +41,25 @@ use tracing::info;
 
 use handlers::*;
 
+/// Convert `[[parsers.preprocessor]]` config entries into parsers-crate-local specs (4.4).
+/// `indexa-parsers` has no dependency on `indexa-core`, so this conversion lives at each
+/// registry-construction call site — the same pattern `[chunking]` -> `ChunkParams` already
+/// uses (mirrored in `apps/indexa`'s own `helpers::preprocessor_specs`).
+pub(crate) fn preprocessor_specs(
+    cfg: &Config,
+) -> Vec<indexa_parsers::preprocess::PreprocessorSpec> {
+    cfg.parsers
+        .preprocessor
+        .iter()
+        .map(|p| indexa_parsers::preprocess::PreprocessorSpec {
+            glob: p.glob.clone(),
+            command: p.command.clone(),
+            timeout: std::time::Duration::from_secs(p.timeout_s),
+            max_output_bytes: p.max_output_mb.saturating_mul(1024 * 1024),
+        })
+        .collect()
+}
+
 // ── Shared state ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -135,6 +154,7 @@ pub(crate) const UI_CSS: &str = concat!(
     include_str!("../assets/ui/css/20-graph-layers.css"),
     include_str!("../assets/ui/css/21-graph-communities.css"),
     include_str!("../assets/ui/css/19-conversation.css"),
+    include_str!("../assets/ui/css/22-graph-modules.css"),
 );
 pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/00-auth-bootstrap.js"),
@@ -167,6 +187,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/27-health.js"),
     include_str!("../assets/ui/js/28-graph-layers.js"),
     include_str!("../assets/ui/js/29-graph-communities.js"),
+    include_str!("../assets/ui/js/30-graph-modules.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -357,7 +378,9 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
         .route("/api/map", get(api_map))
         .route("/api/map/treemap", get(api_map_treemap))
         .route("/api/graph", get(api_graph))
+        .route("/api/graph/modules", get(api_graph_modules))
         .route("/api/roots", get(api_roots))
+        .route("/api/projects", get(api_projects))
         .route("/api/search", get(api_search))
         .route("/api/fs/ls", get(api_fs_ls))
         .route("/api/file", get(api_file_preview))
@@ -488,6 +511,75 @@ mod tests {
         assert!(!UI_CSS.is_empty());
         assert!(!UI_JS.is_empty());
         assert!(UI_JS.contains("/api/ask"));
+    }
+
+    /// Every `NN-name.js` fragment shares one global scope once concatenated (no modules,
+    /// no build step) — a `function NAME(...)` declared in two fragments silently shadows
+    /// the earlier one (JS: last top-level declaration at a scope wins), invisible to
+    /// fmt/clippy/test and to any linter, since each fragment parses fine on its own. This
+    /// is exactly how `toggleSound`/`reindexAll` went dead in two fragments for a real
+    /// release before being caught by hand. `UI_JS` is `concat!` of the fragments with no
+    /// separator inserted — each source file ends in its own trailing newline, so scanning
+    /// for start-of-line `function NAME(` in the joined string is equivalent to scanning
+    /// every fragment individually.
+    #[test]
+    fn no_top_level_function_is_declared_in_two_js_fragments() {
+        let mut counts: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+        for line in UI_JS.split('\n') {
+            let Some(rest) = line.strip_prefix("function ") else {
+                continue;
+            };
+            let name_end = rest
+                .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+                .unwrap_or(rest.len());
+            let name = &rest[..name_end];
+            // A bare `function (` (anonymous) or a name immediately followed by something
+            // other than `(` (e.g. `function foo` mid-comment) isn't a real declaration.
+            if name.is_empty() || !rest[name_end..].starts_with('(') {
+                continue;
+            }
+            *counts.entry(name).or_insert(0) += 1;
+        }
+        let dupes: Vec<&str> = counts
+            .into_iter()
+            .filter(|(_, n)| *n > 1)
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            dupes.is_empty(),
+            "top-level function(s) declared in more than one JS fragment (the later one \
+             silently wins, the earlier is dead code): {dupes:?}"
+        );
+    }
+
+    /// Every `NN-name.js`/`.css` file in `assets/ui/{js,css}` must be listed in this file's
+    /// `UI_JS`/`UI_CSS` `concat!` — a new fragment added to the directory but never wired
+    /// into the concat list compiles fine and is simply never served, dead on arrival.
+    #[test]
+    fn every_ui_fragment_on_disk_is_wired_into_the_concat_list() {
+        let lib_rs_src = include_str!("lib.rs");
+        for sub in ["js", "css"] {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/ui")
+                .join(sub);
+            let mut missing = Vec::new();
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().and_then(|e| e.to_str()) != Some(sub) {
+                    continue;
+                }
+                let name = path.file_name().unwrap().to_str().unwrap();
+                let needle = format!("assets/ui/{sub}/{name}\")");
+                if !lib_rs_src.contains(&needle) {
+                    missing.push(name.to_owned());
+                }
+            }
+            assert!(
+                missing.is_empty(),
+                "{sub} fragment(s) on disk but not include_str!'d into UI_{}: {missing:?}",
+                sub.to_uppercase()
+            );
+        }
     }
 
     // ── Test scaffolding ────────────────────────────────────────────────────────
@@ -864,6 +956,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_config_features_audio_binary_change_is_forbidden_without_env_gate() {
+        // H7: audio_binary names an executable path the indexer later spawns. Setting a
+        // NEW value must be gated the same as api_keys/api_config_provider_set. CI leaves
+        // INDEXA_WEB_ALLOW_KEY_EDIT unset and no test in this binary sets it, so the
+        // closed-gate path is deterministic (same convention as api_keys_post_is_forbidden…
+        // above).
+        //
+        // The handler reads the REAL config::default_config_path() to compare against
+        // (see api_config_features_set's doc comment — this is deliberate, closes a
+        // stale-snapshot bypass) and only rejects when the posted value differs from
+        // what's on disk. This value MUST stay an obvious canary that could never
+        // coincidentally match a real config: if it ever matched, the "changed" check
+        // would read false, skip the gate, and this test would silently start writing
+        // into the developer's actual config.toml on every run instead of asserting
+        // FORBIDDEN. Do not change this to a plausible-looking path.
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let (status, json) = post_json(
+            app,
+            "/api/config/features",
+            serde_json::json!({ "audio_binary": "/nonexistent/h7-test-canary-binary-do-not-reuse" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("INDEXA_WEB_ALLOW_KEY_EDIT"));
+    }
+
+    // No unit test exercises api_config_features_set's success path (the "no-op resend
+    // isn't gated" behavior): every config-write handler in this file (api_keys_set,
+    // api_config_provider_set, api_config_resource_set, api_config_features_set) reads
+    // and writes through the global config::default_config_path() — the REAL OS config
+    // directory, with no AppState-level injection point for tests to redirect it to a
+    // scratch path. A test that reaches past the gate into config::save would write test
+    // data into the developer's actual config.toml. This is why the one existing test in
+    // this area (api_keys_post_is_forbidden_without_env_gate, above) deliberately stops
+    // at the gate — same convention followed here. The no-op-resend behavior is verified
+    // live instead, via `indexa serve` against a HOME-overridden scratch profile (see the
+    // H7 PR description for the transcript) — that path never touches the real config.
+
+    #[tokio::test]
     async fn api_packs_export_redacts_secrets() {
         // Regression guard: the pack export route must scrub secrets before content
         // leaves the machine over HTTP — the same invariant the whole-tree export,
@@ -1088,6 +1222,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_ask_flags_a_stale_source() {
+        // 1.2: a cited source whose on-disk mtime is newer than what's indexed comes back
+        // with `stale: true` in the JSON response.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("widget.rs");
+        std::fs::write(&file, "fn widget_gadget() {}").unwrap();
+        let path = file.to_str().unwrap().to_owned();
+
+        let db = temp_db_path("stale-source");
+        {
+            let mut store = Store::open(&db).unwrap();
+            store
+                .upsert_chunks(&[ChunkRecord {
+                    entry_path: path.clone(),
+                    seq: 0,
+                    heading: String::new(),
+                    text: "a widget gadget function".to_owned(),
+                    language: None,
+                    embedding: Some(vec![0.1_f32; 8]),
+                    embed_model: Some("test".to_owned()),
+                    content_hash: None,
+                }])
+                .unwrap();
+            store
+                .db_connection()
+                .execute(
+                    "UPDATE chunks SET indexed_at = 1 WHERE entry_path = ?1",
+                    rusqlite::params![path],
+                )
+                .unwrap();
+        }
+        let app = build_router(state_with_db(Store::open(&db).unwrap(), db.clone()), 7620);
+        let (status, json) = post_json(
+            app,
+            "/api/ask",
+            serde_json::json!({ "question": "widget gadget", "synthesize": false }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let sources = json["sources"].as_array().expect("sources array");
+        assert!(!sources.is_empty(), "expected at least one cited source");
+        assert!(
+            sources.iter().any(|s| s["stale"] == true),
+            "expected a source flagged stale: {json}"
+        );
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[tokio::test]
     async fn api_export_empty_index_is_not_found() {
         let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
         let (status, json) = get_json(app, "/api/export").await;
@@ -1147,6 +1330,89 @@ mod tests {
         let (status, json) = get_json(app, "/api/stats").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["summaries"], 1);
+    }
+
+    #[tokio::test]
+    async fn api_health_reports_thin_context_and_summaries() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[entry("/r", EntryKind::Dir)])
+            .unwrap();
+        store
+            .upsert_chunks(&[chunk("/r/a.rs", 0, "fn main() {}")])
+            .unwrap();
+        let app = build_router(state_with(store), 7620);
+        let (status, json) = get_json(app, "/api/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["summaries"], 0);
+        assert_eq!(json["chunks"], 1);
+        assert_eq!(json["thin_context"], true);
+        assert!(json.get("stale").is_some());
+    }
+
+    #[tokio::test]
+    async fn api_projects_returns_top_apps_with_coverage() {
+        use indexa_core::store::DetectedApp;
+        // File-backed, not in-memory: api_projects (M4) opens its own fresh connection to
+        // state.db_path instead of locking the shared store, so the handler's connection
+        // must reopen the SAME database this setup writes into (:memory: would not).
+        let db = temp_db_path("projects-coverage");
+        let mut store = Store::open(&db).unwrap();
+        store
+            .upsert_entries(&[
+                entry("/dev/indexa", EntryKind::Dir),
+                entry("/dev/indexa/a.rs", EntryKind::File),
+                entry("/dev/other", EntryKind::Dir),
+            ])
+            .unwrap();
+        store
+            .upsert_chunks(&[chunk("/dev/indexa/a.rs", 0, "fn main() {}")])
+            .unwrap();
+        store
+            .replace_apps_for_dir(
+                "/dev/indexa",
+                &[DetectedApp {
+                    path: "/dev/indexa".into(),
+                    app_kind: "rust_crate".into(),
+                    app_name: "Rust crate".into(),
+                    family: "code".into(),
+                    specificity: 10,
+                    is_primary: true,
+                    markers_json: "[]".into(),
+                    source: "builtin".into(),
+                    detected_at: 0,
+                }],
+            )
+            .unwrap();
+        store
+            .replace_apps_for_dir(
+                "/dev/indexa/crates/core",
+                &[DetectedApp {
+                    path: "/dev/indexa/crates/core".into(),
+                    app_kind: "rust_crate".into(),
+                    app_name: "Rust crate".into(),
+                    family: "code".into(),
+                    specificity: 10,
+                    is_primary: true,
+                    markers_json: "[]".into(),
+                    source: "builtin".into(),
+                    detected_at: 0,
+                }],
+            )
+            .unwrap();
+        store
+            .upsert_summary(&summary("/dev/indexa", "dir", Some("/dev"), 1))
+            .unwrap();
+        let app = build_router(state_with_db(store, db.clone()), 7620);
+        let (status, json) = get_json(app, "/api/projects?path=/dev").await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = json.as_array().expect("projects is an array");
+        assert_eq!(rows.len(), 1, "nested crate must be collapsed: {json}");
+        assert_eq!(rows[0]["path"], "/dev/indexa");
+        assert_eq!(rows[0]["has_summary"], true);
+        assert_eq!(rows[0]["chunk_count"], 1);
+        assert_eq!(rows[0]["app_name"], "Rust crate");
+        let _ = std::fs::remove_file(&db);
     }
 
     #[tokio::test]

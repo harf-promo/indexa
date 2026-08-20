@@ -8,7 +8,7 @@
 //!
 //! The authoritative tool list is `golden_tools.txt` (enforced by the contract tests
 //! below — `tool_contract_golden_list` fails on any add/remove/rename, and
-//! `doc_tool_count_matches_code` keeps the counts in README/CLAUDE.md/docs honest).
+//! `doc_tool_count_matches_code` keeps the counts in README/AGENTS.md/USAGE.md/docs honest).
 //! Tool families: retrieval (`search`, `browse_tree`, `get_summary` l0/l1/l2,
 //! `read_file`, `ask`), code graph (`dependencies`, `who_imports`, `who_calls`,
 //! `blast_radius`, `code_graph`, `related_files`), Context Packs, Smart
@@ -45,7 +45,7 @@ use rmcp::{
 
 use indexa_core::{
     config::{Config, HybridMode},
-    store::Store,
+    store::{AnnIndex, Store},
 };
 use indexa_embed::Embedder;
 use indexa_llm::Generator;
@@ -56,8 +56,8 @@ pub use curation::{
     ListClassificationsParams, ListFilesByCategoryParams, SetWeightParams,
 };
 pub use graph::{
-    BlastRadiusParams, CodeGraphParams, DependenciesParams, RelatedFilesParams, WhoCallsParams,
-    WhoImportsParams,
+    BlastRadiusParams, ChangedImpactParams, CodeGraphParams, DependenciesParams,
+    RelatedFilesParams, SymbolContextParams, TracePathParams, WhoCallsParams, WhoImportsParams,
 };
 pub use insights::{InsightsDaysParams, InsightsDuplicatesParams, InsightsLargestParams};
 pub use packs::{
@@ -76,6 +76,56 @@ pub use review::{
 /// Max bytes returned by `read_file` (L2 raw content).
 const READ_FILE_CAP: usize = 40 * 1024;
 
+/// The MCP server's cached ANN index plus the `(chunk_count, max_chunk_id)` watermark it was
+/// built at — a mismatch means a `deep`/`trigger_index` changed the chunks table and the index
+/// must be rebuilt. Mirrors the web server's `AnnCache` (which is `pub(crate)` to that crate, so
+/// it can't be shared here) so MCP — the primary AI surface — gets the same fast dense retrieval.
+#[derive(Default)]
+struct AnnCache {
+    index: Option<Arc<AnnIndex>>,
+    watermark: (i64, i64),
+}
+
+/// MCP tool-surface profile (3.2) — `core` un-advertises AND un-calls (via rmcp's
+/// `disable_route`, not a filtered listing) every tool outside a small task-focused subset,
+/// cutting the per-session schema token cost for subagents that only need retrieval + basic
+/// graph/pack/decision access. `full` (the default) is byte-identical to pre-3.2 behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolProfile {
+    #[default]
+    Full,
+    Core,
+}
+
+impl ToolProfile {
+    /// Parse a `--tool-profile`/`[mcp] tool_profile` value. Fail-open: anything other than
+    /// exactly `"core"` (including unrecognized values) resolves to `Full` — an unrecognized
+    /// profile must never accidentally hide tools from an agent that needs them.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "core" => ToolProfile::Core,
+            _ => ToolProfile::Full,
+        }
+    }
+}
+
+/// The `core` profile's tool set — retrieval plus the minimum graph/pack/decision surface for
+/// a subagent doing focused, bounded work. Subset-only by construction: every name here must
+/// also appear in [`IndexaMcp::tool_router`]'s full set, enforced by
+/// `core_profile_is_a_subset_of_the_full_tool_set`.
+const CORE_TOOL_NAMES: &[&str] = &[
+    "search",
+    "ask",
+    "dependencies",
+    "who_calls",
+    "blast_radius",
+    "list_packs",
+    "search_pack",
+    "export_pack",
+    "add_note",
+    "list_open_decisions",
+];
+
 /// The Indexa MCP server handler. Holds only `Send + Sync` state. Each tool opens
 /// its own short-lived `Store` connection (a rusqlite `Connection` is `Send` but
 /// not `Sync`, so it can't be shared across the async tool futures) — mirroring
@@ -86,6 +136,12 @@ pub struct IndexaMcp {
     embedder: Arc<dyn Embedder + Send + Sync>,
     llm: Arc<dyn Generator + Send + Sync>,
     config: Arc<Config>,
+    tool_profile: ToolProfile,
+    /// Cached HNSW index for dense retrieval, shared across tool calls (the MCP server is
+    /// long-lived, so the build cost amortizes). Watermark-keyed so a re-index refreshes it.
+    ann: Arc<tokio::sync::RwLock<AnnCache>>,
+    /// Single-flight guard so concurrent cold/stale asks don't each build a full index.
+    ann_build_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 fn mcp_err(e: impl std::fmt::Display) -> ErrorData {
@@ -109,17 +165,33 @@ fn record_usage(store: &mut Store, tool: &str, bytes_served: usize, bytes_counte
 }
 
 impl IndexaMcp {
+    /// `full` tool profile (byte-identical to pre-3.2 behavior). See
+    /// [`Self::new_with_profile`] for `--tool-profile core`.
     pub fn new(
         db_path: PathBuf,
         embedder: Arc<dyn Embedder + Send + Sync>,
         llm: Arc<dyn Generator + Send + Sync>,
         config: Arc<Config>,
     ) -> Self {
+        Self::new_with_profile(db_path, embedder, llm, config, ToolProfile::Full)
+    }
+
+    /// 3.2 — construct with an explicit tool profile.
+    pub fn new_with_profile(
+        db_path: PathBuf,
+        embedder: Arc<dyn Embedder + Send + Sync>,
+        llm: Arc<dyn Generator + Send + Sync>,
+        config: Arc<Config>,
+        tool_profile: ToolProfile,
+    ) -> Self {
         Self {
             db_path: Arc::new(db_path),
             embedder,
             llm,
             config,
+            tool_profile,
+            ann: Arc::new(tokio::sync::RwLock::new(AnnCache::default())),
+            ann_build_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -129,9 +201,86 @@ impl IndexaMcp {
         Store::open(&self.db_path).map_err(mcp_err)
     }
 
+    /// Lazily build (and cache) the ANN index for dense retrieval, or return `None` to fall back
+    /// to the brute-force cosine scan. `None` when ANN is off (`[retrieval] ann`), the index is
+    /// below `ann_min_chunks`, or a build/read fails. Rebuilds when the chunk watermark
+    /// `(count, max_chunk_id)` changes, so a `deep`/`trigger_index` that adds or edits chunks
+    /// transparently refreshes the index on the next call. Ported from the web server's
+    /// `ensure_ann`; all store access uses fresh read connections so nothing is held across the
+    /// CPU-heavy build. `ann.as_deref()` at the call sites turns the returned `Arc` into the
+    /// `Option<&AnnIndex>` the query pipeline already threads end-to-end.
+    async fn ensure_ann(&self) -> Option<Arc<AnnIndex>> {
+        if !self.config.retrieval.ann {
+            return None;
+        }
+        let db_path = (*self.db_path).clone();
+        let min_chunks = self.config.retrieval.ann_min_chunks;
+
+        // Watermark = (chunk_count, max_chunk_id): AUTOINCREMENT ids are monotonic, so any
+        // insert/edit bumps max_id and any delete changes the count — a stale index is always
+        // detected.
+        let (count, max_id) = tokio::task::spawn_blocking({
+            let db_path = db_path.clone();
+            move || -> Option<(i64, i64)> {
+                let s = Store::open(&db_path).ok()?;
+                Some((s.chunk_count().ok()? as i64, s.max_chunk_id().ok()?))
+            }
+        })
+        .await
+        .ok()??;
+
+        if (count as usize) < min_chunks {
+            return None;
+        }
+
+        // Fast path: cached index still matches the watermark.
+        {
+            let cache = self.ann.read().await;
+            if let Some(idx) = &cache.index {
+                if cache.watermark == (count, max_id) {
+                    return Some(idx.clone());
+                }
+            }
+        }
+
+        // Single-flight: serialize builds; re-check after acquiring (another caller may have just
+        // built the current index).
+        let _build_guard = self.ann_build_lock.lock().await;
+        {
+            let cache = self.ann.read().await;
+            if let Some(idx) = &cache.index {
+                if cache.watermark == (count, max_id) {
+                    return Some(idx.clone());
+                }
+            }
+        }
+
+        // Build fresh (CPU-heavy → spawn_blocking; reads on its own connection).
+        let built = tokio::task::spawn_blocking(move || -> Option<AnnIndex> {
+            let s = Store::open(&db_path).ok()?;
+            let items = s.all_chunk_embeddings().ok()?;
+            let dim = items
+                .iter()
+                .find(|(_, v)| !v.is_empty())
+                .map(|(_, v)| v.len())?;
+            Some(AnnIndex::build(&items, dim))
+        })
+        .await
+        .ok()??;
+
+        let idx = Arc::new(built);
+        {
+            let mut cache = self.ann.write().await;
+            cache.index = Some(idx.clone());
+            cache.watermark = (count, max_id);
+        }
+        Some(idx)
+    }
+
     /// Composed router over every tool family module — the single source of
-    /// truth for the tool surface, used by both the `#[tool_handler]` dispatch
-    /// below and the contract tests.
+    /// truth for the FULL tool surface (contract tests, golden list, doc counts). The
+    /// `#[tool_handler]` dispatch below uses [`Self::active_tool_router`] instead, which
+    /// applies the instance's profile on top of this.
     pub(crate) fn tool_router() -> ToolRouter<Self> {
         Self::router_retrieval()
             + Self::router_graph()
@@ -142,15 +291,94 @@ impl IndexaMcp {
             + Self::router_admin()
             + Self::router_query_extras()
     }
+
+    /// 3.2 — the router that actually serves THIS instance's requests: the full router with
+    /// every tool outside the active profile disabled via rmcp's `disable_route` (un-advertised
+    /// in `list_tools` AND rejected by `call_tool` — not merely filtered from a listing).
+    /// `Full` (the default) is the unmodified full router, so profile-off behavior is
+    /// byte-identical to pre-3.2.
+    fn active_tool_router(&self) -> ToolRouter<Self> {
+        let mut router = Self::tool_router();
+        if self.tool_profile == ToolProfile::Core {
+            for tool in router.clone().list_all() {
+                if !CORE_TOOL_NAMES.contains(&tool.name.as_ref()) {
+                    router.disable_route(tool.name);
+                }
+            }
+        }
+        router
+    }
 }
 
-#[tool_handler(router = Self::tool_router())]
+/// The `full` profile's static instructions prose — every tool it names is available under
+/// `ToolProfile::Full` (the unrestricted router), so this is safe to keep hand-written.
+/// Resources/Prompts are listed in both profiles' instructions because `tool_profile` only
+/// gates the `ToolRouter` (tools), never `list_resources`/`list_prompts` — both stay available
+/// under `core` too.
+const FULL_INSTRUCTIONS: &str =
+    "Indexa is a local context engine: a hierarchically-summarized index of your files. \
+     Navigate with `browse_tree` and `search`; call `get_summary` with tier=l0 (one-line \
+     abstract) to scan cheaply, then drill to l1 (full summary) or l2 (raw content). \
+     Use `read_file` for raw text; `ask` for grounded RAG answers (supports scope + mode). \
+     NOTE: `ask` synthesizes with Indexa's LOCAL model (e.g. ollama/gemma3:12b), not your \
+     model — so if you are a strong model, call `ask` with `synthesize: false` to get the \
+     retrieved context slice and write the answer yourself (better, and no local-model cost), \
+     or compose `search`/`get_chunk_context`/`export_pack` for raw context. \
+     Use `trigger_index` to index new or changed files. \
+     Context Packs: `list_packs`/`get_pack`/`create_pack`/`add_pack_paths`/\
+`remove_pack_paths`/`delete_pack`/`export_pack`/`search_pack` — \
+     named, cross-directory bundles ready to paste into any AI tool. \
+     Smart classification: `list_classifications`/`confirm_classification`/\
+`ignore_classification`. \
+     Code graph: `dependencies`/`who_imports`/`who_calls`/`blast_radius`/`code_graph`. \
+     Decision review: `list_open_decisions`/`get_decision`/`answer_decision`/\
+`dismiss_decision`/`decision_history` — questions Indexa needs a human judgment on; \
+     relay them to your user and answer on their behalf. \
+     Resources (`indexa://overview`, `indexa://packs`, `indexa://pack/{name}`, \
+`indexa://summary/{path}`) and Prompts (`onboarding-overview`, `explain-file`, \
+`pack-context`) expose the same index data for browsing/attachment.";
+
+/// The `core` profile's instructions — built from [`CORE_TOOL_NAMES`] itself (via the
+/// trailing "Available tools" sentence) rather than a second hand-maintained prose list, so a
+/// future edit to `CORE_TOOL_NAMES` can't silently leave this prose naming a tool the profile
+/// no longer exposes. The narrative sentences above it only ever name tools that are also in
+/// `CORE_TOOL_NAMES` — `core_instructions_never_names_a_non_core_tool` pins this.
+fn core_instructions() -> String {
+    format!(
+        "Indexa is a local context engine: a hierarchically-summarized index of your files. \
+         This server is running the CORE tool profile — a bounded retrieval + graph/pack/\
+         decision subset; every other tool is hidden from `tools/list` and rejected if called. \
+         Use `search` for keyword+semantic search over indexed content, and `ask` for grounded \
+         RAG answers. NOTE: `ask` synthesizes with Indexa's LOCAL model (e.g. ollama/gemma3:12b), \
+         not your model — if you are a strong model, call `ask` with `synthesize: false` to get \
+         the retrieved context slice and write the answer yourself instead (better, and no \
+         local-model cost). Code graph: `dependencies`/`who_calls`/`blast_radius`. Context \
+         Packs: `list_packs`/`search_pack`/`export_pack` — named, cross-directory bundles ready \
+         to paste into any AI tool; `add_note` writes something you learned back into a pack. \
+         Decision review: `list_open_decisions` — questions Indexa needs a human judgment on; \
+         relay them to your user and answer on their behalf. \
+         Resources (`indexa://overview`, `indexa://packs`, `indexa://pack/{{name}}`, \
+`indexa://summary/{{path}}`) and Prompts (`onboarding-overview`, `explain-file`, \
+`pack-context`) expose the same index data for browsing/attachment. \
+         Available tools in this profile: {}.",
+        CORE_TOOL_NAMES.join(", ")
+    )
+}
+
+#[tool_handler(router = self.active_tool_router())]
 impl ServerHandler for IndexaMcp {
     fn get_info(&self) -> ServerInfo {
         // Identify as "indexa" (from_build_env() bakes in rmcp's own name/version).
         let mut server_info = Implementation::from_build_env();
         server_info.name = "indexa".to_owned();
         server_info.version = env!("CARGO_PKG_VERSION").to_owned();
+        // 3.2 / Wave 7: the instructions prose must reflect what `self.tool_profile` actually
+        // exposes — a `core`-profile caller told about a tool it can't reach (e.g. `read_file`,
+        // `code_graph`) will call it and get rejected. See `core_instructions`.
+        let instructions = match self.tool_profile {
+            ToolProfile::Full => FULL_INSTRUCTIONS.to_owned(),
+            ToolProfile::Core => core_instructions(),
+        };
         ServerInfo::new(
             ServerCapabilities::builder()
                 .enable_tools()
@@ -159,30 +387,7 @@ impl ServerHandler for IndexaMcp {
                 .build(),
         )
         .with_server_info(server_info)
-        .with_instructions(
-            "Indexa is a local context engine: a hierarchically-summarized index of your files. \
-             Navigate with `browse_tree` and `search`; call `get_summary` with tier=l0 (one-line \
-             abstract) to scan cheaply, then drill to l1 (full summary) or l2 (raw content). \
-             Use `read_file` for raw text; `ask` for grounded RAG answers (supports scope + mode). \
-             NOTE: `ask` synthesizes with Indexa's LOCAL model (e.g. ollama/gemma3:12b), not your \
-             model — so if you are a strong model, call `ask` with `synthesize: false` to get the \
-             retrieved context slice and write the answer yourself (better, and no local-model cost), \
-             or compose `search`/`get_chunk_context`/`export_pack` for raw context. \
-             Use `trigger_index` to index new or changed files. \
-             Context Packs: `list_packs`/`get_pack`/`create_pack`/`add_pack_paths`/\
-`remove_pack_paths`/`delete_pack`/`export_pack`/`search_pack` — \
-             named, cross-directory bundles ready to paste into any AI tool. \
-             Smart classification: `list_classifications`/`confirm_classification`/\
-`ignore_classification`. \
-             Code graph: `dependencies`/`who_imports`/`who_calls`/`blast_radius`/`code_graph`. \
-             Decision review: `list_open_decisions`/`get_decision`/`answer_decision`/\
-`dismiss_decision`/`decision_history` — questions Indexa needs a human judgment on; \
-             relay them to your user and answer on their behalf. \
-             Resources (`indexa://overview`, `indexa://packs`, `indexa://pack/{name}`, \
-`indexa://summary/{path}`) and Prompts (`onboarding-overview`, `explain-file`, \
-`pack-context`) expose the same index data for browsing/attachment."
-                .to_owned(),
-        )
+        .with_instructions(instructions)
     }
 
     // ── Resources (read-only index artifacts) ──────────────────────────────────
@@ -240,14 +445,17 @@ impl ServerHandler for IndexaMcp {
 /// Run the Indexa MCP server over stdio until the client disconnects.
 ///
 /// Logging must already be configured to stderr by the caller — stdout is the
-/// JSON-RPC channel.
+/// JSON-RPC channel. `tool_profile` is 3.2's `--tool-profile`/`[mcp] tool_profile`
+/// surface — `ToolProfile::Full` (the default) is byte-identical to pre-3.2 behavior.
 pub async fn serve_mcp(
     db_path: PathBuf,
     embedder: Arc<dyn Embedder + Send + Sync>,
     llm: Arc<dyn Generator + Send + Sync>,
     config: Config,
+    tool_profile: ToolProfile,
 ) -> Result<()> {
-    let handler = IndexaMcp::new(db_path, embedder, llm, Arc::new(config));
+    let handler =
+        IndexaMcp::new_with_profile(db_path, embedder, llm, Arc::new(config), tool_profile);
     let service = handler.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
@@ -327,6 +535,62 @@ mod tests {
             Arc::new(StubGenerator),
             Arc::new(Config::default()),
         )
+    }
+
+    #[tokio::test]
+    async fn ensure_ann_gates_on_config_threshold_and_caches() {
+        // D3: MCP's ANN cache mirrors the web server's. Verify the gates + the build/cache path
+        // hermetically (no Ollama — embeddings are written directly).
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let chunks: Vec<indexa_core::store::ChunkRecord> = (0..5)
+                .map(|i| indexa_core::store::ChunkRecord {
+                    entry_path: format!("/f{i}.rs"),
+                    seq: 0,
+                    heading: String::new(),
+                    text: format!("chunk {i}"),
+                    language: None,
+                    embedding: Some(vec![i as f32; 8]),
+                    embed_model: Some("t".to_owned()),
+                    content_hash: None,
+                })
+                .collect();
+            store.upsert_chunks(&chunks).unwrap();
+        }
+        let make = |cfg: Config| {
+            IndexaMcp::new(
+                dbpath.clone(),
+                Arc::new(StubEmbedder),
+                Arc::new(StubGenerator),
+                Arc::new(cfg),
+            )
+        };
+
+        // Default config: ANN on, but 5 chunks < ann_min_chunks (50k) → brute-force (None).
+        assert!(
+            make(Config::default()).ensure_ann().await.is_none(),
+            "below ann_min_chunks → None"
+        );
+
+        // ANN explicitly off → None even with the threshold lowered.
+        let mut off = Config::default();
+        off.retrieval.ann = false;
+        off.retrieval.ann_min_chunks = 1;
+        assert!(make(off).ensure_ann().await.is_none(), "ann = false → None");
+
+        // ANN on + threshold lowered → the index actually builds, and the second call reuses the
+        // watermark-cached Arc (no rebuild).
+        let mut on = Config::default();
+        on.retrieval.ann_min_chunks = 1;
+        let mcp = make(on);
+        let first = mcp.ensure_ann().await.expect("builds above threshold");
+        let second = mcp.ensure_ann().await.expect("cache hit");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "watermark-cached index is reused, not rebuilt"
+        );
     }
 
     #[tokio::test]
@@ -484,9 +748,165 @@ mod tests {
         assert_eq!(
             actual, golden,
             "MCP tool surface changed. If intentional: INDEXA_UPDATE_GOLDEN=1 cargo test -p indexa-mcp, \
-             commit golden_tools.txt, and update the tool counts in README.md / CLAUDE.md / \
+             commit golden_tools.txt, and update the tool counts in README.md / AGENTS.md / USAGE.md / \
              docs/how-to/live-retrieval-over-mcp.md (doc_tool_count_matches_code enforces them)."
         );
+    }
+
+    /// 3.2 — every name in the `core` profile must be a real tool: a typo here would silently
+    /// disable nothing for that name while still hiding it from the caller's expectations.
+    #[test]
+    fn core_profile_is_a_subset_of_the_full_tool_set() {
+        let full: std::collections::HashSet<String> = IndexaMcp::tool_router()
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        for name in CORE_TOOL_NAMES {
+            assert!(
+                full.contains(*name),
+                "CORE_TOOL_NAMES has '{name}', which is not a real tool — typo?"
+            );
+        }
+    }
+
+    /// Wave 7 bug 2 — `get_info()`'s `core`-profile instructions must never name a tool the
+    /// `core` profile doesn't actually expose (a caller told about `read_file`/`code_graph`/etc.
+    /// would call it and get rejected by `active_tool_router`). Every backtick-quoted plain
+    /// snake_case identifier in the prose (resource URIs and prompt names contain `:`/`/`/`-`
+    /// and are skipped) must be a real `CORE_TOOL_NAMES` entry.
+    #[test]
+    fn core_instructions_never_names_a_non_core_tool() {
+        let text = core_instructions();
+        let parts: Vec<&str> = text.split('`').collect();
+        let mut distinct_tool_terms: std::collections::HashSet<&str> =
+            std::collections::HashSet::new();
+        for (i, part) in parts.iter().enumerate() {
+            // `split('`')` alternates plain-text / backtick-quoted spans — odd indices are
+            // the backtick-quoted ones.
+            if i % 2 != 1 {
+                continue;
+            }
+            let is_snake_case_identifier =
+                !part.is_empty() && part.chars().all(|c| c.is_ascii_lowercase() || c == '_');
+            if !is_snake_case_identifier {
+                continue; // a resource URI, prompt name, or "synthesize: false" — not a tool name
+            }
+            assert!(
+                CORE_TOOL_NAMES.contains(part),
+                "core_instructions() names `{part}`, which is NOT in CORE_TOOL_NAMES — a \
+                 core-profile caller would be told about a tool it can't actually call"
+            );
+            distinct_tool_terms.insert(part);
+        }
+        // Sanity on the DISTINCT set (not raw mention count — `ask` alone appears 3 times, so a
+        // naive tally could reach `CORE_TOOL_NAMES.len()` even if several real core tools were
+        // silently dropped from the prose while `ask`/`search` kept being repeated).
+        for name in CORE_TOOL_NAMES {
+            assert!(
+                distinct_tool_terms.contains(name),
+                "core_instructions() never mentions core tool `{name}` even once"
+            );
+        }
+    }
+
+    /// Wave 7 bug 2 — `get_info()` actually wires `core_instructions()`/`FULL_INSTRUCTIONS`
+    /// through to the live `ToolProfile`, not just as dead helper functions.
+    #[test]
+    fn get_info_instructions_match_the_live_tool_profile() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let full = mcp_with_db(&dbdir);
+        assert_eq!(
+            full.get_info().instructions.as_deref(),
+            Some(FULL_INSTRUCTIONS),
+            "full profile must be byte-identical to pre-3.2 instructions"
+        );
+
+        let dbdir2 = tempfile::tempdir().unwrap();
+        let dbpath = dbdir2.path().join("idx.db");
+        let _ = Store::open(&dbpath).unwrap();
+        let core = IndexaMcp::new_with_profile(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+            ToolProfile::Core,
+        );
+        assert_eq!(
+            core.get_info().instructions,
+            Some(core_instructions()),
+            "core profile must serve the core-specific instructions"
+        );
+    }
+
+    /// 3.2 — `core` profile: `list_tools` advertises only the core subset, and calling a
+    /// non-core tool is rejected (not merely unlisted) while a core tool still works.
+    #[tokio::test]
+    async fn tool_profile_core_hides_and_blocks_non_core_tools() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        let _ = Store::open(&dbpath).unwrap();
+        let mcp = IndexaMcp::new_with_profile(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+            ToolProfile::Core,
+        );
+
+        let router = mcp.active_tool_router();
+        let listed: std::collections::HashSet<String> = router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert_eq!(
+            listed,
+            CORE_TOOL_NAMES.iter().map(|s| s.to_string()).collect(),
+            "core profile must advertise exactly the core set"
+        );
+
+        // A non-core tool (e.g. `code_graph`) is rejected outright, not just unlisted.
+        assert!(
+            router.get("code_graph").is_none(),
+            "a disabled tool must not resolve via get() either"
+        );
+
+        // A core tool still works end-to-end through the profile-filtered router.
+        let text = mcp.list_packs().await.unwrap();
+        let body = text
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!body.is_empty(), "list_packs must still respond directly");
+    }
+
+    /// 3.2 — the default (unset) profile is `Full` and must be byte-identical to pre-3.2
+    /// behavior: every tool listed, none disabled.
+    #[test]
+    fn tool_profile_default_is_full_and_unfiltered() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        assert_eq!(mcp.tool_profile, ToolProfile::Full);
+        let router = mcp.active_tool_router();
+        assert_eq!(
+            router.list_all().len(),
+            IndexaMcp::tool_router().list_all().len()
+        );
+    }
+
+    /// `ToolProfile::parse` fails open: only the exact string `"core"` narrows the surface,
+    /// everything else (empty, unset, typo'd) falls back to `Full` — a misconfigured profile
+    /// must never accidentally hide tools an agent needs.
+    #[test]
+    fn tool_profile_parse_fails_open_to_full() {
+        assert_eq!(ToolProfile::parse("core"), ToolProfile::Core);
+        assert_eq!(ToolProfile::parse("full"), ToolProfile::Full);
+        assert_eq!(ToolProfile::parse(""), ToolProfile::Full);
+        assert_eq!(ToolProfile::parse("Core"), ToolProfile::Full);
+        assert_eq!(ToolProfile::parse("bogus"), ToolProfile::Full);
     }
 
     /// Every tool must carry a non-empty description — agents pick tools by it.
@@ -531,6 +951,7 @@ mod tests {
         for rel in [
             "README.md",
             "AGENTS.md",
+            "USAGE.md",
             "docs/how-to/live-retrieval-over-mcp.md",
         ] {
             let text = std::fs::read_to_string(repo.join(rel)).unwrap();
@@ -602,6 +1023,7 @@ mod tests {
                 limit: None,
                 strict: false,
                 cycles: false,
+                modules: false,
             }))
             .await
             .unwrap(),
@@ -610,6 +1032,218 @@ mod tests {
             caveated.contains("No call edges") || caveated.contains("bare-name"),
             "code_graph must either report emptiness or carry the bare-name caveat, got: {caveated}"
         );
+    }
+
+    /// 2.4 — `trace_path` end-to-end: a scoped call chain resolves through one hop and
+    /// the response names every file in the chain plus its resolving tier.
+    #[tokio::test]
+    async fn trace_path_reports_the_resolved_hop_chain() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_edges(&[
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/handler.rs".into(),
+                        kind: "calls".into(),
+                        to_ref: "helper".into(),
+                    },
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/db.rs".into(),
+                        kind: "defines".into(),
+                        to_ref: "helper".into(),
+                    },
+                ])
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let text = mcp
+            .trace_path(Parameters(TracePathParams {
+                from: "/proj/handler.rs".into(),
+                to: "/proj/db.rs".into(),
+                max_depth: None,
+            }))
+            .await
+            .unwrap();
+        let body = text
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("/proj/handler.rs"), "got: {body}");
+        assert!(body.contains("/proj/db.rs"), "got: {body}");
+        assert!(body.contains("1 hop"), "got: {body}");
+    }
+
+    /// 2.4 — no confirmed path reports the specific "not found" phrasing, not an error.
+    #[tokio::test]
+    async fn trace_path_reports_no_path_when_unreachable() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        let text = mcp
+            .trace_path(Parameters(TracePathParams {
+                from: "/proj/a.rs".into(),
+                to: "/proj/b.rs".into(),
+                max_depth: None,
+            }))
+            .await
+            .unwrap();
+        let body = text
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("No confirmed path"), "got: {body}");
+    }
+
+    /// 2.5 — `symbol_context` end-to-end: definitions (kind + line range from the
+    /// symbols table), callers, and an anchored note (2.6) all appear in one response.
+    #[tokio::test]
+    async fn symbol_context_reports_definition_callers_and_anchored_notes() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_edges(&[
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/lib.rs".into(),
+                        kind: "defines".into(),
+                        to_ref: "run".into(),
+                    },
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/main.rs".into(),
+                        kind: "calls".into(),
+                        to_ref: "run".into(),
+                    },
+                ])
+                .unwrap();
+            store
+                .upsert_symbols(&[indexa_core::store::SymbolRecord {
+                    path: "/proj/lib.rs".into(),
+                    name: "run".into(),
+                    kind: "fn".into(),
+                    start_line: 10,
+                    end_line: 20,
+                }])
+                .unwrap();
+            store
+                .upsert_note_anchor(
+                    "/notes/run-gotcha.md",
+                    "run",
+                    "symbol",
+                    "Watch the retry loop",
+                    "eng",
+                )
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let text = mcp
+            .symbol_context(Parameters(SymbolContextParams {
+                symbol: "run".into(),
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        let body = text
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("/proj/lib.rs:10-20 (fn)"), "got: {body}");
+        assert!(body.contains("/proj/main.rs"), "got: {body}");
+        assert!(body.contains("Watch the retry loop"), "got: {body}");
+    }
+
+    /// 2.3 — `changed_impact` end-to-end against a REAL git repo: an unstaged edit to a
+    /// symbol's line range maps through the actual `git diff` subprocess to the symbol,
+    /// then to its caller via `blast_radius`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn changed_impact_maps_a_real_git_diff_to_the_touched_symbol_and_its_caller() {
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "t"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("lib.rs"), "fn target_fn() {\n    1\n}\n").unwrap();
+        run(&["add", "lib.rs"]);
+        run(&["commit", "-q", "-m", "init"]);
+        // Edit within target_fn's line range (1-3), unstaged.
+        std::fs::write(root.join("lib.rs"), "fn target_fn() {\n    2\n}\n").unwrap();
+
+        let lib_path = root.join("lib.rs").to_string_lossy().into_owned();
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_entries(&[indexa_core::walker::Entry {
+                    path: root.to_path_buf(),
+                    kind: indexa_core::walker::EntryKind::Dir,
+                    size: 0,
+                    modified: None,
+                    hint: None,
+                    is_binary: false,
+                }])
+                .unwrap();
+            store
+                .upsert_symbols(&[indexa_core::store::SymbolRecord {
+                    path: lib_path.clone(),
+                    name: "target_fn".into(),
+                    kind: "fn".into(),
+                    start_line: 1,
+                    end_line: 3,
+                }])
+                .unwrap();
+            store
+                .upsert_edges(&[
+                    indexa_core::store::EdgeRecord {
+                        from_path: lib_path.clone(),
+                        kind: "defines".into(),
+                        to_ref: "target_fn".into(),
+                    },
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/caller.rs".into(),
+                        kind: "calls".into(),
+                        to_ref: "target_fn".into(),
+                    },
+                ])
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let text = mcp
+            .changed_impact(Parameters(ChangedImpactParams {
+                root: Some(root.to_string_lossy().into_owned()),
+                scope: None,
+                strict: false,
+                depth: None,
+                include_heritage: false,
+            }))
+            .await
+            .unwrap();
+        let body = text
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("target_fn"), "got: {body}");
+        assert!(body.contains("/proj/caller.rs"), "got: {body}");
     }
 
     /// End-to-end over the review family: a seeded open question is listed
@@ -735,6 +1369,563 @@ mod tests {
             }))
             .await;
         assert!(dup.is_err(), "duplicate pack name must be rejected");
+    }
+
+    #[tokio::test]
+    async fn export_pack_with_include_graph_appends_mermaid_section() {
+        // 1.6: export_pack's include_graph/graph_format params must append a fenced
+        // ```mermaid flowchart over the pack's call graph when graph_format is "mermaid".
+        use indexa_core::store::SummaryRecord;
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_summary(&SummaryRecord {
+                    path: "/proj".into(),
+                    kind: "dir".into(),
+                    parent_path: None,
+                    depth: 0,
+                    summary: "A small project.".into(),
+                    summary_l0: None,
+                    embedding: None,
+                    child_count: 0,
+                    byte_size: 0,
+                    model: "test".into(),
+                    source_hash: String::new(),
+                    generated_at: 0,
+                })
+                .unwrap();
+            store
+                .upsert_edges(&[
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/a.rs".into(),
+                        kind: "calls".into(),
+                        to_ref: "run".into(),
+                    },
+                    indexa_core::store::EdgeRecord {
+                        from_path: "/proj/b.rs".into(),
+                        kind: "defines".into(),
+                        to_ref: "run".into(),
+                    },
+                ])
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        mcp.create_pack(Parameters(CreatePackMcpParams {
+            name: "proj-pack".into(),
+            description: None,
+        }))
+        .await
+        .unwrap();
+        mcp.add_pack_paths(Parameters(PackPathsParams {
+            name: "proj-pack".into(),
+            paths: vec!["/proj".into()],
+        }))
+        .await
+        .unwrap();
+
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // Default (include_graph: false) — no mermaid section.
+        let flat = text_of(
+            mcp.export_pack(Parameters(ExportPackParams {
+                name: "proj-pack".into(),
+                format: Some("md".into()),
+                depth: None,
+                signatures: None,
+                changed_since: None,
+                category: None,
+                include_graph: false,
+                graph_format: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(!flat.contains("```mermaid"));
+
+        // include_graph + graph_format: mermaid — the fenced block appears.
+        let with_graph = text_of(
+            mcp.export_pack(Parameters(ExportPackParams {
+                name: "proj-pack".into(),
+                format: Some("md".into()),
+                depth: None,
+                signatures: None,
+                changed_since: None,
+                category: None,
+                include_graph: true,
+                graph_format: Some("mermaid".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(with_graph.contains("```mermaid"));
+        assert!(with_graph.contains("flowchart TD"));
+    }
+
+    /// 4.2 — `export_pack` with `format: "okf"` returns the OKF bundle concatenated with
+    /// `--- file: <path> ---` separators (a real directory bundle is the CLI's job).
+    #[tokio::test]
+    async fn export_pack_okf_format_returns_a_concatenated_bundle() {
+        use indexa_core::store::SummaryRecord;
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_summary(&SummaryRecord {
+                    path: "/proj".into(),
+                    kind: "dir".into(),
+                    parent_path: None,
+                    depth: 0,
+                    summary: "A small project.".into(),
+                    summary_l0: Some("A small project abstract.".into()),
+                    embedding: None,
+                    child_count: 0,
+                    byte_size: 0,
+                    model: "test".into(),
+                    source_hash: "deadbeef00".into(),
+                    generated_at: 0,
+                })
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        mcp.create_pack(Parameters(CreatePackMcpParams {
+            name: "proj-pack".into(),
+            description: None,
+        }))
+        .await
+        .unwrap();
+        mcp.add_pack_paths(Parameters(PackPathsParams {
+            name: "proj-pack".into(),
+            paths: vec!["/proj".into()],
+        }))
+        .await
+        .unwrap();
+
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let body = text_of(
+            mcp.export_pack(Parameters(ExportPackParams {
+                name: "proj-pack".into(),
+                format: Some("okf".into()),
+                depth: None,
+                signatures: None,
+                changed_since: None,
+                category: None,
+                include_graph: false,
+                graph_format: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(body.contains("--- file: index.md ---"));
+        assert!(body.contains("--- file: log.md ---"));
+        assert!(body.contains("okf_version"));
+        assert!(body.contains("A small project abstract."));
+        assert!(
+            !body.contains('<'),
+            "OKF bundle must be pure Markdown, never HTML"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_flags_a_stale_result_and_summarizes_in_footer() {
+        // 1.2: a cited file whose on-disk mtime is newer than what's indexed gets a "(stale)"
+        // marker inline and a footer summary; a fresh file gets neither.
+        use indexa_core::store::ChunkRecord;
+        let root = tempfile::tempdir().unwrap();
+        let fresh = root.path().join("fresh.rs");
+        let stale = root.path().join("stale.rs");
+        std::fs::write(&fresh, "fn widget_alpha() {}").unwrap();
+        std::fs::write(&stale, "fn widget_beta() {}").unwrap();
+        let fresh_path = fresh.to_str().unwrap().to_owned();
+        let stale_path = stale.to_str().unwrap().to_owned();
+
+        let dbdir = tempfile::tempdir().unwrap();
+        {
+            let mut store = Store::open(&dbdir.path().join("idx.db")).unwrap();
+            let chunk = |path: &str| ChunkRecord {
+                entry_path: path.to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: "a widget function definition".to_owned(),
+                language: None,
+                // Embedded — chunks_current_for_mtime also requires every chunk to carry an
+                // embedding; without one both rows would read "stale" regardless of indexed_at,
+                // masking the mtime comparison this test targets.
+                embedding: Some(vec![0.1, 0.2, 0.3]),
+                embed_model: Some("test".to_owned()),
+                content_hash: None,
+            };
+            store
+                .upsert_chunks(&[chunk(&fresh_path), chunk(&stale_path)])
+                .unwrap();
+            // Fresh: indexed far in the future relative to disk mtime. Stale: indexed long ago.
+            store
+                .db_connection()
+                .execute(
+                    "UPDATE chunks SET indexed_at = ?1 WHERE entry_path = ?2",
+                    rusqlite::params![i64::MAX / 2, fresh_path],
+                )
+                .unwrap();
+            store
+                .db_connection()
+                .execute(
+                    "UPDATE chunks SET indexed_at = ?1 WHERE entry_path = ?2",
+                    rusqlite::params![1_i64, stale_path],
+                )
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let out = text_of(
+            mcp.search(Parameters(SearchParams {
+                query: "widget".into(),
+                limit: None,
+                scope: None,
+                mode: Some("sparse".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            out.contains(&format!("{stale_path} (stale)")),
+            "stale result must be marked inline: {out}"
+        );
+        assert!(
+            !out.contains(&format!("{fresh_path} (stale)")),
+            "fresh result must not be marked stale: {out}"
+        );
+        assert!(
+            out.contains("1 of 2 result file(s) changed on disk since indexing"),
+            "footer summary missing: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_honors_ext_predicate_when_enabled() {
+        // 1.8: with query_predicates on, "ext:rs" restricts hits to .rs files and is stripped
+        // from the searched text.
+        use indexa_core::store::ChunkRecord;
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let chunk = |path: &str| ChunkRecord {
+                entry_path: path.to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: "a widget function definition".to_owned(),
+                language: None,
+                embedding: None,
+                embed_model: None,
+                content_hash: None,
+            };
+            store
+                .upsert_chunks(&[chunk("/proj/widget.rs"), chunk("/proj/widget.md")])
+                .unwrap();
+        }
+        let mut cfg = Config::default();
+        cfg.retrieval.query_predicates = true;
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(cfg),
+        );
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let out = text_of(
+            mcp.search(Parameters(SearchParams {
+                query: "ext:rs widget".into(),
+                limit: None,
+                scope: None,
+                mode: Some("sparse".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(out.contains("/proj/widget.rs"), "{out}");
+        assert!(
+            !out.contains("/proj/widget.md"),
+            "ext:rs must exclude the .md file: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_honors_type_predicate_when_enabled() {
+        // Named file-type sets: "type:python" restricts hits to .py/.pyi files (both members
+        // of the set) while excluding a .rs file, and is stripped from the searched text.
+        use indexa_core::store::ChunkRecord;
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let chunk = |path: &str| ChunkRecord {
+                entry_path: path.to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: "an auth handler definition".to_owned(),
+                language: None,
+                embedding: None,
+                embed_model: None,
+                content_hash: None,
+            };
+            store
+                .upsert_chunks(&[
+                    chunk("/proj/auth.py"),
+                    chunk("/proj/auth.pyi"),
+                    chunk("/proj/auth.rs"),
+                ])
+                .unwrap();
+        }
+        let mut cfg = Config::default();
+        cfg.retrieval.query_predicates = true;
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(cfg),
+        );
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let out = text_of(
+            mcp.search(Parameters(SearchParams {
+                query: "type:python auth".into(),
+                limit: None,
+                scope: None,
+                mode: Some("sparse".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(out.contains("/proj/auth.py"), "{out}");
+        assert!(out.contains("/proj/auth.pyi"), "{out}");
+        assert!(
+            !out.contains("/proj/auth.rs"),
+            "type:python must exclude the .rs file: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_predicates_are_a_noop_when_disabled() {
+        // The default (query_predicates: false) must searchd the literal query text,
+        // predicates and all — behavior-neutral for anyone not opting in.
+        use indexa_core::store::ChunkRecord;
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_chunks(&[ChunkRecord {
+                    entry_path: "/proj/widget.rs".into(),
+                    seq: 0,
+                    heading: String::new(),
+                    text: "ext:rs widget marker text".to_owned(),
+                    language: None,
+                    embedding: None,
+                    embed_model: None,
+                    content_hash: None,
+                }])
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // Searching the literal token "ext:rs" must still hit the chunk whose FTS-indexed
+        // text contains it verbatim, proving the predicate grammar never engaged.
+        let out = text_of(
+            mcp.search(Parameters(SearchParams {
+                query: "ext:rs".into(),
+                limit: None,
+                scope: None,
+                mode: Some("sparse".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(out.contains("/proj/widget.rs"), "{out}");
+    }
+
+    /// Wave 7 bug 3a — the `ext:`/`type:` filter is applied AFTER `hybrid_search_with_ann`
+    /// already truncated to the requested `limit`, so a real match ranked below that naive
+    /// cutoff was silently invisible ("no results" when a match genuinely exists further down).
+    /// Four short, tightly-matching `.md` chunks outrank one long, diluted `.rs` chunk that
+    /// also matches "widget" (BM25 length-normalizes, so the long document ranks worse) —
+    /// with `limit: 1`, a naive fetch-then-filter would already have thrown the `.rs` hit away
+    /// before the filter ever sees it.
+    #[tokio::test]
+    async fn ext_predicate_finds_a_match_below_the_naive_limit_then_filter_cutoff() {
+        use indexa_core::store::ChunkRecord;
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let short = |path: &str| ChunkRecord {
+                entry_path: path.to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: "widget".to_owned(),
+                language: None,
+                embedding: None,
+                embed_model: None,
+                content_hash: None,
+            };
+            // BM25 length-normalizes: a "widget" mention diluted across a long document
+            // ranks below four short, single-word "widget" chunks.
+            let long_text = format!("{}widget {}", "filler ".repeat(200), "filler ".repeat(200));
+            store
+                .upsert_chunks(&[
+                    short("/proj/a.md"),
+                    short("/proj/b.md"),
+                    short("/proj/c.md"),
+                    short("/proj/d.md"),
+                    ChunkRecord {
+                        entry_path: "/proj/impl.rs".to_owned(),
+                        seq: 0,
+                        heading: String::new(),
+                        text: long_text,
+                        language: None,
+                        embedding: None,
+                        embed_model: None,
+                        content_hash: None,
+                    },
+                ])
+                .unwrap();
+        }
+        let mut cfg = Config::default();
+        cfg.retrieval.query_predicates = true;
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(cfg),
+        );
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let out = text_of(
+            mcp.search(Parameters(SearchParams {
+                query: "ext:rs widget".into(),
+                limit: Some(1),
+                scope: None,
+                mode: Some("sparse".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            out.contains("/proj/impl.rs"),
+            "a genuine .rs match ranked below the naive limit=1 cutoff must still surface: {out}"
+        );
+    }
+
+    /// Wave 7 bug 3b — `ext:` matching must be case-insensitive in both directions: an
+    /// uppercase predicate value must match a lowercase stored extension, and vice versa.
+    #[tokio::test]
+    async fn ext_predicate_matches_case_insensitively_both_directions() {
+        use indexa_core::store::ChunkRecord;
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let chunk = |path: &str| ChunkRecord {
+                entry_path: path.to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: "a widget function definition".to_owned(),
+                language: None,
+                embedding: None,
+                embed_model: None,
+                content_hash: None,
+            };
+            store
+                .upsert_chunks(&[chunk("/proj/lower.rs"), chunk("/proj/UPPER.RS")])
+                .unwrap();
+        }
+        let mut cfg = Config::default();
+        cfg.retrieval.query_predicates = true;
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(cfg),
+        );
+        let text_of = |r: CallToolResult| -> String {
+            r.content
+                .iter()
+                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // Direction 1: an UPPERCASE predicate value must match a lowercase-extension file.
+        let out_upper_predicate = text_of(
+            mcp.search(Parameters(SearchParams {
+                query: "ext:RS widget".into(),
+                limit: None,
+                scope: None,
+                mode: Some("sparse".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            out_upper_predicate.contains("/proj/lower.rs"),
+            "ext:RS must match a stored .rs file: {out_upper_predicate}"
+        );
+        // Direction 2: a lowercase predicate value must match an UPPERCASE-extension file.
+        let out_lower_predicate = text_of(
+            mcp.search(Parameters(SearchParams {
+                query: "ext:rs widget".into(),
+                limit: None,
+                scope: None,
+                mode: Some("sparse".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            out_lower_predicate.contains("/proj/UPPER.RS"),
+            "ext:rs must match a stored .RS file: {out_lower_predicate}"
+        );
     }
 
     #[tokio::test]

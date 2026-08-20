@@ -1,5 +1,10 @@
 /* ── Job helpers ── */
-async function fireJob(kind, path) {
+// `force` only matters for kind === 'summarize', and only from the explicit "↻ Regenerate"
+// button — it blanks stored hashes and re-summarizes the whole subtree even where content
+// hasn't changed (the only way to pick up a model/prompt change). Every other caller omits
+// it and stays incremental: only new-or-stale content is re-run, matching what `deep`/
+// `watch` already do. See `run_summarize_phase`'s `force` param on the Rust side.
+async function fireJob(kind, path, force) {
   // Pre-flight memory-fit gate for the model-loading kinds ("ask me first"):
   // summarize loads the dir-roll-up model; index runs deep + summarize. scan/deep
   // load no heavy model, so they skip the gate.
@@ -9,6 +14,7 @@ async function fireJob(kind, path) {
     if (choice === null) return; // user cancelled the build
     modelParams = choice; // '' (configured) or a recommended-model override
   }
+  if (force && kind === 'summarize') modelParams += '&force=true';
   try {
     const r = await fetch('/api/jobs/' + kind + '?path=' + encodeURIComponent(path) + modelParams, { method: 'POST' });
     if (!r.ok) {
@@ -18,31 +24,27 @@ async function fireJob(kind, path) {
     }
     const d = await r.json();
     subscribeJob(d.job_id, path, kind);
-    // Switch to jobs tab so user can watch progress
-    switchTab('jobs');
+    // Stay on the current view — the Engine bar already shows work in flight.
+    // Opt-in to the Activity drawer via the toast's "Watch progress" action.
+    if (typeof toast === 'function') {
+      var verb = kind === 'summarize' ? 'Building context'
+        : kind === 'index' ? 'Indexing'
+        : kind === 'deep' ? 'Indexing for search'
+        : 'Scanning';
+      toast(verb + '\u2026', 'info', {
+        label: 'Watch progress',
+        onClick: function () { if (typeof switchTab === 'function') switchTab('jobs'); },
+      });
+    }
   } catch (e) {
     toast('Network error starting job: ' + e.message, 'error');
   }
 }
 
-// Trigger an index job for every currently-indexed root. Called from the sidebar
-// refresh button and 27-health.js "Re-index now" banner.
-async function reindexAll() {  // eslint-disable-line no-unused-vars
-  var btn = document.querySelector('.app-sidebar button[onclick="reindexAll()"]');
-  if (btn) btn.disabled = true;
-  try {
-    var r = await fetch('/api/roots');
-    if (!r.ok) { if (typeof toast === 'function') toast('Could not fetch roots', 'error'); return; }
-    var roots = await r.json();
-    for (var i = 0; i < roots.length; i++) {
-      if (typeof fireJob === 'function') await fireJob('index', roots[i].path);
-    }
-  } catch(e) {
-    if (typeof toast === 'function') toast('Reindex error: ' + e.message, 'error');
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
+// reindexAll() lives in 08-util-palette-init.js — this file's concat position is earlier
+// (crates/web/src/lib.rs), so a same-named function declared here would silently be the
+// dead, shadowed one (last declaration at a given scope wins). Its useful bits (the !r.ok
+// check, disabling the sidebar button mid-run) are merged into the surviving definition.
 
 /* Calm, STATIC per-row context-coverage glyph. Replaces the old per-row pending
    strobe: instead of a pulsing spinner on every folder during a subtree build, each dir
@@ -65,7 +67,102 @@ function coverageGlyph(node) {
   if (covered > 0) {
     return '<span class="cov-glyph cov-partial" title="Partly built (' + covered + '/' + total + ')">◐</span>';
   }
-  return '<span class="cov-glyph cov-none" title="Not indexed yet — use Index for search to index this folder">○</span>';
+  if ((node.chunk_count || 0) > 0) {
+    return '<span class="cov-glyph cov-none" title="Searchable, not summarized — click Build context">○</span>';
+  }
+  return '<span class="cov-glyph cov-none" title="Not searchable yet — click Build context">○</span>';
+}
+
+/* One primary verb: write the missing layer. `index` = parse+embed+summarize
+   (nothing searchable yet); `summarize` = write hierarchical context on top of
+   existing chunks; `null` = already covered, hide the primary button. */
+function chooseBuildKind(node) {
+  if (!node) return 'summarize';
+  if (node.kind === 'dir' && !(node.chunk_count > 0)) return 'index';
+  if (node.kind === 'dir') {
+    var total = node.total || 0;
+    var covered = node.covered || 0;
+    if (total > 0 && covered >= total && node.summary_state === 'done') return null;
+    if (total === 0 && node.summary_state === 'done') return null;
+    return 'summarize';
+  }
+  return node.summary_state === 'done' ? null : 'summarize';
+}
+
+async function fireBuildContext(path, node) {  // eslint-disable-line no-unused-vars
+  // A folder that *contains* several detected projects (e.g. ~/development)
+  // must not kick off a whole-tree summarize — that's hours of LLM work.
+  // Per-project buttons pass a leaf path and skip this guard.
+  try {
+    var r = await fetch('/api/projects?path=' + encodeURIComponent(path));
+    if (r.ok) {
+      var projects = await r.json();
+      var kids = (projects || []).filter(function (p) { return p.path !== path; });
+      if (kids.length >= 2) {
+        // H3: render a chooser modal from the response already fetched above (correctly
+        // scoped to this folder's own children) instead of loadWelcomeProjects() — that
+        // re-fetches unscoped and lists index-wide projects into a sidebar container that
+        // showSummary() overwrites the instant anything else is selected, so the
+        // remediation this refusal points at could never actually render again. A modal
+        // works from any tab, including chat, where fireBuildContext is also reachable.
+        if (typeof showProjectChooserModal === 'function') showProjectChooserModal(path, kids);
+        return;
+      }
+    }
+  } catch (_) { /* fail open: still start the job */ }
+  var kind = chooseBuildKind(node) || 'summarize';
+  return fireJob(kind, path);
+}
+
+/* H3: modal listing the projects found directly under `path`, each with a Build context
+   button (via buildProjectRow, 11-onboarding.js) — the remediation for fireBuildContext's
+   "too many projects" refusal above. `kids` is already correctly scoped to this folder. */
+function showProjectChooserModal(path, kids) {
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay confirm-overlay';
+  overlay.style.display = 'flex';
+  var label = path.split('/').pop() || path;
+
+  var modal = document.createElement('div');
+  modal.className = 'modal project-chooser-modal';
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+  modal.setAttribute('aria-label', 'Choose a project to build context for');
+
+  var h = document.createElement('h2');
+  h.textContent = 'Choose a project under ‘' + label + '’';
+  var msg = document.createElement('p');
+  msg.className = 'confirm-msg';
+  msg.textContent = 'This folder has ' + kids.length + ' projects — build context on one at a time.';
+  var list = document.createElement('div');
+  list.className = 'project-chooser-list';
+
+  function close() {
+    if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    document.removeEventListener('keydown', onKey);
+  }
+  function onKey(e) { if (e.key === 'Escape') close(); }
+
+  kids.forEach(function (p) { list.appendChild(buildProjectRow(p, close)); });
+
+  var actions = document.createElement('div');
+  actions.className = 'modal-actions';
+  var cancelBtn = document.createElement('button');
+  cancelBtn.className = 'modal-btn';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', close);
+  actions.appendChild(cancelBtn);
+
+  modal.appendChild(h);
+  modal.appendChild(msg);
+  modal.appendChild(list);
+  modal.appendChild(actions);
+  overlay.appendChild(modal);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(overlay);
+  var firstBtn = list.querySelector('button');
+  if (firstBtn) firstBtn.focus();
 }
 
 function buildTreeNode(node) {
@@ -77,7 +174,14 @@ function buildTreeNode(node) {
   const icon = isDir ? ICO_FOLDER : ICO_FILE;
   // Stash the subtree coverage rollup so the summary header can show a "context: N%"
   // chip for this path without a second request (see coverageByPath / renderSummary).
-  coverageByPath[node.path] = { covered: node.covered || 0, partial: node.partial || 0, total: node.total || 0 };
+  coverageByPath[node.path] = {
+    covered: node.covered || 0,
+    partial: node.partial || 0,
+    total: node.total || 0,
+    chunk_count: node.chunk_count || 0,
+    summary_state: node.summary_state || null,
+    kind: node.kind,
+  };
   const badge = coverageGlyph(node);
   // One calm, determinate count per ACTIVE subtree (something still queued), instead of
   // N pulsing children. Static until the next tree refresh — live updates arrive in PR-4.
@@ -103,10 +207,16 @@ function buildTreeNode(node) {
     coverageCount +
     badge +
     '<span class="tree-row-actions">' +
-    '<button data-act="scan"      title="Re-scan"              aria-label="Re-scan">' + ICO_REFRESH + '</button>' +
-    '<button data-act="deep"      title="Index for search: parse and embed this folder so you can search and ask about its contents (the deep phase — scanning only lists files)" aria-label="Index for search">' + ICO_BOLT + '</button>' +
-    '<button data-act="summarize" title="Summarize"            aria-label="Summarize">' + ICO_PENCIL + '</button>' +
-    '<button data-act="remove"    title="Remove from context"  aria-label="Remove from context">' + ICO_TRASH + '</button>' +
+    (chooseBuildKind(node)
+      ? '<button data-act="build" title="Build context: write summaries so Ask and Export can use this folder" aria-label="Build context">' + ICO_PENCIL + '</button>'
+      : '') +
+    '<span class="tree-row-more">' +
+    '<button data-act="more" title="More actions" aria-label="More actions" aria-haspopup="true">&#x22EF;</button>' +
+    '<span class="tree-row-menu" hidden>' +
+    '<button data-act="scan">Re-scan</button>' +
+    '<button data-act="index">Refresh</button>' +
+    '<button data-act="remove">Remove from context</button>' +
+    '</span></span>' +
     '</span>';
 
   // ARIA tree semantics + roving focus (WS6). Every row is a treeitem reachable by
@@ -120,6 +230,15 @@ function buildTreeNode(node) {
     btn.addEventListener('click', async function(e) {
       e.stopPropagation();
       const act = btn.dataset.act;
+      if (act === 'more') {
+        var wrap = btn.closest('.tree-row-more');
+        var menu = wrap && wrap.querySelector('.tree-row-menu');
+        if (!menu) return;
+        var willOpen = menu.hidden;
+        document.querySelectorAll('.tree-row-menu').forEach(function (m) { m.hidden = true; });
+        menu.hidden = !willOpen;
+        return;
+      }
       if (act === 'remove') {
         const label = node.path.split('/').pop() || node.path;
         if (!(await confirmModal('Remove ‹' + label + '› from your context?\nFiles on disk are not deleted.', 'Remove'))) return;
@@ -129,11 +248,12 @@ function buildTreeNode(node) {
           refreshTree();
           loadStats();
         } catch(err) { toast('Remove failed: ' + err.message, 'error'); }
-      } else {
-        try {
-          await fireJob(act, node.path);
-        } catch(err) { toast('Failed to start job: ' + err.message, 'error'); }
+        return;
       }
+      try {
+        if (act === 'build') await fireBuildContext(node.path, node);
+        else await fireJob(act, node.path);
+      } catch(err) { toast('Failed to start job: ' + err.message, 'error'); }
     });
   });
 
@@ -201,9 +321,9 @@ function buildTreeNode(node) {
     target.textContent = '⋯';
     try {
       await fetch('/api/queue/retry?path=' + encodeURIComponent(path), { method: 'POST' });
-      toast('Queued retry for "' + escapeHtml(path.split('/').pop() || path) + '"', 'info');
+      toast('Queued retry for "' + (path.split('/').pop() || path) + '"', 'info');
       setTimeout(function() { refreshTree(); }, 400);
-    } catch(err) { toast('Retry failed: ' + escapeHtml(err.message), 'error'); }
+    } catch(err) { toast('Retry failed: ' + err.message, 'error'); }
   });
   treeList.addEventListener('keydown', function(e) {
     var target = e.target.closest('.cov-retry');
@@ -380,6 +500,10 @@ async function doSearch(query) {
     list.innerHTML = '<div role="alert" style="padding:8px 12px;color:var(--red);font-size:12px">Search error</div>';
   }
 }
+
+document.addEventListener('click', function () {
+  document.querySelectorAll('.tree-row-menu').forEach(function (m) { m.hidden = true; });
+});
 
 /* ══════════════════════════════════════════════════════════════════
    JOBS — data model + render system

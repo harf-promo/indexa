@@ -125,8 +125,37 @@ pub(crate) async fn cmd_doctor(
     println!();
 
     // Load config once for the probes below (Ollama liveness + Claude provider).
-    let cfg =
-        indexa_core::config::load(&indexa_core::config::default_config_path()).unwrap_or_default();
+    let config_path = indexa_core::config::default_config_path();
+    let cfg = indexa_core::config::load(&config_path).unwrap_or_default();
+
+    // ── Config observability (ripgrep's `--debug` config reporting) ──
+    println!("Config");
+    if config_path.exists() {
+        println!("  File     {}", config_path.display());
+    } else {
+        println!(
+            "  File     {} (not found — using built-in defaults)",
+            config_path.display()
+        );
+    }
+    let non_default = indexa_core::config::non_default_keys(&cfg);
+    if non_default.is_empty() {
+        println!("  Active settings: all defaults");
+    } else {
+        println!("  Active settings (non-default):");
+        for (key, value) in &non_default {
+            println!("    {key} = {value}");
+        }
+    }
+    // Permission check (unix only) — only worth reporting when there's actually a key stored.
+    // `config::load` above already re-tightens a loose file to 0600 on a best-effort (fail-open)
+    // basis, so this mostly confirms that succeeded; it only warns when the file is STILL loose
+    // (e.g. the tighten itself failed — read-only mount, ownership mismatch).
+    #[cfg(unix)]
+    if let Some(line) = config_permission_line(&config_path, cfg.api_keys.has_any()) {
+        println!("{line}");
+    }
+    println!();
 
     // Blocking prerequisites for "can I index right now?" — filled by the Ollama probe.
     let mut readiness_issues: Vec<String> = Vec::new();
@@ -136,36 +165,61 @@ pub(crate) async fn cmd_doctor(
     // config* will use are pulled. This is the check that catches the #1 first-run failure:
     // "Ollama isn't running" or "the model was never pulled".
     println!("Ollama server (liveness)");
-    let ollama_base =
-        indexa_llm::OllamaLlm::resolve_base_url(Some(cfg.embedding.base_url.as_str()));
-    println!("  Base URL  {ollama_base}");
-    // Required models = those the current config routes through Ollama.
-    let mut required: Vec<(&str, &str)> = Vec::new();
-    if cfg.embedding.provider == "ollama" {
-        required.push((cfg.embedding.model.as_str(), "embeddings"));
-    }
-    if cfg.describer.provider == "ollama" {
-        required.push((cfg.describer.file_model.as_str(), "file summaries"));
-        if cfg.describer.dir_model != cfg.describer.file_model {
-            required.push((cfg.describer.dir_model.as_str(), "dir roll-ups / Q&A"));
+    // Required models = those the current config routes through Ollama, each carrying the
+    // base URL for ITS OWN provider — `cfg.embedding.base_url` and `cfg.describer.base_url`
+    // are independently settable (the web UI's `/api/config/provider` only ever writes the
+    // describer's), so the embedder and describer can point at two different Ollama hosts.
+    let required = super::helpers::ollama_requirements(&cfg);
+    // Distinct hosts actually in use, in first-seen order — usually 1 (the common case: one
+    // shared local Ollama for both providers), occasionally 2 when they diverge.
+    let mut bases: Vec<&str> = Vec::new();
+    for req in &required {
+        if !bases.contains(&req.base.as_str()) {
+            bases.push(&req.base);
         }
     }
-    match indexa_llm::ollama_list_models(&ollama_base).await {
-        Ok(installed) => {
-            println!("  ✅  reachable — {} model(s) installed", installed.len());
-            for (model, role) in &required {
-                if model_installed(&installed, model) {
-                    println!("  ✅  {model}  ({role})");
-                } else {
-                    println!("  ❌  {model} — not pulled; run: ollama pull {model}  ({role})");
-                    readiness_issues.push(format!("missing model: {model} (ollama pull {model})"));
-                }
+    // The describer's own resolved base — used below by the (opt-in) latency probe so it
+    // benchmarks the describer's actual host, never the embedder's.
+    let describer_base =
+        indexa_llm::OllamaLlm::resolve_base_url(Some(cfg.describer.base_url.as_str()));
+
+    if bases.is_empty() {
+        println!("  ℹ️   neither provider is configured for Ollama — nothing to check.");
+    }
+    let mut installed_by_base: std::collections::HashMap<&str, Vec<String>> =
+        std::collections::HashMap::new();
+    for base in &bases {
+        println!("  Base URL  {base}");
+        match indexa_llm::ollama_list_models(base).await {
+            Ok(installed) => {
+                println!("  ✅  reachable — {} model(s) installed", installed.len());
+                installed_by_base.insert(base, installed);
+            }
+            Err(e) => {
+                println!("  ❌  not reachable: {e:#}");
+                println!(
+                    "      Start Ollama and retry (macOS: open -a Ollama; or `ollama serve`)."
+                );
+                readiness_issues.push(format!("Ollama not reachable at {base}"));
             }
         }
-        Err(e) => {
-            println!("  ❌  not reachable: {e:#}");
-            println!("      Start Ollama and retry (macOS: open -a Ollama; or `ollama serve`).");
-            readiness_issues.push(format!("Ollama not reachable at {ollama_base}"));
+    }
+    for req in &required {
+        let Some(installed) = installed_by_base.get(req.base.as_str()) else {
+            continue; // that host was unreachable — already reported + flagged above.
+        };
+        if model_installed(installed, &req.model) {
+            println!("  ✅  {}  ({})", req.model, req.role);
+        } else {
+            println!(
+                "  ❌  {model} — not pulled; run: ollama pull {model}  ({role})",
+                model = req.model,
+                role = req.role
+            );
+            readiness_issues.push(format!(
+                "missing model: {model} (ollama pull {model})",
+                model = req.model
+            ));
         }
     }
     println!();
@@ -207,7 +261,7 @@ pub(crate) async fn cmd_doctor(
             }
         }
         if cfg.describer.provider == "ollama" {
-            let llm = indexa_llm::OllamaLlm::new(&ollama_base, &cfg.describer.file_model);
+            let llm = indexa_llm::OllamaLlm::new(&describer_base, &cfg.describer.file_model);
             let t = Instant::now();
             match llm.generate("Reply with the single word: ok").await {
                 Ok(_) => {
@@ -500,6 +554,36 @@ pub(crate) async fn cmd_doctor(
     Ok(())
 }
 
+/// Report line for the config file's Unix permissions (H5) — `None` when there's nothing
+/// sensitive to report (`has_keys` false, matching `config::load`'s own no-op gate) or the
+/// file doesn't exist. `config::load` (called before this, to build `cfg`) already re-tightens
+/// a loose file to 0600 on a best-effort (fail-open) basis, so a ⚠️ here means that tighten
+/// itself failed (e.g. a read-only mount or ownership mismatch), not just that the file was
+/// loose — it was already loose-checked-and-fixed by the time this runs.
+#[cfg(unix)]
+fn config_permission_line(config_path: &std::path::Path, has_keys: bool) -> Option<String> {
+    if !has_keys || !config_path.exists() {
+        return None;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    Some(match std::fs::metadata(config_path) {
+        Ok(meta) => {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                format!(
+                    "  ⚠️   {} is mode {mode:o} (group/other-readable) with API keys stored — \
+                     run: chmod 600 {}",
+                    config_path.display(),
+                    config_path.display()
+                )
+            } else {
+                "  ✅  permissions 0600 (API keys protected)".to_owned()
+            }
+        }
+        Err(e) => format!("  ⚠️   could not check config file permissions: {e:#}"),
+    })
+}
+
 /// True if `want` (a configured model name) is among Ollama's installed `models`,
 /// matching leniently across the implicit `:latest` tag (Ollama reports a model pulled
 /// as `nomic-embed-text` as `nomic-embed-text:latest`).
@@ -551,6 +635,8 @@ fn apply_ollama_env_vars(vars: &[(&str, &str)]) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::config_permission_line;
     use super::model_installed;
 
     #[test]
@@ -572,5 +658,73 @@ mod tests {
         let installed = vec!["gemma3:4b".to_owned()];
         assert!(!model_installed(&installed, "gemma3:12b"));
         assert!(model_installed(&installed, "gemma3:4b"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_permission_line_warns_on_loose_mode_with_keys() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("indexa-doctor-perm-test-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "[api_keys]\nopenai = \"sk-x\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let line = config_permission_line(&path, true).expect("keys present, file exists");
+        assert!(line.contains('⚠'), "expected a warning line, got: {line}");
+        assert!(
+            line.contains("644"),
+            "expected the mode in the line: {line}"
+        );
+        assert!(
+            line.contains(&path.display().to_string()),
+            "expected the path in the line: {line}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_permission_line_reports_ok_when_already_tight() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("indexa-doctor-perm-ok-test-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "[api_keys]\nopenai = \"sk-x\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let line = config_permission_line(&path, true).expect("keys present, file exists");
+        assert!(line.contains('✅'), "expected an OK line, got: {line}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_permission_line_is_silent_without_keys_or_missing_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "indexa-doctor-perm-none-test-{}",
+            std::process::id()
+        ));
+        let path = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "[api_keys]\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        // No keys present — even at a loose mode, this must produce no line (no false positive).
+        assert!(config_permission_line(&path, false).is_none());
+
+        // A missing file must also produce no line, regardless of `has_keys`.
+        let missing = dir.join("does-not-exist.toml");
+        assert!(config_permission_line(&missing, true).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

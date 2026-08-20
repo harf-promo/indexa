@@ -17,6 +17,7 @@ mod keys;
 mod misc;
 mod models;
 mod packs;
+mod projects;
 mod providers;
 mod queue;
 mod review;
@@ -42,7 +43,7 @@ pub(crate) use config::{
 pub(crate) use export::api_export;
 pub(crate) use file_preview::api_file_preview;
 pub(crate) use fs::api_fs_ls;
-pub(crate) use graph::api_graph;
+pub(crate) use graph::{api_graph, api_graph_modules};
 pub(crate) use health::api_health;
 pub(crate) use insights_handler::{
     api_insights_diff, api_insights_duplicates, api_insights_languages, api_insights_largest,
@@ -62,6 +63,7 @@ pub(crate) use packs::{
     api_packs_create, api_packs_delete, api_packs_export, api_packs_list, api_packs_paths_add,
     api_packs_paths_get, api_packs_paths_remove, api_packs_search, api_packs_suggest,
 };
+pub(crate) use projects::api_projects;
 pub(crate) use providers::api_providers_status;
 pub(crate) use queue::{api_queue_failed, api_queue_retry, api_queue_stats};
 pub(crate) use review::{

@@ -1,9 +1,12 @@
 # Evaluate retrieval quality
 
 **Goal:** regression-test retrieval with a golden-questions file, so a change to chunking,
-parsing, or ranking can't silently make `ask`/`search` worse. `indexa eval` runs each question
-through the same retrieval the `ask` pipeline uses (with reranking excluded — eval stays LLM-free, so rerank-enabled configs diverge by exactly that step) and scores the ranked hits — **no LLM, no
-synthesis**, and in sparse mode (the default) no embedder, so it runs hermetically in CI.
+parsing, ranking, or reranking can't silently make `ask`/`search` worse. `indexa eval` runs each
+question through the same retrieval the `ask` pipeline uses and scores the ranked hits — **no LLM
+synthesis, ever**. By default reranking is excluded too (eval stays LLM-free and hermetic, so
+rerank-enabled configs diverge by exactly that step), and in sparse mode (the default) no embedder
+is needed either. Pass `--rerank` to also route retrieval through the SAME rerank pass `ask` uses
+(needs a local LLM, or the cross-encoder model when `[retrieval] rerank_backend = "cross-encoder"`).
 
 ## The golden file
 
@@ -40,6 +43,7 @@ indexa eval golden.json --mode rrf               # hybrid, needs the embedder us
 indexa eval golden.json --scope ~/code/myrepo    # confine retrieval to one tree
 indexa eval golden.json --json | jq .summary     # machine output
 indexa eval golden.json --min-hit-rate 0.8       # exit 1 below 80% hit rate (absolute floor)
+indexa eval golden.json --rerank                 # also score ask's rerank pass — needs a local LLM
 ```
 
 ### Regression gate (compare against a baseline)
@@ -102,6 +106,13 @@ on every PR.
 
 Sparse mode scores BM25 keyword retrieval only — it tells you nothing about embedding quality.
 Use `--mode rrf` locally (with the same embedder the index was built with) when a change touches
-the dense path. Note that sparse retrieval treats a multi-word question as a phrase, the same as
-`ask --sparse-only` — write sparse golden questions as phrases that actually occur in the content,
-or expect (and track) the miss.
+the dense path, and add `--rerank` when the change touches reranking (either backend). Note that
+sparse retrieval treats a multi-word question as a phrase, the same as `ask --sparse-only` — write
+sparse golden questions as phrases that actually occur in the content, or expect (and track) the
+miss.
+
+`--mode rrf`/`dense` also unlocks MMR (`retrieve()` skips it entirely in sparse mode), so combining
+`--mode rrf --rerank` is the closest this command gets to the full production `ask` ranking. Both
+need a real index built with embeddings (`indexa deep` without `--no-embed`) — the hermetic CI gate
+deliberately can't run either; see `.github/workflows/dense-eval.yml` (`workflow_dispatch`) for the
+one that can.

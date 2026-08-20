@@ -77,11 +77,18 @@ pub(crate) async fn api_watch_start(
     let max_parse_bytes = state.config.parsers.max_file_mb.saturating_mul(1024 * 1024);
     // Chunk-aware registry honoring `[chunking]` size/overlap; built before the `'static` watch
     // task so it can be moved in and reused for every event.
-    let registry =
+    let mut registry =
         indexa_parsers::registry::Registry::with_chunk(indexa_parsers::types::ChunkParams {
             size: state.config.chunking.size,
             overlap: state.config.chunking.overlap,
+            encoding: indexa_parsers::types::TextEncoding::from_config_str(
+                &state.config.parsers.encoding,
+            ),
         });
+    registry.register_preprocessors(&crate::preprocessor_specs(&state.config));
+    if state.config.parsers.compressed {
+        registry.enable_compressed();
+    }
     let watch_root = PathBuf::from(&path);
     let watch_root2 = watch_root.clone();
     // Same per-event file-selection policy the scan walker uses (skip artifacts/sensitive/oversized/
@@ -90,6 +97,7 @@ pub(crate) async fn api_watch_start(
         std::slice::from_ref(&watch_root),
         state.config.scan.respect_gitignore,
         &state.config.scan.ignore,
+        state.config.scan.custom_ignore,
     );
     let include_sensitive = state.config.scan.include_sensitive;
     let redact_at_index = state.config.scan.redact_at_index;

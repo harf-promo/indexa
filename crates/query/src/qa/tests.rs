@@ -611,6 +611,44 @@ async fn answer_synthesizes_from_hits() {
     assert!(!conf.inputs.embeddings, "sparse mode never embedded");
 }
 
+/// Bug 1 (Wave 7): `ask(catalog: true)` must NOT pay for a rerank call it then discards —
+/// catalog dedupes to file level and sorts by the pre-rerank `rrf_score`, so any reordering a
+/// rerank pass produced would be silently thrown away. Two hits (rerank's early-return for
+/// `len() < 2` would otherwise mask the bug) and `QaConfig::default()` (rerank defaults to
+/// `true`) — a caller that didn't explicitly disable rerank must still get zero LLM calls.
+#[tokio::test]
+async fn catalog_never_calls_the_llm_even_with_rerank_on_by_default() {
+    let (_dir, path) = temp_index_with_chunks(&[
+        ("/fox.md", "the quick brown fox jumps over the lazy dog"),
+        ("/fox2.md", "another fox document about foxes running"),
+    ]);
+    let gen_calls = Arc::new(AtomicUsize::new(0));
+    let embedder = CountingEmbedder {
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let llm = CountingGen {
+        calls: gen_calls.clone(),
+        reply: "1,2".to_owned(), // a plausible rerank response, must never be requested
+    };
+    let cfg = QaConfig {
+        mode: HybridMode::Sparse,
+        ..QaConfig::default() // rerank: true — the caller never opted out
+    };
+
+    let ans = answer_catalog_history(&path, &embedder, &llm, "fox", &cfg, None, &[])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        gen_calls.load(Ordering::SeqCst),
+        0,
+        "catalog mode must never call the LLM — not for rerank, not for synthesis"
+    );
+    assert!(!ans.synthesized, "catalog is never synthesized");
+    assert!(ans.answer.contains("CATALOG"));
+    assert_eq!(ans.sources.len(), 2, "both files are deduped/listed");
+}
+
 /// Generator that streams several fragments (overrides generate_stream) so we can verify
 /// answer_stream preserves fragment order and event ordering.
 struct StreamingGen;

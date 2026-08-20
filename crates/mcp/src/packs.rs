@@ -20,7 +20,11 @@ pub struct GetPackParams {
 pub struct ExportPackParams {
     /// Name of the Context Pack to export (case-insensitive).
     pub name: String,
-    /// Output format: `xml` (default), `md`, or `json`.
+    /// Output format: `xml` (default), `md`, `json`, or `okf` (4.2 — an OKF v0.1 knowledge
+    /// bundle: one Markdown file per summarized item with YAML frontmatter, plus
+    /// `index.md`/`log.md`, concatenated here with `--- file: <path> ---` separators since
+    /// this tool returns one string — for a real directory bundle use the CLI
+    /// `indexa pack export --format okf --out <dir>`).
     #[serde(default)]
     pub format: Option<String>,
     /// Maximum tree depth per path (0 = top summary only). Omit for full depth.
@@ -38,6 +42,14 @@ pub struct ExportPackParams {
     /// Combine with `changed_since` to intersect. Omit for no category filter.
     #[serde(default)]
     pub category: Option<String>,
+    /// Append a call-graph section (which files relate to which) for the pack's paths, capped
+    /// at 200 heaviest edges. Default false.
+    #[serde(default)]
+    pub include_graph: bool,
+    /// With `include_graph`: `"text"` (per-format list, default) or `"mermaid"` (a fenced
+    /// ```mermaid flowchart block — pure text, renders natively in most AI tools/viewers).
+    #[serde(default)]
+    pub graph_format: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -137,13 +149,21 @@ impl IndexaMcp {
         )))
     }
 
-    /// Export a Context Pack as XML, Markdown, or JSON — ready to paste into any AI tool.
+    /// Export a Context Pack as XML, Markdown, JSON, or an OKF bundle — ready to paste into
+    /// any AI tool, or hand to any OKF-aware tool.
     #[tool(
         description = "Export a Context Pack as a self-contained context file (XML by default, \
                        also Markdown or JSON). Each path in the pack is rendered with its \
                        hierarchical summary tree. Optionally slice with `changed_since` \
-                       (e.g. '7d') and/or `category` (e.g. 'code'). Ideal for giving an AI tool \
-                       focused context on a specific topic (e.g. 'Auth', 'Tax 2025', 'Client X')."
+                       (e.g. '7d') and/or `category` (e.g. 'code'). Set `include_graph: true` \
+                       to append a call-graph section (`graph_format: \"mermaid\"` for a fenced \
+                       diagram block instead of a per-format list). Set `format: \"okf\"` for an \
+                       OKF v0.1 knowledge bundle (one Markdown file per item with YAML \
+                       frontmatter, plus an index.md/log.md changelog) consumable by other \
+                       OKF-aware tools — concatenated here with `--- file: <path> ---` \
+                       separators (for a real directory bundle, use the CLI `indexa pack \
+                       export --format okf --out <dir>`). Ideal for giving an AI tool focused \
+                       context on a specific topic (e.g. 'Auth', 'Tax 2025', 'Client X')."
     )]
     pub(crate) async fn export_pack(
         &self,
@@ -156,17 +176,27 @@ impl IndexaMcp {
             signatures,
             changed_since,
             category,
+            include_graph,
+            graph_format,
         } = params.0;
-        let store = self.store()?;
+        let mut store = self.store()?;
+        let fmt = format.as_deref().unwrap_or("xml");
         let buf = export_pack_body(
             &store,
             &name,
-            format.as_deref().unwrap_or("xml"),
+            fmt,
             depth,
             signatures.unwrap_or(false),
             changed_since.as_deref(),
             category.as_deref(),
+            include_graph,
+            graph_format.as_deref().unwrap_or("text"),
         )?;
+        // Record the export (4.1) — best-effort, a history-write hiccup must never fail an
+        // otherwise-successful export.
+        if let Ok(Some(pack)) = store.pack_by_name(&name) {
+            let _ = store.record_pack_exported(&pack.id, fmt);
+        }
         Ok(ok_text(buf))
     }
 
@@ -337,6 +367,7 @@ impl IndexaMcp {
 /// Render a Context Pack to a single string in `format` (`xml` | `md` | `json`), with
 /// `redact_secrets` applied — the shared body for the `export_pack` tool, the
 /// `indexa://pack/{name}` resource, and the `pack-context` prompt (one redaction site).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn export_pack_body(
     store: &Store,
     name: &str,
@@ -345,10 +376,12 @@ pub(crate) fn export_pack_body(
     signatures: bool,
     changed_since: Option<&str>,
     category: Option<&str>,
+    include_graph: bool,
+    graph_format: &str,
 ) -> Result<String, ErrorData> {
     use indexa_query::{
-        build_export_filter, build_tree, prune_tree, redact::redact_secrets, render_json,
-        render_markdown, render_signatures, render_xml,
+        build_export_filter, build_tree, prune_tree, redact::redact_secrets, render_graph,
+        render_graph_mermaid, render_json, render_markdown, render_signatures, render_xml,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -367,6 +400,39 @@ pub(crate) fn export_pack_body(
         return Err(mcp_err(format!(
             "pack \"{name}\" is empty — add paths first with: indexa pack add \"{name}\" <paths…>"
         )));
+    }
+
+    // 4.2 — OKF bundle: a directory-shaped artifact doesn't fit the single-string return of
+    // every other format, so the MCP surface concatenates it with `--- file: <path> ---`
+    // separators (documented in the tool description) instead of a real directory write —
+    // that's the CLI's job (`indexa pack export --format okf --out <dir>`).
+    if format == "okf" {
+        let mut roots = Vec::new();
+        for root_path in &paths {
+            if let Some(tree) = build_tree(store, root_path, depth).map_err(mcp_err)? {
+                roots.push(tree);
+            }
+        }
+        if roots.is_empty() {
+            return Err(mcp_err(format!(
+                "no paths in pack \"{name}\" have summaries yet — run `indexa summarize <path>` first"
+            )));
+        }
+        let events: Vec<(String, Option<String>, i64)> = store
+            .pack_events(&pack.id)
+            .map_err(mcp_err)?
+            .into_iter()
+            .map(|e| (e.event, e.detail, e.at))
+            .collect();
+        let bundle = indexa_query::render_okf_bundle(name, &roots, &events);
+        let mut out = String::new();
+        for (rel_path, content) in &bundle {
+            out.push_str(&format!("--- file: {rel_path} ---\n"));
+            out.push_str(content);
+            out.push('\n');
+        }
+        let (redacted, _) = redact_secrets(&out);
+        return Ok(redacted);
     }
 
     // Relational slice (v0.58/v0.60): same filters as CLI `pack export` and web `/api/packs/:name/export`,
@@ -417,6 +483,26 @@ pub(crate) fn export_pack_body(
         buf.push('\n');
         exported += 1;
     }
+
+    // Optional call-graph section (1.6): a single pack path scopes the graph to it; multiple
+    // paths fall back to the whole-index scope ("/"), matching `indexa export --include-graph`.
+    // Capped at 200 edges (the MCP `code_graph` tool's default).
+    if include_graph {
+        let scope = if paths.len() == 1 {
+            paths[0].clone()
+        } else {
+            "/".to_owned()
+        };
+        if let Ok(graph) = store.code_graph(&scope, 200, false) {
+            let section = if graph_format == "mermaid" {
+                render_graph_mermaid(&graph)
+            } else {
+                render_graph(&graph, format)
+            };
+            buf.push_str(&section);
+        }
+    }
+
     if is_xml {
         buf.push_str("</context>\n");
     }

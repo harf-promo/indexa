@@ -16,7 +16,7 @@ ollama pull gemma3:12b         # dir roll-ups + Q&A (~8 GB)
 
 ## Feature surface (timeless — details in CHANGELOG.md)
 
-- **MCP server:** 47 tools across router modules in `crates/mcp` composed in `tool_router()` (NOT one lib.rs), + 4 resources (`indexa://…`) + 3 prompts. A pinned test (`doc_tool_count_matches_code`) keeps this number honest — update it when tools change.
+- **MCP server:** 50 tools across router modules in `crates/mcp` composed in `tool_router()` (NOT one lib.rs), + 4 resources (`indexa://…`) + 3 prompts. A pinned test (`doc_tool_count_matches_code`) keeps this number honest — update it when tools change.
 - **Retrieval:** hybrid BM25/FTS5 + dense embeddings, RRF fusion, archive/code-intent/recency boosts, rerank, MMR; eval-gated via `indexa eval` over `fixtures/self-golden.json`.
 - **Ask:** grounded RAG; `synthesize:false` returns the raw slice; conversational via `session_id`; `explain_retrieval` traces scoring.
 - **Context Packs** (create/add/remove/export/search, remote `add-url` opt-in; exports secret-redacted) · **code graph** (deps/who_imports/who_calls/blast_radius; 8 languages, 1-hop, case-sensitive) · **decision-review ledger** · **classification + importance weights** · **savings/impact accounting** (≈4 bytes/token estimate).
@@ -45,6 +45,8 @@ cargo clippy --workspace -- -D warnings
 cargo test --workspace
 cargo build --release
 ```
+
+**Touched a dependency anywhere in the graph?** `apps/indexa-desktop` is workspace-excluded with its own committed `Cargo.lock` — CI builds it `--locked`. Adding/removing a dep in a crate the desktop app pulls in (even transitively) leaves that lock stale and red-Xs `desktop build (macOS)` with no local signal, since `cargo build --workspace` never touches it. Regenerate it: `cargo generate-lockfile --manifest-path apps/indexa-desktop/Cargo.toml`, then diff it — only your actual dependency change should move; the pinned `brotli`/`pcre2` versions (see that Cargo.toml's own comment) must not float.
 
 UI changes: `indexa serve` → visually confirm at http://localhost:7620 (headless-CDP harness fallback: `memory/feedback_browser_verification.md`).
 

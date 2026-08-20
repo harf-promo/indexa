@@ -23,6 +23,12 @@ pub struct AddNoteParams {
     pub title: String,
     /// Markdown body of the note — the knowledge you want to persist and make searchable.
     pub body: String,
+    /// Optional (2.6): anchor this note to a code path or bare symbol name, so
+    /// `dependencies`/`blast_radius`/`symbol_context` surface it inline when that
+    /// path/symbol comes up later. A value starting with `/` is treated as a path;
+    /// anything else as a symbol name.
+    #[serde(default)]
+    pub anchor: Option<String>,
 }
 
 /// Absolute path to the running `indexa` binary. The MCP server IS `indexa mcp`, so `current_exe`
@@ -175,12 +181,13 @@ impl IndexaMcp {
         let counts = store.prune_orphans().map_err(mcp_err)?;
         Ok(ok_text(format!(
             "Pruned {} orphaned chunk(s), {} stale queue row(s), {} summary row(s), {} \
-             classification(s), and {} app detection(s).",
+             classification(s), {} app detection(s), and {} symbol row(s).",
             counts.chunks,
             counts.queue,
             counts.summaries,
             counts.classifications,
-            counts.directory_apps
+            counts.directory_apps,
+            counts.symbols
         )))
     }
 
@@ -246,13 +253,21 @@ impl IndexaMcp {
                        to persist learned facts (design decisions, bug root-causes, meeting \
                        outcomes) that should survive the session. The pack must already exist \
                        — call `create_pack` first. Re-submitting the same title+body is \
-                       idempotent. Notes are redacted on `export_pack` like any other file."
+                       idempotent. Notes are redacted on `export_pack` like any other file. \
+                       Set `anchor` (2.6) to a code path or bare symbol name to have \
+                       `dependencies`/`blast_radius`/`symbol_context` surface this note inline \
+                       whenever that path/symbol comes up later."
     )]
     pub(crate) async fn add_note(
         &self,
         params: Parameters<AddNoteParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let AddNoteParams { pack, title, body } = params.0;
+        let AddNoteParams {
+            pack,
+            title,
+            body,
+            anchor,
+        } = params.0;
 
         // Derive data_dir from db_path (db_path = <data_dir>/index.db).
         let data_dir = self
@@ -269,8 +284,14 @@ impl IndexaMcp {
         })?;
 
         // Write the note file (idempotent: same title+body → same filename).
-        let note_path = indexa_core::notes::write_note_file(data_dir, &pack, &title, &body)
-            .map_err(|e| mcp_err(format!("writing note: {e}")))?;
+        let note_path = indexa_core::notes::write_note_file_anchored(
+            data_dir,
+            &pack,
+            &title,
+            &body,
+            anchor.as_deref(),
+        )
+        .map_err(|e| mcp_err(format!("writing note: {e}")))?;
 
         let note_path_str = note_path.to_string_lossy().into_owned();
 
@@ -278,6 +299,13 @@ impl IndexaMcp {
         store
             .add_pack_paths(&pack_rec.id, std::slice::from_ref(&note_path_str))
             .map_err(mcp_err)?;
+
+        if let Some(a) = &anchor {
+            let kind = if a.starts_with('/') { "path" } else { "symbol" };
+            store
+                .upsert_note_anchor(&note_path_str, a, kind, &title, &pack)
+                .map_err(mcp_err)?;
+        }
 
         // Index immediately: scan + deep-embed + summarize the notes directory so the
         // note is searchable right away. Best-effort — a failure here still means the
@@ -301,8 +329,12 @@ impl IndexaMcp {
             Err(e) => format!("\n⚠ Could not spawn `indexa index`: {e}"),
         };
 
+        let anchor_note = match &anchor {
+            Some(a) => format!("\nAnchored to: {a}"),
+            None => String::new(),
+        };
         Ok(ok_text(format!(
-            "Note \"{title}\" added to pack \"{pack}\" and indexed.\nFile: {note_path_str}{index_note}"
+            "Note \"{title}\" added to pack \"{pack}\" and indexed.\nFile: {note_path_str}{anchor_note}{index_note}"
         )))
     }
 }

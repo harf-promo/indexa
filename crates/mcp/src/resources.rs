@@ -90,7 +90,7 @@ impl IndexaMcp {
             let name = percent_decode(name);
             let store = self.store()?;
             // Already redacted inside export_pack_body.
-            export_pack_body(&store, &name, "md", None, false, None, None)?
+            export_pack_body(&store, &name, "md", None, false, None, None, false, "text")?
         } else if let Some(path) = rest.strip_prefix("summary/") {
             let path = percent_decode(path);
             let store = self.store()?;

@@ -204,7 +204,7 @@ passes_cap = 3               # hard ceiling
 [parsers]
 max_file_mb = 100            # 0 = no cap
 [parsers.pdf]
-backend = "pdfium"           # pdfium | marker (scanned/OCR)
+backend = "text"             # text (text-layer only) | ocr (also OCR scanned/image-only pages)
 [parsers.image]
 caption = false              # opt-in (roadmap: local vision captions)
 [parsers.audio]
@@ -215,17 +215,23 @@ profile = "balanced"         # conservative | balanced | performance
 headroom_gb = 0.0            # 0 = use profile default
 auto_select_model = true     # downgrade the model if the preferred one won't fit RAM
 keep_alive_secs = 0          # 0 = profile default
-micro_benchmark = true       # measure real throughput at job start for accurate ETAs
 
-[api_keys]                   # fallback when the matching env var is unset; stored 0600
+[api_keys]                   # fallback when the matching env var is unset; kept 0600
 openai = ""
 anthropic = ""
 google = ""
 ```
 
+**API key storage:** Indexa always writes `config.toml` 0600 (web Settings, `multimodal --enable`,
+…); a hand-edited file with `[api_keys]` values set is auto-tightened to 0600 the next time it's
+loaded, so a stray `chmod 644` from an editor doesn't leave keys group/other-readable. `indexa doctor`
+reports the file's permission status when keys are present, including if an auto-tighten ever fails.
+
 **Storage modes** (`[describer] mode`): `augment` (chunks + summaries, best recall) · `compress`
 (summarize, then drop chunks — ~10× smaller) · `summaries-only` (skip chunking — ~100× smaller, no
-hybrid retrieval; ~3.5 GB per 1 TB indexed).
+hybrid retrieval; ~3.5 GB per 1 TB indexed). Set it in config and just run `indexa index`/`deep`/
+`summarize` with no `--mode` flag to use it everywhere; an explicit `--mode` on any of those three
+commands overrides the config value for that one run.
 
 **Resource profiles:** `conservative` (8 GB headroom, gentlest) · `balanced` (5 GB, default) ·
 `performance` (3 GB, fastest/heaviest). The memory watchdog pauses LLM/embed work under genuine pressure
@@ -256,8 +262,10 @@ Bring your own model — none is bundled.
 | **OpenAI** | Cloud | Data leaves your device. |
 | **Anthropic** | Cloud | Data leaves your device (answers/summaries). |
 
-**Optional reranking** — set `[retrieval] rerank = true` to add a cross-encoder reorder pass before the
-answer. Off by default and *fails open*: any model hiccup falls back to the original order.
+**Reranking** — `[retrieval] rerank` adds a reorder pass before the answer. **On by default**
+(`rerank_backend = "llm"`: listwise, reuses the already-loaded generation model, no extra
+download); set `rerank_backend = "cross-encoder"` for the dedicated DeBERTa-v2 model instead.
+Set `rerank = false` to disable. *Fails open*: any model hiccup falls back to the original order.
 
 ### Use your Claude Pro/Max subscription (no API key)
 
@@ -304,7 +312,7 @@ Add it to **Claude Desktop** (`claude_desktop_config.json`) — or any MCP clien
 }
 ```
 
-**47 tools** are exposed (see [docs/how-to/live-retrieval-over-mcp.md](docs/how-to/live-retrieval-over-mcp.md)
+**50 tools** are exposed (see [docs/how-to/live-retrieval-over-mcp.md](docs/how-to/live-retrieval-over-mcp.md)
 for the full table). The ones you'll reach for most: `search` (content search), `browse_tree` (one
 directory level), `get_summary` (`tier` = l0 one-liner / l1 full+children / l2 file content —
 progressive disclosure), `get_chunk_context` (a file's indexed chunks, or the neighbors of a search
@@ -345,9 +353,11 @@ to drain summaries in the background. (Roadmap: a native desktop app replaces le
 **Right-size for a small machine.** `indexa doctor` shows what fits; set `[resource] profile =
 "conservative"` and/or `mode = "summaries-only"`; keep `auto_select_model = true`.
 
-**Keep dense search fast on a huge index.** Past ~50K chunks, brute-force cosine starts to drag.
-Set `[retrieval] ann = true` to switch dense retrieval to an in-memory HNSW index (it only engages
-above `ann_min_chunks`, default 50 000 — below that brute-force is faster than building the index).
+**Dense search stays fast on a huge index.** Past ~50K chunks, brute-force cosine starts to drag, so
+`[retrieval] ann` is **on by default**: the long-lived `serve` and `mcp` servers switch dense retrieval
+to a cached in-memory HNSW index above `ann_min_chunks` (default 50 000 — below that, and for scoped
+queries, brute-force is exact and faster than building the index). Set `ann = false` to force exact
+brute-force everywhere.
 
 **Index in the background.** Leave `indexa worker` draining the summary queue, and `indexa watch <path>`
 re-embedding files as you save them — no foreground build to babysit. `indexa worker --auto-reindex`

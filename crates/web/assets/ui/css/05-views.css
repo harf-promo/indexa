@@ -73,6 +73,27 @@
 .onboard-cta:disabled { opacity: 0.4; cursor: default; }
 .onboard-hint { color: var(--muted); font-size: 12.5px; }
 .onboard-hint code { color: var(--accent); font-family: var(--font-mono); font-size: 12px; }
+.welcome-projects {
+  margin-top: 22px;
+  text-align: left;
+  max-width: 520px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.welcome-projects-head {
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+.welcome-project-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border-subtle);
+}
+.welcome-project-name { font-size: 13px; font-weight: 500; color: var(--text); }
+.welcome-project-kind { flex: 1; font-size: 11px; color: var(--muted); }
 .msg { max-width: 800px; width: 100%; }
 /* Harf: sharp chat bubbles. The user bubble keeps the teal author fill (it's an
    author identity colour, not a button); the assistant bubble is a hairline card. */
@@ -114,6 +135,7 @@
 }
 .source-item .path { color: var(--accent); font-weight: 500; font-family: var(--font-mono); font-size: 11px; }
 .source-item .heading { color: var(--orange); margin-left: 8px; }
+.source-item .stale-badge { color: var(--orange); margin-left: 8px; font-weight: 500; }
 .source-item .snippet { color: var(--muted); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thinking { color: var(--muted); font-style: italic; animation: pulse 1.5s ease-in-out infinite; }
 .input-bar {
@@ -230,6 +252,19 @@
 
 /* ── Settings view ── */
 .settings-view { flex: 1; overflow-y: auto; padding: 24px; max-width: 640px; }
+.settings-advanced {
+  margin: 8px 0 18px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-2);
+  padding: 4px 10px 8px;
+}
+.settings-advanced > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 8px 2px;
+}
+.settings-advanced[open] > summary { margin-bottom: 8px; }
 .settings-section { margin-bottom: 32px; }
 .settings-section h2 {
   font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px;
@@ -401,6 +436,10 @@
 }
 .export-menu button:last-child { border-bottom: none; }
 .export-menu button:hover { background: var(--surface-2); }
+.export-menu-sep {
+  height: 1px; background: var(--border); margin: 4px 0;
+}
+#export-pack-list { display: flex; flex-direction: column; }
 .export-hint { font-size: 11px; color: var(--muted); margin-left: 4px; }
 .export-slice { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-top: 1px solid var(--border); }
 /* Harf: text input — 4px corner. */

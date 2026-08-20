@@ -50,6 +50,12 @@ pub(crate) struct ExportQuery {
     changed_since: Option<String>,
     /// Relational slice: only files in this classification category (e.g. `code`, `document`).
     category: Option<String>,
+    /// Append a call-graph section (which files relate to which), capped at 200 heaviest edges.
+    #[serde(default)]
+    include_graph: bool,
+    /// With `include_graph=true`: `text` (per-format list, default) or `mermaid` (a fenced
+    /// ```mermaid flowchart block).
+    graph_format: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -188,7 +194,8 @@ pub(crate) async fn api_packs_export(
     Query(q): Query<ExportQuery>,
 ) -> Response {
     use indexa_query::{
-        build_export_filter, build_tree, prune_tree, render_json, render_markdown, render_xml,
+        build_export_filter, build_tree, prune_tree, render_graph, render_graph_mermaid,
+        render_json, render_markdown, render_xml,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -201,7 +208,7 @@ pub(crate) async fn api_packs_export(
     let format = q.format.as_deref().unwrap_or("xml");
     let depth = q.depth;
 
-    let store = state.store.lock().await;
+    let mut store = state.store.lock().await;
     let pack = match store.pack_by_name(&name) {
         Ok(Some(p)) => p,
         Ok(None) => return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\"")),
@@ -263,6 +270,26 @@ pub(crate) async fn api_packs_export(
         buf.push('\n');
         exported += 1;
     }
+
+    // Optional call-graph section (1.6): a single pack path scopes the graph to it; multiple
+    // paths fall back to the whole-index scope ("/"), matching CLI `indexa export
+    // --include-graph`. Capped at 200 edges (the MCP `code_graph` tool's default).
+    if q.include_graph {
+        let scope = if paths.len() == 1 {
+            paths[0].clone()
+        } else {
+            "/".to_owned()
+        };
+        if let Ok(graph) = store.code_graph(&scope, 200, false) {
+            let section = if q.graph_format.as_deref() == Some("mermaid") {
+                render_graph_mermaid(&graph)
+            } else {
+                render_graph(&graph, format)
+            };
+            buf.push_str(&section);
+        }
+    }
+
     if is_xml {
         buf.push_str("</context>\n");
     }
@@ -291,6 +318,8 @@ pub(crate) async fn api_packs_export(
     // same invariant the whole-tree export (api_export), MCP export_pack, and CLI
     // `pack export` enforce. This pack route was the one surface that skipped it.
     let (buf, _redacted) = indexa_query::redact::redact_secrets(&buf);
+    // Best-effort (4.1) — a history-write hiccup must never fail an otherwise-successful export.
+    let _ = store.record_pack_exported(&pack.id, format);
     ([(axum::http::header::CONTENT_TYPE, content_type)], buf).into_response()
 }
 

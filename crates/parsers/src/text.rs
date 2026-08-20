@@ -1,6 +1,36 @@
-use crate::types::{split_char_budget, Chunk, ChunkParams, Extracted, Parser, MAX_CHUNK_CHARS};
+use crate::types::{
+    split_char_budget, Chunk, ChunkParams, Extracted, Parser, TextEncoding, MAX_CHUNK_CHARS,
+};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser as MdParser, Tag, TagEnd};
 use std::path::Path;
+
+/// Read a text file, transcoding to UTF-8 per `encoding` (1.3 — borrowed from ripgrep's
+/// `--encoding auto`). `Utf8Strict` is the old exact behavior (`read_to_string`, errors on
+/// invalid UTF-8). `Auto` reads raw bytes and calls [`decode_text_bytes`] — BOM-sniffs UTF-16,
+/// lossy-decodes everything else. A valid-UTF-8 file decodes identically either way, so `Auto`
+/// only changes outcomes for files that previously errored.
+pub(crate) fn read_text_lossy(path: &Path, encoding: TextEncoding) -> std::io::Result<String> {
+    match encoding {
+        TextEncoding::Utf8Strict => std::fs::read_to_string(path),
+        TextEncoding::Auto => Ok(decode_text_bytes(&std::fs::read(path)?)),
+    }
+}
+
+/// Pure byte-level decode (unit-testable without real files). BOM-sniffs UTF-8/UTF-16LE/UTF-16BE
+/// via `encoding_rs::Encoding::for_bom` (which also reports the BOM's byte length so it's
+/// stripped, not embedded as a leading U+FEFF/replacement char); falls back to lossy UTF-8
+/// decoding for anything without a recognized BOM.
+pub(crate) fn decode_text_bytes(bytes: &[u8]) -> String {
+    if let Some((enc, bom_len)) = encoding_rs::Encoding::for_bom(bytes) {
+        if enc == encoding_rs::UTF_16LE || enc == encoding_rs::UTF_16BE {
+            let (text, _, _) = enc.decode(bytes);
+            return text.into_owned();
+        }
+        // UTF-8 BOM: strip it, decode the rest as UTF-8 (lossy).
+        return String::from_utf8_lossy(&bytes[bom_len..]).into_owned();
+    }
+    String::from_utf8_lossy(bytes).into_owned()
+}
 
 pub struct TextParser;
 
@@ -70,7 +100,7 @@ impl Parser for TextParser {
     }
 
     fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> anyhow::Result<Extracted> {
-        let text = std::fs::read_to_string(path)?;
+        let text = read_text_lossy(path, chunk.encoding)?;
         let chunks = self.fixed_chunks(path, &text, chunk.size, chunk.overlap);
         Ok(Extracted {
             source: path.to_path_buf(),
@@ -100,7 +130,7 @@ impl Parser for MarkdownParser {
     }
 
     fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> anyhow::Result<Extracted> {
-        let raw = std::fs::read_to_string(path)?;
+        let raw = read_text_lossy(path, chunk.encoding)?;
         let (frontmatter, body) = split_frontmatter(&raw);
 
         let mut chunks = chunk_markdown(path, &body, chunk.size, chunk.overlap);
@@ -296,11 +326,71 @@ mod tests {
                 ChunkParams {
                     size: 5,
                     overlap: 2,
+                    ..Default::default()
                 },
             )
             .unwrap();
         assert!(!extracted.chunks.is_empty());
         assert_eq!(extracted.chunks[0].text, "one two three four five");
+    }
+
+    #[test]
+    fn decode_text_bytes_transcodes_utf16le_bom() {
+        // "hi" in UTF-16LE with a BOM: FF FE 68 00 69 00.
+        let bytes: &[u8] = &[0xFF, 0xFE, 0x68, 0x00, 0x69, 0x00];
+        assert_eq!(decode_text_bytes(bytes), "hi");
+    }
+
+    #[test]
+    fn decode_text_bytes_transcodes_utf16be_bom() {
+        // "hi" in UTF-16BE with a BOM: FE FF 00 68 00 69.
+        let bytes: &[u8] = &[0xFE, 0xFF, 0x00, 0x68, 0x00, 0x69];
+        assert_eq!(decode_text_bytes(bytes), "hi");
+    }
+
+    #[test]
+    fn decode_text_bytes_strips_utf8_bom() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"hello");
+        assert_eq!(decode_text_bytes(&bytes), "hello");
+    }
+
+    #[test]
+    fn decode_text_bytes_no_bom_is_lossy_utf8() {
+        assert_eq!(decode_text_bytes(b"plain ascii"), "plain ascii");
+        // Invalid UTF-8 (a lone continuation byte) is replaced, not rejected — the whole
+        // point of "auto" mode is never erroring on a previously-unreadable file.
+        let invalid: &[u8] = &[b'a', 0x80, b'b'];
+        assert_eq!(decode_text_bytes(invalid), "a\u{FFFD}b");
+    }
+
+    #[test]
+    fn read_text_lossy_utf8_strict_errors_on_utf16() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.txt");
+        std::fs::write(&p, [0xFF, 0xFE, 0x68, 0x00, 0x69, 0x00]).unwrap();
+        assert!(
+            read_text_lossy(&p, TextEncoding::Utf8Strict).is_err(),
+            "Utf8Strict must preserve the old error-on-invalid-UTF-8 behavior"
+        );
+        assert_eq!(read_text_lossy(&p, TextEncoding::Auto).unwrap(), "hi");
+    }
+
+    #[test]
+    fn text_parser_transcodes_a_real_utf16_file_end_to_end() {
+        // 1.3: a real UTF-16LE-with-BOM file, named .txt (the common case — a Windows
+        // PowerShell redirect or a Notepad "Save as UTF-16" file), must parse into
+        // readable chunk text instead of erroring or emitting a garbled chunk.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("notes.txt");
+        let mut bytes = vec![0xFF, 0xFE];
+        for ch in "hello world".encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        std::fs::write(&p, &bytes).unwrap();
+        let extracted = TextParser.parse(&p).unwrap();
+        assert_eq!(extracted.chunks.len(), 1);
+        assert_eq!(extracted.chunks[0].text, "hello world");
     }
 
     #[test]
@@ -387,6 +477,7 @@ mod tests {
                 ChunkParams {
                     size: 3,
                     overlap: 5,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -411,6 +502,7 @@ mod tests {
                 ChunkParams {
                     size: 2,
                     overlap: 100,
+                    ..Default::default()
                 },
             )
             .unwrap();

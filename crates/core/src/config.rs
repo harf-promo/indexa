@@ -22,9 +22,6 @@ pub struct Config {
     pub parsers: ParsersConfig,
     /// Resource-awareness settings: memory headroom, model selection, ETA.
     pub resource: ResourceConfig,
-    /// Per-directory overrides. Matched by path prefix (longest wins).
-    #[serde(default)]
-    pub region: Vec<RegionConfig>,
     /// Optional cloud-provider API keys persisted to config.toml.
     #[serde(default)]
     pub api_keys: ApiKeysConfig,
@@ -40,6 +37,12 @@ pub struct Config {
     /// Opt-in remote-source ingestion (v0.32): pull a web page / GitHub issue|PR into a pack.
     #[serde(default)]
     pub sources: SourcesConfig,
+    /// MCP server settings (3.2): tool-surface profile.
+    #[serde(default)]
+    pub mcp: McpServerConfig,
+    /// Code-graph settings (4.6): persisted architecture-map modules.
+    #[serde(default)]
+    pub graph: GraphConfig,
 }
 
 /// Settings for opt-in remote-source ingestion (`indexa pack add-url`). Off by default — fetching
@@ -64,6 +67,40 @@ impl Default for SourcesConfig {
             max_retries: 2,
         }
     }
+}
+
+/// MCP server settings (3.2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpServerConfig {
+    /// Tool-surface profile: `"full"` (default — every tool advertised and callable) or
+    /// `"core"` (a small task-focused subset — `search`/`ask`/`dependencies`/`who_calls`/
+    /// `blast_radius`/`list_packs`/`search_pack`/`export_pack`/`add_note`/
+    /// `list_open_decisions`; the rest un-advertised and un-callable). Cuts the per-session
+    /// tool-schema token cost for subagents doing bounded work. Unrecognized values fall
+    /// open to `"full"`. The `indexa mcp --tool-profile` flag overrides this per-invocation.
+    pub tool_profile: String,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            tool_profile: "full".to_owned(),
+        }
+    }
+}
+
+/// Code-graph settings (4.6).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GraphConfig {
+    /// Persisted architecture-map modules: cluster the code graph (Louvain, directory-prior-
+    /// boosted) into named functional areas, labeled via a short local-LLM call per cluster from
+    /// member L0 abstracts. Populated by `indexa graph --compute-modules`, read by `code_graph`'s
+    /// `modules: true` and `indexa graph --modules`. Default false — spends local-LLM time at
+    /// compute time; this flag only gates whether those read surfaces report the persisted table
+    /// (empty/absent otherwise), not whether `--compute-modules` can be run manually.
+    pub modules: bool,
 }
 
 // ── Review (Decision Ledger) ──────────────────────────────────────────────────
@@ -111,10 +148,12 @@ pub struct ScanConfig {
     pub respect_gitignore: bool,
     /// Extra gitignore-style patterns to skip (e.g. `["build/", "*.log", "vendor/"]`).
     pub ignore: Vec<String>,
-    /// Re-index interval for `indexa worker --auto-reindex`: `"off"` (default) or a duration
-    /// like `"7d"` / `"30d"` / `"12h"`. When set, the worker re-runs scan→deep→summarize for
-    /// any indexed root whose newest content is older than this. The `--auto-reindex` flag must
-    /// still be passed to activate it (so an expensive rebuild never starts implicitly).
+    /// Re-index interval for `indexa worker --auto-reindex`: `"off"` (default), a duration
+    /// like `"7d"` / `"30d"` / `"12h"` (a one-shot pre-drain staleness check), or `"git-poll"`
+    /// (3.3 — continuously watch each indexed git root's HEAD/working-tree state at an
+    /// adaptive interval and re-index on change; non-git roots fall back to the interval
+    /// check). The `--auto-reindex` flag must still be passed to activate any of these (so an
+    /// expensive rebuild never starts implicitly).
     pub auto_reindex: String,
     /// Descend into sensitive credential directories (`.ssh`, `.gnupg`, `.aws`, browser profiles,
     /// macOS Keychains, password managers). Defaults to `false` — these are never walked unless
@@ -129,6 +168,13 @@ pub struct ScanConfig {
     /// executables/images/DB blobs aren't opened and parsed. The entry is still recorded either
     /// way — this only stops the deep phase from parsing flagged binaries.
     pub skip_binary: bool,
+    /// Walker worker-thread count. `None` (default) = `available_parallelism()` floored at 4 — the
+    /// walk is I/O/syscall-bound, so this scales past the core count. Set a number to cap on a
+    /// shared host (leave cores for other tenants) or raise it on a fast local NVMe machine.
+    pub threads: Option<usize>,
+    /// Honor `.indexaignore` files (highest-precedence ignore layer, above `.gitignore`/`.ignore`,
+    /// supports `!` re-includes) during the walk. Default on; set `false` to disable entirely.
+    pub custom_ignore: bool,
 }
 
 impl Default for ScanConfig {
@@ -140,6 +186,8 @@ impl Default for ScanConfig {
             include_sensitive: false,
             redact_at_index: true,
             skip_binary: false,
+            threads: None,
+            custom_ignore: true,
         }
     }
 }
@@ -193,6 +241,18 @@ pub struct ApiKeysConfig {
     pub openai: Option<String>,
     pub anthropic: Option<String>,
     pub google: Option<String>,
+}
+
+impl ApiKeysConfig {
+    /// True if any provider key is set to a non-empty value — i.e. this config actually
+    /// holds something sensitive that permission hardening should protect. An absent or
+    /// blank `[api_keys]` section (the common case) returns `false`, so permission checks
+    /// that gate on this never warn/tighten a config with nothing worth protecting.
+    pub fn has_any(&self) -> bool {
+        [&self.openai, &self.anthropic, &self.google]
+            .into_iter()
+            .any(|k| k.as_deref().is_some_and(|s| !s.is_empty()))
+    }
 }
 
 // ── Embedding ─────────────────────────────────────────────────────────────────
@@ -290,11 +350,12 @@ pub struct RetrievalConfig {
     pub summary_depth_alpha: f32,
     /// Max characters of retrieved context packed into the answer-synthesis prompt.
     pub context_budget: usize,
-    /// Use an in-memory HNSW (ANN) index for dense retrieval instead of a brute-force
-    /// cosine scan (opt-in). Brute-force is fine to ~300K chunks; enable this beyond that.
-    /// The index is built in a long-lived process (the web server) and cached; a one-shot
-    /// CLI `ask` would pay the build cost for a single query, so prefer it for `serve`.
-    /// Falls back to brute-force for scoped queries and below `ann_min_chunks`.
+    /// Use an in-memory HNSW (ANN) index for dense retrieval instead of a brute-force cosine
+    /// scan. **On by default** — but only takes effect in a long-lived process (the web server
+    /// and the MCP server, which cache the index) and above `ann_min_chunks`; below that, and for
+    /// scoped queries, dense retrieval falls back to the exact brute-force scan. A one-shot CLI
+    /// `ask` never builds the index (it would pay the full build cost for a single query). ANN is
+    /// approximate but recall is high; set to `false` to force exact brute-force everywhere.
     pub ann: bool,
     /// Minimum chunk count before the ANN index is built/used (below this, brute-force is
     /// faster than building an index). Only consulted when `ann` is true.
@@ -386,6 +447,22 @@ pub struct RetrievalConfig {
     /// so clustering can be used without the added latency. `false` by default.
     #[serde(default)]
     pub graphrag_summarize: bool,
+    /// Annotate cited files whose on-disk mtime is newer than what's indexed (1.2) —
+    /// "(stale: modified since indexed)" per source, plus a footer summary. Annotation-only:
+    /// never changes retrieval scores or which chunks are cited, so it needs no eval gate.
+    /// `true` by default; set `false` to disable the extra per-citation `fs::metadata` check.
+    #[serde(default = "default_true")]
+    pub staleness_flags: bool,
+    /// Recognize `path:`/`ext:` predicates in free-text `search`/`ask` queries (1.8) — e.g.
+    /// `ext:md path:crates/core auth flow`. `path:` maps onto the existing scope filter;
+    /// `ext:` is a post-hoc hit filter (search only). Off by default: it changes query
+    /// interpretation, so it's eval-gated before flipping the default.
+    #[serde(default)]
+    pub query_predicates: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Default cluster cap for [`RetrievalConfig::graphrag_max_clusters`].
@@ -421,7 +498,7 @@ impl Default for RetrievalConfig {
             summary_weight: 0.0,
             summary_depth_alpha: 0.15,
             context_budget: 8000,
-            ann: false,
+            ann: true,
             ann_min_chunks: 50_000,
             use_weights: true,
             agentic: false,
@@ -438,6 +515,8 @@ impl Default for RetrievalConfig {
             graphrag_max_clusters: default_graphrag_max_clusters(),
             graphrag_cluster_sim: default_graphrag_cluster_sim(),
             graphrag_summarize: false,
+            staleness_flags: true,
+            query_predicates: false,
         }
     }
 }
@@ -546,6 +625,69 @@ pub struct ParsersConfig {
     /// `0` disables the cap.
     #[serde(default = "default_max_file_mb")]
     pub max_file_mb: u64,
+    /// Text-file encoding detection (1.3): `"auto"` (default) BOM-sniffs UTF-16 and transcodes
+    /// it to UTF-8 (lossy — invalid sequences become U+FFFD), falling back to lossy UTF-8 for
+    /// everything else — a valid-UTF-8 file decodes identically to the old strict read, so this
+    /// only changes outcomes for files that previously errored/were skipped. `"utf-8"` restores
+    /// the old strict behavior (errors on invalid UTF-8) for callers who want a bad file
+    /// detected rather than silently patched.
+    #[serde(default = "default_encoding")]
+    pub encoding: String,
+    /// Runtime preprocessor hooks (4.4, ripgrep `--pre` improved): an external command's
+    /// stdout is indexed as text for any file matching `glob`, covering long-tail formats
+    /// without shipping a parser. Config-file only — there is deliberately no MCP/web
+    /// surface to add one, since this is arbitrary-command execution the user opts into via
+    /// their own config file. Empty by default (no hooks configured).
+    #[serde(default)]
+    pub preprocessor: Vec<PreprocessorConfig>,
+    /// Transparent gzip content indexing (4.5, ripgrep `-z`): index the decompressed
+    /// content of standalone `.gz` files (`README.md.gz`, rotated `.log.gz`, man pages) —
+    /// `.tar.gz`/`.tgz` are unaffected (always handled by the archive parser). Default
+    /// `false`: without it, a `.gz` file is metadata-only, same as today.
+    #[serde(default)]
+    pub compressed: bool,
+}
+
+/// One `[[parsers.preprocessor]]` entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PreprocessorConfig {
+    /// Glob pattern (matched against the full path) selecting which files this hook handles,
+    /// e.g. `"*.dwg"`.
+    pub glob: String,
+    /// The command to run, given the file's path as its argument and the file's bytes on
+    /// stdin. Its stdout is indexed as the file's text content.
+    pub command: String,
+    /// Kill the command if it hasn't finished within this many seconds.
+    #[serde(default = "default_preprocessor_timeout_s")]
+    pub timeout_s: u64,
+    /// Cap on how much of the command's stdout is read (MB) — a runaway or misbehaving
+    /// command can't blow up memory.
+    #[serde(default = "default_preprocessor_max_output_mb")]
+    pub max_output_mb: u64,
+}
+
+impl Default for PreprocessorConfig {
+    fn default() -> Self {
+        Self {
+            glob: String::new(),
+            command: String::new(),
+            timeout_s: default_preprocessor_timeout_s(),
+            max_output_mb: default_preprocessor_max_output_mb(),
+        }
+    }
+}
+
+fn default_preprocessor_timeout_s() -> u64 {
+    30
+}
+
+fn default_preprocessor_max_output_mb() -> u64 {
+    16
+}
+
+fn default_encoding() -> String {
+    "auto".to_owned()
 }
 
 impl Default for ParsersConfig {
@@ -556,6 +698,9 @@ impl Default for ParsersConfig {
             audio: AudioParserConfig::default(),
             video: VideoParserConfig::default(),
             max_file_mb: default_max_file_mb(),
+            encoding: default_encoding(),
+            preprocessor: Vec::new(),
+            compressed: false,
         }
     }
 }
@@ -691,20 +836,6 @@ impl VideoParserConfig {
     }
 }
 
-// ── Per-region overrides ──────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegionConfig {
-    /// Directory path (supports ~ expansion).
-    pub path: String,
-    /// Optional parser overrides for this region.
-    #[serde(default)]
-    pub parsers: Option<ParsersConfig>,
-    /// Optional embedding override for this region.
-    #[serde(default)]
-    pub embedding: Option<EmbeddingConfig>,
-}
-
 // ── Resource configuration ────────────────────────────────────────────────────
 
 /// Controls how aggressively Indexa uses system resources.
@@ -800,12 +931,100 @@ pub fn load(path: &Path) -> Result<Config> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading config: {}", path.display()))?;
 
-    toml::from_str(&text).with_context(|| format!("parsing config: {}", path.display()))
+    let cfg: Config =
+        toml::from_str(&text).with_context(|| format!("parsing config: {}", path.display()))?;
+
+    // `save()` always writes 0600 (with a TOCTOU-safe create + re-tighten), but the documented
+    // way to set `[api_keys]` is hand-authoring the TOML directly — a file created that way
+    // (e.g. by a text editor) is left at the umask default, commonly 0644 (group/other-readable).
+    // Mirror `Store::open`'s unconditional re-tighten of `index.db` on every open: fail-open (a
+    // permissions error must never block startup) and unix-only. Gated on `has_any()` so a config
+    // with no keys in it — the common case — is never touched or warned about; there's nothing
+    // sensitive to protect.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if cfg.api_keys.has_any() {
+            if let Ok(meta) = std::fs::metadata(path) {
+                let mode = meta.permissions().mode() & 0o777;
+                if mode & 0o077 != 0 {
+                    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+                }
+            }
+        }
+    }
+
+    Ok(cfg)
 }
 
 /// Load config from the default platform path.
 pub fn load_default() -> Result<Config> {
     load(&default_config_path())
+}
+
+/// Every dotted-path key in `cfg` whose value differs from `Config::default()` — for `indexa
+/// doctor`'s config-observability report (ripgrep's `--debug` config reporting: which file was
+/// loaded, which non-default settings are active). Generic over the whole `Config` tree via a
+/// `toml::Value` diff, so a new config field is covered automatically without a hand-maintained
+/// field list.
+///
+/// `[api_keys]` is never surfaced at the value level — only whether the section is configured —
+/// matching the "keys never logged" invariant.
+pub fn non_default_keys(cfg: &Config) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let default = Config::default();
+    let (Ok(actual), Ok(defaults)) = (toml::Value::try_from(cfg), toml::Value::try_from(&default))
+    else {
+        // Fail-open: an unexpected serialization error just means an empty report, not a crash.
+        return out;
+    };
+    diff_toml_values("", &actual, &defaults, &mut out);
+    out
+}
+
+fn diff_toml_values(
+    prefix: &str,
+    actual: &toml::Value,
+    defaults: &toml::Value,
+    out: &mut Vec<(String, String)>,
+) {
+    if prefix == "api_keys" {
+        if actual != defaults {
+            out.push((prefix.to_owned(), "configured (values redacted)".to_owned()));
+        }
+        return;
+    }
+    match (actual, defaults) {
+        (toml::Value::Table(a), toml::Value::Table(d)) => {
+            for (key, actual_val) in a {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                match d.get(key) {
+                    Some(default_val) => diff_toml_values(&path, actual_val, default_val, out),
+                    // A key present in `cfg` but absent from `Config::default()`'s serialization
+                    // can't happen for a struct-derived Config (every field always serializes),
+                    // but stay fail-open rather than panic if it ever does.
+                    None => out.push((path, display_toml_value(actual_val))),
+                }
+            }
+        }
+        _ => {
+            if actual != defaults {
+                out.push((prefix.to_owned(), display_toml_value(actual)));
+            }
+        }
+    }
+}
+
+fn display_toml_value(v: &toml::Value) -> String {
+    match v {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Array(items) if items.is_empty() => "[]".to_owned(),
+        other => other.to_string(),
+    }
 }
 
 /// Serialise `cfg` to `path`, creating parent directories as needed.
@@ -847,28 +1066,6 @@ pub fn save(cfg: &Config, path: &Path) -> Result<()> {
     Ok(())
 }
 
-// ── Region matching ───────────────────────────────────────────────────────────
-
-impl Config {
-    /// Find the region config whose path is the longest prefix of `target`.
-    /// Performs ~ expansion on region paths before comparing.
-    pub fn region_for(&self, target: &Path) -> Option<&RegionConfig> {
-        self.region
-            .iter()
-            .filter_map(|r| {
-                let expanded = shellexpand::tilde(&r.path);
-                let region_path = Path::new(expanded.as_ref()).to_path_buf();
-                if target.starts_with(&region_path) {
-                    Some((region_path.components().count(), r))
-                } else {
-                    None
-                }
-            })
-            .max_by_key(|(depth, _)| *depth)
-            .map(|(_, r)| r)
-    }
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -897,6 +1094,36 @@ mod tests {
         assert_eq!(parse_reindex_interval("°"), None);
     }
 
+    #[test]
+    fn non_default_keys_reports_only_changed_fields() {
+        let mut cfg = Config::default();
+        assert!(
+            non_default_keys(&cfg).is_empty(),
+            "a default config must report no non-default keys"
+        );
+
+        cfg.scan.skip_binary = true;
+        cfg.scan.ignore = vec!["*.log".to_owned()];
+        cfg.chunking.size = 500;
+        let keys = non_default_keys(&cfg);
+        let paths: Vec<&str> = keys.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(paths.contains(&"scan.skip_binary"));
+        assert!(paths.contains(&"scan.ignore"));
+        assert!(paths.contains(&"chunking.size"));
+        // Untouched fields must not appear.
+        assert!(!paths.contains(&"scan.respect_gitignore"));
+    }
+
+    #[test]
+    fn non_default_keys_redacts_api_key_values() {
+        let mut cfg = Config::default();
+        cfg.api_keys.openai = Some("sk-super-secret-value".to_owned());
+        let keys = non_default_keys(&cfg);
+        let joined: String = keys.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        assert!(!joined.contains("sk-super-secret-value"));
+        assert!(keys.iter().any(|(k, _)| k == "api_keys"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn save_writes_config_at_0600_and_tightens_existing() {
@@ -920,6 +1147,79 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_retightens_hand_authored_config_with_api_keys() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("indexa-cfg-load-test-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Simulate a config hand-authored by a text editor under a permissive umask: valid
+        // TOML with a real API key, but written directly (never round-tripped through
+        // `save()`) so it keeps the loose mode.
+        std::fs::write(&path, "[api_keys]\nopenai = \"sk-hand-authored-secret\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let cfg = load(&path).unwrap();
+        assert_eq!(
+            cfg.api_keys.openai.as_deref(),
+            Some("sk-hand-authored-secret")
+        );
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "load() must re-tighten a loose config that has API keys set, got {mode:o}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_leaves_loose_permissions_alone_when_api_keys_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("indexa-cfg-load-noop-test-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A config with no keys (the common case) is left exactly as-is — no false-positive
+        // tightening/noise for a file that has nothing sensitive in it.
+        std::fs::write(
+            &path,
+            "[api_keys]\nopenai = \"\"\nanthropic = \"\"\ngoogle = \"\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let cfg = load(&path).unwrap();
+        assert!(!cfg.api_keys.has_any());
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o644,
+            "load() must not touch permissions when [api_keys] is empty, got {mode:o}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn api_keys_has_any_detects_non_empty_values_only() {
+        let mut cfg = ApiKeysConfig::default();
+        assert!(!cfg.has_any(), "default (all None) must be false");
+
+        cfg.openai = Some(String::new());
+        assert!(!cfg.has_any(), "an empty string key must not count as set");
+
+        cfg.openai = Some("sk-real-key".to_owned());
+        assert!(cfg.has_any());
     }
 
     #[test]
@@ -946,6 +1246,10 @@ auto_reindex = "7d"
         assert_eq!(cfg.retrieval.top_k, 12);
         assert_eq!(cfg.retrieval.context_budget, 8000);
         assert!(cfg.retrieval.rerank);
+        // ANN on by default: fast HNSW dense retrieval in long-lived processes above
+        // ann_min_chunks; brute-force fallback below it and for scoped queries.
+        assert!(cfg.retrieval.ann);
+        assert_eq!(cfg.retrieval.ann_min_chunks, 50_000);
         assert_eq!(cfg.retrieval.rerank_backend, "llm");
         assert_eq!(
             cfg.retrieval.rerank_model,
@@ -994,45 +1298,6 @@ rerank_model = "mixedbread-ai/mxbai-rerank-base-v1"
         assert_eq!(cfg.retrieval.rrf_k, 60);
         assert_eq!(cfg.retrieval.rerank_backend, "llm");
         assert_eq!(cfg.describer.model, "gemma3:12b");
-    }
-
-    #[test]
-    fn region_matching_picks_longest_prefix() {
-        let toml = r#"
-[[region]]
-path = "/tmp"
-[region.parsers.audio]
-transcribe = true
-
-[[region]]
-path = "/tmp/voice"
-[region.parsers.audio]
-transcribe = false
-"#;
-        let cfg: Config = toml::from_str(toml).unwrap();
-
-        let hit = cfg.region_for(Path::new("/tmp/voice/memo.m4a"));
-        assert!(hit.is_some());
-        // longest prefix "/tmp/voice" should win over "/tmp"
-        let region = hit.unwrap();
-        assert!(region.path.contains("voice"));
-        let audio_transcribe = region
-            .parsers
-            .as_ref()
-            .map(|p| p.audio.transcribe)
-            .unwrap_or(false);
-        assert!(!audio_transcribe); // /tmp/voice overrides /tmp
-
-        let hit2 = cfg.region_for(Path::new("/tmp/other/file.txt"));
-        assert!(hit2.is_some());
-        let r2 = hit2.unwrap();
-        // /tmp/other only matches /tmp
-        let audio_transcribe2 = r2
-            .parsers
-            .as_ref()
-            .map(|p| p.audio.transcribe)
-            .unwrap_or(false);
-        assert!(audio_transcribe2); // /tmp region has transcribe=true
     }
 
     #[test]

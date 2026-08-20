@@ -82,13 +82,15 @@ impl IndexaMcp {
         }
         cfg.scope = scope.filter(|s| !s.is_empty());
 
+        // Trace what `ask` actually runs, including the ANN dense arm when it's active.
+        let ann = self.ensure_ann().await;
         let trace = indexa_query::explain_retrieval(
             &self.db_path,
             self.embedder.as_ref(),
             self.llm.as_ref(),
             &question,
             &cfg,
-            None,
+            ann.as_deref(),
         )
         .await
         .map_err(mcp_err)?;

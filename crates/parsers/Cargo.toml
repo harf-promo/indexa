@@ -33,7 +33,7 @@ calamine = { version = "0.26", features = ["dates"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 # Subprocess timeout: kill hung OCR/transcription/ffmpeg children instead of blocking indexing
 # forever. Tiny waitpid/WaitForSingleObject wrapper (MIT/Apache-2.0), no transitive deps.
-wait-timeout = "0.2"
+wait-timeout = { workspace = true }
 # Media metadata (audio/video via ffprobe subprocess — no extra dep needed)
 serde_json = "1"
 # Temp directories for video frame extraction
@@ -48,3 +48,23 @@ mail-parser = "0.11.3"
 object = "0.39.1"
 wasmparser = "0.252.0"
 cfb = "0.14.0"
+# UTF-16/BOM transcoding for the text-family parsers ([parsers] encoding = "auto")
+encoding_rs = { workspace = true }
+# Glob matching for preprocessor hooks (4.4) — [[parsers.preprocessor]] glob scoping.
+globset = { workspace = true }
+# Unix process-group kill for preprocessor hooks (4.4) — a killed shell wrapper can leave an
+# orphaned grandchild (e.g. a shebang script's last command) holding the stdout pipe open past
+# the timeout; already in Cargo.lock transitively (via cpufeatures/lopdf), promoted to a direct
+# dep at the same pinned version: zero new tree entries.
+libc = "0.2"
+# Transparent .zst content indexing — pure-Rust zstd decoder (decode-only, no C toolchain).
+# Already a transitive dep of `object` (above) at this exact version; promoted to a direct dep,
+# zero new tree entries.
+ruzstd = "0.8.3"
+# Transparent .xz/.lzma content indexing — pure-Rust, decode-only. Genuinely new to the tree.
+lzma-rs = "0.3"
+# Transparent .br content indexing — pure-Rust brotli decoder. Exact pin (not a range): already
+# present transitively via Tauri in apps/indexa-desktop's separate Cargo.lock at this exact
+# version — 8.0.3 is a known-broken release (compile error in enc/combined_alloc.rs), which is
+# why the desktop app itself pins the exact patch.
+brotli = "=8.0.2"

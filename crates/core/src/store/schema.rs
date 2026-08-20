@@ -3,6 +3,13 @@
 use super::Store;
 use anyhow::Result;
 
+/// Current schema version, stored in `PRAGMA user_version`. An open whose DB is already stamped at
+/// this value skips the (idempotent but not free) DDL + migration probes in [`Store::init_schema`].
+///
+/// **INVARIANT: bump this whenever the DDL or any migration in `init_schema` changes** — otherwise a
+/// DB stamped at the old value would skip the new migration and silently miss a column/table.
+pub(super) const SCHEMA_VERSION: i64 = 5;
+
 /// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
 /// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
 fn chunks_has_autoincrement(conn: &rusqlite::Connection) -> bool {
@@ -26,8 +33,22 @@ fn edges_allows_calls(conn: &rusqlite::Connection) -> bool {
     .unwrap_or(true)
 }
 
+/// Does the `edges` table's CHECK constraint already allow `'extends'` (2.2, heritage edges)?
+/// Returns `true` when the table is absent (fresh DB) — DDL below already includes it.
+fn edges_allows_heritage(conn: &rusqlite::Connection) -> bool {
+    conn.query_row(
+        "SELECT sql LIKE '%''extends''%' FROM sqlite_master WHERE type='table' AND name='edges'",
+        [],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(true)
+}
+
 impl Store {
     pub(super) fn init_schema(&mut self) -> Result<()> {
+        // Connection-level PRAGMAs — these are per-connection (not persisted, except journal_mode
+        // which is a DB-header setting), so they MUST run on every open regardless of schema
+        // version. Cheap; kept out of the version-gated block below.
         self.conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
@@ -42,7 +63,25 @@ impl Store {
             -- so without a busy timeout a contended write fails immediately with SQLITE_BUSY.
             -- Block-and-retry for up to 5s instead.
             PRAGMA busy_timeout = 5000;
+            ",
+        )?;
 
+        // Fast path: a DB already stamped at the current version skips the idempotent-but-not-free
+        // DDL (~20 `CREATE … IF NOT EXISTS`) and the ~10 `pragma_table_info`/`sqlite_master`
+        // migration probes below. This runs on EVERY `Store::open` — MCP opens a fresh Store per
+        // tool call and qa per ask — so the probes were pure repeated cost. Any mismatch (a fresh
+        // DB reads 0, or an older/newer stamp) runs the full idempotent init and re-stamps, so old
+        // DBs still migrate. See [`SCHEMA_VERSION`]'s bump invariant.
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap_or(0);
+        if version == SCHEMA_VERSION {
+            return Ok(());
+        }
+
+        self.conn.execute_batch(
+            "
             -- Surface-scan entries (paths, sizes, surface hints)
             CREATE TABLE IF NOT EXISTS entries (
                 id          INTEGER PRIMARY KEY,
@@ -176,21 +215,84 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_dirapps_primary ON directory_apps(path) WHERE is_primary = 1;
             CREATE INDEX IF NOT EXISTS idx_dirapps_kind    ON directory_apps(app_kind);
 
-            -- Code-relationship graph (D1 + D2). One row per edge from a code file:
-            --   kind='imports' → to_ref is an imported module/path
-            --   kind='defines' → to_ref is a symbol defined in the file
-            --   kind='calls'   → to_ref is a function/method name called by the file (D2)
+            -- Code-relationship graph (D1 + D2 + 2.2). One row per edge from a code file:
+            --   kind='imports'    → to_ref is an imported module/path
+            --   kind='defines'    → to_ref is a symbol defined in the file
+            --   kind='calls'      → to_ref is a function/method name called by the file (D2)
+            --   kind='extends'    → to_ref is the parent class/struct name (2.2, heritage)
+            --   kind='implements' → to_ref is the implemented trait/interface name (2.2)
             -- Composite PK dedups identical edges; idx_edges_to powers reverse lookups
             -- (who imports X / who defines Y / who calls Z). Re-deep of a file replaces
             -- its rows (delete-by-from_path then insert), mirroring chunks.
             CREATE TABLE IF NOT EXISTS edges (
                 from_path TEXT NOT NULL,
-                kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls')),
+                kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls','extends','implements')),
                 to_ref    TEXT NOT NULL,
                 PRIMARY KEY (from_path, kind, to_ref)
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_edges_to   ON edges(kind, to_ref);
             CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_path);
+
+            -- Symbols (2.1): kind + line range for every top-level code symbol a file
+            -- defines — richer than a bare `defines` edge (name only). One row per
+            -- (path, name, kind, start_line); re-deep of a file replaces its rows
+            -- (delete-by-path then insert), mirroring edges/chunks. Backs diff→symbol
+            -- mapping (changed_impact) and kind-aware graph-tool output.
+            CREATE TABLE IF NOT EXISTS symbols (
+                path       TEXT NOT NULL,
+                name       TEXT NOT NULL,
+                kind       TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line   INTEGER NOT NULL,
+                PRIMARY KEY (path, name, kind, start_line)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_symbols_path ON symbols(path);
+            CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
+
+            -- Note anchors (2.6): an `add_note` may optionally anchor itself to a code path
+            -- or bare symbol name, so graph tools (dependencies/blast_radius/symbol_context)
+            -- can surface a related-note hint inline. One row per note
+            -- (a note has at most one anchor); cheap indexed join by anchor value.
+            CREATE TABLE IF NOT EXISTS note_anchors (
+                note_path   TEXT PRIMARY KEY,
+                anchor      TEXT NOT NULL,
+                anchor_kind TEXT NOT NULL CHECK(anchor_kind IN ('path','symbol')),
+                title       TEXT NOT NULL,
+                pack        TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_note_anchors_anchor ON note_anchors(anchor);
+
+            -- Co-change edges (2.7): files that historically change together in git history —
+            -- behavioral coupling invisible to static analysis. Computed offline
+            -- (`indexa graph --compute-co-change`), symmetric pairs stored once with
+            -- path_a < path_b lexically so a lookup checks both columns. Additive/inert until
+            -- a reader opts in (`related_files`'s `include_co_change`).
+            CREATE TABLE IF NOT EXISTS co_change (
+                path_a       TEXT NOT NULL,
+                path_b       TEXT NOT NULL,
+                count        INTEGER NOT NULL DEFAULT 0,
+                computed_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                PRIMARY KEY (path_a, path_b)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_co_change_a ON co_change(path_a);
+            CREATE INDEX IF NOT EXISTS idx_co_change_b ON co_change(path_b);
+
+            -- Persisted architecture map (4.6): a whole-repo recompute (`indexa graph
+            -- --compute-modules`) clusters the code graph via Louvain (directory-prior-boosted)
+            -- and labels each cluster with a short local-LLM-generated name from its members'
+            -- L0 abstracts. One row per (module, member file); `label`/`cohesion` are repeated
+            -- per member row (denormalized — the whole table is replaced wholesale each
+            -- recompute, so there's no update-anomaly risk). Additive/inert until a reader
+            -- opts in (`code_graph`'s `modules: true`, `indexa graph --modules`).
+            CREATE TABLE IF NOT EXISTS graph_modules (
+                module_id   INTEGER NOT NULL,
+                label       TEXT NOT NULL,
+                cohesion    REAL NOT NULL DEFAULT 0.0,
+                member_path TEXT NOT NULL,
+                computed_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                PRIMARY KEY (module_id, member_path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_graph_modules_member ON graph_modules(member_path);
 
             -- Context Packs (v0.9): named, cross-directory context bundles.
             -- A pack is a user-curated set of paths that form a coherent topic
@@ -208,6 +310,18 @@ impl Store {
                 added_at INTEGER NOT NULL DEFAULT (unixepoch()),
                 PRIMARY KEY (pack_id, path)
             );
+            -- Pack event history (4.1): an append-only changelog per pack, feeding a pack's
+            -- `updated_at` (MAX(at)) and the OKF bundle export's log.md (4.2). ON DELETE
+            -- CASCADE mirrors pack_paths — deleting a pack needs no manual cleanup here.
+            CREATE TABLE IF NOT EXISTS pack_events (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                pack_id TEXT NOT NULL REFERENCES packs(id) ON DELETE CASCADE,
+                event   TEXT NOT NULL
+                            CHECK(event IN ('created','path_added','path_removed','renamed','exported')),
+                detail  TEXT,
+                at      INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE INDEX IF NOT EXISTS idx_pack_events_pack ON pack_events(pack_id, at);
             -- Importance weights (v0.8): user-controlled boosts per file, directory,
             -- or classification category. A weight > 1.0 promotes the target in search
             -- results; 0.0 effectively silences it. 'auto' rows are recency-based
@@ -483,6 +597,33 @@ impl Store {
             tx.commit()?;
         }
 
+        // Migration: widen the edges.kind CHECK to include 'extends'/'implements' (2.2,
+        // heritage edges). Same copy-table pattern as the 'calls' widening above — SQLite
+        // can't ALTER a constraint. A fresh DB never hits this (base DDL above already
+        // includes both); a DB previously migrated to the 'calls'-only CHECK does.
+        if !edges_allows_heritage(&self.conn) {
+            let tx = self
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if !edges_allows_heritage(&tx) {
+                tx.execute_batch(
+                    "
+                    CREATE TABLE edges_new (
+                        from_path TEXT NOT NULL,
+                        kind      TEXT NOT NULL CHECK(kind IN ('imports','defines','calls','extends','implements')),
+                        to_ref    TEXT NOT NULL,
+                        PRIMARY KEY (from_path, kind, to_ref)
+                    ) WITHOUT ROWID;
+                    INSERT OR IGNORE INTO edges_new SELECT * FROM edges;
+                    DROP TABLE edges;
+                    ALTER TABLE edges_new RENAME TO edges;
+                    CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(kind, to_ref);
+                    ",
+                )?;
+            }
+            tx.commit()?;
+        }
+
         // Migration: add chunks.content_hash (v0.42) — a SHA-256 hex digest of the raw
         // chunk text, used as a cache key to skip re-embedding chunks whose text is unchanged.
         // Nullable so existing rows (NULL) are treated as "no cache" and re-embedded normally.
@@ -533,6 +674,11 @@ impl Store {
         // exempt too: a conversation is standing user state, not entry-keyed — see
         // store::sessions.)
 
+        // Stamp the schema version LAST — only after all DDL + migrations succeeded — so a future
+        // open can take the fast path above. A failure before here leaves user_version unchanged,
+        // so the next open retries the full init.
+        self.conn
+            .pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
     }
 }

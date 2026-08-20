@@ -6,15 +6,20 @@ var treemapCurrentNode = null;
 var treemapRootIndex = 0;     // which top-level root to show when multiple exist
 var treemapSvgNS = 'http://www.w3.org/2000/svg';
 
-// Coverage colours — keyed by coverage state from the backend
+// Coverage colours — keyed by coverage state from the backend. Harf design-system tokens
+// (css/01-tokens.css), not literal hex: these are `light-dark()`-aware and theme-flip
+// correctly, unlike the hardcoded Tailwind hex this used to carry (which stayed a dark
+// slate block on a white page in light mode) — same `setAttribute('fill', 'var(--…)')`
+// pattern 19-graph.js already uses. --positive is teal (the Harf "active state" colour,
+// not brand green, which is punctuation-only per the design system).
 var TM_COV_COLORS = {
-  'full':    '#22c55e',   // green  — all summaries built
-  'partial': '#f97316',   // orange — some built / in progress
-  'failed':  '#f43f5e',   // red    — summarization failed
-  'none':    '#374151',   // grey   — no context yet
+  'full':    'var(--positive)',  // teal   — all summaries built
+  'partial': 'var(--warning)',   // amber  — some built / in progress
+  'failed':  'var(--critical)',  // red    — summarization failed
+  'none':    'var(--rule-2)',    // grey   — no context yet
 };
 // Fallback if coverage field missing
-var TM_COV_DEFAULT = '#374151';
+var TM_COV_DEFAULT = 'var(--rule-2)';
 
 function covColor(node) {
   return TM_COV_COLORS[node.coverage] || TM_COV_DEFAULT;
@@ -294,11 +299,22 @@ function renderBreadcrumb() {
 }
 
 /* ── Map sub-view toggle ── */
-// Default Map sub-view: the interactive knowledge graph is the flagship view, so opening
-// Map lands on the force-directed graph (it blooms on entry), not the treemap table.
-var mapSubView = 'graph';
+// Default is coverage Treemap (the useful picture at whole-disk scope). Graph
+// is the right default once the user has scoped into a project-depth folder.
+// An explicit tab click sticks for the rest of the session.
+var mapSubView = 'treemap';
+var mapUserPicked = false;
 
-function switchMapView(view) {
+function pickMapView() {
+  if (mapUserPicked && mapSubView) return mapSubView;
+  if (!selectedPath) return 'treemap';
+  var depth = String(selectedPath).split('/').filter(Boolean).length;
+  // /Users/name/development/projects/indexa → 5 segments: a project, not the disk.
+  return depth >= 5 ? 'graph' : 'treemap';
+}
+
+function switchMapView(view, fromUser) {
+  if (fromUser !== false) mapUserPicked = true;
   mapSubView = view;
   ['treemap', 'table', 'graph'].forEach(function(v) {
     var btn   = document.getElementById('map-tab-' + v);

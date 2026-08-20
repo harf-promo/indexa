@@ -154,8 +154,11 @@ async fn main() -> Result<()> {
                 name,
                 format,
                 output,
+                out,
                 depth,
                 include_weights,
+                include_graph,
+                graph_format,
                 signatures,
                 token_budget,
                 strict_budget,
@@ -169,8 +172,11 @@ async fn main() -> Result<()> {
                     name,
                     format,
                     output,
+                    out,
                     depth,
                     include_weights,
+                    include_graph,
+                    graph_format,
                     signatures,
                     token_budget,
                     strict_budget,
@@ -186,6 +192,11 @@ async fn main() -> Result<()> {
                 commands::cmd_pack_rename(name, new_name).await
             }
             PackAction::Delete { name } => commands::cmd_pack_delete(name).await,
+            PackAction::Import {
+                bundle_dir,
+                force,
+                name,
+            } => commands::cmd_pack_import(bundle_dir, force, name).await,
         },
         Commands::Weight { action } => match action {
             WeightAction::Set {
@@ -225,6 +236,7 @@ async fn main() -> Result<()> {
             min_hit_rate,
             baseline,
             max_regression,
+            rerank,
         } => {
             commands::cmd_eval(
                 golden,
@@ -235,6 +247,7 @@ async fn main() -> Result<()> {
                 min_hit_rate,
                 baseline,
                 max_regression,
+                rerank,
                 &cfg,
             )
             .await
@@ -279,8 +292,34 @@ async fn main() -> Result<()> {
             cycles,
             blast,
             depth,
-        } => commands::cmd_graph(path, limit, strict, cycles, blast, depth).await,
-        Commands::Related { path, limit, json } => commands::cmd_related(path, limit, json).await,
+            grouped,
+            heritage,
+            compute_co_change,
+            compute_modules,
+            modules,
+        } => {
+            commands::cmd_graph(
+                &cfg,
+                path,
+                limit,
+                strict,
+                cycles,
+                blast,
+                depth,
+                grouped,
+                heritage,
+                compute_co_change,
+                compute_modules,
+                modules,
+            )
+            .await
+        }
+        Commands::Related {
+            path,
+            limit,
+            json,
+            include_co_change,
+        } => commands::cmd_related(path, limit, json, include_co_change).await,
         Commands::Export {
             paths,
             format,
@@ -371,12 +410,22 @@ async fn main() -> Result<()> {
         } => commands::cmd_serve(port, host, embed_model, llm_model, &cfg).await,
         // Bare `indexa mcp` must keep running the stdio server — every client
         // config written by `mcp install` points at exactly that invocation.
-        Commands::Mcp { action } => match action {
-            None => commands::cmd_mcp(&cfg).await,
+        Commands::Mcp {
+            action,
+            tool_profile,
+        } => match action {
+            None => commands::cmd_mcp(&cfg, tool_profile).await,
             Some(McpAction::Install { client, dry_run }) => {
                 commands::cmd_mcp_install(client, dry_run).await
             }
         },
+        Commands::InstallHooks {
+            write,
+            with_pretooluse,
+        } => commands::cmd_install_hooks(write, with_pretooluse).await,
+        Commands::McpHook { event } => {
+            commands::cmd_mcp_hook(commands::HookEvent::parse(&event)?).await
+        }
         Commands::Status {
             unknown,
             deep,
