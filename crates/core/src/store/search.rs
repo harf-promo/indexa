@@ -863,6 +863,63 @@ impl Store {
         }
         Ok(out)
     }
+
+    /// Feed every `(chunk_id, embedding)` with a stored embedding to `f`, row by row — the
+    /// streaming input to [`AnnIndex::build_from`](super::AnnIndex::build_from) (no intermediate
+    /// Vec). Invalid-length blobs are skipped, matching [`all_chunk_embeddings`](Self::all_chunk_embeddings).
+    pub fn stream_chunk_embeddings(&self, mut f: impl FnMut(i64, &[f32])) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            if blob.len().is_multiple_of(4) {
+                f(id, &blob_to_embedding(&blob));
+            }
+        }
+        Ok(())
+    }
+
+    /// Count of chunks with a stored embedding — the HNSW capacity hint for a streaming ANN
+    /// build. Same `WHERE` as [`all_chunk_embeddings`](Self::all_chunk_embeddings), so it tracks
+    /// what a build would actually see (a slight overcount vs. what gets inserted is harmless —
+    /// HNSW capacity is only a preallocation hint).
+    pub fn count_embedded_chunks(&self) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// The dimension of the first non-empty stored embedding (all stored vectors share the
+    /// configured dim) — used to size a streaming ANN build without materializing every vector
+    /// to find one. `None` if no embeddings are stored yet.
+    ///
+    /// Matches `all_chunk_embeddings().iter().find(|(_, v)| !v.is_empty()).map(|(_, v)| v.len())`
+    /// exactly: `length(embedding) > 0 AND length(embedding) % 4 = 0` selects the same blobs
+    /// `all_chunk_embeddings` converts to a non-empty `Vec<f32>` (a zero-length or
+    /// not-multiple-of-4 blob would never be picked as "the first non-empty vector" there
+    /// either), so this can't pick a dim the old collect-then-find path wouldn't have.
+    pub fn first_embedding_dim(&self) -> Result<Option<usize>> {
+        use rusqlite::OptionalExtension;
+        let blob: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT embedding FROM chunks
+                 WHERE embedding IS NOT NULL
+                   AND length(embedding) > 0
+                   AND length(embedding) % 4 = 0
+                 LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(blob.map(|b| b.len() / 4))
+    }
 }
 
 #[cfg(test)]
