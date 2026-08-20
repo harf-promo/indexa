@@ -373,3 +373,16 @@ fn is_project_noise_path_matches_windows_style_fragments() {
     assert!(is_project_noise_path(r"C:\app\ios\Runner.xcodeproj"));
     assert!(!is_project_noise_path(r"C:\a\Barrq\mobile"));
 }
+
+/// B3: `.min.js`/`.bundle.js` matter for *file* paths — the code graph's edges are file
+/// paths, unlike `top_projects_under`'s directory paths, so these two suffix fragments
+/// only ever bite here even though the list is shared with the directory-noise check.
+#[test]
+fn is_project_noise_path_matches_minified_and_bundled_js() {
+    // Neither path matches any PRE-EXISTING fragment (no /vendor/, /dist/, /build/, …) —
+    // only the new `.min.js`/`.bundle.js` suffixes should flag them, so this actually
+    // discriminates the fix from the old fragment list.
+    assert!(is_project_noise_path("/app/public/js/app.min.js"));
+    assert!(is_project_noise_path("/app/lib/main.bundle.js"));
+    assert!(!is_project_noise_path("/app/src/main.js"));
+}
