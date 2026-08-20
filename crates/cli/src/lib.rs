@@ -145,7 +145,10 @@ pub enum Commands {
         #[arg(long)]
         embed_model: Option<String>,
 
-        /// Show what would be parsed/indexed without writing to the DB.
+        /// Show what would be parsed/indexed without writing to the DB. File counts and the
+        /// family breakdown are always exact; the chunk count is exact for a small tree and an
+        /// extrapolated estimate (from an evenly-spaced sample) for a large one, so the preview
+        /// stays fast on a huge tree instead of nearly fully parsing it.
         #[arg(long)]
         dry_run: bool,
 

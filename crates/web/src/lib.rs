@@ -658,6 +658,99 @@ mod tests {
         }
     }
 
+    /// `id`s the JS bundle creates at runtime — via `document.createElement(...); el.id =
+    /// '...'` or by building an `innerHTML` template string containing `id="..."` — rather
+    /// than a static `id="..."` in `index.html`. `getElementById` calls against these are
+    /// real code, not dead references; each entry below was confirmed by reading the
+    /// surrounding JS. Add an id here only after that confirmation, never just to silence a
+    /// failure — a genuine dead reference belongs fixed in `UI_JS`/`UI_HTML`, not allowlisted.
+    const DYNAMICALLY_CREATED_IDS: &[&str] = &[
+        // 27-health.js `makeBanner()`: `document.createElement('div'); bar.id = id;`.
+        "health-banner",
+        "cli-skew-banner",
+        "thin-context-banner",
+        // 05-summary.js: built into the summary panel's `innerHTML` template string.
+        "export-since",
+        "export-cat",
+        "summary-classify",
+    ];
+
+    /// A `getElementById('missing-id')` call returns `null`, and every guarded branch after
+    /// it (`if (el) ...`) silently no-ops forever — invisible to fmt/clippy/test, and to a
+    /// human until the feature is reported broken. This is exactly the guard class that
+    /// would have caught the dead-container defects #417 fixed. Cross-checks every literal
+    /// `getElementById('…')`/`getElementById("…")` call in `UI_JS` against the static
+    /// `id="…"` attributes in `UI_HTML`; ids created at runtime are exempted via
+    /// `DYNAMICALLY_CREATED_IDS` above.
+    ///
+    /// Deliberate blind spot: a call built from a concatenated/computed id
+    /// (`getElementById('panel-' + tab)`) is not a *literal* call, so it's skipped
+    /// entirely rather than false-flagged — this guard only ever proves something about
+    /// calls whose id argument is a hardcoded string literal.
+    #[test]
+    fn every_get_element_by_id_call_resolves_to_a_real_html_id() {
+        let mut html_ids = std::collections::HashSet::new();
+        let marker = "id=\"";
+        let mut from = 0usize;
+        while let Some(rel) = UI_HTML[from..].find(marker) {
+            let start = from + rel + marker.len();
+            let Some(end_rel) = UI_HTML[start..].find('"') else {
+                break;
+            };
+            html_ids.insert(&UI_HTML[start..start + end_rel]);
+            from = start + end_rel;
+        }
+
+        let mut calls = 0u32;
+        let mut dead: Vec<&str> = Vec::new();
+        let call = "getElementById(";
+        let mut from = 0usize;
+        while let Some(rel) = UI_JS[from..].find(call) {
+            let start = from + rel + call.len();
+            from = start;
+            let Some(quote) = UI_JS[start..].chars().next() else {
+                break;
+            };
+            if quote != '\'' && quote != '"' {
+                continue;
+            }
+            let val_start = start + quote.len_utf8();
+            let Some(end_rel) = UI_JS[val_start..].find(quote) else {
+                continue;
+            };
+            let val_end = val_start + end_rel;
+            // Only a literal call — `getElementById('id')` with nothing else inside the
+            // parens — counts. `getElementById('prefix-' + x)` has more after the closing
+            // quote before `)`, so it's a computed id, not a literal one; skip it rather
+            // than false-flag a computed suffix as a dead reference.
+            if !UI_JS[val_end + quote.len_utf8()..].starts_with(')') {
+                continue;
+            }
+            calls += 1;
+            let id = &UI_JS[val_start..val_end];
+            if !html_ids.contains(id) && !DYNAMICALLY_CREATED_IDS.contains(&id) {
+                dead.push(id);
+            }
+        }
+        // A floor, not an exact count: if a refactor (e.g. a `$(id)` helper) changes how
+        // most calls are written, this catches the guard silently going vacuous instead of
+        // passing by accident. (248 literal calls at the time this test was written.)
+        assert!(
+            calls >= 100,
+            "only found {calls} literal getElementById(...) calls in UI_JS — the parser \
+             above may no longer match how the bundle calls it (expected 100+)"
+        );
+        dead.sort_unstable();
+        dead.dedup();
+        assert!(
+            dead.is_empty(),
+            "getElementById(...) call(s) in UI_JS reference an id with no static id=\"...\" \
+             in UI_HTML and not in DYNAMICALLY_CREATED_IDS — either a dead reference (fix \
+             the JS) or a genuinely dynamic id (add it to the allowlist above after \
+             confirming it's created at runtime): {dead:?}"
+        );
+    }
+
     /// Regression guard for the stored-XSS sinks fixed in this change (Wave 0 of the review
     /// sweep). These three fragments used to build `onclick="fn(" + JSON.stringify(untrusted)
     /// + ")"` HTML strings from filenames, pack names, and weight targets and `innerHTML`
@@ -1322,6 +1415,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["calls"], 0);
         assert!(json["by_tool"].as_array().unwrap().is_empty());
+        assert!(json["by_basis"].as_array().unwrap().is_empty());
         // No usage ⇒ no savings sentence (matches UsageSummary::savings_line → None).
         assert!(json["savings_line"].is_null());
     }
@@ -1352,6 +1446,42 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("tokens saved"));
+    }
+
+    #[tokio::test]
+    async fn api_impact_reports_per_basis_breakdown_most_saving_first() {
+        // `served_basis` tags what `bytes_served` measured (surfaces disagree — see
+        // store::usage); `/api/impact` must split the blended weekly aggregate by it,
+        // same as it already does for `by_tool`.
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .record_tool_usage_with_basis("web", "ask", 100, 4000, None, "answer_citations")
+            .unwrap();
+        store
+            .record_tool_usage_with_basis("cli", "search", 50, 2000, None, "rendered_response")
+            .unwrap();
+        store
+            .record_tool_usage_with_basis("web", "ask", 100, 4000, None, "answer_citations")
+            .unwrap();
+        // Untagged (delegating) row reads back as "unspecified".
+        store
+            .record_tool_usage("cli", "search", 10, 100, None)
+            .unwrap();
+        let app = build_router(state_with(store), 7620);
+        let (status, json) = get_json(app, "/api/impact").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["calls"], 4);
+        let by_basis = json["by_basis"].as_array().unwrap();
+        assert_eq!(by_basis.len(), 3);
+        // Ordered by avoided bytes desc: answer_citations (2×3900) outranks the rest.
+        assert_eq!(by_basis[0]["basis"], "answer_citations");
+        assert_eq!(by_basis[0]["calls"], 2);
+        assert!(by_basis
+            .iter()
+            .any(|b| b["basis"] == "rendered_response" && b["calls"] == 1));
+        assert!(by_basis
+            .iter()
+            .any(|b| b["basis"] == "unspecified" && b["calls"] == 1));
     }
 
     #[tokio::test]

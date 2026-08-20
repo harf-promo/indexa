@@ -44,11 +44,23 @@ pub(crate) struct ImpactResponse {
     pub(crate) counterfactual: u64,
     pub(crate) savings_line: Option<String>,
     pub(crate) by_tool: Vec<ToolUsageDto>,
+    /// Per-`served_basis` breakdown (most-saving first) — what `bytes_served` measured for
+    /// each group (see `store::usage`). Untagged rows (including every MCP row until that
+    /// half is tagged too) group under `"unspecified"`. Always present alongside `by_tool`.
+    pub(crate) by_basis: Vec<BasisUsageDto>,
 }
 
 #[derive(Serialize)]
 pub(crate) struct ToolUsageDto {
     pub(crate) tool: String,
+    pub(crate) calls: u64,
+    pub(crate) served: u64,
+    pub(crate) counterfactual: u64,
+}
+
+#[derive(Serialize)]
+pub(crate) struct BasisUsageDto {
+    pub(crate) basis: String,
     pub(crate) calls: u64,
     pub(crate) served: u64,
     pub(crate) counterfactual: u64,

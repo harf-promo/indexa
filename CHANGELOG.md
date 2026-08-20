@@ -34,9 +34,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against the new lock. The topbar now shows folder-summary coverage (`N of M folders summarized (P%)`) next to files/chunks, and the "context not built" banner is **path-aware** — a handful of summaries in one repo no longer hide that the selected folder has none. Hover actions collapse to one **Build context** verb (deep+summarize if the folder isn't searchable yet, summarize if it is); Re-scan / Refresh / Remove move into a ⋯ menu. Starting a job stays on the current view and offers "Watch progress" on the toast instead of yanking you into Activity. **Build context** on a folder that contains several detected projects refuses the whole-tree job and points at the per-project list. `GET /api/health` adds `summaries` + `thin_context`; a third banner names a thin hierarchical layer without calling it "stale". New `GET /api/projects` lists top-level detected apps with coverage so the welcome view can offer per-project Build context. Ask's **Agentic** toggle is labeled **Think harder**; a scoped answer on an unsummarized folder says so and offers the same button.
 - **Review inbox noise (detectors + web).** Archive questions no longer fire on generated/toolchain caches (`/build/`, `SourcePackages`, `.xcframework`, `DerivedData`, `Pods`, gradle wrappers, `/gen/`). Duplicate questions skip ubiquitous sibling manifests (`Cargo.toml`, `package.json`, `go.mod`, …) unless they are exact copies in the same folder. `sweep_filtered_noise` retro-dismisses the existing inbox on the next `index`/`prune`. The Review drawer groups cards by type and pre-fills the batch "under" folder when every open question of that type shares a path prefix.
 - **Surface the product (web).** The toolbar **Export** menu lists named Context Packs and can create a pack from the selected folder — no need to open Settings. Map now opens on the coverage **Treemap** at whole-disk scope (the graph is a hairball there) and switches to **Graph** once you select a project-depth folder; an explicit tab click still sticks. Settings tucks passes / resources / insights / packs / weights under **More settings**. `docs/COMPETITIVE.md` "still open" list no longer claims Decision Ledger or token-savings are unshipped.
+- **`deep --dry-run` estimates instead of fully parsing a large tree.** The preview used to parse
+  *every* file just to count chunks — nearly a whole real `deep` minus the embedding calls, so
+  previewing a large directory was slow. A tree of 64 files or fewer is still parsed in full (an
+  exact count, no downside); a larger tree now parses an evenly-spaced ~64-file sample and
+  extrapolates chunks-per-byte to the whole set, landing within a few percent of exact on real
+  corpora while staying fast. The report says so explicitly (`chunks estimated from an N-file
+  sample`). Deliberate accuracy-for-speed tradeoff #2 in the same command: the per-family
+  breakdown now classifies every file by **extension** (`classify_file_by_extension`'s category —
+  code/config/documents/media/data/archive/font/…) instead of by the MIME type from an actual
+  parse. This is cheap and covers every file (the old MIME-based breakdown silently dropped any
+  file that failed to parse), but extension-based classification can misjudge a file with a wrong
+  or missing extension where MIME-sniffing would have caught it.
 
 ### Added
 
+- **Two more pinned invariant tests, plus the doc/dead-reference gaps they caught.**
+  `every_get_element_by_id_call_resolves_to_a_real_html_id` (`crates/web/src/lib.rs`) is a
+  third guard on the `include_str!`-concatenated web bundle: every literal
+  `getElementById('…')`/`getElementById("…")` call in `UI_JS` must resolve to a static
+  `id="…"` in `UI_HTML`, with an explicit, commented allowlist for the handful of ids
+  created at runtime (`document.createElement` + `.id =`, or built into an `innerHTML`
+  template string). Ran against the pre-existing bundle it flagged 6 ids with no static
+  match; all 6 triaged as genuinely dynamic (2 banners in `27-health.js`, three
+  export-slice/classify fields in `05-summary.js`) — zero dead references found, so the
+  guard is preventive going forward, not a fix for a live bug. `every_config_field_is_mentioned_in_docs`
+  + `all_config_fields_list_stays_in_sync_with_the_struct` (`crates/core/src/config.rs`) do
+  the same for `docs/config.md`: every `Config` field (hand-enumerated as
+  `ALL_CONFIG_FIELDS`, since Rust has no runtime struct-field reflection) must be mentioned
+  in the docs, and the list itself is cross-checked against a `toml::Value` walk of
+  `Config::default()` so a newly-added field can't silently go missing from both places at
+  once. That walk was considered as the *sole* source (mirroring `non_default_keys` in the
+  same file) and rejected: it silently omits every `Option<T>` field defaulting to `None`,
+  which is exactly the category most likely to go undocumented. This run caught 9 real
+  gaps — `retrieval.rerank_model`, `describer.contextual_prefix`, `describer.num_ctx`,
+  `parsers.max_file_mb`, `parsers.video.fps_sample`, `parsers.video.max_frames`, and the
+  entire `[api_keys]` section (`openai`/`anthropic`/`google` — persisted cloud-provider
+  keys were never documented at all) — now fixed in `docs/config.md`, including a new
+  **API keys** section. (Note: the review plan that flagged this test as missing had also
+  named `claude_bin`, `tool_profile`, `catalog_url`, `include_sensitive`,
+  `redact_at_index`, `[review]`, `[sources]`, `auto_select_model`, and `"git-poll"` as
+  gaps — all nine were already documented on `main` by the time this landed, i.e. that
+  list was stale, not a live backlog.)
 - **Ask: stop a streaming answer, and click a cited source to open it.** The Ask button now morphs
   into **Stop** while an answer is streaming — it aborts the request via `AbortController`, keeping
   whatever streamed so far (a muted "Stopped.", not a red error) — and Enter no longer fires a
@@ -193,6 +232,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Savings ledger now records what each row *measured* (`served_basis`) — core/CLI/web half.**
+  The `tool_usage` ledger behind the "tokens saved" figures on `status` / `/api/impact` blended
+  different accountings into one untagged column: web/CLI `ask` records answer text + delivered
+  citations, `cli search` records the full rendered response — so the aggregate mixed bases and
+  "show the math" couldn't reconcile per-surface. Each of these recording sites now tags its row
+  with a `served_basis` (canonical `BASIS_*` constants in `indexa_query::impact`), added as a
+  migration-guarded `tool_usage` column (`SCHEMA_VERSION` 5 → 6; existing indexes migrate in
+  place, legacy rows read as *unspecified*). `indexa status` (text and `--json`) and `/api/impact`
+  show a per-basis split (the text form only when more than one basis contributed). **The MCP
+  server's recording sites are a separate, deferred follow-up** — until that lands, every MCP-tool
+  row (still the majority of usage on a real index) reads as `unspecified`, same as before this
+  change; no MCP tool count or wire shape changed here.
+- **Retrieval polish: byte-consistent project-overview budget + tighter code-intent trigger.** The
+  project-overview block was assembled against a byte-based budget guard (the child-line loop and
+  the caller's chunk-budget subtraction) but hard-capped by *character* count at the end, so for
+  multibyte content (Arabic, CJK, emoji) it could silently overrun its byte budget; it's now capped
+  at the actual byte budget, still landing on a UTF-8 char boundary. Separately, the bare locators
+  "where is" / "which file" no longer trigger the ×1.6 code-intent boost on their own — they're just
+  as common in plain prose ("where is the budget spreadsheet") as in code questions — they now
+  require either a co-occurring named code file (e.g. "where is parse defined in `retrieve.rs`") or
+  an implementation-action verb ("where is X **computed**/**handled**/**parsed**/…", which is asking
+  about behavior, not a document's location — "where is auth handled?" and the self-golden "where is
+  the memory budget computed" still trigger it). Strong terms (`function`, `method`, `struct`, a
+  snake_case symbol, …) are unchanged, matched via exact `Path::extension()` rather than a `.ext`
+  substring scan so `.h`/`.c` can't false-positive on `.html`/`.csv`/`.conf`/`.cfg`.
+- **Map tab was unusable at whole-disk scope — Treemap showed one cell, Graph was a
+  vendor-choked hairball.** Three fixes, one PR:
+  - **Treemap single-child descent (server-side).** `build_coverage_treemap`
+    (`handlers/stats.rs`) computed each root, then walked a fixed `max_depth` of 4 down
+    from it — but a whole-disk index's real structure is a synthesized root chained
+    through several single-child directories (`/` → `Users` → `name` → `development` →
+    `projects` → *first actual branch point*) before anything interesting happens, so the
+    depth budget was spent entirely on the boring chain and the treemap rendered exactly
+    one undifferentiated cell. Each root now walks down while it has exactly one
+    directory child **whose own child set isn't empty** (never landing on a node that
+    would render zero cells) and emits from the landing node instead — spending the full
+    depth budget below the interesting node. Fixed **server-side, not client-side**: a
+    client-only descent would burn depth walking the chain and could land on a node whose
+    `children` were never serialized at all (outside the depth-4 window), rendering "No
+    sub-directories" — strictly worse than today's one cell. The skipped chain is folded
+    into the emitted root's `name` (e.g. `development/projects`) so the breadcrumb keeps
+    its "up" trail; `12-treemap.js` carries a matching (normally-inert) client-side
+    descent as defense in depth, guarded the same way. Also fixed while in the area: (1)
+    zero-chunk sibling directories (the common case before `deep`/`summarize` has run)
+    all computed the *same* cell area under the old `size / totalSize` normalization —
+    `Math.max(size,1)` clamped the numerator but not the denominator, so every zero-chunk
+    child claimed 100% of the area and squarify's greedy row-fill only ever placed the
+    first one, silently dropping the rest; normalizing against the sum of the *clamped*
+    sizes fixes it without changing real (non-zero) layouts. (2) `renderRootPicker`
+    `insertBefore`d a new `.treemap-root-picker` on every `loadTreemap()` without removing
+    the last one, so pickers stacked up across the auto-refresh that follows a finished
+    job — now removes any existing picker first.
+  - **Graph default scope re-scoped to a real project, not the whole disk.**
+    `19-graph.js`'s `loadGraph()` populated the scope `<select>` from `/api/roots` and
+    defaulted to `roots[0]` — the alphabetically-first indexed root (`root_paths()` orders
+    `ORDER BY path`; a stale code comment at `handlers/graph.rs` claimed it picked "the
+    largest," which was never true and is now corrected). At whole-disk scope the call
+    graph is ~250 nodes / ~300 edges of unreadable hairball. It now populates the
+    selector from `GET /api/projects` (backed by `top_projects_under()` — already
+    filtered to real, non-nested, non-vendored project roots) and defaults to the first
+    detected project instead, falling back to `/api/roots` only when no projects have
+    been detected yet so the selector is never left empty. Seeds from the sidebar's
+    current selection when it's already at project depth. The Graph tab itself is
+    **not** gated/disabled — a disabled `<button>` would swallow the synthetic
+    `.click()` the ARIA tablist handler uses and drop out of keyboard tab order, and
+    `pickMapView()` can still programmatically select `'graph'` regardless.
+  - **Vendored/generated noise filtered out of the code graph, in core, before
+    truncation.** `code_graph_scoped` (`crates/core/src/store/edges.rs`) sorts its edge
+    list by weight and truncates to `max_edges` — filtering noise out *after* that point
+    (as the web handler alone could have done) recovers nothing, since a noisy edge has
+    already consumed a slot a real edge should have had. The existing
+    `is_project_noise_path` (already shared between `top_projects_under` and the
+    `/api/projects` welcome list) now also runs against the graph's edge list via
+    `raw.retain(...)` **before** sort+truncate, and gained two new fragments: `.min.js`
+    and `.bundle.js` (matched against file paths — the directory-fragment list like
+    `/vendor/`/`/node_modules/` already existed, these two are the file-suffix
+    counterpart). **Blast radius:** `is_project_noise_path` is shared, so this change
+    affects three consumers, not just the web Graph tab — the MCP `graph` tool
+    (`crates/mcp/src/graph.rs`, same `code_graph_scoped` call) and
+    `recompute_graph_modules` (`crates/query/src/modules.rs`), which **persists** the
+    architecture-map table to the database, so the module boundaries `indexa graph
+    --compute-modules` writes can shift on the next run now that vendored files can no
+    longer anchor a module. Existing `code_graph_scoped` test fixtures use no
+    vendor-shaped paths, so none of them changed behavior.
+  - `scripts/web-smoke.mjs`'s fixture gained a `wrap/{a,b}/` single-child-then-branch
+    shape (previously every fixture directory was either the root or a childless leaf,
+    which couldn't exercise the descent at all) and a new assertion that the Treemap
+    renders ≥2 cells on first paint through the app's own tab switcher — the required
+    `web smoke (headless Chrome)` CI job now locks this in.
 - **Code-graph edges migrations no longer risk silently dropping rows.** Both one-time table-recreates
   that widen the `edges.kind` CHECK constraint — to add `'calls'` (D2), and separately to add
   `'extends'`/`'implements'` (2.2, heritage edges) — copied rows with `INSERT OR IGNORE SELECT *`,
@@ -650,6 +778,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP `mode` typos silently ran a different search than the one asked for; internal MCP errors
+  dropped their cause chain.** `parse_hybrid_mode` (backing `search`/`ask`/`explain_retrieval`'s
+  `mode` param) fell through any unrecognized value to `rrf` — so `mode:"dnese"` (a typo of
+  `"dense"`) silently ran a full hybrid search instead of erroring, with no signal the caller had
+  been misunderstood. A present-but-unrecognized `mode` is now rejected as a JSON-RPC `-32602
+  invalid_params` error naming the bad value and the valid set (`sparse`, `dense`, `rrf`); `mode`
+  omitted still defaults to `rrf`, unchanged. Separately, `mcp_err` (the internal-failure → MCP
+  `-32603` mapping used across every tool) rendered only `anyhow::Error`'s outermost context frame
+  via `e.to_string()`, discarding every deeper `.context()` layer — so a failing tool call showed
+  an agent just `"opening index at ..."` instead of the actual root cause underneath. It now uses
+  `{e:#}` (anyhow's alternate `Display`), which renders the full chain. New `mcp_invalid` helper
+  (used inside `parse_hybrid_mode`, with `search`/`ask`/`explain_retrieval` propagating its
+  `Result` via `?`) reports a caller mistake distinctly from a server-side failure.
 - **Archive detector reused the duplicate detector's noise filter — wrong list, wrong reach.**
   `archive_path_is_noise` was a pure delegate to `dup_in_generated_dir`, sharing
   `DUP_SKIP_DIR_FRAGMENTS` with the near-duplicate detector. That list's `/assets/` and

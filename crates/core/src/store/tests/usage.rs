@@ -199,3 +199,105 @@ fn opens_pre_v069_index_missing_tool_usage_session_id() {
         "the existing pre-migration usage row must be preserved"
     );
 }
+
+#[test]
+fn usage_by_basis_separates_surfaces_and_groups_untagged_as_unspecified() {
+    // `bytes_served` means different things per surface, so rows carry a `served_basis`
+    // tag and `usage_by_basis` splits the otherwise-blended weekly aggregate.
+    let mut store = Store::open_in_memory().unwrap();
+
+    // MCP-style rendered-response rows (recorded here only to exercise the store API —
+    // the actual MCP call sites still call the untagged `record_tool_usage` until that
+    // half of the accounting work lands).
+    store
+        .record_tool_usage_with_basis("mcp", "search", 100, 4_000, None, "rendered_response")
+        .unwrap();
+    store
+        .record_tool_usage_with_basis("mcp", "ask", 200, 6_000, None, "rendered_response")
+        .unwrap();
+    // Web/CLI answer+citation row (the actual basis `record_ask_impact` now tags).
+    store
+        .record_tool_usage_with_basis("web", "ask", 50, 1_000, Some("s1"), "answer_citations")
+        .unwrap();
+    // An untagged row (via the delegating `record_tool_usage`) → "unspecified".
+    store
+        .record_tool_usage("cli", "search", 10, 100, None)
+        .unwrap();
+
+    let by_basis = store.usage_by_basis(USAGE_WEEK_SECS).unwrap();
+    // Three distinct bases; ordered by avoided bytes DESC (rendered saved the most).
+    assert_eq!(
+        by_basis.len(),
+        3,
+        "one group per distinct basis: {by_basis:?}"
+    );
+    assert_eq!(by_basis[0].0, "rendered_response");
+    assert_eq!(by_basis[0].1.calls, 2);
+    assert_eq!(by_basis[0].1.bytes_served, 300);
+    assert_eq!(by_basis[0].1.bytes_counterfactual, 10_000);
+
+    let ac = by_basis
+        .iter()
+        .find(|(b, _)| b == "answer_citations")
+        .unwrap();
+    assert_eq!(ac.1.calls, 1);
+    assert_eq!(ac.1.bytes_counterfactual, 1_000);
+
+    let un = by_basis.iter().find(|(b, _)| b == "unspecified").unwrap();
+    assert_eq!(
+        un.1.calls, 1,
+        "the delegating record_tool_usage row reads as unspecified"
+    );
+
+    // The per-basis calls reconcile back to the blended weekly aggregate.
+    let total: u64 = by_basis.iter().map(|(_, u)| u.calls).sum();
+    assert_eq!(total, store.usage_summary(USAGE_WEEK_SECS).unwrap().calls);
+}
+
+#[test]
+fn opens_pre_served_basis_index_missing_tool_usage_served_basis() {
+    // Regression: this change added tool_usage.served_basis + bumped SCHEMA_VERSION. Opening
+    // an index whose tool_usage table has session_id but NOT served_basis must migrate in
+    // place and preserve rows — same shape as opens_pre_v069_index_missing_tool_usage_session_id
+    // above, one column later. A fresh hand-built DB's `user_version` defaults to 0, which never
+    // equals SCHEMA_VERSION, so the full idempotent init runs unconditionally — no need to stamp
+    // a (soon-to-be-stale) explicit version number here.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pre_served_basis.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tool_usage (
+                 id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                 surface              TEXT NOT NULL,
+                 tool                 TEXT NOT NULL,
+                 bytes_served         INTEGER NOT NULL DEFAULT 0,
+                 bytes_counterfactual INTEGER NOT NULL DEFAULT 0,
+                 at                   INTEGER NOT NULL DEFAULT (unixepoch()),
+                 session_id           TEXT
+             );
+             CREATE INDEX idx_tool_usage_at ON tool_usage(at);
+             CREATE INDEX idx_tool_usage_session ON tool_usage(session_id);
+             INSERT INTO tool_usage (surface, tool, bytes_served, bytes_counterfactual)
+                 VALUES ('mcp', 'search', 100, 4000);",
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(&path).expect("must open & migrate a pre-served_basis index");
+
+    // served_basis column was added …
+    let has_col: bool = store
+        .db_connection()
+        .prepare("SELECT 1 FROM pragma_table_info('tool_usage') WHERE name = 'served_basis'")
+        .unwrap()
+        .exists([])
+        .unwrap();
+    assert!(has_col, "migration must add tool_usage.served_basis");
+
+    // … the pre-existing row survived (reads back as "unspecified") …
+    let by_basis = store.usage_by_basis(USAGE_WEEK_SECS).unwrap();
+    assert_eq!(by_basis.len(), 1);
+    assert_eq!(by_basis[0].0, "unspecified");
+    assert_eq!(by_basis[0].1.calls, 1);
+}

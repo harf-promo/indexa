@@ -52,10 +52,17 @@ const home = join(sandbox, 'home');
 const fixture = join(sandbox, 'smoke-fixture');
 mkdirSync(join(home, '.config'), { recursive: true });
 mkdirSync(join(home, '.local', 'share'), { recursive: true });
-mkdirSync(join(fixture, 'notes'), { recursive: true });
+// `wrap/` is the fixture root's ONLY subdirectory (a single-child hop the B1 server-side
+// treemap descent must walk through), and `wrap/` itself fans out into two real
+// subdirectories (`a/`, `b/`) — the branch point the descent should land on. Before B1
+// this whole tree rendered as one undifferentiated treemap cell; the smoke check below
+// asserts it now renders (at least) the two `a`/`b` cells on first paint.
+mkdirSync(join(fixture, 'wrap', 'a'), { recursive: true });
+mkdirSync(join(fixture, 'wrap', 'b'), { recursive: true });
 writeFileSync(join(fixture, 'alpha.txt'), 'The quick brown fox jumps over the lazy dog.\n');
 writeFileSync(join(fixture, 'beta.txt'), 'Beta release notes: nothing of consequence.\n');
-writeFileSync(join(fixture, 'notes', 'gamma.md'), '# Gamma\n\nA small markdown fixture file.\n');
+writeFileSync(join(fixture, 'wrap', 'a', 'gamma.md'), '# Gamma\n\nA small markdown fixture file.\n');
+writeFileSync(join(fixture, 'wrap', 'b', 'delta.txt'), 'Delta: another small fixture file.\n');
 
 const childEnv = {
   ...process.env,
@@ -343,17 +350,37 @@ try {
       search.body.some((n) => String(n.path || '').includes('alpha.txt')),
     `status=${search.status} hits=${Array.isArray(search.body) ? search.body.length : 'n/a'}`);
 
+  // Check 5 — Map tab → Treemap renders ≥2 cells on first paint (B1 regression guard).
+  // The fixture root is a single-child hop (root → wrap/) that fans out into wrap/{a,b} —
+  // before the server-side single-child descent this whole tree rendered as ONE
+  // undifferentiated cell. Activated through the app's own switcher (switchTab → the
+  // Map tab's default sub-view is Treemap via pickMapView), not by calling loadTreemap()
+  // directly, so this also exercises the real click path. The harness only runs `scan`
+  // (no `deep`/`summarize`), so every dir here has zero chunks — confirms zero-chunk
+  // directories still render as cells rather than hitting the "No summaries built yet"
+  // empty state.
+  await cdp.eval("switchTab('map')");
+  const treemapCells = await poll(
+    async () => {
+      const n = await cdp.eval('document.querySelectorAll("#treemap-svg g.treemap-cell").length');
+      return n >= 2 ? n : null;
+    },
+    { label: 'treemap renders ≥2 cells', timeout: 10_000 },
+  ).catch(() => 0);
+  check('treemap renders ≥2 cells on first paint (single-child chain descended)',
+    treemapCells >= 2, `cells=${treemapCells}`);
+
   // Give late async fetches (update check, telemetry stream) a beat to land
   // before tallying console errors — bounded, not load-bearing.
   await sleep(500);
 
-  // Check 5 — zero console errors across the whole session.
+  // Check 6 — zero console errors across the whole session.
   check('no console errors during session', consoleErrors.length === 0,
     consoleErrors.length ? consoleErrors.slice(0, 5).join(' | ') : undefined);
 
   cdp.ws.close();
 
-  // Check 6 — clean shutdown: both children die on SIGTERM.
+  // Check 7 — clean shutdown: both children die on SIGTERM.
   killChildren();
   const allDead = await poll(
     () => children.every((c) => c.exitCode !== null || c.signalCode !== null),

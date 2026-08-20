@@ -108,6 +108,74 @@ fn code_graph_truncates_at_cap() {
 }
 
 #[test]
+fn code_graph_drops_vendored_noise_edges() {
+    let mut store = Store::open_in_memory().unwrap();
+    // A vendored edge alongside a real one; the vendored endpoint must never appear.
+    store
+        .upsert_edges(&[
+            edge("/p/app.rs", "calls", "real_sym"),
+            edge("/p/lib.rs", "defines", "real_sym"),
+            edge("/p/vendor/lib.rs", "calls", "noisy_sym"),
+            edge("/p/vendor/other.rs", "defines", "noisy_sym"),
+        ])
+        .unwrap();
+    let g = store.code_graph("/p", 400, false).unwrap();
+    assert_eq!(g.edges.len(), 1);
+    assert_eq!(g.edges[0].from, "/p/app.rs");
+    assert_eq!(g.edges[0].to, "/p/lib.rs");
+    assert!(
+        g.nodes.iter().all(|n| !n.path.contains("/vendor/")),
+        "no vendored node should survive either"
+    );
+}
+
+/// B3: the filter must run BEFORE sort+truncate, not after — a test that only checks
+/// "no vendor edges in the output" would pass even with the filter placed post-truncate
+/// (it would just silently shrink the result below `max_edges`). This test discriminates
+/// placement: the noisy pair outweighs both real pairs (2 shared symbols vs 1 each), so
+/// with `max_edges` set to exactly the real-edge count, a post-truncate filter would let
+/// the heavier noise edge win a slot and only ONE real edge would survive; a pre-truncate
+/// filter drops the noise first and both real edges survive.
+#[test]
+fn code_graph_filters_noise_before_truncating_not_after() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_edges(&[
+            // Noise: weight 2 (two shared symbols) — sorts ahead of both real edges.
+            edge("/p/vendor/lib.rs", "calls", "ns1"),
+            edge("/p/vendor/lib.rs", "calls", "ns2"),
+            edge("/p/vendor/other.rs", "defines", "ns1"),
+            edge("/p/vendor/other.rs", "defines", "ns2"),
+            // Two real edges, weight 1 each.
+            edge("/p/real1.rs", "calls", "r1sym"),
+            edge("/p/def1.rs", "defines", "r1sym"),
+            edge("/p/real2.rs", "calls", "r2sym"),
+            edge("/p/def2.rs", "defines", "r2sym"),
+        ])
+        .unwrap();
+    // max_edges == exactly the real-edge count: a post-truncate filter would have
+    // already dropped one real edge in favor of the heavier noise edge.
+    let g = store.code_graph("/p", 2, false).unwrap();
+    assert_eq!(
+        g.edges.len(),
+        2,
+        "both real edges must survive — the noise edge never consumed a slot"
+    );
+    assert!(g
+        .edges
+        .iter()
+        .any(|e| e.from == "/p/real1.rs" && e.to == "/p/def1.rs"));
+    assert!(g
+        .edges
+        .iter()
+        .any(|e| e.from == "/p/real2.rs" && e.to == "/p/def2.rs"));
+    assert!(g
+        .edges
+        .iter()
+        .all(|e| !e.from.contains("/vendor/") && !e.to.contains("/vendor/")));
+}
+
+#[test]
 fn code_graph_excludes_over_common_symbols() {
     let mut store = Store::open_in_memory().unwrap();
     // `gen` is defined in 30 files (> the 25-file cap) → a generic name, excluded.

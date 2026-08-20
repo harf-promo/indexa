@@ -8,7 +8,9 @@
 //! import-linked → bare-name fallback) before any surface renders it. Edge *recording*
 //! is unchanged, so existing indexes get the precision win without a re-deep.
 
-use super::{CodeGraph, CodeGraphEdge, CodeGraphNode, EdgeRecord, RelatedFile, Store};
+use super::{
+    is_project_noise_path, CodeGraph, CodeGraphEdge, CodeGraphNode, EdgeRecord, RelatedFile, Store,
+};
 use anyhow::Result;
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -1348,6 +1350,13 @@ impl Store {
             .into_iter()
             .map(|((from, to), (w, tier))| (from, to, w, tier))
             .collect();
+        // B3: drop vendored/generated noise BEFORE sort+truncate. Filtering after
+        // truncation recovers no budget — a noisy edge has already consumed a
+        // `max_edges` slot a real project edge should have had. Shared with the web
+        // Graph tab, the MCP `graph` tool (both call `code_graph_scoped`), and
+        // `recompute_graph_modules` (`crates/query/src/modules.rs`), which PERSISTS the
+        // architecture map — see CHANGELOG.md for the full blast radius of this filter.
+        raw.retain(|(from, to, _, _)| !is_project_noise_path(from) && !is_project_noise_path(to));
         raw.sort_by(|a, b| {
             b.2.cmp(&a.2)
                 .then_with(|| a.0.cmp(&b.0))

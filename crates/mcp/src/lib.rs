@@ -144,8 +144,20 @@ pub struct IndexaMcp {
     ann_build_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
+/// Map an internal failure (store/IO/embedder) to a JSON-RPC internal error (-32603).
+/// Uses `{:#}` (the alternate `Display`) so an `anyhow::Error`'s full cause chain reaches the
+/// calling agent instead of only the outermost context — e.g. `opening index at /x/idx.db:
+/// unable to open database file` rather than just `opening index at /x/idx.db`. For
+/// non-anyhow `Display` types the alternate flag is a harmless no-op.
 fn mcp_err(e: impl std::fmt::Display) -> ErrorData {
-    ErrorData::internal_error(e.to_string(), None)
+    ErrorData::internal_error(format!("{e:#}"), None)
+}
+
+/// Map a caller mistake (an unrecognized enum value, an out-of-range argument) to a JSON-RPC
+/// invalid-params error (-32602), so an agent can tell "I called this wrong" apart from "the
+/// server broke" — the latter (`mcp_err`) implies retrying the same call won't help.
+fn mcp_invalid(e: impl std::fmt::Display) -> ErrorData {
+    ErrorData::invalid_params(format!("{e:#}"), None)
 }
 
 fn ok_text(s: impl Into<String>) -> CallToolResult {
@@ -462,12 +474,23 @@ pub async fn serve_mcp(
 }
 
 /// Parse a user-supplied mode string into a `HybridMode`.
-/// Accepts `"sparse"`, `"dense"`, `"rrf"` (default).
-fn parse_hybrid_mode(s: Option<&str>) -> HybridMode {
-    match s.unwrap_or("rrf").to_lowercase().as_str() {
-        "sparse" => HybridMode::Sparse,
-        "dense" => HybridMode::Dense,
-        _ => HybridMode::Rrf,
+/// `None`, or a blank/whitespace-only string, defaults to `"rrf"` — matching how every other
+/// optional string param in this crate treats an empty value as "absent" (e.g. `scope.filter(|s|
+/// !s.is_empty())` at each of this function's call sites). A *present, non-blank* but
+/// unrecognized value is a caller error — rejected as `invalid_params` — rather than silently
+/// coerced to `rrf`; the old silent-fallback behavior meant a typo like `mode:"dnese"` ran a full
+/// hybrid search the caller never asked for, with no error signal at all.
+fn parse_hybrid_mode(s: Option<&str>) -> Result<HybridMode, ErrorData> {
+    match s.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(HybridMode::Rrf),
+        Some(v) => match v.to_lowercase().as_str() {
+            "sparse" => Ok(HybridMode::Sparse),
+            "dense" => Ok(HybridMode::Dense),
+            "rrf" => Ok(HybridMode::Rrf),
+            other => Err(mcp_invalid(format!(
+                "invalid mode '{other}' — expected one of: sparse, dense, rrf"
+            ))),
+        },
     }
 }
 
@@ -535,6 +558,158 @@ mod tests {
             Arc::new(StubGenerator),
             Arc::new(Config::default()),
         )
+    }
+
+    #[test]
+    fn parse_hybrid_mode_rejects_unknown_values_instead_of_coercing() {
+        // A present-but-unrecognized value must be an error, not a silent fallback to `rrf` —
+        // the old behavior hid a typo like `mode:"dnese"` behind a full hybrid search the
+        // caller never asked for.
+        use rmcp::model::ErrorCode;
+
+        assert!(matches!(parse_hybrid_mode(None), Ok(HybridMode::Rrf)));
+        assert!(matches!(
+            parse_hybrid_mode(Some("rrf")),
+            Ok(HybridMode::Rrf)
+        ));
+        assert!(matches!(
+            parse_hybrid_mode(Some("SPARSE")),
+            Ok(HybridMode::Sparse)
+        ));
+        assert!(matches!(
+            parse_hybrid_mode(Some("dense")),
+            Ok(HybridMode::Dense)
+        ));
+        // A blank/whitespace-only value is treated as "absent" (defaults to rrf), matching how
+        // every other optional string param in this crate treats an empty value — not rejected
+        // as an unrecognized enum value.
+        assert!(matches!(parse_hybrid_mode(Some("")), Ok(HybridMode::Rrf)));
+        assert!(matches!(
+            parse_hybrid_mode(Some("   ")),
+            Ok(HybridMode::Rrf)
+        ));
+        // Surrounding whitespace on an otherwise-valid value is trimmed, not rejected.
+        assert!(matches!(
+            parse_hybrid_mode(Some(" dense ")),
+            Ok(HybridMode::Dense)
+        ));
+
+        let err = parse_hybrid_mode(Some("dnese")).unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(
+            err.message.contains("dnese"),
+            "error must name the bad value, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("sparse") && err.message.contains("dense"),
+            "error must name the valid options, got: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn search_rejects_invalid_mode_as_invalid_params_not_a_silent_default() {
+        // End-to-end through the actual tool handler (not just the parser): calling `search`
+        // with a bad `mode` must surface as -32602 invalid_params naming the bad value, not
+        // silently run an `rrf` search and return 200-style success.
+        use rmcp::model::ErrorCode;
+
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        let err = mcp
+            .search(Parameters(SearchParams {
+                query: "widget".into(),
+                limit: None,
+                scope: None,
+                mode: Some("dnese".into()),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code,
+            ErrorCode::INVALID_PARAMS,
+            "got: {} {}",
+            err.code.0,
+            err.message
+        );
+        assert!(
+            err.message.contains("dnese"),
+            "error must name the bad value, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn mcp_err_surfaces_the_full_anyhow_cause_chain() {
+        // `mcp_err` used to render only `e.to_string()` — an anyhow::Error's outermost context
+        // frame — dropping every deeper `.context()` layer. Build a realistic multi-layer chain
+        // the way `Store::open` does (create-dir context -> Connection::open context -> the
+        // underlying io/rusqlite error) and confirm every layer survives into the MCP message,
+        // not just the top one.
+        let root = anyhow::anyhow!("unable to open database file: /no/such/dir/idx.db");
+        let chained = root
+            .context("opening index at /no/such/dir/idx.db")
+            .context("initializing MCP store");
+
+        let data = mcp_err(&chained);
+        assert_eq!(data.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert!(
+            data.message.contains("initializing MCP store"),
+            "top frame missing: {}",
+            data.message
+        );
+        assert!(
+            data.message
+                .contains("opening index at /no/such/dir/idx.db"),
+            "middle frame missing: {}",
+            data.message
+        );
+        assert!(
+            data.message.contains("unable to open database file"),
+            "root cause missing: {}",
+            data.message
+        );
+    }
+
+    #[tokio::test]
+    async fn store_open_failure_surfaces_full_chain_through_a_real_tool_call() {
+        // Same as above but end-to-end: point a real IndexaMcp at a db_path whose parent can
+        // never be created (it's nested under a regular file, not a directory) so `Store::open`
+        // fails with its real `.context()` chain, and confirm `get_stats` (which opens the
+        // store via `mcp_err`) reports more than the bare top-level message.
+        let dir = tempfile::tempdir().unwrap();
+        let blocking_file = dir.path().join("not_a_dir");
+        std::fs::write(&blocking_file, b"x").unwrap();
+        let bogus_db_path = blocking_file.join("nested").join("idx.db");
+
+        let mcp = IndexaMcp::new(
+            bogus_db_path.clone(),
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+        let err = mcp.get_stats().await.unwrap_err();
+        // The old `mcp_err` (bare `e.to_string()`) would have produced exactly this top context
+        // frame and nothing else. Don't assert on the underlying io::Error's exact wording (it's
+        // OS-dependent — "Not a directory" vs. Windows' phrasing differ); instead assert the
+        // fixed chain-preservation property: the message starts with the top frame we control
+        // AND carries strictly more detail after it, proving the deeper cause wasn't dropped.
+        let top_frame_only = format!(
+            "creating index directory {}",
+            bogus_db_path.parent().unwrap().display()
+        );
+        assert!(
+            err.message.starts_with(&top_frame_only),
+            "top context frame missing: {}",
+            err.message
+        );
+        assert!(
+            err.message.len() > top_frame_only.len(),
+            "expected root-cause detail appended after the top frame (chain must not be \
+             truncated to just the top-level message), got: {}",
+            err.message
+        );
     }
 
     #[tokio::test]
