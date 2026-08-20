@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`candle-core`/`candle-nn`/`candle-transformers` 0.9 → 0.11 (dependency bump, #428/#429/#430
+  superseded).** A two-major-version jump for the pure-Rust inference stack behind the
+  cross-encoder reranker (`crates/query/src/rerank.rs`, `[retrieval] rerank_backend =
+  "cross-encoder"`). **No source changes were needed** — `rerank.rs`'s exact API surface
+  (`Tensor::new`/`.unsqueeze`/`.get`/`.to_scalar`, `VarBuilder::from_mmaped_safetensors`,
+  `debertav2::{Config, DebertaV2SeqClassificationModel::load, .forward}`) is unchanged across
+  0.9→0.11; `cargo check -p indexa-query` was clean on the first try. Transitively, candle 0.11
+  pulls in a new `gemm` matmul backend and bumps `tokenizers` 0.20.4→0.22.2 for its own internal
+  use — `crates/query` keeps its own direct `tokenizers = "0.20"` dependency (rerank.rs constructs
+  its own `Tokenizer` and never crosses candle's API boundary with one), so the tree now carries
+  two `tokenizers` versions side by side; harmless (confirmed via `cargo tree -i candle-core`, which
+  resolves to exactly one version) but worth knowing if a future bump wants to collapse it.
+  `apps/indexa-desktop/Cargo.lock` (workspace-excluded, separately committed) was regenerated with a
+  targeted `cargo update -p candle-core -p candle-nn -p candle-transformers`; the diff is scoped to
+  candle + its new transitive deps (`ahash`, `castaway`, `compact_str`, `dary_heap`,
+  `static_assertions`, the second `tokenizers`) plus a `windows-sys` version convergence (several
+  loosely-pinned consumers — `mio`, `tokio`, `socket2`, etc. — unify onto the newer version candle's
+  `gemm` dependency introduced; none of those consumers themselves changed version). The
+  deliberately-pinned `brotli` (8.0.2) / `brotli-decompressor` (5.0.3) / `pcre2` (0.2.11) /
+  `pcre2-sys` (0.2.10) versions are byte-identical before and after. **Reranker correctness,
+  verified, not just compiled:** the `#[ignore]`-gated `candle_reranker_loads_configured_model` test
+  (downloads `mixedbread-ai/mxbai-rerank-xsmall-v1` from HuggingFace, ~85 MB, already cached
+  locally) was run on candle 0.9.2 *before* the bump and again on 0.11.0 *after* — both pass with
+  the identical assertion: a full 3-document permutation is returned, and the obviously-relevant
+  "Tokio async scheduler" passage ranks first (`order[0] == 1`) against two decoy passages
+  (mitochondria, sourdough). Also re-run against the larger `mxbai-rerank-base-v1` variant on 0.11,
+  same result. This is a genuine before/after ranking comparison, not just a load-without-erroring
+  check — a load failure fails open (empty order, caught by the length assert); a subtly-wrong
+  ranking would still return a full permutation but fail the `order[0] == 1` assertion, which it did
+  not. **What this does *not* prove:** the non-ignored `cargo test --workspace` suite exercises only
+  stub rerankers (`Reverser`/`Exploder`/`Garbage`) — zero candle code paths — so a green full suite
+  on its own is not reranker evidence; the ignored-test runs above are the actual evidence.
+  `apps/indexa-desktop`'s own `cargo check`/`cargo build --locked` were verified against the new
+  lock (via a scratch copy — this worktree is nested under the main checkout, which trips an
+  unrelated Cargo workspace-discovery quirk when building the desktop app in place; not a change
+  introduced by this bump). `cargo tree -i openssl-sys` stays empty (unaffected — candle carries no
+  TLS dependency).
 - **`reqwest` 0.12 → 0.13 (dependency bump, #325 superseded).** reqwest 0.13 consolidated its TLS
   features — the `rustls-tls` feature name is gone, replaced by `rustls` — so every declaration site
   (`Cargo.toml`, `crates/{llm,embed,http-util}`; `crates/{update,web}` inherit via
