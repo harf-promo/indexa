@@ -345,31 +345,24 @@ pub struct DetectorReport {
     pub expired: usize,
 }
 
-/// The detector pass run at the end of `cmd_index`: repair sweep first (so a
-/// crashed projection heals before new questions stack on top), then the
-/// duplicate, archive, language, and symbol detectors — in that order, so the
-/// higher-priority question types get the cap budget first — honoring the
-/// fatigue caps in `cfg`.
-pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorReport> {
-    let mut report = DetectorReport {
-        repaired: super::repair_unapplied(store)?,
-        ..DetectorReport::default()
-    };
-
-    // v0.39: retroactively dismiss already-open questions the noise filters now reject
-    // (idiom / disabled symbol_ambiguity, asset/generated duplicate clusters) so an
-    // existing inbox gets quiet on the next index without a manual sweep.
-    report.skipped += sweep_filtered_noise(store, cfg, false)?;
-
-    // Expiry sweep: an open question whose evidence left the index would
-    // otherwise linger forever and permanently consume the open budget —
-    // starving new questions by attrition. "Left the index" = a member path
-    // has neither an entries row NOR a summary row (the deep-without-scan
-    // workflow legitimately produces summaries with no entries row, so
-    // entries-absence alone is not evidence of removal). Expired is recorded,
-    // never silently dropped; and expiry is not a sticky dismissal, so the
-    // question returns if the evidence does.
-    for d in store.open_decisions(None, cfg.max_open.max(64))? {
+/// Expire open questions whose evidence left the index — otherwise they linger forever
+/// and permanently consume the open budget, starving new questions by attrition.
+/// "Left the index" = a member path has neither an entries row NOR a summary row (the
+/// deep-without-scan workflow legitimately produces summaries with no entries row, so
+/// entries-absence alone is not evidence of removal). Expired is recorded, never
+/// silently dropped; and expiry is not a sticky dismissal, so the question returns if
+/// the evidence does. Returns the count expired.
+///
+/// Standalone (not folded into [`run_detectors`]) so callers that only want index
+/// hygiene — not the full duplicate/archive/language/symbol detector pass — can run it
+/// on its own. `run_detectors` (the CLI's `indexa index` "Phase 4") calls it as part of
+/// the full pass; the web job pipeline calls it directly alongside `prune_orphans` (H1)
+/// — before this, only a CLI `indexa index`/`indexa review` run ever expired a decision,
+/// so a subject excluded by a later `[scan] ignore` edit or removed via the web-only
+/// "Build context" flow could linger in the Review inbox indefinitely.
+pub fn expire_vanished_decisions(store: &mut Store, max_open: usize) -> Result<usize> {
+    let mut expired = 0;
+    for d in store.open_decisions(None, max_open.max(64))? {
         let params: serde_json::Value = serde_json::from_str(&d.params).unwrap_or_default();
         let members: Vec<String> = params
             .get("paths")
@@ -389,9 +382,29 @@ pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorRe
         }
         if let Some(gone) = vanished {
             store.expire_decision(d.id, &format!("{gone} left the index"))?;
-            report.expired += 1;
+            expired += 1;
         }
     }
+    Ok(expired)
+}
+
+/// The detector pass run at the end of `cmd_index`: repair sweep first (so a
+/// crashed projection heals before new questions stack on top), then the
+/// duplicate, archive, language, and symbol detectors — in that order, so the
+/// higher-priority question types get the cap budget first — honoring the
+/// fatigue caps in `cfg`.
+pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorReport> {
+    let mut report = DetectorReport {
+        repaired: super::repair_unapplied(store)?,
+        ..DetectorReport::default()
+    };
+
+    // v0.39: retroactively dismiss already-open questions the noise filters now reject
+    // (idiom / disabled symbol_ambiguity, asset/generated duplicate clusters) so an
+    // existing inbox gets quiet on the next index without a manual sweep.
+    report.skipped += sweep_filtered_noise(store, cfg, false)?;
+
+    report.expired += expire_vanished_decisions(store, cfg.max_open)?;
 
     // Exact clusters first: they are certain, so they deserve the cap budget
     // before the probabilistic near-duplicates.

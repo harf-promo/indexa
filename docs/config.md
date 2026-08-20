@@ -499,36 +499,6 @@ modules = false   # set true to expose the persisted architecture-map modules (4
 
 ---
 
-## Per-region overrides
-
-Apply different settings to different parts of your disk.
-
-```toml
-[[region]]
-path = "~/Documents/Voice Memos"
-
-[region.parsers.audio]
-transcribe = true   # transcribe only voice memo files, not all audio
-
-[[region]]
-path = "~/Pictures"
-
-[region.parsers.image]
-caption = true   # enable vision captions for photos
-
-[[region]]
-path = "~/Work"
-
-[region.embedding]
-model    = "text-embedding-3-large"
-provider = "openai"
-dim      = 3072
-```
-
-The longest matching path prefix wins. In the example above, a file at `~/Documents/Voice Memos/meeting.m4a` matches the `Voice Memos` region, not the `~/Documents` region (if one existed), because `Voice Memos` is a longer prefix.
-
----
-
 ## Full example
 
 ```toml
@@ -554,14 +524,4 @@ profile = "balanced"   # conservative | balanced | performance
 [describer]
 provider = "ollama"
 model    = "gemma3:12b"
-
-[[region]]
-path = "~/Documents/Voice Memos"
-[region.parsers.audio]
-transcribe = true
-
-[[region]]
-path = "~/Pictures"
-[region.parsers.image]
-caption = true
 ```
