@@ -240,6 +240,11 @@ pub(crate) struct ProjectResponse {
     pub(crate) chunk_count: u64,
     pub(crate) has_summary: bool,
     pub(crate) covered: u64,
+    /// Subtree dir summaries still `pending`/`in_flight` — work queued for this
+    /// project, distinct from "nothing queued" (P1-partial). Not a guarantee a
+    /// job is actively draining it right now: a standalone `deep` enqueues these
+    /// rows before any `summarize`/`index` job runs.
+    pub(crate) partial: u64,
     pub(crate) total: u64,
 }
 

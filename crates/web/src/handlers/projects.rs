@@ -50,6 +50,7 @@ fn projects_from(
             chunk_count: cov.chunk_count,
             has_summary: cov.has_summary,
             covered: cov.covered,
+            partial: cov.partial,
             total: cov.total,
         });
     }

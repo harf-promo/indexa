@@ -266,11 +266,51 @@ fn path_coverage_counts_chunks_and_summary() {
     assert_eq!(empty.chunk_count, 1);
     assert!(!empty.has_summary);
     assert_eq!(empty.total, 1); // the dir itself
+    assert_eq!(empty.partial, 0);
 
     store.upsert_summary(&file_summary_for("/p")).unwrap();
     let built = store.path_coverage("/p").unwrap();
     assert!(built.has_summary);
     assert_eq!(built.chunk_count, 1);
+}
+
+/// `partial` (P1-partial) — a subtree with dir-summary jobs still `pending`/`in_flight`
+/// must be distinguishable from "nothing queued at all", so the web welcome view can read
+/// a mid-build project as "in progress" instead of "no summaries" (`ProjectResponse` /
+/// `buildProjectRow` in `11-onboarding.js`). Mirrors the `covered`/`partial` split
+/// `store/search.rs`'s `tree_level` already computes for the general file tree.
+#[test]
+fn path_coverage_reports_partial_for_in_progress_builds() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            dummy_entry("/p", EntryKind::Dir, 0),
+            dummy_entry("/p/a", EntryKind::Dir, 0),
+            dummy_entry("/p/b", EntryKind::Dir, 0),
+        ])
+        .unwrap();
+    store
+        .enqueue_summary_items(&[
+            ("/p".into(), "dir".into(), 0),
+            ("/p/a".into(), "dir".into(), 1),
+            ("/p/b".into(), "dir".into(), 1),
+        ])
+        .unwrap();
+    // "/p" stays 'pending' (default from enqueue); "/p/a" is actively summarizing;
+    // "/p/b" already finished.
+    store.mark_queue_state("/p/a", "in_flight", None).unwrap();
+    store.mark_queue_state("/p/b", "done", None).unwrap();
+
+    let cov = store.path_coverage("/p").unwrap();
+    assert_eq!(cov.total, 3, "the dir itself plus its two subdirectories");
+    assert_eq!(cov.covered, 1, "only /p/b reached 'done'");
+    assert_eq!(
+        cov.partial, 2,
+        "/p (pending) and /p/a (in_flight) are a build in progress, not 'no summaries'"
+    );
+    // The subtree has real, queued work, but the root path itself has no completed
+    // summary yet — the exact state the welcome header conflated with "no summaries".
+    assert!(!cov.has_summary);
 }
 
 /// The test named by the comment above
