@@ -27,18 +27,42 @@ function currentGraphScope() {
   return sel ? sel.value : '';
 }
 
-// Populate the scope <select> from /api/roots once, then load the graph.
+// Populate the scope <select> from /api/projects (project-depth folders — real repos/apps,
+// not the whole disk) once, then load the graph scoped to the first project instead of the
+// alphabetically-first raw root (B2 — whole-disk scope is where the graph becomes an
+// unreadable hairball). Falls back to /api/roots when no projects are detected yet
+// (app-detection hasn't run, so /api/projects is empty) — leaving the selector empty would
+// just trade one regression (hairball) for another (nothing to pick from).
 function loadGraph(scope) {  // eslint-disable-line no-unused-vars
   var sel = document.getElementById('graph-scope');
   if (!graphScopeLoaded && sel) {
     graphScopeLoaded = true;
-    fetch('/api/roots')
+    // Seed from the sidebar's current selection when it's already at project depth
+    // (same "≥5 segments ⇒ a project" heuristic pickMapView uses in 12-treemap.js) —
+    // best-effort only; if it doesn't match a real project the project-list default
+    // below still applies.
+    if (!scope && typeof selectedPath !== 'undefined' && selectedPath) {
+      var segs = String(selectedPath).split('/').filter(Boolean).length;
+      if (segs >= 5) scope = selectedPath;
+    }
+    fetch('/api/projects')
       .then(function (r) { return r.json(); })
-      .then(function (roots) {
-        sel.innerHTML = (roots || []).map(function (r) {
-          return '<option value="' + escapeHtml(r.path) + '">' + escapeHtml(r.name || r.path) + '</option>';
+      .then(function (projects) {
+        if (projects && projects.length) return { list: projects, fellBack: false };
+        // No detected projects yet — fall back to the raw root list rather than
+        // leaving the scope selector with nothing to pick from.
+        return fetch('/api/roots')
+          .then(function (r) { return r.json(); })
+          .then(function (roots) { return { list: roots || [], fellBack: true }; });
+      })
+      .then(function (result) {
+        var list = result.list;
+        sel.innerHTML = list.map(function (p) {
+          return '<option value="' + escapeHtml(p.path) + '">' + escapeHtml(p.name || p.path) + '</option>';
         }).join('');
-        fetchGraph(scope || (roots && roots[0] && roots[0].path) || '');
+        var resolved = scope || (list[0] && list[0].path) || '';
+        if (resolved) sel.value = resolved; // no-op if `resolved` isn't one of the options
+        fetchGraph(resolved);
       })
       .catch(function () { fetchGraph(scope || ''); });
     return;
