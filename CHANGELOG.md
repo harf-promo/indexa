@@ -64,6 +64,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flush mixes many files' misses, and dim-mismatch/embed-failure counts re-attribute to the
   owning file despite a mixed flush.
 
+- **Notes write-back loop — save an answer straight back into its pack.** New `indexa note add
+  <pack> <title> <body>` (CLI) and `POST /api/packs/{name}/note` (web) attach a Markdown note to
+  a Context Pack and best-effort reindex it, mirroring the MCP `add_note` tool that has had this
+  since v0.76 — the CLI and web were the two remaining surfaces without it. Both write via the
+  same shared `indexa_core::notes::write_note_file` + `Store::add_pack_paths` that `add_note`
+  uses, so the durable half of the flow (file written + pack membership recorded) is identical
+  across all three surfaces regardless of which one wrote it. The CLI reindexes in-process via
+  `cmd_deep` (mirroring `pack refresh`'s reindex call — `mode: None` defers to the configured
+  `[describer] mode` rather than overriding it); the web endpoint's durable write happens under a
+  scoped store lock (never held across an `.await`/spawn) and the reindex runs as a background
+  job using the exact same `job_slot_available` → `register_job` → `walk_for_job` →
+  `run_deep_phase` shape `pack refresh` uses, except a full job queue skips the reindex instead of
+  rejecting the request — the note is still saved either way. The chat UI gains a "Save to pack"
+  control under every substantive answer, letting a user save the question+answer straight into a
+  pack without leaving the conversation (built once and appended to the persistent message
+  container, like the existing "broaden scope" offer, so it survives repaint; pack names are
+  rendered via `textContent`, never `innerHTML` interpolation). No MCP change — tool count stays
+  51.
+
 ### Changed
 
 - **`sha2` 0.10 → 0.11 (dependency bump, #324 superseded).** `sha2` is declared once as a
