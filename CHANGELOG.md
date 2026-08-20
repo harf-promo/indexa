@@ -49,6 +49,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Context Pack staleness detection + `pack refresh` (CLI, web, and `stale_files` on all three
+  export surfaces).** A pack's members can drift from what was indexed — edited without a
+  rescan, or deleted — and nothing said so. New `Store::stale_pack_paths(pack_id)`
+  (`crates/core/src/store/packs.rs`) expands each member (file or directory) to its *indexed*
+  files, stats the **live** disk mtime, and flags anything no longer current per
+  `chunks_current_for_mtime` (the same caller-supplied-live-mtime check `deep` already uses) —
+  a member that can no longer be stat'd (deleted) counts as stale too. `indexa pack show` now
+  prints a stale-file count when it's non-zero.
+  New `indexa pack refresh "<name>"` (CLI) and `POST /api/packs/{name}/refresh` (web,
+  background job with a **Refresh** button per pack row) reindex just the stale members —
+  chunk content only, no rescan of the rest of the pack. All three export surfaces — CLI
+  `pack export`, web `GET /api/packs/{name}/export`, MCP `export_pack` — now report the live
+  count in the XML header as `stale_files="N"` (confined to the XML path; `md`/`json` have no
+  wrapping header to hang the attribute off).
+  **Design decision — flag, don't auto-remove.** A member whose file has vanished from disk
+  entirely is left in the pack (not silently dropped) so it keeps showing as stale until the
+  user explicitly `pack remove`s it — mirroring the Decision Ledger's
+  `decisions::expire_vanished_decisions`, which *expires* a question whose evidence left the
+  index rather than deleting the record. This is safe to do unconditionally because `walk()`
+  is fail-open on an unreadable/missing root (`Err(_) => WalkState::Continue`), so handing
+  `cmd_deep`/the web job a vanished path just yields zero entries for that root instead of
+  aborting the reindex of the pack's other stale members. Each refresh attempt is recorded as
+  a `pack_events` `"refreshed"` row (new CHECK-widening migration, schema v7) noting the
+  reindexed/vanished split, visible in `pack show` history and the OKF bundle's `log.md`.
+  **Caveat, stated plainly rather than papered over:** this is chunk-level only — a refresh
+  brings embeddings/chunk content current but does not touch prose summaries, so
+  `stale_files="0"` right after a refresh doesn't guarantee a folder's summary text reflects
+  the new content too; a separate `indexa summarize <path>` is still needed for that, same as
+  it always has been.
+  **Scope note:** MCP's `export_pack` gained only the `stale_files` header field — no `refresh`
+  param and no staleness line on `get_pack`, keeping `crates/mcp/` changes minimal for this PR.
 - **Two more pinned invariant tests, plus the doc/dead-reference gaps they caught.**
   `every_get_element_by_id_call_resolves_to_a_real_html_id` (`crates/web/src/lib.rs`) is a
   third guard on the `include_str!`-concatenated web bundle: every literal

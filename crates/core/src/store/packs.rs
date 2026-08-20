@@ -181,4 +181,70 @@ impl Store {
             .execute("DELETE FROM packs WHERE id = ?1", params![pack_id])?;
         Ok(())
     }
+
+    /// Record that a pack was refreshed (G2b) — `detail` is a short human-readable summary of
+    /// how many stale members were reindexed vs. genuinely vanished from disk (e.g. "3
+    /// reindexed, 1 vanished (left flagged)"). Shows up in `pack show` history and the OKF
+    /// bundle's `log.md`, same as [`Store::record_pack_exported`].
+    pub fn record_pack_refreshed(&mut self, pack_id: &str, detail: &str) -> Result<()> {
+        self.record_pack_event(pack_id, "refreshed", Some(detail))
+    }
+
+    /// A pack's indexed member files whose stored chunks are out of date with the file on disk —
+    /// the "stale" set behind `pack show`, the export headers' `stale_files` count, and `pack
+    /// refresh`. Each member path (a file or a directory prefix) is expanded via
+    /// [`super::entries::subtree_match`] to the *indexed* files at or under it (those carrying
+    /// chunks); each is then stat'd on the LIVE disk and kept when it is no longer current per
+    /// [`Store::chunks_current_for_mtime`] (missing/partial embeddings, or indexed before the
+    /// file's current mtime). A member that can't be stat'd (deleted/unreadable) counts as stale
+    /// too — it no longer matches what was indexed, and `pack refresh` leaves it flagged rather
+    /// than silently dropping it (see that function's doc comment). Returned sorted (BTreeSet),
+    /// deduped across overlapping members.
+    ///
+    /// This deliberately touches the disk, unusually for the store: `entries.modified_s`
+    /// reflects only the last *scan*, so a file edited without a rescan would look fresh.
+    /// `chunks_current_for_mtime` is built for exactly this caller-supplied-live-mtime check.
+    ///
+    /// Chunk-level only: a pack export built from summaries (the non-`--signatures` path) can
+    /// still show a stale-in-spirit *summary* after this reports 0 stale, because summary
+    /// freshness isn't part of this check — only the underlying chunk content is. `pack refresh`
+    /// only reindexes chunks (`cmd_deep`); picking up a summary/description change needs a
+    /// separate `indexa summarize <path>`, same as it always has.
+    pub fn stale_pack_paths(&self, pack_id: &str) -> Result<Vec<String>> {
+        use std::collections::BTreeSet;
+        let members = self.pack_paths(pack_id)?;
+
+        // Expand every member to the indexed files (those carrying chunks) at or under it.
+        let mut indexed: BTreeSet<String> = BTreeSet::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT entry_path FROM chunks
+                  WHERE entry_path = ?1 OR entry_path LIKE ?2 ESCAPE '\\'",
+            )?;
+            for member in &members {
+                let (exact, like) = super::entries::subtree_match(member);
+                let rows = stmt.query_map(params![exact, like], |r| r.get::<_, String>(0))?;
+                for p in rows {
+                    indexed.insert(p?);
+                }
+            }
+        }
+
+        let mut stale = Vec::new();
+        for path in indexed {
+            let live_mtime = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64);
+            let current = match live_mtime {
+                Some(m) => self.chunks_current_for_mtime(&path, m).unwrap_or(false),
+                None => false, // gone/unreadable → no longer matches what was indexed
+            };
+            if !current {
+                stale.push(path);
+            }
+        }
+        Ok(stale)
+    }
 }

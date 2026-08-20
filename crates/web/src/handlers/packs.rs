@@ -8,6 +8,7 @@
 //!   POST   /api/packs/:name/paths      — add paths     { paths: [...] }
 //!   DELETE /api/packs/:name/paths      — remove paths  { paths: [...] }
 //!   GET    /api/packs/:name/export     — export as XML/MD/JSON  ?format=&depth=
+//!   POST   /api/packs/:name/refresh    — reindex stale members as a background job
 //!   GET    /api/packs/:name/search     — search chunk content within the pack  ?q=&limit=
 //!   POST   /api/packs/suggest          — suggest paths for a query { query, limit? }
 
@@ -19,7 +20,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::dto::err_json;
+use crate::dto::{err_json, JobStartResponse};
+use crate::handlers::jobs::{job_slot_available, register_job};
+use crate::jobs_exec::{
+    finalize_done, run_deep_phase, scan_walk_config, schedule_cleanup, walk_for_job,
+};
 use crate::AppState;
 
 // ── DTOs ─────────────────────────────────────────────────────────────────────
@@ -239,10 +244,19 @@ pub(crate) async fn api_packs_export(
     let is_xml = format != "md" && format != "markdown" && format != "json";
     let mut buf = String::new();
     if is_xml {
+        // Freshness (G2b): same best-effort stat check the CLI/MCP export surfaces use (a stat
+        // error must not fail an export that worked before) — confined to the XML path so
+        // md/json exports (no wrapping header to hang the attribute off) don't pay the sweep.
+        // Note: this holds `state.store` locked for the duration of the stat sweep (no `.await`
+        // inside, so it's correct, just a bigger critical section than the query work already
+        // under this lock) — accepted rather than restructuring this handler more broadly.
+        let stale_count = store.stale_pack_paths(&pack.id).unwrap_or_default().len();
         buf.push_str("<context pack=\"");
         buf.push_str(&indexa_core::text::xml_escape_attr(&name));
         buf.push_str("\" generated=\"");
         buf.push_str(&now);
+        buf.push_str("\" stale_files=\"");
+        buf.push_str(&stale_count.to_string());
         buf.push_str("\">\n");
     }
 
@@ -321,6 +335,86 @@ pub(crate) async fn api_packs_export(
     // Best-effort (4.1) — a history-write hiccup must never fail an otherwise-successful export.
     let _ = store.record_pack_exported(&pack.id, format);
     ([(axum::http::header::CONTENT_TYPE, content_type)], buf).into_response()
+}
+
+/// `POST /api/packs/:name/refresh` — reindex a pack's stale members (files changed on disk
+/// since last indexed) as a background job. No-op (no job started) when nothing is stale.
+///
+/// Design decision (flag-for-review, not auto-remove): mirrors the CLI's `cmd_pack_refresh_at`
+/// — a stale member whose file has vanished from disk entirely is left in `pack_paths` rather
+/// than silently dropped (same expire-don't-delete precedent `decisions::expire_vanished_decisions`
+/// sets for the review ledger). It stays flagged (`stale_pack_paths` keeps reporting it) until
+/// the user explicitly removes it. Safe to hand every stale path to the walk loop below
+/// unconditionally because `walk()` (crates/core/src/walker.rs) is fail-open on an
+/// unreadable/missing root — a vanished path just yields zero entries, not a job failure.
+pub(crate) async fn api_packs_refresh(
+    Path(name): Path<String>,
+    State(s): State<AppState>,
+) -> Response {
+    if let Some(resp) = job_slot_available(&s.jobs).await {
+        return resp;
+    }
+
+    let stale = {
+        let store = s.store.lock().await;
+        let pack = match store.pack_by_name(&name) {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\""))
+            }
+            Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        };
+        store.stale_pack_paths(&pack.id).unwrap_or_default()
+        // Lock dropped here, before spawning — never held across an `.await`/`tokio::spawn`.
+    };
+    if stale.is_empty() {
+        return Json(serde_json::json!({ "stale_files": 0 })).into_response();
+    }
+    let missing_count = stale
+        .iter()
+        .filter(|p| !std::path::Path::new(p).exists())
+        .count();
+
+    let (id, handle) = register_job(&s.jobs, "pack_refresh", name.clone()).await;
+    let state = s.clone();
+    tokio::spawn(async move {
+        // Walk each stale path independently (ignore::WalkBuilder handles a bare file root
+        // correctly — same behavior `cmd_deep` relies on for the CLI's `pack refresh`) and
+        // concatenate the resulting per-file Vecs, reusing the existing, trusted per-file
+        // classification/entry-construction logic rather than a new builder.
+        let mut entries = Vec::with_capacity(stale.len());
+        for path in &stale {
+            if let Some(mut e) = walk_for_job(
+                path,
+                &handle,
+                &state.walk_semaphore,
+                scan_walk_config(&state.config.scan),
+            )
+            .await
+            {
+                entries.append(&mut e);
+            }
+        }
+        if run_deep_phase(&state, &name, &entries, &handle).await {
+            let reindexed = stale.len() - missing_count;
+            let detail = format!("{reindexed} reindexed, {missing_count} vanished (left flagged)");
+            {
+                let mut store = state.store.lock().await;
+                if let Ok(Some(pack)) = store.pack_by_name(&name) {
+                    let _ = store.record_pack_refreshed(&pack.id, &detail);
+                }
+            }
+            finalize_done(
+                &handle,
+                &format!(
+                    "Pack refresh complete: {} file(s), {missing_count} vanished",
+                    entries.len()
+                ),
+            );
+        }
+        schedule_cleanup(state.jobs.clone(), handle.id);
+    });
+    Json(JobStartResponse { job_id: id }).into_response()
 }
 
 pub(crate) async fn api_packs_suggest(

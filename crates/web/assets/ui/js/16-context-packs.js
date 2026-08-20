@@ -46,6 +46,7 @@ function renderPackList(packs) {
       + '<span style="font-size:13px"><strong>' + escapeHtml(p.name) + '</strong>' + desc + ' <span style="color:var(--muted);font-size:11px">(' + p.path_count + ' path' + (p.path_count === 1 ? '' : 's') + ')</span></span>'
       + '<span style="display:flex;gap:4px">'
       + '<button class="btn-sm pack-edit-btn" style="font-size:11px" type="button">Edit</button>'
+      + '<button class="btn-sm pack-refresh-btn" style="font-size:11px" type="button" title="Reindex stale members">Refresh</button>'
       + '<button class="btn-sm pack-export-btn" style="font-size:11px" type="button">Export</button>'
       + '<button class="btn-sm btn-danger pack-delete-btn" style="font-size:11px" type="button">Delete</button>'
       + '</span>'
@@ -57,11 +58,50 @@ function renderPackList(packs) {
     if (!row) return;
     var editBtn = row.querySelector('.pack-edit-btn');
     if (editBtn) editBtn.addEventListener('click', function () { openPackEditor(p.name); });
+    var refreshBtn = row.querySelector('.pack-refresh-btn');
+    if (refreshBtn) refreshBtn.addEventListener('click', function () { refreshPack(p.name); });
     var exportBtn = row.querySelector('.pack-export-btn');
     if (exportBtn) exportBtn.addEventListener('click', function () { quickExportPack(p.name); });
     var deleteBtn = row.querySelector('.pack-delete-btn');
     if (deleteBtn) deleteBtn.addEventListener('click', function () { deletePack(p.name); });
   });
+}
+
+/* Reindex a pack's stale members (files changed on disk since last indexed, or deleted).
+   POST /api/packs/:name/refresh starts a background job (subscribed via the existing global
+   `subscribeJob`, same as every other job-starting action) unless nothing is stale, in which
+   case it responds synchronously with { stale_files: 0 } and no job_id. Security note: no pack
+   name is ever written into an HTML attribute here — same stored-XSS guard as the rest of this
+   file — `name` only ever reaches fetch()'s URL (encodeURIComponent'd) and toast() text. */
+function refreshPack(name) {  // eslint-disable-line no-unused-vars
+  fetch('/api/packs/' + encodeURIComponent(name) + '/refresh', { method: 'POST' })
+    .then(function (r) {
+      if (r.status === 429) {
+        return r.json().then(function (d) {
+          throw new Error(d.error || 'Another job is already running — try again shortly.');
+        });
+      }
+      if (!r.ok) {
+        return r.json().then(function (d) { throw new Error(d.error || 'Refresh failed.'); });
+      }
+      return r.json();
+    })
+    .then(function (d) {
+      if (d.job_id) {
+        subscribeJob(d.job_id, name, 'pack_refresh');
+        if (typeof toast === 'function') {
+          toast('Refreshing pack “' + name + '”…', 'info', {
+            label: 'Watch progress',
+            onClick: function () { if (typeof switchTab === 'function') switchTab('jobs'); },
+          });
+        }
+      } else if (typeof toast === 'function') {
+        toast('Pack “' + name + '” has no stale files.', 'info');
+      }
+    })
+    .catch(function (e) {
+      if (typeof toast === 'function') toast('Pack refresh failed: ' + e.message, 'error');
+    });
 }
 
 function createPack() {  // eslint-disable-line no-unused-vars

@@ -8,7 +8,7 @@ use anyhow::Result;
 ///
 /// **INVARIANT: bump this whenever the DDL or any migration in `init_schema` changes** — otherwise a
 /// DB stamped at the old value would skip the new migration and silently miss a column/table.
-pub(super) const SCHEMA_VERSION: i64 = 6;
+pub(super) const SCHEMA_VERSION: i64 = 7;
 
 /// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
 /// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
@@ -38,6 +38,17 @@ fn edges_allows_calls(conn: &rusqlite::Connection) -> bool {
 fn edges_allows_heritage(conn: &rusqlite::Connection) -> bool {
     conn.query_row(
         "SELECT sql LIKE '%''extends''%' FROM sqlite_master WHERE type='table' AND name='edges'",
+        [],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(true)
+}
+
+/// Does the `pack_events` table's CHECK constraint already allow `'refreshed'` (G2b, `pack
+/// refresh`)? Returns `true` when the table is absent (fresh DB) — DDL below already includes it.
+fn pack_events_allows_refreshed(conn: &rusqlite::Connection) -> bool {
+    conn.query_row(
+        "SELECT sql LIKE '%''refreshed''%' FROM sqlite_master WHERE type='table' AND name='pack_events'",
         [],
         |r| r.get::<_, bool>(0),
     )
@@ -317,7 +328,7 @@ impl Store {
                 id      INTEGER PRIMARY KEY AUTOINCREMENT,
                 pack_id TEXT NOT NULL REFERENCES packs(id) ON DELETE CASCADE,
                 event   TEXT NOT NULL
-                            CHECK(event IN ('created','path_added','path_removed','renamed','exported')),
+                            CHECK(event IN ('created','path_added','path_removed','renamed','exported','refreshed')),
                 detail  TEXT,
                 at      INTEGER NOT NULL DEFAULT (unixepoch())
             );
@@ -648,6 +659,37 @@ impl Store {
                     DROP TABLE edges;
                     ALTER TABLE edges_new RENAME TO edges;
                     CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(kind, to_ref);
+                    ",
+                )?;
+            }
+            tx.commit()?;
+        }
+
+        // Migration: widen the pack_events.event CHECK to include 'refreshed' (G2b, `pack
+        // refresh`). SQLite can't ALTER a constraint, so recreate the table when the old DDL is
+        // detected. Same copy-table pattern as the edges CHECK-widening migrations above.
+        if !pack_events_allows_refreshed(&self.conn) {
+            let tx = self
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if !pack_events_allows_refreshed(&tx) {
+                tx.execute_batch(
+                    "
+                    CREATE TABLE pack_events_new (
+                        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                        pack_id TEXT NOT NULL REFERENCES packs(id) ON DELETE CASCADE,
+                        event   TEXT NOT NULL
+                                    CHECK(event IN ('created','path_added','path_removed','renamed','exported','refreshed')),
+                        detail  TEXT,
+                        at      INTEGER NOT NULL DEFAULT (unixepoch())
+                    );
+                    -- Explicit columns, plain INSERT (like the edges migrations above): every
+                    -- legacy row is valid under the wider CHECK, so this can't collide.
+                    INSERT INTO pack_events_new (id, pack_id, event, detail, at)
+                        SELECT id, pack_id, event, detail, at FROM pack_events;
+                    DROP TABLE pack_events;
+                    ALTER TABLE pack_events_new RENAME TO pack_events;
+                    CREATE INDEX IF NOT EXISTS idx_pack_events_pack ON pack_events(pack_id, at);
                     ",
                 )?;
             }
