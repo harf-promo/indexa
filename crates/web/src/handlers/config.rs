@@ -258,12 +258,29 @@ fn caption_budget_warning(
     })
 }
 
-/// Persist advanced feature toggles. Ungated — no secrets involved. Only supplied
-/// fields are written; every other config section is preserved by the round-trip.
+/// Persist advanced feature toggles. Mostly ungated — no secrets involved for
+/// ann/image/video captioning or the audio-transcribe toggle itself. `audio_binary` is
+/// the one exception (H7): unlike `pdf.ocr_binary`/`video.ffmpeg_binary`, which have no
+/// web setter at all, this field names an executable path the indexer later spawns
+/// (`Command::new(binary)`, fixed args, no shell — but still program selection, not
+/// just endpoint selection). Gated behind `INDEXA_WEB_ALLOW_KEY_EDIT=1` like
+/// `api_config_provider_set`, so a LAN-shared token alone can't repoint it.
+///
+/// Gated on CHANGE, not presence: the Features panel always resends every field on
+/// Save (including the unmodified current `audio_binary`), so gating on
+/// `body.audio_binary.is_some()` alone would lock a caller out of every other,
+/// non-sensitive toggle the moment a binary path was ever configured — a no-op resend
+/// of the already-stored value is not a repoint attempt and must not require the gate.
+/// Only supplied fields are written; every other config section is preserved by the
+/// round-trip.
 pub(crate) async fn api_config_features_set(
     State(state): State<AppState>,
     Json(body): Json<FeaturesRequest>,
 ) -> Response {
+    let audio_binary_changed = matches!(&body.audio_binary, Some(v) if Some(v) != state.config.parsers.audio.binary.as_ref());
+    if audio_binary_changed && std::env::var("INDEXA_WEB_ALLOW_KEY_EDIT").as_deref() != Ok("1") {
+        return err_json(StatusCode::FORBIDDEN, "INDEXA_WEB_ALLOW_KEY_EDIT not set");
+    }
     let cfg_path = config::default_config_path();
     let mut cfg = match config::load(&cfg_path) {
         Ok(c) => c,

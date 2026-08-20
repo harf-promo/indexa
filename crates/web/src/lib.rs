@@ -956,6 +956,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_config_features_audio_binary_change_is_forbidden_without_env_gate() {
+        // H7: audio_binary names an executable path the indexer later spawns. Setting a
+        // NEW value must be gated the same as api_keys/api_config_provider_set. CI leaves
+        // INDEXA_WEB_ALLOW_KEY_EDIT unset and no test in this binary sets it, so the
+        // closed-gate path is deterministic (same convention as api_keys_post_is_forbidden…
+        // above).
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let (status, json) = post_json(
+            app,
+            "/api/config/features",
+            serde_json::json!({ "audio_binary": "/usr/bin/whisper-cli" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("INDEXA_WEB_ALLOW_KEY_EDIT"));
+    }
+
+    #[tokio::test]
+    async fn api_config_features_resending_unchanged_audio_binary_is_not_gated() {
+        // The Features panel always resends every field on Save, including the current
+        // audio_binary — gating on presence alone would lock a caller out of every other,
+        // non-sensitive toggle (ann, captioning, …) the instant a binary path was ever
+        // configured. Gating on CHANGE means a no-op resend of the already-stored value
+        // must succeed with no env var set, and the unrelated field change must land.
+        let mut cfg = indexa_core::config::Config::default();
+        cfg.parsers.audio.binary = Some("/usr/bin/whisper-cli".to_owned());
+        let mut state = state_with(Store::open_in_memory().unwrap());
+        state.config = std::sync::Arc::new(cfg);
+        let app = build_router(state, 7620);
+        let (status, json) = post_json(
+            app,
+            "/api/config/features",
+            serde_json::json!({
+                "audio_binary": "/usr/bin/whisper-cli",
+                "audio_transcribe": true,
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "no-op resend must not be gated: {json}"
+        );
+    }
+
+    #[tokio::test]
     async fn api_packs_export_redacts_secrets() {
         // Regression guard: the pack export route must scrub secrets before content
         // leaves the machine over HTTP — the same invariant the whole-tree export,
