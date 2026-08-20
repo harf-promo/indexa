@@ -165,6 +165,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CLI log filter had no per-crate targeting and silently ignored `RUST_LOG`'s global level.**
+  `apps/indexa/src/main.rs` built its `EnvFilter` via `from_default_env().add_directive(INFO)`;
+  the target-less `INFO` directive always overwrote whatever global level `RUST_LOG` set, so
+  `RUST_LOG=debug` or `RUST_LOG=warn` silently became `info` regardless (verified: a `debug!`
+  event was dropped under `RUST_LOG=debug`, and an `info!` event leaked through under
+  `RUST_LOG=warn`). Same construction also gave `pdf_extract`/`lopdf` — both pulled in
+  transitively for PDF text extraction — no way to be quieted: their `log::warn!` diagnostics
+  (non-core-font substitution, trailer-dictionary `/Size` mismatches) are common on real-world
+  PDFs and flooded the one log file AGENTS.md and the desktop app both point users at for
+  diagnostics. Switched to `try_from_default_env()` with a
+  `"info,pdf_extract=error,lopdf=error"` fallback, so `RUST_LOG` now actually controls the
+  global level and the two noisy crates are pre-silenced by default. (Investigated but did not
+  find the reported `from_default_env()`-panics-on-malformed-`RUST_LOG` crash path — the pinned
+  `tracing-subscriber` 0.3.23 makes `from_default_env()` lossy, not panicking; see the PR
+  description for the reproduction.)
 - **A preprocessor hook could hang indexing forever.** `run_command`'s stdin write ran on the
   calling thread *before* the stdout-reader thread was spawned — once a child's stdout pipe
   filled (~64 KB) it stopped reading stdin, and once stdin filled the parent blocked in
