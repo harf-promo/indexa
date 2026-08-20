@@ -8,6 +8,7 @@ use indexa_query::{
     render_markdown, render_xml,
 };
 
+use super::cmd_deep;
 use super::helpers::{
     build_embedder, expand, finalize_export, index_db_path, now_unix, require_index_db, ExportSink,
 };
@@ -239,6 +240,113 @@ pub(crate) async fn cmd_pack_show(name: String) -> Result<()> {
     for p in &paths {
         println!("  {p}");
     }
+    // Freshness: indexed member files whose stored chunks are out of date with the disk
+    // (edited without a rescan, or deleted). Best-effort — a stat failure must not fail the show.
+    let stale = store.stale_pack_paths(&pack.id).unwrap_or_default();
+    if !stale.is_empty() {
+        println!(
+            "\n{} indexed file{} stale — chunk content only, changed or removed since last \
+             index — refresh with: indexa pack refresh \"{name}\"",
+            stale.len(),
+            if stale.len() == 1 { " is" } else { "s are" },
+        );
+    }
+    Ok(())
+}
+
+/// Reindex a pack's stale members (files changed on disk since last indexed). Unlike the
+/// fail-open freshness check `pack show`/`pack export` use, a `stale_pack_paths` error here
+/// propagates — refresh's whole job is to report accurately, so silently showing 0 would mislead.
+pub(crate) async fn cmd_pack_refresh(name: String, cfg: &Config) -> Result<()> {
+    let Some(db_path) = require_index_db()? else {
+        return Ok(());
+    };
+    cmd_pack_refresh_at(&db_path, name, cfg).await
+}
+
+/// `cmd_pack_refresh` with the DB path injected (rather than resolved via `require_index_db`),
+/// so it's hermetically testable — mirrors `resolve_target_roots_in`'s testability pattern.
+///
+/// Design decision (flag-for-review, not auto-remove): a stale member whose file has vanished
+/// from disk entirely is left in `pack_paths` rather than silently dropped — mirroring
+/// `decisions::expire_vanished_decisions`'s expire-don't-delete precedent for the review ledger.
+/// It stays flagged (still reported by `stale_pack_paths` on the next call) until the user
+/// explicitly runs `indexa pack remove`. This is safe to do unconditionally because `walk()`
+/// (crates/core/src/walker.rs) is fail-open on an unreadable/missing root — `Err(_) =>
+/// WalkState::Continue` — so handing `cmd_deep` a path that no longer exists just yields zero
+/// entries for that root instead of aborting the whole reindex.
+///
+/// Chunk-level only, same caveat as `stale_pack_paths`: this brings chunk content current but
+/// does not touch prose summaries — if a summary also needs updating, a separate `indexa
+/// summarize <path>` is still required.
+pub(crate) async fn cmd_pack_refresh_at(
+    db_path: &std::path::Path,
+    name: String,
+    cfg: &Config,
+) -> Result<()> {
+    let mut store = Store::open(db_path)?;
+    let pack = store
+        .pack_by_name(&name)?
+        .ok_or_else(|| anyhow::anyhow!("no pack named \"{name}\""))?;
+    let stale = store.stale_pack_paths(&pack.id)?;
+    if stale.is_empty() {
+        println!("Pack \"{name}\" has no stale files.");
+        return Ok(());
+    }
+
+    // Partition into what's still on disk (reindexable) vs. genuinely gone (flagged, not
+    // removed — see the design-decision doc comment above).
+    let (existing, missing): (Vec<String>, Vec<String>) = stale
+        .iter()
+        .cloned()
+        .partition(|p| std::path::Path::new(p).exists());
+
+    if !missing.is_empty() {
+        println!(
+            "{} member file{} no longer exist on disk — left flagged in the pack \
+             (remove with: indexa pack remove \"{name}\" <path>):",
+            missing.len(),
+            if missing.len() == 1 { "" } else { "s" }
+        );
+        for m in &missing {
+            println!("  \u{26a0} {m}");
+        }
+    }
+
+    let detail = format!(
+        "{} reindexed, {} vanished (left flagged)",
+        existing.len(),
+        missing.len()
+    );
+    if let Err(e) = store.record_pack_refreshed(&pack.id, &detail) {
+        tracing::debug!("pack event (refreshed) not recorded: {e:#}");
+    }
+
+    if existing.is_empty() {
+        println!("Nothing left to reindex in pack \"{name}\".");
+        return Ok(());
+    }
+
+    println!(
+        "Refreshing {} stale file{} in pack \"{name}\"…",
+        existing.len(),
+        if existing.len() == 1 { "" } else { "s" }
+    );
+    // Release the connection before `cmd_deep` opens its own.
+    drop(store);
+    // Each stale path is passed as its own root: `cmd_deep`/`walk()` (ignore::WalkBuilder) already
+    // handle a bare file root correctly, so this reindexes exactly the stale files — no rescan of
+    // the rest of the pack. `mode: None` defers to the configured `[describer] mode` (same as
+    // every other caller that has no dedicated `--mode` flag of its own — forcing a mode here
+    // would silently override the user's config). `no_embed: false` so embeddings are actually
+    // brought current — that's the whole point of refresh. Folder-rollup summaries still need a
+    // follow-up `indexa summarize`/worker pass, exactly as the hint text above and `pack show`'s
+    // says (chunk-level only, see this function's doc comment).
+    cmd_deep(existing, None, false, None, false, false, false, cfg).await?;
+    println!(
+        "Pack \"{name}\" refreshed (chunk index only — if a summary/description also needs \
+         updating, run `indexa summarize <path>`)."
+    );
     Ok(())
 }
 
@@ -267,7 +375,51 @@ pub(crate) async fn cmd_pack_export(
     if !db_path.exists() {
         bail!("No index found. Run `indexa index <path>` first.");
     }
-    let mut store = Store::open(&db_path)?;
+    cmd_pack_export_at(
+        &db_path,
+        name,
+        format,
+        output,
+        out,
+        depth,
+        include_weights,
+        include_graph,
+        graph_format,
+        signatures,
+        token_budget,
+        strict_budget,
+        clipboard,
+        strip_comments,
+        no_redact,
+        changed_since,
+        category,
+    )
+    .await
+}
+
+/// `cmd_pack_export` with the DB path injected, so it's hermetically testable — mirrors
+/// `resolve_target_roots_in`'s testability pattern.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn cmd_pack_export_at(
+    db_path: &std::path::Path,
+    name: String,
+    format: String,
+    output: Option<String>,
+    out: Option<String>,
+    depth: Option<usize>,
+    include_weights: bool,
+    include_graph: bool,
+    graph_format: String,
+    signatures: bool,
+    token_budget: Option<usize>,
+    strict_budget: bool,
+    clipboard: bool,
+    strip_comments: bool,
+    no_redact: bool,
+    changed_since: Option<String>,
+    category: Option<String>,
+) -> Result<()> {
+    let mut store = Store::open(db_path)?;
     let pack = store
         .pack_by_name(&name)?
         .ok_or_else(|| anyhow::anyhow!("no pack named \"{name}\""))?;
@@ -341,10 +493,16 @@ pub(crate) async fn cmd_pack_export(
 
     // XML: wrap all roots in a single <context> element for a self-contained file
     if is_xml {
+        // Freshness (G2b): same best-effort stat check `pack show` surfaces (a stat error must
+        // not fail an export that worked before) — confined to the XML path so md/json exports
+        // (which have no wrapping header to hang the attribute off) don't pay the stat sweep.
+        let stale_count = store.stale_pack_paths(&pack.id).unwrap_or_default().len();
         out_buf.push_str("<context pack=\"");
         out_buf.push_str(&indexa_core::text::xml_escape_attr(&name));
         out_buf.push_str("\" generated=\"");
         out_buf.push_str(&now);
+        out_buf.push_str("\" stale_files=\"");
+        out_buf.push_str(&stale_count.to_string());
         out_buf.push_str("\">\n");
     }
 
@@ -891,5 +1049,176 @@ mod tests {
             vec!["/root".to_owned()],
             "only the is_root item must be imported as a pack_path"
         );
+    }
+
+    // ── G2a/G2b: staleness + refresh + export stale_files ───────────────────────
+
+    use indexa_core::store::ChunkRecord;
+
+    /// A chunk with an embedding present (so it counts toward `chunks_current_for_mtime`) and a
+    /// non-null `language` (so `code_chunks_under`, the `--signatures` export path, picks it up).
+    fn dummy_chunk_embedded(path: &str, text: &str) -> ChunkRecord {
+        ChunkRecord {
+            entry_path: path.to_owned(),
+            seq: 0,
+            heading: String::new(),
+            text: text.to_owned(),
+            language: Some("rust".to_owned()),
+            embedding: Some(vec![0.1, 0.2, 0.3]),
+            embed_model: Some("test".to_owned()),
+            content_hash: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn export_header_reports_stale_files_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.rs");
+        std::fs::write(&file, b"fn foo() {}").unwrap();
+        let file_s = file.to_string_lossy().to_string();
+
+        let db_path = dir.path().join("idx.db");
+        let mut store = Store::open(&db_path).unwrap();
+        store
+            .upsert_chunks(&[dummy_chunk_embedded(&file_s, "fn foo() {}")])
+            .unwrap();
+        // Pin indexed_at to the epoch — long before the file's real mtime — so it reads stale
+        // (mirrors `stale_pack_paths_flags_out_of_date_and_missing_members` in indexa-core).
+        store
+            .db_connection()
+            .execute(
+                "UPDATE chunks SET indexed_at = 1 WHERE entry_path = ?1",
+                rusqlite::params![file_s],
+            )
+            .unwrap();
+        let pack_id = store.create_pack("code", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, std::slice::from_ref(&file_s))
+            .unwrap();
+        drop(store);
+
+        let out_path = dir.path().join("out.xml");
+        cmd_pack_export_at(
+            &db_path,
+            "code".to_string(),
+            "xml".to_string(),
+            Some(out_path.to_string_lossy().to_string()),
+            None,
+            None,
+            false,
+            false,
+            "text".to_string(),
+            true, // signatures — reads chunks directly, no summary fixture needed
+            None,
+            false,
+            false,
+            false,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let xml = std::fs::read_to_string(&out_path).unwrap();
+        assert!(
+            xml.contains("stale_files=\"1\""),
+            "expected stale_files=\"1\" in the export header, got: {xml}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_reports_no_stale_files_without_reindexing() {
+        // A pack whose only member is current (fresh mtime, freshly-indexed chunk) has nothing
+        // stale — refresh must report that and return WITHOUT calling `cmd_deep` (which would
+        // need a reachable Ollama in a real run).
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("b.rs");
+        std::fs::write(&file, b"fn bar() {}").unwrap();
+        let file_s = file.to_string_lossy().to_string();
+
+        let db_path = dir.path().join("idx.db");
+        let mut store = Store::open(&db_path).unwrap();
+        store
+            .upsert_chunks(&[dummy_chunk_embedded(&file_s, "fn bar() {}")])
+            .unwrap();
+        // Pin indexed_at far in the future — current relative to the file's real mtime.
+        store
+            .db_connection()
+            .execute(
+                "UPDATE chunks SET indexed_at = 4102444800 WHERE entry_path = ?1",
+                rusqlite::params![file_s],
+            )
+            .unwrap();
+        let pack_id = store.create_pack("clean", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, std::slice::from_ref(&file_s))
+            .unwrap();
+        drop(store);
+
+        let cfg = Config::default();
+        // No stale files ⇒ returns Ok before ever touching `cmd_deep`/Ollama — this call would
+        // hang/fail on the preflight if the "no stale" early return didn't fire first.
+        cmd_pack_refresh_at(&db_path, "clean".to_string(), &cfg)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_flags_a_vanished_member_without_removing_it_from_the_pack() {
+        // The only stale member has been deleted from disk entirely — `existing` (reindexable)
+        // is empty, so refresh must hit the "nothing left to reindex" early return WITHOUT
+        // calling `cmd_deep`/Ollama, AND must leave the path in `pack_paths` (flag, don't
+        // auto-remove — mirrors `decisions::expire_vanished_decisions`).
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("gone.rs");
+        std::fs::write(&file, b"fn gone() {}").unwrap();
+        let file_s = file.to_string_lossy().to_string();
+
+        let db_path = dir.path().join("idx.db");
+        let mut store = Store::open(&db_path).unwrap();
+        store
+            .upsert_chunks(&[dummy_chunk_embedded(&file_s, "fn gone() {}")])
+            .unwrap();
+        let pack_id = store.create_pack("vanish", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, std::slice::from_ref(&file_s))
+            .unwrap();
+        drop(store);
+
+        // Delete the file AFTER it was indexed — it can no longer be stat'd, so
+        // `stale_pack_paths` flags it and `refresh` cannot reindex it.
+        std::fs::remove_file(&file).unwrap();
+
+        let cfg = Config::default();
+        cmd_pack_refresh_at(&db_path, "vanish".to_string(), &cfg)
+            .await
+            .unwrap();
+
+        let store = Store::open(&db_path).unwrap();
+        let pack = store.pack_by_name("vanish").unwrap().unwrap();
+        assert_eq!(
+            store.pack_paths(&pack.id).unwrap(),
+            vec![file_s.clone()],
+            "a vanished member must stay in the pack, not be silently removed"
+        );
+        assert_eq!(
+            store.stale_pack_paths(&pack.id).unwrap(),
+            vec![file_s],
+            "it must still read as stale on the next check"
+        );
+        let events = store.pack_events(&pack.id).unwrap();
+        assert_eq!(
+            events.last().unwrap().event,
+            "refreshed",
+            "the refresh attempt is recorded even though nothing was reindexed"
+        );
+        assert!(events
+            .last()
+            .unwrap()
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("1 vanished"));
     }
 }

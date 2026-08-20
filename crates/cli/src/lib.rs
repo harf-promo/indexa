@@ -1030,6 +1030,16 @@ pub enum PackAction {
         /// Pack name.
         name: String,
     },
+    /// Reindex a pack's stale members — files changed on disk since they were last indexed, or
+    /// deleted. A vanished member is left flagged in the pack (not removed) so it keeps showing
+    /// as stale until you explicitly `pack remove` it. Chunk content only; if a summary/
+    /// description also needs updating, follow up with `indexa summarize <path>`.
+    #[command(after_help = "Examples:
+  indexa pack refresh \"Auth\"")]
+    Refresh {
+        /// Pack name.
+        name: String,
+    },
     /// Export a pack as XML, Markdown, JSON, or an OKF bundle — ready to paste into any AI
     /// tool, or (OKF) to hand to any OKF-aware tool (Obsidian, Knowledge Catalog, ...).
     #[command(after_help = "Examples:

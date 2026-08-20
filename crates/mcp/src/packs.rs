@@ -442,10 +442,16 @@ pub(crate) fn export_pack_body(
     let is_xml = format != "md" && format != "markdown" && format != "json";
     let mut buf = String::new();
     if is_xml {
+        // Freshness (G2b): same best-effort stat check the CLI/web export surfaces use (a stat
+        // error must not fail an export that worked before) — confined to the XML path so
+        // md/json exports (no wrapping header to hang the attribute off) don't pay the sweep.
+        let stale_count = store.stale_pack_paths(&pack.id).unwrap_or_default().len();
         buf.push_str("<context pack=\"");
         buf.push_str(&indexa_core::text::xml_escape_attr(name));
         buf.push_str("\" generated=\"");
         buf.push_str(&now);
+        buf.push_str("\" stale_files=\"");
+        buf.push_str(&stale_count.to_string());
         buf.push_str("\">\n");
     }
 
