@@ -1018,9 +1018,12 @@ async fn agentic_runs_a_second_hop_and_merges_context() {
     ]);
     let gen_calls = Arc::new(AtomicUsize::new(0));
     // Single-word follow-up ("beta") so it matches chunk B regardless of whether
-    // the BM25 layer treats a multi-word query as a phrase or an AND.
+    // the BM25 layer treats a multi-word query as a phrase or an AND. `rerank` stays at
+    // its QaConfig::default() (true), so this also exercises rerank on a genuinely
+    // MERGED (multi-hop) pool, not just a single-hop one — "1,2" is an identity
+    // ranking for the 2-candidate pool, so it doesn't disturb the merge assertions below.
     let llm = ScriptedGen::new(
-        &["SEARCH: beta", "DONE", "Both covered [1][2]."],
+        &["SEARCH: beta", "DONE", "1,2", "Both covered [1][2]."],
         gen_calls.clone(),
     );
     let embedder = CountingEmbedder {
@@ -1046,8 +1049,8 @@ async fn agentic_runs_a_second_hop_and_merges_context() {
         2,
         "both hops' chunks merged into the pool"
     );
-    // decide#1 + decide#2 + synthesis = 3 generations.
-    assert_eq!(gen_calls.load(Ordering::SeqCst), 3);
+    // decide#1 + decide#2 + rerank(merged 2-hop pool) + synthesis = 4 generations.
+    assert_eq!(gen_calls.load(Ordering::SeqCst), 4);
 }
 
 #[tokio::test]
@@ -1098,9 +1101,13 @@ async fn agentic_stream_emits_steps_before_sources_and_answer() {
     let embedder = CountingEmbedder {
         calls: Arc::new(AtomicUsize::new(0)),
     };
+    // Rerank off — this test is about streaming event order, not reranking (see
+    // `agentic_pool_is_reranked_before_synthesis` for that); with 2 pooled hits a rerank
+    // pass would otherwise consume one of the three scripted replies.
     let cfg = QaConfig {
         mode: HybridMode::Sparse,
         max_steps: 3,
+        rerank: false,
         ..QaConfig::default()
     };
 
@@ -1138,6 +1145,110 @@ async fn agentic_stream_emits_steps_before_sources_and_answer() {
     assert_eq!(order[first_answer], "sources");
 }
 
+/// Generator whose reply depends on which prompt it's fed: the listwise rerank prompt
+/// (built by `LlmReranker` — identifiable by its trailing "Ranking (comma-separated
+/// numbers):" line) always gets reversed for a 2-candidate pool, regardless of what
+/// order the pool arrived in; any other prompt (decide/synthesis) gets a fixed reply.
+/// This lets the test prove reordering happened without needing to know the merged
+/// pool's pre-rerank order in advance.
+struct ReverseRerankGen {
+    rerank_calls: Arc<AtomicUsize>,
+    synth_reply: String,
+}
+#[async_trait::async_trait]
+impl Generator for ReverseRerankGen {
+    async fn generate(&self, prompt: &str) -> Result<String> {
+        if prompt.contains("Ranking (comma-separated numbers):") {
+            self.rerank_calls.fetch_add(1, Ordering::SeqCst);
+            Ok("2,1".to_owned())
+        } else {
+            Ok(self.synth_reply.clone())
+        }
+    }
+}
+
+/// Bug fix: the agentic loop previously only sorted its merged pool by fused RRF score
+/// and never called `apply_configured_rerank` at all — the one-shot path reranked, the
+/// agentic path silently didn't. Prove the merged pool now goes through reranking by
+/// comparing citation order with rerank off (baseline) against rerank on with a
+/// generator that deterministically reverses a 2-candidate list.
+#[tokio::test]
+async fn agentic_pool_is_reranked_before_synthesis() {
+    let (_d, path) = temp_index_with_chunks(&[
+        ("/a.md", "alpha content about widgets"),
+        ("/b.md", "beta content about widgets"),
+    ]);
+    let embedder = CountingEmbedder {
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+
+    // Baseline: rerank OFF — citation order is whatever the merged pool's RRF sort produced.
+    let base_cfg = QaConfig {
+        mode: HybridMode::Sparse,
+        max_steps: 1,
+        rerank: false,
+        ..QaConfig::default()
+    };
+    let base_llm = CountingGen {
+        calls: Arc::new(AtomicUsize::new(0)),
+        reply: "Baseline [1][2].".to_owned(),
+    };
+    let baseline = answer_agentic(
+        &path,
+        &embedder,
+        &base_llm,
+        "widgets",
+        &base_cfg,
+        &mut |_, _| {},
+    )
+    .await
+    .unwrap();
+    let baseline_order: Vec<String> = baseline.sources.iter().map(|s| s.path.clone()).collect();
+    assert_eq!(
+        baseline_order.len(),
+        2,
+        "both chunks must be pooled: {baseline_order:?}"
+    );
+
+    // Reranked: same two-chunk pool, but cfg.rerank = true (the default) with a reranker
+    // that always reverses a 2-candidate list.
+    let rerank_calls = Arc::new(AtomicUsize::new(0));
+    let rerank_llm = ReverseRerankGen {
+        rerank_calls: rerank_calls.clone(),
+        synth_reply: "Reranked [1][2].".to_owned(),
+    };
+    let reranked_cfg = QaConfig {
+        mode: HybridMode::Sparse,
+        max_steps: 1,
+        rerank: true,
+        rerank_backend: "llm".to_owned(),
+        ..QaConfig::default()
+    };
+    let reranked = answer_agentic(
+        &path,
+        &embedder,
+        &rerank_llm,
+        "widgets",
+        &reranked_cfg,
+        &mut |_, _| {},
+    )
+    .await
+    .unwrap();
+    let reranked_order: Vec<String> = reranked.sources.iter().map(|s| s.path.clone()).collect();
+
+    assert_eq!(
+        rerank_calls.load(Ordering::SeqCst),
+        1,
+        "the agentic merged pool must be sent through apply_configured_rerank exactly once"
+    );
+    assert_eq!(
+        reranked_order,
+        vec![baseline_order[1].clone(), baseline_order[0].clone()],
+        "rerank must visibly reorder the merged agentic pool: got {reranked_order:?}, \
+         baseline {baseline_order:?}"
+    );
+}
+
 // ── Phase 2: whole-project synthesis helpers ──────────────────────────────
 
 #[test]
@@ -1159,6 +1270,104 @@ fn is_broad_intent_recognises_project_level_questions() {
     assert!(!is_broad_intent("where is the qa.rs file?"));
     assert!(!is_broad_intent("how do I run the tests?"));
     assert!(!is_broad_intent("what is 2+2"));
+}
+
+/// Bug fix: the intent-detection gates in `retrieve_and_rerank` (the `want_clusters` flag and
+/// the overview-budget split) used to key off the raw follow-up `question` instead of the
+/// conversation-rewritten `search_query` retrieval actually searched with — so a follow-up
+/// like "what about it" (not broad on its own) got the narrow 300-byte overview budget even
+/// when the rewrite resolved it to an obviously broad standalone query. Prove the fix by
+/// observing the overview budget actually applied: a long dir summary carries a marker placed
+/// past the 300-byte cutoff but well inside the ~35%-of-context_budget cutoff, so it survives
+/// into the packed context only when the BROAD (rewritten) budget won.
+#[tokio::test]
+async fn intent_gates_use_the_rewritten_query_not_the_raw_follow_up() {
+    // Sanity: the premise this test relies on — the raw follow-up doesn't itself read as
+    // broad, but the rewrite it resolves to does.
+    assert!(!is_broad_intent("what about it"));
+    assert!(is_broad_intent("what is this project about"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.db");
+    let mut store = Store::open(&path).unwrap();
+    store
+        .upsert_chunks(&[ChunkRecord {
+            entry_path: "/project/notes.md".to_owned(),
+            seq: 0,
+            heading: String::new(),
+            text: "notes explaining what is this project about, covering widgets in detail"
+                .to_owned(),
+            language: None,
+            embedding: None,
+            embed_model: None,
+            content_hash: None,
+        }])
+        .unwrap();
+    // Marker sits ~500 bytes into the dir summary: excluded under the narrow 300-byte budget
+    // (the old bug's outcome, since the raw follow-up isn't broad), included under the
+    // ~2800-byte (35% of the default 8000 context_budget) broad budget.
+    let long_summary = format!(
+        "{} MARKER_PAST_300_BYTES {}",
+        "A".repeat(500),
+        "B".repeat(50)
+    );
+    store
+        .upsert_summary(&indexa_core::store::SummaryRecord {
+            path: "/project".to_owned(),
+            kind: "dir".to_owned(),
+            parent_path: None,
+            depth: 0,
+            summary: long_summary,
+            summary_l0: None,
+            embedding: None,
+            child_count: 0,
+            byte_size: 0,
+            model: "test".to_owned(),
+            source_hash: "hash".to_owned(),
+            generated_at: 0,
+        })
+        .unwrap();
+
+    let embedder = CountingEmbedder {
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    // One scripted reply: the conversation rewrite. Nothing else calls generate() on the
+    // answer_retrieval_only path (no synthesis; rerank is off here).
+    let rewrite_calls = Arc::new(AtomicUsize::new(0));
+    let llm = ScriptedGen::new(&["what is this project about"], rewrite_calls.clone());
+    let cfg = QaConfig {
+        mode: HybridMode::Sparse,
+        rerank: false,
+        ..QaConfig::default()
+    };
+    let history = vec![turn(
+        "Tell me about the codebase.",
+        "It's a project with several components.",
+    )];
+
+    let ans = answer_retrieval_only_history(
+        &path,
+        &embedder,
+        &llm,
+        "what about it", // raw follow-up — NOT broad on its own
+        &cfg,
+        None,
+        &history,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        rewrite_calls.load(Ordering::SeqCst),
+        1,
+        "exactly one LLM call: the conversation rewrite"
+    );
+    assert!(
+        ans.answer.contains("MARKER_PAST_300_BYTES"),
+        "the overview budget must be gated on the rewritten (broad) search_query, not the raw \
+         follow-up — a missing marker means the narrow 300-byte budget won: {:?}",
+        &ans.answer[..ans.answer.len().min(400)]
+    );
 }
 
 #[test]

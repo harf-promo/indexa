@@ -377,7 +377,11 @@ async fn retrieve_and_rerank(
 
     // GraphRAG clustering is gated like the per-file cap: only broad, unscoped questions, and only
     // when enabled. Focused/scoped asks are byte-identical to today (clusters stays empty).
-    let want_clusters = cfg.graphrag_clusters && cfg.scope.is_none() && is_broad_intent(question);
+    // Gated on `search_query` (the conversation-rewritten form), not the raw follow-up — a
+    // follow-up like "what about it" only reads as broad once resolved to something like
+    // "what is this project about".
+    let want_clusters =
+        cfg.graphrag_clusters && cfg.scope.is_none() && is_broad_intent(&search_query);
 
     // 2. Retrieve + build project overview in a sync scope — `&Store` never crosses an await.
     //    Also fetch the chunk embeddings here (same open connection) when clustering wants them;
@@ -388,7 +392,9 @@ async fn retrieve_and_rerank(
         // Compute project-overview block while the store is still open.
         // Budget: broad questions get ~35% of context_budget (≤1400); specific → 300 chars
         // for just the root one-liner. Always subtracted FROM the chunk budget, never added.
-        let overview_budget = if is_broad_intent(question) {
+        // Gated on `search_query`, matching `want_clusters` above — the rewritten query is
+        // what retrieval actually searched for, so intent detection should see the same text.
+        let overview_budget = if is_broad_intent(&search_query) {
             cfg.context_budget * 35 / 100
         } else {
             300
