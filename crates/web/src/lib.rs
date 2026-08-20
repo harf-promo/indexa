@@ -339,6 +339,69 @@ pub async fn serve(
     Ok(())
 }
 
+// ── Security response headers ───────────────────────────────────────────────
+
+/// Defense-in-depth `Content-Security-Policy` for the embedded web UI, added by
+/// [`add_security_headers`] to every response.
+///
+/// The stored-XSS fix in this same change is source-level: the three real sinks
+/// (`13-classify.js`, `16-context-packs.js`, `17-weights.js` — see
+/// `fixed_xss_sink_fragments_build_no_onclick_attributes` below) no longer build
+/// `onclick="..."` HTML from untrusted filenames/pack names/weight targets at all, closure
+/// capture replaced string interpolation, so there's nothing left for a stricter
+/// `script-src` to catch there. This header is the second line of defense for if a similar
+/// bug is ever reintroduced elsewhere.
+///
+/// `script-src`/`style-src` still need `'unsafe-inline'`: dozens of *other*, unrelated UI
+/// fragments — and `index.html` itself (83+ occurrences) — use literal (non-interpolated)
+/// `onclick="..."` and `style="..."` attributes as an ordinary UI mechanism, not as an XSS
+/// sink. Dropping `'unsafe-inline'` would break navigation, every drawer, the command
+/// palette, and most buttons in the app; eliminating inline handlers repo-wide so
+/// `script-src` can go strict is real work, out of scope for this fix, and tracked as a
+/// follow-up in CHANGELOG.md. Even with `'unsafe-inline'` present, this policy still buys:
+/// no script/style/object/frame ever loaded from a third-party origin, no embedding of this
+/// page in someone else's frame, and no exfiltration of index contents to an
+/// attacker-controlled host over `connect-src`/`img-src` if a stored-XSS bug recurs.
+const CONTENT_SECURITY_POLICY_VALUE: &str = concat!(
+    "default-src 'self'; ",
+    "script-src 'self' 'unsafe-inline'; ",
+    "style-src 'self' 'unsafe-inline'; ",
+    "img-src 'self' data:; ",
+    "font-src 'self'; ",
+    "connect-src 'self'; ",
+    "object-src 'none'; ",
+    "base-uri 'self'; ",
+    "frame-ancestors 'none'; ",
+    "form-action 'self'",
+);
+
+/// Middleware layer: stamps every response with a `Content-Security-Policy` plus two cheap,
+/// zero-behavior-risk hardening headers. Applied inside [`build_router`] (not only in
+/// [`serve`]) so the test router built by `build_router` in `#[cfg(test)]` carries it too.
+async fn add_security_headers(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static(CONTENT_SECURITY_POLICY_VALUE),
+    );
+    // Blocks MIME-sniffing a response into executable content.
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    // Belt-and-suspenders alongside `frame-ancestors 'none'` above, for browsers that only
+    // honor the legacy header. The app is never framed anywhere (`grep -r iframe` is empty).
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        axum::http::HeaderValue::from_static("DENY"),
+    );
+    resp
+}
+
 /// Build the full axum router (all routes + layers) for the given app state.
 ///
 /// `port` is used only to lock the CORS allow-origin to `http://localhost:<port>`.
@@ -492,6 +555,7 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
                 ])
                 .allow_headers([header::CONTENT_TYPE]),
         )
+        .layer(axum::middleware::from_fn(add_security_headers))
 }
 
 #[cfg(test)]
@@ -579,6 +643,58 @@ mod tests {
                 "{sub} fragment(s) on disk but not include_str!'d into UI_{}: {missing:?}",
                 sub.to_uppercase()
             );
+        }
+    }
+
+    /// Regression guard for the stored-XSS sinks fixed in this change (Wave 0 of the review
+    /// sweep). These three fragments used to build `onclick="fn(" + JSON.stringify(untrusted)
+    /// + ")"` HTML strings from filenames, pack names, and weight targets and `innerHTML`
+    /// them into the live DOM — a payload as simple as a file literally named
+    /// `a"><img src=x onerror=...>` executed with full authenticated API access the moment
+    /// its summary was opened. The fix routes every one of those sinks through
+    /// `addEventListener` with the value captured in a closure instead, so none of these
+    /// fragments should build an `onclick="..."` HTML attribute any more.
+    ///
+    /// The one allowed exception is the pre-existing, unrelated idiom
+    /// `document.querySelector('button[onclick="literalFn()"]')` — locating a *static*
+    /// button already declared with a literal, non-interpolated onclick in `index.html`, not
+    /// a live sink — allowlisted per-line rather than dropped from the scan entirely.
+    #[test]
+    fn fixed_xss_sink_fragments_build_no_onclick_attributes() {
+        let fragments: &[(&str, &str)] = &[
+            (
+                "13-classify.js",
+                include_str!("../assets/ui/js/13-classify.js"),
+            ),
+            (
+                "16-context-packs.js",
+                include_str!("../assets/ui/js/16-context-packs.js"),
+            ),
+            (
+                "17-weights.js",
+                include_str!("../assets/ui/js/17-weights.js"),
+            ),
+        ];
+        for (name, src) in fragments {
+            for (i, line) in src.lines().enumerate() {
+                if !line.contains("onclick=\"") {
+                    continue;
+                }
+                // The one allowlisted idiom, matched by its exact substring rather than by
+                // "this line happens to also mention querySelector somewhere" — a future line
+                // that both looks up an element AND builds hostile HTML on the same line must
+                // still fail this check.
+                if line.contains("querySelector('button[onclick=\"") {
+                    continue;
+                }
+                panic!(
+                    "{name}:{}: re-introduced an onclick=\"...\" HTML attribute — route the \
+                     handler through addEventListener with the value captured in a closure \
+                     instead (this is exactly the stored-XSS pattern fixed in this file's git \
+                     history): {line}",
+                    i + 1
+                );
+            }
         }
     }
 
@@ -675,6 +791,27 @@ mod tests {
     }
 
     // ── Tests ────────────────────────────────────────────────────────────────────
+
+    /// The `Content-Security-Policy` header (added by `add_security_headers`, defense in
+    /// depth for the stored-XSS fix above) must actually reach responses served through the
+    /// real router, not just be defined and unwired.
+    #[tokio::test]
+    async fn root_response_carries_a_content_security_policy_header() {
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let csp = resp
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .expect("CSP header missing from the UI response")
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("default-src 'self'"));
+        assert!(csp.contains("object-src 'none'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+    }
 
     #[tokio::test]
     async fn api_stats_empty_store_is_zero() {
