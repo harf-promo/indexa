@@ -10,6 +10,7 @@
 
 use anyhow::{Context, Result};
 use indexa_core::config::SourcesConfig;
+use indexa_core::store::hex_digest;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -190,7 +191,7 @@ pub(crate) fn cache_source(
 ) -> Result<PathBuf> {
     let dir = data_dir.join("sources");
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let sha = format!("{:x}", Sha256::digest(url.as_bytes()));
+    let sha = hex_digest(Sha256::digest(url.as_bytes()));
     let slug = label.map(slugify).unwrap_or_else(|| slug_from_url(url));
     let path = dir.join(format!("{slug}-{}.md", &sha[..8]));
     let body = format!("<!-- indexa remote source: {url} -->\n\n{content}");

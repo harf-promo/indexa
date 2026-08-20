@@ -10,7 +10,9 @@
 
 use crate::config::ReviewConfig;
 use crate::pathutil::norm_sep;
-use crate::store::{abstract_from, DuplicateCluster, NewDecision, Store, SummaryRecord};
+use crate::store::{
+    abstract_from, hex_digest, DuplicateCluster, NewDecision, Store, SummaryRecord,
+};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
@@ -811,7 +813,7 @@ pub fn drift_fingerprint(source_hash: &str, model: &str) -> String {
     hasher.update(source_hash.as_bytes());
     hasher.update([0u8]);
     hasher.update(model.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex_digest(hasher.finalize())
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -870,7 +872,7 @@ fn language_fingerprint(lang: &str, n_chunks: i64) -> String {
     hasher.update(lang.as_bytes());
     hasher.update([0u8]);
     hasher.update(n_chunks.to_le_bytes());
-    format!("{:x}", hasher.finalize())
+    hex_digest(hasher.finalize())
 }
 
 /// Extension → language name for files that *should* be code. Mirrors the
@@ -961,7 +963,7 @@ fn symbol_fingerprint(definers: &[String]) -> String {
         hasher.update(p.as_bytes());
         hasher.update([0u8]);
     }
-    format!("{:x}", hasher.finalize())
+    hex_digest(hasher.finalize())
 }
 
 /// Archive evidence fingerprint: staleness bucketed to [`ARCHIVE_BUCKET_DAYS`]
@@ -971,7 +973,7 @@ pub fn archive_fingerprint(days: i64, files: i64) -> String {
     let mut hasher = Sha256::new();
     hasher.update((days / ARCHIVE_BUCKET_DAYS).to_le_bytes());
     hasher.update(files.to_le_bytes());
-    format!("{:x}", hasher.finalize())
+    hex_digest(hasher.finalize())
 }
 
 /// Duplicate-cluster evidence fingerprint: sorted member paths, the exact flag,
@@ -986,7 +988,7 @@ pub fn duplicate_fingerprint(sorted_paths: &[String], exact: bool, similarity: f
     }
     hasher.update(if exact { "exact" } else { "near" });
     hasher.update(((similarity * 100.0).round() as i64).to_le_bytes());
-    format!("{:x}", hasher.finalize())
+    hex_digest(hasher.finalize())
 }
 
 /// Classification evidence fingerprint: the dir's own surface hint + its
@@ -1016,7 +1018,7 @@ pub fn classification_fingerprint(own_hint: Option<&str>, children: &[(String, i
             hasher.update([0u8]);
         }
     }
-    format!("{:x}", hasher.finalize())
+    hex_digest(hasher.finalize())
 }
 
 // ── Pre-dismissal (insights → ledger) ─────────────────────────────────────────

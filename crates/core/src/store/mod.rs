@@ -77,10 +77,10 @@ pub use sessions::ConversationTurn;
 // placeholders); the query crate's `retrieve()` guard reuses it.
 pub use search::is_stub_chunk;
 pub use types::{
-    chunk_content_hash, ChunkRecord, ClassificationRecord, CodeGraph, CodeGraphEdge, CodeGraphNode,
-    DecisionRecord, EdgeRecord, EntryInfo, FailedQueueItem, HealthStats, NewDecision, PackEvent,
-    PackRecord, QueueItem, QueueStats, RegionSummary, RelatedFile, SearchHit, SummaryRecord,
-    SymbolRecord, TreeNode, WeightRecord,
+    chunk_content_hash, hex_digest, ChunkRecord, ClassificationRecord, CodeGraph, CodeGraphEdge,
+    CodeGraphNode, DecisionRecord, EdgeRecord, EntryInfo, FailedQueueItem, HealthStats,
+    NewDecision, PackEvent, PackRecord, QueueItem, QueueStats, RegionSummary, RelatedFile,
+    SearchHit, SummaryRecord, SymbolRecord, TreeNode, WeightRecord,
 };
 pub use usage::{UsageSummary, USAGE_WEEK_SECS};
 

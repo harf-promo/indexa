@@ -2,13 +2,51 @@
 
 use sha2::{Digest, Sha256};
 
+/// Lowercase hex-encode any digest output (sha2's `Output<D>`, or any other
+/// `AsRef<[u8]>`). A manual byte fold rather than `format!("{:x}", …)`: digest
+/// 0.11's `Output` type (a `hybrid_array::Array`, replacing 0.10's
+/// `generic_array::GenericArray`) dropped the `LowerHex` impl the old type had,
+/// so every sha2 hex-encode site in this crate goes through this one function.
+pub fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    use std::fmt::Write as _;
+    let bytes = bytes.as_ref();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
 /// SHA-256 hex digest of a chunk's raw source text — the embedding cache key
 /// stored in [`ChunkRecord::content_hash`]. Hash the ORIGINAL chunk text (never
 /// the enriched contextual-retrieval blurb) so the cache stays valid across
 /// contextual runs on the same source. Must match what `cached_embeddings_by_hash`
 /// looks up, so every producer goes through this one function.
 pub fn chunk_content_hash(text: &str) -> String {
-    format!("{:x}", Sha256::digest(text.as_bytes()))
+    hex_digest(Sha256::digest(text.as_bytes()))
+}
+
+#[cfg(test)]
+mod hex_digest_tests {
+    use super::hex_digest;
+    use sha2::{Digest, Sha256};
+
+    // Regression guard for the sha2 0.10 -> 0.11 bump: proves the digest BYTES
+    // are unchanged across the major version by comparing against a reference
+    // computed independently of this codebase (`printf '%s' "test-input" |
+    // shasum -a 256`, matches).
+    #[test]
+    fn matches_independently_computed_reference() {
+        let expected = "ae1608896372720b6ebb58261e0c0092c608324b0804bc99267c1753990faaa8";
+        assert_eq!(hex_digest(Sha256::digest(b"test-input")), expected);
+    }
+
+    #[test]
+    fn pads_single_hex_digit_bytes() {
+        // 0x0a must render as "0a", not "a" — a naive `format!("{b:x}")` fold
+        // without the `02` width would silently shift every low byte.
+        assert_eq!(hex_digest([0x0au8, 0xffu8]), "0aff");
+    }
 }
 
 #[derive(Debug, Clone)]

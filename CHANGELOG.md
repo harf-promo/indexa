@@ -35,6 +35,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`sha2` 0.10 → 0.11 (dependency bump, #324 superseded).** `sha2` is declared once as a
+  workspace dep (root `Cargo.toml`) and inherited by `crates/core` and `apps/indexa`. **This one
+  matters because `sha2`'s output directly feeds `source_hash`** — `file_source_hash` and
+  `dir_source_hash` (`crates/core/src/store/summaries.rs`) hash file content and roll it up into
+  the Merkle-style directory hash that `deep`/`summarize` compare against on every run to decide
+  whether a file needs re-embedding/re-summarizing. A digest-encoding change here would have
+  silently re-flagged every stored summary as stale on upgrade — a real, expensive behavior
+  change, not "just a dependency bump."
+  **Not a pure version-string bump.** digest 0.11's `Output<D>` type changed from
+  `generic_array::GenericArray` to `hybrid_array::Array`, which **dropped the `fmt::LowerHex`
+  impl** the old type had — every `format!("{:x}", …)` call site over a sha2 digest failed to
+  compile. Fixed by adding one shared `indexa_core::store::hex_digest` (byte-fold hex-encoder,
+  `crates/core/src/store/types.rs`) that all 11 call sites now route through
+  (`notes.rs`, `decisions/detectors/mod.rs` ×6, `store/types.rs::chunk_content_hash`,
+  `store/summaries.rs` ×2, `apps/indexa/src/commands/sources.rs`) instead of hand-rolling the
+  hex fold at each site.
+  **Digest bytes proven identical, not assumed:** `hex_digest(Sha256::digest(b"test-input"))`
+  under sha2 0.10.9 and again under 0.11.0 both produce
+  `ae1608896372720b6ebb58261e0c0092c608324b0804bc99267c1753990faaa8`, matching an
+  independently-computed reference (`printf '%s' "test-input" | shasum -a 256`, outside the Rust
+  build entirely) — now a permanent regression test
+  (`store::types::hex_digest_tests::matches_independently_computed_reference`).
+  **Live cross-version proof, the direction that actually matters for users:** indexed a scratch
+  fixture (2 files + their parent dir) with an 0.11-built binary, captured the stored
+  `source_hash`/`generated_at` values, then ran `deep`/`summarize` again against that **same**
+  database using a separately-built **0.10** binary (`git stash` back to the pre-bump tree) —
+  it reported `skipped 2/2 files (unchanged)` and `0 summaries generated`, i.e. the pre-bump
+  binary agrees with hashes an 0.11 binary wrote, exercising both `file_source_hash` (direct
+  digest) and the `dir_source_hash` Merkle roll-up (multi-`update` + NUL-separator path) that the
+  unit test alone doesn't cover. `source_hash`/`generated_at` were byte-identical across all three
+  runs.
+  **Two majors now coexist in the graph** — `sha2`/`digest` 0.11 (our own usage) alongside
+  0.10 (pulled in transitively by `lopdf`, the PDF-parsing dependency, which doesn't yet allow
+  0.11): confirmed via the lockfile diff (only `indexa`/`indexa-core`'s entries move), and
+  `cargo deny check` (the required CI license/advisory gate) stays clean —
+  `multiple-versions = "warn"`, not `deny`, and the three new transitive crates (`hybrid-array`,
+  `const-oid`, the newer `crypto-common`) all clear the license allowlist.
+  `apps/indexa-desktop/Cargo.lock` (workspace-excluded, separately committed) was regenerated
+  with a targeted `cargo update --manifest-path apps/indexa-desktop/Cargo.toml -p sha2`; the diff
+  is scoped to the same 6 sha2-chain packages, and `brotli`/`pcre2` pins are byte-identical
+  before and after. **The nested-worktree Cargo workspace-discovery quirk** (this worktree lives
+  under `.claude/worktrees/…`, itself nested inside the main checkout — `cargo`, when resolving
+  the workspace-excluded desktop manifest, walks past its own exclude and picks up the outer
+  checkout's workspace instead) hit `cargo update -p` directly this time, not just
+  `generate-lockfile` as the tower-http entry below found — worked around the same way, by
+  temporarily giving `apps/indexa-desktop/Cargo.toml` its own empty `[workspace]` table for the
+  duration of the `cargo update` call, then reverting it (verified byte-identical, zero diff,
+  before committing). The desktop app's own `cargo check --locked` was verified clean against the
+  new lock via a scratch copy of the tree (same reason as above — running it in place hits the
+  same quirk).
 - **Cheaper index hot loops (no change in results).** Two per-call patterns collapsed to batched
   or streamed forms, reviving and re-verifying the stalled `perf-hot-loops-d9` work against
   current `main`: `embeddings_for_chunks` (the MMR re-ranking pass's candidate-vector fetch) now
