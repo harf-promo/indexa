@@ -25,11 +25,18 @@ pub type CoverageEntry = (String, String, bool, u64, Option<String>);
 /// `/` when it has none (a bare root or a single path segment). See `search.rs`'s
 /// module docs for why this beats normalize-at-write-time + migrate, and why matching
 /// both separators via `OR`-ed LIKE patterns or `REPLACE(...)` was rejected.
+///
+/// The separator is read from the ORIGINAL `prefix`, before trimming — not from `exact`.
+/// For a bare drive root (`C:\`) the trailing separator IS the only separator in the
+/// string; inferring from the already-trimmed `exact` (`C:`) would find none and
+/// silently default to `/`, reproducing this exact bug's failure shape for that one
+/// input. Every other case is unaffected: a trailing separator is itself a valid
+/// instance of the separator, so trimming never changes what `rfind` would have seen.
 pub(super) fn subtree_match(prefix: &str) -> (String, String) {
-    let exact = prefix.trim_end_matches(['/', '\\']).to_owned();
-    let sep = exact
+    let sep = prefix
         .rfind(['/', '\\'])
-        .map_or('/', |i| exact.as_bytes()[i] as char);
+        .map_or('/', |i| prefix.as_bytes()[i] as char);
+    let exact = prefix.trim_end_matches(['/', '\\']).to_owned();
     let child_pattern = like_prefix(&format!("{exact}{sep}"));
     (exact, child_pattern)
 }
@@ -559,6 +566,20 @@ mod tests {
         let (exact, child) = subtree_match("proj");
         assert_eq!(exact, "proj");
         assert_eq!(child, "proj/%");
+    }
+
+    #[test]
+    fn windows_drive_root_still_infers_backslash() {
+        // Regression: a bare drive root's only separator IS the trailing one that
+        // `exact` trims away. Inferring the separator from `exact` (post-trim) instead
+        // of `prefix` (pre-trim) would find no separator left to look at and silently
+        // fall back to `/`, reproducing this whole bug's failure shape for exactly the
+        // input a Windows "whole disk" scope would pass.
+        let (exact, child) = subtree_match(r"C:\");
+        assert_eq!(exact, "C:");
+        assert_eq!(child, r"C:\\%");
+        assert!(like_matches(&child, r"C:\proj"));
+        assert!(like_matches(&child, r"C:\proj\a.rs"));
     }
 
     /// Minimal stand-in for the SQL `LIKE … ESCAPE '\'` semantics `child_pattern` is
