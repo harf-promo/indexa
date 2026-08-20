@@ -266,6 +266,13 @@ impl Store {
     /// Returns a map of `chunk_id → embedding`. Ids with no stored embedding (or an
     /// invalid blob) are silently omitted so callers can fail-open if some vectors are
     /// missing. Used by the MMR re-ranking pass in `retrieve()` (v0.42).
+    ///
+    /// One batched `IN (…)` query instead of one `query_row` per id (mirrors
+    /// `paths_for_ids`'s pattern in `store/search.rs`). `ids` is always the caller's
+    /// already-retrieved hit set (`retrieve.rs`, `synthesize.rs`) — bounded by the
+    /// retrieval limit — so it stays well under SQLite's variable cap. Behavior matches
+    /// the old per-id loop exactly: same ids included/excluded, same fail-open on a
+    /// missing or invalid blob.
     pub fn embeddings_for_chunks(
         &self,
         ids: &[i64],
@@ -273,13 +280,16 @@ impl Store {
         if ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!("SELECT id, embedding FROM chunks WHERE id IN ({placeholders})");
+        let mut stmt = self.conn.prepare(&sql)?;
         let mut map = std::collections::HashMap::with_capacity(ids.len());
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT id, embedding FROM chunks WHERE id = ?1")?;
-        for &id in ids {
-            if let Ok(Some(blob)) = stmt.query_row(params![id], |r| r.get::<_, Option<Vec<u8>>>(1))
-            {
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<Vec<u8>>>(1)?))
+        })?;
+        for row in rows {
+            let (id, blob) = row?;
+            if let Some(blob) = blob {
                 if blob.len().is_multiple_of(4) && !blob.is_empty() {
                     map.insert(id, super::search::blob_to_embedding(&blob));
                 }
