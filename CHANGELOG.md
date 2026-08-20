@@ -314,6 +314,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **`indexa scan` streams the walk instead of buffering the whole tree, and reconciles ghosts by
+  generation instead of an in-memory `HashSet` (D5).** The walker's `walk()` collected every
+  discovered entry into one `Vec` before any reconciliation began, and ghost-pruning built a full
+  live-path `HashSet` to diff against stored rows — both scale peak memory with total file count. A
+  new `walk_streaming` yields entries incrementally (`walk()` is now a thin collector over it, so
+  every existing caller is unaffected); `entries.scan_generation` (new nullable column, `SCHEMA_VERSION`
+  8, no backfill — existing rows stay `NULL` until the next scan re-stamps whatever's still live)
+  tags every row a scan upserts, and a new `reconcile_by_generation` deletes anything under the
+  scanned root whose generation isn't the current one via a subquery-based delete cascade (shares the
+  same artifact-table list as the exact-path delete path, `ENTRY_CHILD_TABLES`, so the two deletion
+  routes can't drift out of sync) — no ghost-path list ever held in memory, so a mostly-deleted root
+  stays bounded regardless of ghost count. `[scan] ignore` / gitignore-aware walking is unaffected.
+  Live-verified: scanning a fixture, deleting a file, and rescanning correctly reports "removed 1
+  ghost rows" and leaves every surviving entry untouched.
 - **Allocation-light brute-force dense search.** The cosine scan behind `ask`/`search` (the exact path
   used below `ann_min_chunks` and for scoped queries) previously decoded each chunk's embedding into a fresh `Vec<f32>`,
   materialized its path string, recomputed the query norm for every row, and full-sorted *all* rows to
