@@ -119,6 +119,30 @@ fn run_detectors_expires_questions_whose_evidence_left_the_index() {
 }
 
 #[test]
+fn expire_vanished_decisions_works_standalone_without_the_full_detector_pass() {
+    // H1: the web job pipeline calls expire_vanished_decisions directly (not the full
+    // run_detectors pass) alongside prune_orphans on every scan — a CLI-only run_detectors
+    // call left web-only "Build context" builds unable to ever clean a stale Review
+    // question. This proves the extracted function works on its own, not just as a step
+    // inside run_detectors.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_summary(&file_summary("/r/a.txt", "H1"))
+        .unwrap();
+    store
+        .upsert_summary(&file_summary("/r/b.txt", "H1"))
+        .unwrap();
+    let cfg = crate::config::ReviewConfig::default();
+    let report = run_detectors(&mut store, &cfg).unwrap();
+    assert_eq!(report.opened, 1);
+
+    store.delete_summary("/r/b.txt").unwrap();
+    let expired = super::expire_vanished_decisions(&mut store, cfg.max_open).unwrap();
+    assert_eq!(expired, 1, "the orphaned question must expire");
+    assert_eq!(store.open_decision_count().unwrap(), 0);
+}
+
+#[test]
 fn archive_detector_asks_about_topmost_stale_dirs_only() {
     let mut store = Store::open_in_memory().unwrap();
     store
