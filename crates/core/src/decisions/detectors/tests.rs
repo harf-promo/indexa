@@ -119,6 +119,30 @@ fn run_detectors_expires_questions_whose_evidence_left_the_index() {
 }
 
 #[test]
+fn expire_vanished_decisions_works_standalone_without_the_full_detector_pass() {
+    // H1: the web job pipeline calls expire_vanished_decisions directly (not the full
+    // run_detectors pass) alongside prune_orphans on every scan — a CLI-only run_detectors
+    // call left web-only "Build context" builds unable to ever clean a stale Review
+    // question. This proves the extracted function works on its own, not just as a step
+    // inside run_detectors.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_summary(&file_summary("/r/a.txt", "H1"))
+        .unwrap();
+    store
+        .upsert_summary(&file_summary("/r/b.txt", "H1"))
+        .unwrap();
+    let cfg = crate::config::ReviewConfig::default();
+    let report = run_detectors(&mut store, &cfg).unwrap();
+    assert_eq!(report.opened, 1);
+
+    store.delete_summary("/r/b.txt").unwrap();
+    let expired = super::expire_vanished_decisions(&mut store, cfg.max_open).unwrap();
+    assert_eq!(expired, 1, "the orphaned question must expire");
+    assert_eq!(store.open_decision_count().unwrap(), 0);
+}
+
+#[test]
 fn archive_detector_asks_about_topmost_stale_dirs_only() {
     let mut store = Store::open_in_memory().unwrap();
     store
@@ -820,6 +844,76 @@ fn archive_detector_skips_build_and_toolchain_caches() {
 }
 
 #[test]
+fn archive_detector_silences_root_named_toolchain_cache_dir() {
+    // M6: a dir literally named `build`/`DerivedData`/`SourcePackages` with
+    // nothing after it in the path (the tree's own ROOT, not a path
+    // descending through it) must stay silenced, same as any other toolchain
+    // cache. Before the fix, the plain `.contains("/build/")` substring check
+    // required content on BOTH sides of the segment — a trailing separator
+    // that a ROOT-named dir never has — so this exact case slipped through
+    // and generated the noise question the filter exists to stop.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            old_entry("/proj/build", EntryKind::Dir),
+            old_entry("/proj/DerivedData", EntryKind::Dir),
+            old_entry("/proj/SourcePackages", EntryKind::Dir),
+        ])
+        .unwrap();
+    let cfg = crate::config::ReviewConfig::default();
+    let report = run_detectors(&mut store, &cfg).unwrap();
+    assert_eq!(
+        report.opened, 0,
+        "root-named toolchain-cache dirs must stay quiet, not generate noise questions"
+    );
+    assert_eq!(store.open_decisions(Some("archive"), 10).unwrap().len(), 0);
+}
+
+#[test]
+fn archive_detector_asks_about_stale_assets_and_competitors_dirs() {
+    // M6: /assets/ and /competitors/ are user-content directories, not
+    // generated/toolchain-cache trees — a stale one must surface an archive
+    // question like any other user dir, not be silently swallowed by the
+    // duplicate detector's noise list.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            old_entry("/proj/assets", EntryKind::Dir),
+            old_entry("/proj/competitors", EntryKind::Dir),
+        ])
+        .unwrap();
+    let cfg = crate::config::ReviewConfig::default();
+    let report = run_detectors(&mut store, &cfg).unwrap();
+    assert_eq!(report.opened, 2, "both user-content dirs must be askable");
+    let open = store.open_decisions(Some("archive"), 10).unwrap();
+    let mut subjects: Vec<&str> = open.iter().map(|d| d.subject.as_str()).collect();
+    subjects.sort_unstable();
+    assert_eq!(subjects, vec!["/proj/assets", "/proj/competitors"]);
+}
+
+#[test]
+fn sweep_no_longer_retro_dismisses_stale_assets_archive_question() {
+    // M6 regression guard: before the fix, sweep_filtered_noise's archive
+    // branch (which calls archive_path_is_noise) would retro-dismiss an
+    // already-open archive question about /assets/ purely because it shared
+    // the duplicate detector's noise list. It must not anymore.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[old_entry("/proj/assets", EntryKind::Dir)])
+        .unwrap();
+    let cfg = crate::config::ReviewConfig::default();
+    assert_eq!(run_detectors(&mut store, &cfg).unwrap().opened, 1);
+    assert_eq!(store.open_decision_count().unwrap(), 1);
+
+    let hits = super::sweep_filtered_noise(&mut store, &cfg, false).unwrap();
+    assert_eq!(
+        hits, 0,
+        "the open /proj/assets question must survive the sweep"
+    );
+    assert_eq!(store.open_decision_count().unwrap(), 1);
+}
+
+#[test]
 fn symbol_ambiguity_is_off_by_default() {
     let mut store = Store::open_in_memory().unwrap();
     seed_ambiguous_foo(&mut store);
@@ -1075,11 +1169,30 @@ fn sweep_dismisses_sibling_manifest_and_archive_cache_noise() {
             paths: vec!["/app/build/ios/SourcePackages/absl.xcframework".into()],
         })
         .unwrap();
-    assert_eq!(store.open_decision_count().unwrap(), 2);
+    // M6 mirror case: an already-open question about a ROOT-named cache dir
+    // (nothing after `build` in the path — the exact case the old substring
+    // check missed) must also get swept by the corrected filter.
+    store
+        .record_decision(NewDecision {
+            decision_type: "archive".into(),
+            subject: "/proj/build".into(),
+            params: serde_json::json!({ "days": 500, "files": 40 }),
+            options: serde_json::json!(["archive", "keep_active"]),
+            auto_value: Some("archive".into()),
+            confidence: None,
+            evidence_hash: "test-archive-root-cache".into(),
+            priority: 30,
+            paths: vec!["/proj/build".into()],
+        })
+        .unwrap();
+    assert_eq!(store.open_decision_count().unwrap(), 3);
 
     let cfg = crate::config::ReviewConfig::default();
     let n = sweep_filtered_noise(&mut store, &cfg, false).unwrap();
-    assert_eq!(n, 2, "manifest + toolchain-cache archive must both sweep");
+    assert_eq!(
+        n, 3,
+        "manifest + interior toolchain-cache + ROOT-named toolchain-cache must all sweep"
+    );
     assert_eq!(store.open_decision_count().unwrap(), 0);
 }
 
@@ -1213,4 +1326,40 @@ fn dup_in_generated_dir_and_archive_path_is_noise_match_windows_style_paths() {
     ));
     assert!(!dup_in_generated_dir(r"C:\proj\src\main.rs"));
     assert!(!archive_path_is_noise(r"C:\proj\src"));
+}
+
+// ── M6: archive detector gets its own fragment list ──────────────────────
+
+#[test]
+fn archive_path_is_noise_matches_bare_root_named_toolchain_dirs() {
+    // The fragments are bracketed segment literals (`/build/`) that historically
+    // required content on BOTH sides of the segment to match via plain
+    // `.contains()` — so a directory whose own name IS the fragment (the
+    // tree's ROOT, nothing after it in the path) never matched. These must
+    // now match.
+    assert!(archive_path_is_noise("/proj/build"));
+    assert!(archive_path_is_noise("/proj/DerivedData"));
+    assert!(archive_path_is_noise("/proj/SourcePackages"));
+    assert!(archive_path_is_noise(r"C:\proj\node_modules"));
+    // A sibling whose name merely starts with the fragment must NOT match —
+    // the padding fix must not loosen the segment-boundary requirement.
+    assert!(!archive_path_is_noise("/proj/buildsomething"));
+    assert!(!archive_path_is_noise("/proj/src"));
+}
+
+#[test]
+fn archive_path_is_noise_does_not_suppress_user_content_dirs() {
+    // /assets/ and /competitors/ are user content, not generated/toolchain
+    // trees — the archive detector must be able to ask about them, unlike the
+    // duplicate detector's list (which correctly keeps skipping them below).
+    assert!(!archive_path_is_noise("/proj/assets/logo.png"));
+    assert!(!archive_path_is_noise("/proj/assets"));
+    assert!(!archive_path_is_noise("/proj/competitors/screenshot.png"));
+    assert!(!archive_path_is_noise("/proj/competitors"));
+
+    // The duplicate detector's own function is untouched: it must keep
+    // treating these as generated/asset noise for ITS purpose (near-identical
+    // icon sets / competitor screenshots are never a "pick a canonical" ask).
+    assert!(dup_in_generated_dir("/proj/assets/logo.png"));
+    assert!(dup_in_generated_dir("/proj/competitors/screenshot.png"));
 }
