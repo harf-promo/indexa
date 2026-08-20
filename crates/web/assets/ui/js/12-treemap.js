@@ -64,7 +64,7 @@ async function loadTreemap() {
 
     renderRootPicker();
     treemapStack = [];
-    treemapCurrentNode = treemapData[treemapRootIndex] || treemapData[0];
+    treemapCurrentNode = applySingleChildDescent(treemapData[treemapRootIndex] || treemapData[0]);
     renderTreemapCurrent();
 
   } catch (e) {
@@ -73,9 +73,31 @@ async function loadTreemap() {
   }
 }
 
+// Defense-in-depth companion to the server-side single-child descent
+// (`build_coverage_treemap` in stats.rs, B1): the server already collapses a boring
+// single-child directory chain before emitting a root, so this normally does nothing.
+// If a landing node still has exactly one child whose own children were serialized,
+// keep descending client-side rather than showing one boring cell — but stop the
+// instant we'd land on a node whose `children` were never serialized at all (outside
+// the depth-4 window): descending there would render "No sub-directories", which is
+// worse than showing the one cell we already have. Pushes each skipped node onto
+// `treemapStack` so the breadcrumb keeps its "up" trail.
+function applySingleChildDescent(node) {
+  while (node && node.children && node.children.length === 1 &&
+         node.children[0].children && node.children[0].children.length) {
+    treemapStack.push(node);
+    node = node.children[0];
+  }
+  return node;
+}
+
 /* ── Root picker ── Renders a small pill row above the treemap when there are multiple roots.
    Prevents a large root (e.g. '/') from swallowing a small one ('projects') into one blue block. */
 function renderRootPicker() {
+  // Remove any picker left over from a previous loadTreemap() (e.g. the map auto-refresh
+  // after a job finishes resets treemapLoaded and re-runs this) — otherwise pickers stack
+  // up, one per refresh, instead of the current root set replacing the last one.
+  document.querySelectorAll('.treemap-root-picker').forEach(function(el) { el.remove(); });
   if (!treemapData || treemapData.length <= 1) return;
   var bc = document.getElementById('treemap-breadcrumb');
   if (!bc) return;
@@ -89,7 +111,7 @@ function renderRootPicker() {
     btn.addEventListener('click', function() {
       treemapRootIndex = i;
       treemapStack = [];
-      treemapCurrentNode = treemapData[i];
+      treemapCurrentNode = applySingleChildDescent(treemapData[i]);
       document.querySelectorAll('.treemap-root-btn').forEach(function(b, j) {
         b.classList.toggle('active', j === i);
       });
@@ -120,11 +142,18 @@ function renderTreemapCurrent() {
 
   // Sort by size (chunk count) descending, then assign areas
   children.sort(function(a, b) { return b.size - a.size; });
-  var totalSize = children.reduce(function(s, c) { return s + c.size; }, 0) || 1;
+  // Normalize by the SUM OF THE CLAMPED sizes, not the raw sum: with the raw sum, every
+  // all-zero-chunk sibling (scan-only, before deep/summarize has run) computes
+  // `max(0,1) / max(0,1) = 1` — i.e. EVERY child claims the full area, and squarify's
+  // greedy row-fill only ever places the first one, leaving the rest with no `_rect` at
+  // all (drawCell then skips them). Clamping the denominator the same way as the
+  // numerator makes zero-chunk siblings share the area equally instead of each claiming
+  // all of it; real (non-zero) sizes are unaffected since sum(max(size,1)) ≈ sum(size).
+  var totalWeight = children.reduce(function(s, c) { return s + Math.max(c.size, 1); }, 0) || 1;
   var totalArea = W * H;
   children.forEach(function(c) {
-    // Give zero-chunk dirs a minimal area so they're still visible
-    c._area = (Math.max(c.size, 1) / Math.max(totalSize, 1)) * totalArea;
+    // Give zero-chunk dirs a minimal (equal-share) area so they're still visible.
+    c._area = (Math.max(c.size, 1) / totalWeight) * totalArea;
     c._color = covColor(c);
     c._hasChildren = c.children && c.children.length > 0;
   });
