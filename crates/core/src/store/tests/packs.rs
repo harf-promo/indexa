@@ -282,6 +282,140 @@ fn delete_entry_also_removes_edges() {
 }
 
 #[test]
+fn stale_pack_paths_flags_out_of_date_and_missing_members() {
+    // Real files on disk so `stale_pack_paths` can stat their live mtime.
+    let dir = tempfile::tempdir().unwrap();
+    let fresh = dir.path().join("fresh.txt");
+    let stale = dir.path().join("stale.txt");
+    std::fs::write(&fresh, b"fresh content").unwrap();
+    std::fs::write(&stale, b"stale content").unwrap();
+    let fresh_s = fresh.to_string_lossy().to_string();
+    let stale_s = stale.to_string_lossy().to_string();
+
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_chunks(&[
+            dummy_chunk_embedded(&fresh_s, 0, "fresh content"),
+            dummy_chunk_embedded(&stale_s, 0, "stale content"),
+        ])
+        .unwrap();
+    // Pin indexed_at deterministically (no timing race): fresh indexed FAR AFTER its
+    // mtime → current; stale indexed at the epoch, long before its mtime → out of date.
+    store
+        .db_connection()
+        .execute(
+            "UPDATE chunks SET indexed_at = 4102444800 WHERE entry_path = ?1", // year 2100
+            rusqlite::params![fresh_s],
+        )
+        .unwrap();
+    store
+        .db_connection()
+        .execute(
+            "UPDATE chunks SET indexed_at = 1 WHERE entry_path = ?1", // 1970
+            rusqlite::params![stale_s],
+        )
+        .unwrap();
+
+    // Pack references the DIRECTORY, exercising member→indexed-file prefix expansion.
+    let pid = store.create_pack("proj", None).unwrap();
+    store
+        .add_pack_paths(&pid, &[dir.path().to_string_lossy().to_string()])
+        .unwrap();
+    assert_eq!(
+        store.stale_pack_paths(&pid).unwrap(),
+        vec![stale_s.clone()],
+        "only the file indexed before its current mtime is stale"
+    );
+
+    // A pack whose only member is the fresh (current) file has nothing stale.
+    let clean = store.create_pack("fresh-only", None).unwrap();
+    store
+        .add_pack_paths(&clean, std::slice::from_ref(&fresh_s))
+        .unwrap();
+    assert!(store.stale_pack_paths(&clean).unwrap().is_empty());
+
+    // A member that no longer exists on disk can't be stat'd → counts as stale.
+    std::fs::remove_file(&stale).unwrap();
+    assert_eq!(store.stale_pack_paths(&pid).unwrap(), vec![stale_s]);
+}
+
+#[test]
+fn migrates_legacy_pack_events_check_preserving_all_rows() {
+    // Pre-G2b indexes had `pack_events.event CHECK IN ('created','path_added','path_removed',
+    // 'renamed','exported')`. Store::open must widen the CHECK to include 'refreshed' AND
+    // preserve every legacy row — the table-recreate must not silently drop rows (the reason
+    // the copy is a plain explicit INSERT, not INSERT OR IGNORE). Mirrors
+    // `migrates_legacy_edges_check_preserving_all_rows` in store::tests::graph.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pre_refreshed.db");
+    {
+        // Minimal legacy packs/pack_events schema with the OLD 5-value CHECK + a seeded row.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE packs (
+                 id          TEXT PRIMARY KEY,
+                 name        TEXT NOT NULL UNIQUE,
+                 description TEXT,
+                 created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+             );
+             CREATE TABLE pack_events (
+                 id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                 pack_id TEXT NOT NULL REFERENCES packs(id) ON DELETE CASCADE,
+                 event   TEXT NOT NULL
+                             CHECK(event IN ('created','path_added','path_removed','renamed','exported')),
+                 detail  TEXT,
+                 at      INTEGER NOT NULL DEFAULT (unixepoch())
+             );
+             INSERT INTO packs (id, name) VALUES ('p1', 'proj');
+             INSERT INTO pack_events (pack_id, event, detail) VALUES
+                 ('p1', 'created', 'proj'),
+                 ('p1', 'exported', 'xml');",
+        )
+        .unwrap();
+    }
+
+    // Store::open runs the CHECK-widening migration.
+    let mut store = Store::open(&path).expect("must open & migrate a pre-'refreshed' index");
+
+    // 1) Row parity: both legacy rows survive.
+    let events = store.pack_events("p1").unwrap();
+    let kinds: Vec<&str> = events.iter().map(|e| e.event.as_str()).collect();
+    assert_eq!(kinds, vec!["created", "exported"]);
+
+    // 2) The widened CHECK actually accepts 'refreshed' now.
+    store
+        .record_pack_refreshed("p1", "1 reindexed, 0 vanished")
+        .expect("widened CHECK must accept 'refreshed'");
+    let events = store.pack_events("p1").unwrap();
+    assert_eq!(events.last().unwrap().event, "refreshed");
+
+    // 3) The rebuilt table's `REFERENCES packs(id) ON DELETE CASCADE` still works post-migration
+    // — the copy-table migration recreates the FK declaration too, not just the CHECK; a typo
+    // there would silently orphan events on delete instead of erroring. Mirrors
+    // `deleting_a_pack_cascades_its_events`.
+    store.delete_pack("p1").unwrap();
+    assert!(
+        store.pack_events("p1").unwrap().is_empty(),
+        "ON DELETE CASCADE must survive the pack_events table rebuild"
+    );
+}
+
+#[test]
+fn record_pack_refreshed_appends_a_refreshed_event() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store.create_pack("proj", None).unwrap();
+    store
+        .record_pack_refreshed(&id, "2 reindexed, 1 vanished (left flagged)")
+        .unwrap();
+    let events = store.pack_events(&id).unwrap();
+    assert_eq!(events.last().unwrap().event, "refreshed");
+    assert_eq!(
+        events.last().unwrap().detail.as_deref(),
+        Some("2 reindexed, 1 vanished (left flagged)")
+    );
+}
+
+#[test]
 fn create_pack_records_a_created_event() {
     let mut store = Store::open_in_memory().unwrap();
     let id = store.create_pack("proj", None).unwrap();
