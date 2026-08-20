@@ -9,5 +9,7 @@ description = "Shared HTTP client construction and retry/backoff for Indexa's ne
 
 [dependencies]
 tokio = { workspace = true }
-# rustls-tls (not native-tls) is a cross-compile invariant — see CLAUDE.md.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# rustls (not native-tls) is a cross-compile invariant — see CLAUDE.md. reqwest 0.13
+# renamed the feature from "rustls-tls" to "rustls" (features consolidated; TLS backend
+# now uses aws-lc-rs + rustls-platform-verifier instead of the 0.12 webpki-roots/ring combo).
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }

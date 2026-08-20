@@ -9,7 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Coverage honesty (web).** The topbar now shows folder-summary coverage (`N of M folders summarized (P%)`) next to files/chunks, and the "context not built" banner is **path-aware** — a handful of summaries in one repo no longer hide that the selected folder has none. Hover actions collapse to one **Build context** verb (deep+summarize if the folder isn't searchable yet, summarize if it is); Re-scan / Refresh / Remove move into a ⋯ menu. Starting a job stays on the current view and offers "Watch progress" on the toast instead of yanking you into Activity. **Build context** on a folder that contains several detected projects refuses the whole-tree job and points at the per-project list. `GET /api/health` adds `summaries` + `thin_context`; a third banner names a thin hierarchical layer without calling it "stale". New `GET /api/projects` lists top-level detected apps with coverage so the welcome view can offer per-project Build context. Ask's **Agentic** toggle is labeled **Think harder**; a scoped answer on an unsummarized folder says so and offers the same button.
+- **`reqwest` 0.12 → 0.13 (dependency bump, #325 superseded).** reqwest 0.13 consolidated its TLS
+  features — the `rustls-tls` feature name is gone, replaced by `rustls` — so every declaration site
+  (`Cargo.toml`, `crates/{llm,embed,http-util}`; `crates/{update,web}` inherit via
+  `workspace = true`) moved to `default-features = false, features = ["json", "rustls", …]`. The
+  rustls backend itself changed too: 0.12's `rustls-tls` used bundled `webpki-roots` + the `ring`
+  crypto provider; 0.13's `rustls` uses the OS trust store via `rustls-platform-verifier` and the
+  `aws-lc-rs` crypto provider (built from source via `aws-lc-sys`, a new from-source C/asm dependency
+  — still openssl-free, verified below; the only other newcomer worth naming is `openssl-probe`, a
+  path-lookup helper for the OS cert store pulled in by `rustls-native-certs` — it has no OpenSSL
+  linkage). `AGENTS.md`'s openssl-free invariant text and the `hf-hub` comment in the root manifest
+  are updated to describe the new provider. **openssl-free tree reverified**: `openssl-sys` is
+  absent from the dependency graph entirely on `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`,
+  and `x86_64-pc-windows-msvc` (`cargo tree -i openssl-sys` errors "did not match any packages" on
+  each, rather than printing an empty tree). Because `release.yml`'s aarch64-linux cross-compile job
+  only runs on `v*.*.*` tags — never on this PR's own CI — the new `aws-lc-sys` build dependency was
+  separately cross-compiled end-to-end for `aarch64-unknown-linux-gnu` in Docker, using the release
+  workflow's exact toolchain (`gcc-aarch64-linux-gnu` + its `CARGO_TARGET_..._LINKER` on an x86_64
+  host), to confirm it doesn't regress the Linux ARM64 release build the way the v0.43.0 native-tls
+  incident did. `apps/indexa-desktop/Cargo.lock` (workspace-excluded, separately committed) was
+  regenerated with a targeted `cargo update -p reqwest` — reqwest's two prior versions (0.12.28
+  ours, 0.13.4 already pulled in by Tauri's updater) collapse into one; `brotli`/`pcre2` stay pinned
+  at their existing versions; the desktop app was re-verified `cargo check`/`clippy --locked` clean
+  against the new lock. The topbar now shows folder-summary coverage (`N of M folders summarized (P%)`) next to files/chunks, and the "context not built" banner is **path-aware** — a handful of summaries in one repo no longer hide that the selected folder has none. Hover actions collapse to one **Build context** verb (deep+summarize if the folder isn't searchable yet, summarize if it is); Re-scan / Refresh / Remove move into a ⋯ menu. Starting a job stays on the current view and offers "Watch progress" on the toast instead of yanking you into Activity. **Build context** on a folder that contains several detected projects refuses the whole-tree job and points at the per-project list. `GET /api/health` adds `summaries` + `thin_context`; a third banner names a thin hierarchical layer without calling it "stale". New `GET /api/projects` lists top-level detected apps with coverage so the welcome view can offer per-project Build context. Ask's **Agentic** toggle is labeled **Think harder**; a scoped answer on an unsummarized folder says so and offers the same button.
 - **Review inbox noise (detectors + web).** Archive questions no longer fire on generated/toolchain caches (`/build/`, `SourcePackages`, `.xcframework`, `DerivedData`, `Pods`, gradle wrappers, `/gen/`). Duplicate questions skip ubiquitous sibling manifests (`Cargo.toml`, `package.json`, `go.mod`, …) unless they are exact copies in the same folder. `sweep_filtered_noise` retro-dismisses the existing inbox on the next `index`/`prune`. The Review drawer groups cards by type and pre-fills the batch "under" folder when every open question of that type shares a path prefix.
 - **Surface the product (web).** The toolbar **Export** menu lists named Context Packs and can create a pack from the selected folder — no need to open Settings. Map now opens on the coverage **Treemap** at whole-disk scope (the graph is a hairball there) and switches to **Graph** once you select a project-depth folder; an explicit tab click still sticks. Settings tucks passes / resources / insights / packs / weights under **More settings**. `docs/COMPETITIVE.md` "still open" list no longer claims Decision Ledger or token-savings are unshipped.
 
