@@ -17,12 +17,14 @@ pub(super) fn embedding_to_blob(v: &[f32]) -> Vec<u8> {
 /// Decode a little-endian byte blob back into an `f32` vector.
 ///
 /// Any trailing bytes that don't form a complete 4-byte chunk are silently
-/// dropped (via `chunks_exact`), matching the historical behavior at the
+/// dropped (via `as_chunks`), matching the historical behavior at the
 /// summary call sites. Callers that need strict alignment validation should
 /// check `b.len().is_multiple_of(4)` before calling.
 pub(super) fn blob_to_embedding(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+    b.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect()
 }
 
@@ -754,8 +756,8 @@ impl Store {
             // Sequential accumulation in the same order as the old code ⇒ bit-identical `sim`.
             let mut dot = 0.0f32;
             let mut row_norm_sq = 0.0f32;
-            for (i, c) in blob.chunks_exact(4).enumerate() {
-                let v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            for (i, c) in blob.as_chunks::<4>().0.iter().enumerate() {
+                let v = f32::from_le_bytes(*c);
                 dot += query[i] * v;
                 row_norm_sq += v * v;
             }
