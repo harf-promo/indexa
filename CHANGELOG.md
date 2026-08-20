@@ -315,6 +315,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Mach-O/ELF/PE magic-byte sanity check. Verification is **fail-open** for pre-signature releases (no
   `.sig` published) so existing installs still update, but a signature that IS present and fails to
   verify is a hard error. Download requests also gained connect/request timeouts.
+- **`POST /api/config/features` no longer lets a LAN-shared token repoint the audio-transcription
+  binary.** `audio_binary` names an executable path the indexer later spawns
+  (`Command::new(binary)`) — the endpoint's own doc comment called it "ungated — no secrets
+  involved," which understated the blast radius: `pdf.ocr_binary`/`video.ffmpeg_binary` have no web
+  setter at all, so this was the one web-exposed knob that crosses into program selection. Now
+  gated behind `INDEXA_WEB_ALLOW_KEY_EDIT=1`, matching `api_config_provider_set` — but only on an
+  actual *change*, not on presence: the Features panel always resends the current value on every
+  Save, so gating on presence alone would have locked a caller out of every other, non-sensitive
+  toggle the moment a binary path was ever configured.
 
 ### Removed
 
