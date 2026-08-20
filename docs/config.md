@@ -97,6 +97,10 @@ than `structure` is accepted but has no effect yet:
 | `recursive` | Reserved: split on paragraph/sentence boundaries. |
 | `semantic` | Reserved: embed full document and window embeddings (late chunking). |
 
+`indexa doctor` surfaces this too: it warns whenever `strategy` is set to anything other than
+`structure`, naming the value you configured and reminding you it currently has no effect
+(silent at the default, so an untouched config never sees it).
+
 ---
 
 ## Scan

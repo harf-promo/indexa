@@ -147,6 +147,12 @@ pub(crate) async fn cmd_doctor(
             println!("    {key} = {value}");
         }
     }
+    // `chunking.strategy` is a reserved/forward-looking knob (docs/config.md#chunking):
+    // nothing in the chunker branches on it yet, for ANY variant — not just `fixed`. A user
+    // who explicitly set it away from the default deserves to know it's a no-op today.
+    if let Some(line) = chunking_strategy_line(&cfg.chunking.strategy) {
+        println!("{line}");
+    }
     // Permission check (unix only) — only worth reporting when there's actually a key stored.
     // `config::load` above already re-tightens a loose file to 0600 on a best-effort (fail-open)
     // basis, so this mostly confirms that succeeded; it only warns when the file is STILL loose
@@ -584,6 +590,29 @@ fn config_permission_line(config_path: &std::path::Path, has_keys: bool) -> Opti
     })
 }
 
+/// Warn when `[chunking] strategy` is set away from its default (`structure`) — every
+/// variant (`fixed`, `recursive`, `semantic`, and `structure` itself) currently runs the same
+/// structure-aware word-window chunker; nothing branches on this field yet (docs/config.md
+/// §Chunking has the full "reserved" table). Silent at the default so this never fires for
+/// the common case of an untouched config.
+fn chunking_strategy_line(strategy: &indexa_core::config::ChunkStrategy) -> Option<String> {
+    use indexa_core::config::ChunkStrategy;
+    if *strategy == ChunkStrategy::default() {
+        return None;
+    }
+    let name = match strategy {
+        ChunkStrategy::Structure => "structure",
+        ChunkStrategy::Fixed => "fixed",
+        ChunkStrategy::Recursive => "recursive",
+        ChunkStrategy::Semantic => "semantic",
+    };
+    Some(format!(
+        "  ⚠️   chunking.strategy = \"{name}\" but no strategy currently branches on it — \
+         chunking always runs today's structure-aware word-window chunker regardless \
+         (size/overlap ARE honored). See docs/config.md#chunking."
+    ))
+}
+
 /// True if `want` (a configured model name) is among Ollama's installed `models`,
 /// matching leniently across the implicit `:latest` tag (Ollama reports a model pulled
 /// as `nomic-embed-text` as `nomic-embed-text:latest`).
@@ -637,7 +666,35 @@ fn apply_ollama_env_vars(vars: &[(&str, &str)]) {
 mod tests {
     #[cfg(unix)]
     use super::config_permission_line;
-    use super::model_installed;
+    use super::{chunking_strategy_line, model_installed};
+
+    #[test]
+    fn chunking_strategy_line_is_silent_at_default() {
+        // `structure` is `ChunkStrategy::default()` — the common case of an untouched
+        // config must never produce a warning.
+        assert!(chunking_strategy_line(&indexa_core::config::ChunkStrategy::Structure).is_none());
+    }
+
+    #[test]
+    fn chunking_strategy_line_warns_for_every_non_default_variant() {
+        for (strategy, name) in [
+            (indexa_core::config::ChunkStrategy::Fixed, "fixed"),
+            (indexa_core::config::ChunkStrategy::Recursive, "recursive"),
+            (indexa_core::config::ChunkStrategy::Semantic, "semantic"),
+        ] {
+            let line = chunking_strategy_line(&strategy)
+                .unwrap_or_else(|| panic!("expected a warning for {strategy:?}"));
+            assert!(line.contains('⚠'), "expected a warning marker: {line}");
+            assert!(
+                line.contains(&format!("\"{name}\"")),
+                "expected the configured value quoted in the line: {line}"
+            );
+            assert!(
+                line.contains("no strategy currently branches on it"),
+                "expected the no-op explanation: {line}"
+            );
+        }
+    }
 
     #[test]
     fn matches_exact_and_implicit_latest_tag() {

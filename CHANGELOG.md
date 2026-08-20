@@ -860,6 +860,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handler with no env gate standing between a request and `config::save`. Verified with an
   MD5 of the real `config.toml` taken before and after a full `cargo test --workspace` run:
   byte-identical, including its `0600` permissions.
+- **`indexa doctor` never told you `chunking.strategy` was a no-op.** A prior docs-only pass
+  documented `[chunking] strategy` as reserved (`docs/config.md` §Chunking) after discovering
+  that *every* variant — not just `fixed` — currently runs the same structure-aware
+  word-window chunker; nothing in `crates/parsers`/`crates/core` branches on the field at all
+  (only `size`/`overlap` reach the chunker, via `ChunkParams`). That left the fact
+  documentation-only: a user who set `strategy = "fixed"` (or `"recursive"`/`"semantic"`) got
+  no runtime signal that their choice does nothing. `indexa doctor`'s Config section now emits
+  a warning line — mirroring the existing `config_permission_line` pattern — whenever
+  `chunking.strategy` is set away from its default (`structure`), naming the configured value
+  and pointing at `docs/config.md#chunking`; the doc's Strategies section now names this
+  warning back. Silent at the default, so an untouched config never sees it. `query_config`'s
+  MCP-side display of this same field (`crates/mcp/src/admin.rs`) still has no equivalent
+  note — left as a scoped follow-up since it sits outside `doctor`.
 
 ## [0.76.0] — 2026-06-28
 
