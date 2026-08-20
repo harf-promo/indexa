@@ -4,19 +4,23 @@ pub mod contextual;
 pub mod eval;
 pub mod export;
 pub mod impact;
+pub mod modules;
+pub mod predicates;
 pub mod qa;
 pub mod redact;
 pub mod rerank;
+pub mod staleness;
 pub mod summarize;
 pub mod worker;
 
 pub use eval::{
-    aggregate, compare_to_baseline, evaluate_question, score_ranking, EvalQuestion, EvalSummary,
-    GoldenSet, MetricDelta, QuestionMetrics,
+    aggregate, compare_to_baseline, evaluate_question, evaluate_question_reranked, score_ranking,
+    EvalQuestion, EvalSummary, GoldenSet, MetricDelta, QuestionMetrics,
 };
 pub use export::{
-    approx_tokens, build_export_filter, build_tree, prune_tree, render_graph, render_json,
-    render_markdown, render_signatures, render_weights, render_xml,
+    approx_tokens, build_export_filter, build_tree, prune_tree, render_graph, render_graph_mermaid,
+    render_json, render_markdown, render_okf_bundle, render_signatures, render_weights, render_xml,
+    ManifestItem, PackManifest,
 };
 pub use impact::{
     ask_impact_breakdown, record_ask_impact, served_bytes, AnswerImpact, ImpactBreakdown,
@@ -33,8 +37,8 @@ pub use qa::{
     SourceCitation, AGENTIC_MAX_STEPS_CAP,
 };
 pub use summarize::{
-    enqueue_subtree, process_queue_item_with_passes, requeue_subtree, summarize_subtree_sync,
-    QueueOutcome,
+    cleanup_chunks_for_mode, enqueue_subtree, process_queue_item_with_passes, requeue_subtree,
+    summarize_subtree_sync, QueueOutcome,
 };
 pub use worker::run_worker;
 

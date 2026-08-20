@@ -74,7 +74,19 @@ pub fn human_count(n: u64) -> String {
 /// caller passes the leading bytes it already read; this never opens a file. Single source of
 /// truth shared by the scan walker's binary filter and the web file-preview `binary` flag.
 pub fn is_binary(bytes: &[u8]) -> bool {
+    // UTF-16 text is legitimate text but is NUL-dense by construction (every other byte is 0
+    // for ASCII-range content) — without this exemption, `[scan] skip_binary` would flag every
+    // UTF-16 file as binary (1.3). A hand-written BOM check, not a dependency on `encoding_rs`
+    // (that crate lives in indexa-parsers, which does the actual transcoding).
+    if has_utf16_bom(bytes) {
+        return false;
+    }
     bytes.iter().take(8192).any(|&b| b == 0)
+}
+
+/// True if `bytes` starts with a UTF-16LE (`FF FE`) or UTF-16BE (`FE FF`) byte-order mark.
+fn has_utf16_bom(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF])
 }
 
 /// Largest byte index ≤ `byte` that is a UTF-8 char boundary of `s` (clamped to
@@ -116,6 +128,24 @@ mod tests {
         let mut late = vec![b'a'; 9000];
         late.push(0);
         assert!(!is_binary(&late), "NUL past the 8 KB window is ignored");
+    }
+
+    #[test]
+    fn is_binary_exempts_utf16_bom() {
+        // UTF-16 "hi" (LE): FF FE 68 00 69 00 — the 00 bytes would otherwise trip the NUL
+        // heuristic even though this is legitimate text (1.3).
+        let utf16_le_hi: &[u8] = &[0xFF, 0xFE, 0x68, 0x00, 0x69, 0x00];
+        assert!(!is_binary(utf16_le_hi), "UTF-16LE BOM must exempt NULs");
+        let utf16_be_hi: &[u8] = &[0xFE, 0xFF, 0x00, 0x68, 0x00, 0x69];
+        assert!(!is_binary(utf16_be_hi), "UTF-16BE BOM must exempt NULs");
+        // A genuine binary blob that merely happens to start with FF FE bytes but has no
+        // trailing NUL-dense pattern is still fine to exempt — the BOM check is a prefix
+        // match, matching ripgrep's own BOM-sniff contract (sniff first, don't second-guess).
+        // But a blob with NULs and NO BOM is still flagged.
+        assert!(
+            is_binary(&[0x00, 0x01, 0x02]),
+            "no BOM, NUL present ⇒ binary"
+        );
     }
 
     #[test]

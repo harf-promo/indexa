@@ -8,16 +8,20 @@ pub(crate) use crate::walker::{Entry, EntryKind};
 pub(crate) use std::path::PathBuf;
 
 mod basics;
+mod co_change;
 mod decisions;
 mod dir_apps;
 mod entry_cleanup;
 mod graph;
 mod incremental;
 mod insights;
+mod modules;
+mod note_anchors;
 mod packs;
 mod queue;
 mod scoped_resolution;
 mod sessions;
+mod symbols;
 mod usage;
 mod weights;
 
@@ -136,6 +140,9 @@ fn orphan_rows_for(store: &Store, path: &str) -> i64 {
     q("SELECT COUNT(*) FROM chunks WHERE entry_path = ?1")
         + q("SELECT COUNT(*) FROM chunks_fts WHERE entry_path = ?1")
         + q("SELECT COUNT(*) FROM edges WHERE from_path = ?1")
+        + q("SELECT COUNT(*) FROM symbols WHERE path = ?1")
+        + q("SELECT COUNT(*) FROM note_anchors WHERE note_path = ?1")
+        + q("SELECT COUNT(*) FROM co_change WHERE path_a = ?1 OR path_b = ?1")
         + q("SELECT COUNT(*) FROM summaries WHERE path = ?1")
         + q("SELECT COUNT(*) FROM summary_queue WHERE path = ?1")
         + q("SELECT COUNT(*) FROM classifications WHERE path = ?1")
@@ -158,6 +165,27 @@ fn seed_full_entry(store: &mut Store, path: &str) {
             edge(path, "imports", "std::fs"),
             edge(path, "defines", "run"),
         ])
+        .unwrap();
+    store
+        .upsert_symbols(&[SymbolRecord {
+            path: path.to_owned(),
+            name: "run".to_owned(),
+            kind: "fn".to_owned(),
+            start_line: 1,
+            end_line: 3,
+        }])
+        .unwrap();
+    store
+        .upsert_note_anchor(path, "run", "symbol", "seeded note", "seed-pack")
+        .unwrap();
+    // Not `replace_co_change` (whole-table replace — would wipe rows seeded by an earlier
+    // call for a different path in the same test) — a direct insert instead.
+    store
+        .db_connection()
+        .execute(
+            "INSERT INTO co_change (path_a, path_b, count) VALUES (?1, ?2, 1)",
+            rusqlite::params![path, format!("{path}.cochange-partner")],
+        )
         .unwrap();
     store
         .enqueue_summary_items(&[(path.to_owned(), "file".to_owned(), 1)])

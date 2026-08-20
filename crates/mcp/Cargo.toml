@@ -29,3 +29,4 @@ schemars = "1"
 tempfile = "3"
 # Stub Embedder/Generator impls in tests use the same async-trait the traits do.
 async-trait = { workspace = true }
+rusqlite = { workspace = true }

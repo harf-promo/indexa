@@ -311,6 +311,18 @@ impl Parser for CodeParser {
             let mut seen_calls = std::collections::HashSet::new();
             extract_calls(root, &source, path, call_kinds, &mut edges, &mut seen_calls);
         }
+        // 2.2: extract extends/implements heritage edges (class/impl/interface bases).
+        let heritage_kinds = heritage_kinds_for(lang_def.name);
+        if !heritage_kinds.is_empty() {
+            extract_heritage(
+                root,
+                &source,
+                path,
+                lang_def.name,
+                heritage_kinds,
+                &mut edges,
+            );
+        }
 
         Ok(Extracted {
             source: path.to_path_buf(),
@@ -354,6 +366,8 @@ fn extract_calls(
                         from: path.to_path_buf(),
                         kind: "calls",
                         to: name,
+                        symbol_kind: None,
+                        line_range: None,
                     });
                 }
             }
@@ -419,6 +433,195 @@ fn call_callee(node: &Node, source: &str) -> Option<String> {
     None
 }
 
+/// Top-level node kinds that may carry heritage (extends/implements) info, by language
+/// name. Empty for languages with no inheritance concept (Go's interface satisfaction is
+/// structural, not declared; C has no classes).
+fn heritage_kinds_for(language: &str) -> &'static [&'static str] {
+    match language {
+        "rust" => &["impl_item"],
+        "python" => &["class_definition"],
+        "javascript" | "typescript" | "tsx" => &["class_declaration"],
+        "java" => &["class_declaration", "interface_declaration"],
+        "cpp" => &["class_specifier", "struct_specifier"],
+        _ => &[],
+    }
+}
+
+/// Extract `extends`/`implements` edges (2.2) from class/impl/interface nodes. File-level,
+/// like every other edge kind here — not "type X extends Y" but "this file extends Y",
+/// consistent with `defines`/`calls` being file-scoped and resolved against definers at
+/// query time (see `store::edges::resolve_call`).
+///
+/// Field/child shapes below are verified against real tree-sitter output (`Node::to_sexp`),
+/// not assumed from grammar docs:
+///   Rust        `impl_item { trait: type_identifier, type: type_identifier }` — `trait` is
+///               present only for `impl Trait for Type` (absent for a plain `impl Type`).
+///   Python      `class_definition { superclasses: argument_list(identifier*) }`.
+///   JavaScript  `class_declaration { .. class_heritage(identifier) .. }` (unlabeled child;
+///               no `implements` keyword in JS).
+///   TypeScript  `class_declaration { .. class_heritage(extends_clause{value:identifier}?
+///               implements_clause(type_identifier*)?) .. }`.
+///   Java        `class_declaration { superclass: superclass(type_identifier),
+///               interfaces: super_interfaces(type_list(type_identifier*)) }`;
+///               `interface_declaration { .. extends_interfaces(type_list(type_identifier*)) .. }`.
+///   C++         `class_specifier|struct_specifier { .. base_class_clause(access_specifier|
+///               type_identifier, ..) .. }` — access_specifier (public/private/protected)
+///               nodes are filtered out, keeping only type_identifier children.
+fn extract_heritage(
+    node: Node,
+    source: &str,
+    path: &Path,
+    language: &str,
+    kinds: &[&str],
+    edges: &mut Vec<Edge>,
+) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if kinds.contains(&child.kind()) {
+            match language {
+                "rust" => {
+                    if let Some(t) = child.child_by_field_name("trait") {
+                        push_heritage(edges, path, "implements", &source[t.byte_range()]);
+                    }
+                }
+                "python" => {
+                    if let Some(bases) = child.child_by_field_name("superclasses") {
+                        let mut c2 = bases.walk();
+                        for base in bases.children(&mut c2) {
+                            if base.kind() == "identifier" {
+                                push_heritage(edges, path, "extends", &source[base.byte_range()]);
+                            }
+                        }
+                    }
+                }
+                "javascript" => {
+                    if let Some(heritage) = find_child_by_kind(&child, "class_heritage") {
+                        let mut c2 = heritage.walk();
+                        for n in heritage.children(&mut c2) {
+                            if n.kind() == "identifier" {
+                                push_heritage(edges, path, "extends", &source[n.byte_range()]);
+                            }
+                        }
+                    }
+                }
+                "typescript" | "tsx" => {
+                    if let Some(heritage) = find_child_by_kind(&child, "class_heritage") {
+                        let mut c2 = heritage.walk();
+                        for n in heritage.children(&mut c2) {
+                            match n.kind() {
+                                "extends_clause" => {
+                                    if let Some(v) = n.child_by_field_name("value") {
+                                        push_heritage(
+                                            edges,
+                                            path,
+                                            "extends",
+                                            &source[v.byte_range()],
+                                        );
+                                    }
+                                }
+                                "implements_clause" => {
+                                    let mut c3 = n.walk();
+                                    for t in n.children(&mut c3) {
+                                        if t.kind() == "type_identifier" {
+                                            push_heritage(
+                                                edges,
+                                                path,
+                                                "implements",
+                                                &source[t.byte_range()],
+                                            );
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                "java" => {
+                    if child.kind() == "class_declaration" {
+                        if let Some(superclass) = child.child_by_field_name("superclass") {
+                            if let Some(t) = find_child_by_kind(&superclass, "type_identifier") {
+                                push_heritage(edges, path, "extends", &source[t.byte_range()]);
+                            }
+                        }
+                        if let Some(interfaces) = child.child_by_field_name("interfaces") {
+                            extract_java_type_list(&interfaces, source, path, "implements", edges);
+                        }
+                    } else if child.kind() == "interface_declaration" {
+                        if let Some(ext) = find_child_by_kind(&child, "extends_interfaces") {
+                            extract_java_type_list(&ext, source, path, "extends", edges);
+                        }
+                    }
+                }
+                "cpp" => {
+                    if let Some(base_clause) = find_child_by_kind(&child, "base_class_clause") {
+                        let mut c2 = base_clause.walk();
+                        for n in base_clause.children(&mut c2) {
+                            if n.kind() == "type_identifier" {
+                                push_heritage(edges, path, "extends", &source[n.byte_range()]);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        extract_heritage(child, source, path, language, kinds, edges);
+    }
+}
+
+/// Push an `extends`/`implements` heritage edge (no symbol_kind/line_range — those are
+/// `defines`-only, see [`Edge`]). Skips an empty name (a malformed/partial parse).
+fn push_heritage(edges: &mut Vec<Edge>, path: &Path, kind: &'static str, name: &str) {
+    if name.is_empty() {
+        return;
+    }
+    edges.push(Edge {
+        from: path.to_path_buf(),
+        kind,
+        to: name.to_owned(),
+        symbol_kind: None,
+        line_range: None,
+    });
+}
+
+/// First direct child of `node` with tree-sitter kind `kind` — for constructs not exposed
+/// as a named field (JS/TS `class_heritage`, C++ `base_class_clause`, Java's unlabeled
+/// `extends_interfaces`, the `type_identifier` inside Java's `superclass` wrapper node).
+// Not `Iterator::find`: the adaptor borrows `cursor`, which doesn't live past this
+// statement, so the NLL borrow checker rejects the chained form here.
+#[allow(clippy::manual_find)]
+fn find_child_by_kind<'a>(node: &Node<'a>, kind: &str) -> Option<Node<'a>> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == kind {
+            return Some(child);
+        }
+    }
+    None
+}
+
+/// Java `super_interfaces`/`extends_interfaces` both wrap a `type_list` of `type_identifier`
+/// children — shared walk for both (`interfaces:` on a class, and the unlabeled child on an
+/// `interface_declaration`).
+fn extract_java_type_list(
+    wrapper: &Node,
+    source: &str,
+    path: &Path,
+    kind: &'static str,
+    edges: &mut Vec<Edge>,
+) {
+    let Some(type_list) = find_child_by_kind(wrapper, "type_list") else {
+        return;
+    };
+    let mut cursor = type_list.walk();
+    for t in type_list.children(&mut cursor) {
+        if t.kind() == "type_identifier" {
+            push_heritage(edges, path, kind, &source[t.byte_range()]);
+        }
+    }
+}
+
 /// Tree-sitter node kinds that represent an import/use statement, by language name. An
 /// empty slice means imports aren't extracted for that language (its `defines` edges are
 /// still emitted). Go uses `import_spec` (one per import) so grouped `import ( … )` blocks
@@ -454,14 +657,46 @@ fn extract_defines(
         if kinds.contains(&child.kind()) {
             let name = symbol_name(&child, source);
             if name != child.kind() && seen.insert(name.clone()) {
+                // 1-based, inclusive line range (tree-sitter positions are 0-based rows).
+                let start_line = child.start_position().row + 1;
+                let end_line = child.end_position().row + 1;
                 edges.push(Edge {
                     from: path.to_path_buf(),
                     kind: "defines",
                     to: name,
+                    symbol_kind: Some(simplify_symbol_kind(child.kind())),
+                    line_range: Some((start_line, end_line)),
                 });
             }
         }
         extract_defines(child, source, path, kinds, edges, seen);
+    }
+}
+
+/// Map a tree-sitter top-level node kind to a compact, cross-language symbol-kind vocabulary
+/// (2.1) — every `top_level_kinds` entry across the 8 supported languages is covered
+/// explicitly; an unmapped kind (a future grammar/language addition) falls back to `"other"`
+/// rather than leaking a grammar-specific node-kind string into the `symbols` table.
+pub(crate) fn simplify_symbol_kind(node_kind: &str) -> &'static str {
+    match node_kind {
+        "function_item" | "function_definition" | "function_declaration" => "fn",
+        "method_declaration" => "method",
+        "impl_item" => "impl",
+        "struct_item" | "struct_specifier" => "struct",
+        "enum_item" | "enum_specifier" | "enum_declaration" => "enum",
+        "union_specifier" => "union",
+        "trait_item" => "trait",
+        "class_declaration" | "class_definition" | "class_specifier" => "class",
+        "interface_declaration" => "interface",
+        "mod_item" | "namespace_definition" => "module",
+        "type_alias" | "type_alias_declaration" | "type_declaration" | "type_definition" => "type",
+        "const_item" | "const_declaration" => "const",
+        "static_item" => "static",
+        "var_declaration" | "variable_declaration" | "lexical_declaration" => "var",
+        "template_declaration" => "template",
+        "preproc_def" | "preproc_function_def" => "macro",
+        "declaration" => "declaration",
+        _ => "other",
     }
 }
 
@@ -478,6 +713,8 @@ fn extract_imports(node: Node, source: &str, path: &Path, kinds: &[&str], edges:
                         from: path.to_path_buf(),
                         kind: "imports",
                         to: target,
+                        symbol_kind: None,
+                        line_range: None,
                     });
                 }
             }
@@ -761,6 +998,209 @@ impl Greeter {
         assert!(defines.contains(&"Widget"), "defines: {defines:?}");
         // Every edge originates at the parsed file.
         assert!(ex.edges.iter().all(|e| e.from == p));
+    }
+
+    fn heritage_of(ex: &crate::types::Extracted) -> Vec<(&str, &str)> {
+        ex.edges
+            .iter()
+            .filter(|e| e.kind == "extends" || e.kind == "implements")
+            .map(|e| (e.kind, e.to.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn heritage_rust_impl_trait_for_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.rs");
+        std::fs::write(&p, "impl Foo for Bar {}\nimpl Bar {}\n").unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+        let h = heritage_of(&ex);
+        assert_eq!(h, vec![("implements", "Foo")], "{h:?}");
+    }
+
+    #[test]
+    fn heritage_python_multiple_base_classes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.py");
+        std::fs::write(&p, "class Foo(Base1, Base2):\n    pass\n").unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+        let h = heritage_of(&ex);
+        assert_eq!(h, vec![("extends", "Base1"), ("extends", "Base2")], "{h:?}");
+    }
+
+    #[test]
+    fn heritage_javascript_extends_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.js");
+        std::fs::write(&p, "class Foo extends Bar {}\n").unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+        assert_eq!(heritage_of(&ex), vec![("extends", "Bar")]);
+    }
+
+    #[test]
+    fn heritage_typescript_extends_and_implements() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.ts");
+        std::fs::write(&p, "class Foo extends Bar implements Baz, Qux {}\n").unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+        let h = heritage_of(&ex);
+        assert_eq!(
+            h,
+            vec![
+                ("extends", "Bar"),
+                ("implements", "Baz"),
+                ("implements", "Qux")
+            ],
+            "{h:?}"
+        );
+    }
+
+    #[test]
+    fn heritage_java_class_and_interface() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("A.java");
+        std::fs::write(
+            &p,
+            "class Foo extends Bar implements Baz, Qux {}\ninterface A extends B, C {}\n",
+        )
+        .unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+        let h = heritage_of(&ex);
+        assert_eq!(
+            h,
+            vec![
+                ("extends", "Bar"),
+                ("implements", "Baz"),
+                ("implements", "Qux"),
+                ("extends", "B"),
+                ("extends", "C"),
+            ],
+            "{h:?}"
+        );
+    }
+
+    #[test]
+    fn heritage_cpp_class_and_struct_base_clause() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.cpp");
+        std::fs::write(
+            &p,
+            "class Foo : public Bar, private Baz {};\nstruct S : Base {};\n",
+        )
+        .unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+        let h = heritage_of(&ex);
+        assert_eq!(
+            h,
+            vec![("extends", "Bar"), ("extends", "Baz"), ("extends", "Base"),],
+            "{h:?}"
+        );
+    }
+
+    #[test]
+    fn heritage_absent_for_go_and_c() {
+        let dir = tempfile::tempdir().unwrap();
+        let go = dir.path().join("a.go");
+        std::fs::write(&go, "package main\n\nfunc main() {}\n").unwrap();
+        assert!(heritage_of(&CodeParser.parse(&go).unwrap()).is_empty());
+
+        let c = dir.path().join("a.c");
+        std::fs::write(&c, "struct Foo { int x; };\n").unwrap();
+        assert!(heritage_of(&CodeParser.parse(&c).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn defines_edges_carry_symbol_kind_and_line_range() {
+        // 2.1: `defines` edges now carry a compact symbol kind + 1-based line range;
+        // imports/calls edges carry neither.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("lib.rs");
+        std::fs::write(
+            &p,
+            "use std::fmt;\n\npub fn run() {\n    helper();\n}\n\npub struct Widget {\n    x: i32,\n}\n",
+        )
+        .unwrap();
+        let ex = CodeParser.parse(&p).unwrap();
+
+        let run_edge = ex
+            .edges
+            .iter()
+            .find(|e| e.kind == "defines" && e.to == "run")
+            .expect("run defines edge");
+        assert_eq!(run_edge.symbol_kind, Some("fn"));
+        // `pub fn run() {` starts on line 3, its closing `}` is line 5 (1-based).
+        assert_eq!(run_edge.line_range, Some((3, 5)));
+
+        let widget_edge = ex
+            .edges
+            .iter()
+            .find(|e| e.kind == "defines" && e.to == "Widget")
+            .expect("Widget defines edge");
+        assert_eq!(widget_edge.symbol_kind, Some("struct"));
+        assert_eq!(widget_edge.line_range, Some((7, 9)));
+
+        // Imports and calls never carry symbol metadata.
+        assert!(ex
+            .edges
+            .iter()
+            .filter(|e| e.kind != "defines")
+            .all(|e| e.symbol_kind.is_none() && e.line_range.is_none()));
+    }
+
+    #[test]
+    fn simplify_symbol_kind_covers_every_top_level_kind() {
+        // Every top_level_kinds entry across all 8 languages must map to something other
+        // than the "other" fallback — this pins the mapping table against silent gaps
+        // when a language's top_level_kinds list changes.
+        const ALL_TOP_LEVEL_KINDS: &[&str] = &[
+            // Rust
+            "function_item",
+            "impl_item",
+            "struct_item",
+            "enum_item",
+            "trait_item",
+            "mod_item",
+            "type_alias",
+            "const_item",
+            "static_item",
+            // Python
+            "function_definition",
+            "class_definition",
+            // JS/TS/TSX
+            "function_declaration",
+            "class_declaration",
+            "lexical_declaration",
+            "variable_declaration",
+            "interface_declaration",
+            "type_alias_declaration",
+            // Go
+            "method_declaration",
+            "type_declaration",
+            "const_declaration",
+            "var_declaration",
+            // Java
+            "enum_declaration",
+            // C/C++
+            "struct_specifier",
+            "enum_specifier",
+            "union_specifier",
+            "type_definition",
+            "preproc_def",
+            "preproc_function_def",
+            "class_specifier",
+            "namespace_definition",
+            "template_declaration",
+            "declaration",
+        ];
+        for kind in ALL_TOP_LEVEL_KINDS {
+            assert_ne!(
+                simplify_symbol_kind(kind),
+                "other",
+                "unmapped top_level_kinds entry: {kind}"
+            );
+        }
+        // A genuinely unknown kind still falls back gracefully.
+        assert_eq!(simplify_symbol_kind("some_future_grammar_node"), "other");
     }
 
     #[test]

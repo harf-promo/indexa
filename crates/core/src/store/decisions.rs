@@ -13,9 +13,11 @@
 //! The entries.rs delete paths do NOT touch these tables; vanished subjects are
 //! expired by the sweep via [`Store::expire_decision`] — recorded, never dropped.
 
+use super::entries::subtree_match_or_all;
 use super::search::like_prefix;
 use super::types::{DecisionRecord, NewDecision};
 use super::Store;
+use crate::decisions::DecisionType;
 use anyhow::{bail, Result};
 use rusqlite::{params, OptionalExtension, Transaction};
 
@@ -362,11 +364,30 @@ impl Store {
         chosen: &str,
         source: &str,
     ) -> Result<Vec<i64>> {
-        let pattern = like_prefix(dir_prefix);
+        // `subject = exact OR subject LIKE child_pattern` (a `/`-bounded match), not a bare
+        // prefix `LIKE` — the old behavior matched a sibling directory that merely shared the
+        // string prefix (`--under ~/Downloads` also answered questions under
+        // `~/Downloads-2024-archive`) and *wrote* those answers as sticky user classifications.
+        // Only applies when the type's subject is actually a path (see
+        // `DecisionType::subject_is_path`) — `symbol_ambiguity`'s subject is a bare symbol
+        // name, where a literal starts-with is still the right (only) match semantics.
+        let is_path_type =
+            DecisionType::parse(decision_type).is_none_or(DecisionType::subject_is_path);
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let ids: Vec<i64> = {
+        let ids: Vec<i64> = if is_path_type {
+            let (exact, child) = subtree_match_or_all(dir_prefix);
+            let mut stmt = tx.prepare(
+                "SELECT id FROM decisions
+                  WHERE status = 'open' AND decision_type = ?1
+                    AND (subject = ?2 OR subject LIKE ?3 ESCAPE '\\')
+                  ORDER BY id",
+            )?;
+            let rows = stmt.query_map(params![decision_type, exact, child], |r| r.get(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            let pattern = like_prefix(dir_prefix);
             let mut stmt = tx.prepare(
                 "SELECT id FROM decisions
                   WHERE status = 'open' AND decision_type = ?1

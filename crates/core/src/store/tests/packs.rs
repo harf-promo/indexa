@@ -280,3 +280,84 @@ fn delete_entry_also_removes_edges() {
     assert!(store.edges_from("/gone.rs").unwrap().is_empty());
     assert!(store.edges_to("imports", "std::fs").unwrap().is_empty());
 }
+
+#[test]
+fn create_pack_records_a_created_event() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store.create_pack("proj", None).unwrap();
+    let events = store.pack_events(&id).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event, "created");
+    assert_eq!(events[0].detail.as_deref(), Some("proj"));
+}
+
+#[test]
+fn pack_events_are_chronological_across_the_crud_lifecycle() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store.create_pack("proj", None).unwrap();
+    store
+        .add_pack_paths(&id, &["/a.rs".to_owned(), "/b.rs".to_owned()])
+        .unwrap();
+    store.rename_pack(&id, "proj2").unwrap();
+    store.remove_pack_paths(&id, &["/a.rs".to_owned()]).unwrap();
+    store.record_pack_exported(&id, "xml").unwrap();
+
+    let events = store.pack_events(&id).unwrap();
+    let kinds: Vec<&str> = events.iter().map(|e| e.event.as_str()).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            "created",
+            "path_added",
+            "renamed",
+            "path_removed",
+            "exported"
+        ]
+    );
+    assert_eq!(events[1].detail.as_deref(), Some("/a.rs, /b.rs"));
+    assert_eq!(events[2].detail.as_deref(), Some("proj2"));
+    assert_eq!(events[4].detail.as_deref(), Some("xml"));
+}
+
+#[test]
+fn add_and_remove_pack_paths_with_empty_batch_records_no_event() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store.create_pack("proj", None).unwrap();
+    store.add_pack_paths(&id, &[]).unwrap();
+    store.remove_pack_paths(&id, &[]).unwrap();
+    let events = store.pack_events(&id).unwrap();
+    assert_eq!(events.len(), 1, "only the initial 'created' event");
+}
+
+#[test]
+fn rename_pack_no_op_records_no_event() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store.create_pack("proj", None).unwrap();
+    // Renaming a nonexistent pack id changes 0 rows -> no event.
+    store.rename_pack("nonexistent-id", "whatever").unwrap();
+    let events = store.pack_events(&id).unwrap();
+    assert_eq!(events.len(), 1);
+}
+
+#[test]
+fn pack_updated_at_reflects_the_latest_event() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store.create_pack("proj", None).unwrap();
+    let created = store.pack_by_name("proj").unwrap().unwrap();
+    assert!(created.updated_at.is_some());
+
+    store.add_pack_paths(&id, &["/a.rs".to_owned()]).unwrap();
+    let after_add = store.pack_by_name("proj").unwrap().unwrap();
+    assert!(after_add.updated_at.unwrap() >= created.updated_at.unwrap());
+}
+
+#[test]
+fn deleting_a_pack_cascades_its_events() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store.create_pack("proj", None).unwrap();
+    store.add_pack_paths(&id, &["/a.rs".to_owned()]).unwrap();
+    assert_eq!(store.pack_events(&id).unwrap().len(), 2);
+
+    store.delete_pack(&id).unwrap();
+    assert!(store.pack_events(&id).unwrap().is_empty());
+}

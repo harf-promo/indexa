@@ -219,6 +219,50 @@ fn answer_decisions_under_answers_only_matching_open_rows() {
 }
 
 #[test]
+fn answer_decisions_under_excludes_prefix_siblings() {
+    // H4: `--under /proj` must NOT also answer (and PROJECT — this writes sticky
+    // classifications, unlike a read-only search leak) questions under `/projector`, a
+    // directory that merely shares the string prefix.
+    let mut store = Store::open_in_memory().unwrap();
+    let inside = store
+        .record_decision(new_decision("classification", "/proj/a"))
+        .unwrap()
+        .unwrap();
+    let sibling = store
+        .record_decision(new_decision("classification", "/projector/b"))
+        .unwrap()
+        .unwrap();
+
+    let answered = store
+        .answer_decisions_under("/proj", "classification", "archive", "user")
+        .unwrap();
+    assert_eq!(answered, vec![inside]);
+    assert_eq!(
+        store.decision_by_id(sibling).unwrap().unwrap().status,
+        "open",
+        "/projector's question must be untouched by a /proj scope"
+    );
+}
+
+#[test]
+fn answer_decisions_under_symbol_ambiguity_keeps_literal_prefix_matching() {
+    // symbol_ambiguity's subject is a bare symbol name, not a path (see
+    // DecisionType::subject_is_path) — path-boundary matching must NOT apply to it, or
+    // `--under <prefix> --type symbol_ambiguity` would stop matching almost anything (a
+    // symbol name only rarely looks like "<prefix>/<rest>"). The literal starts-with
+    // behavior this type always had must be preserved.
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store
+        .record_decision(new_decision("symbol_ambiguity", "run_worker"))
+        .unwrap()
+        .unwrap();
+    let answered = store
+        .answer_decisions_under("run_", "symbol_ambiguity", "all", "user")
+        .unwrap();
+    assert_eq!(answered, vec![id]);
+}
+
+#[test]
 fn unapplied_decided_and_mark_effects_applied_roundtrip() {
     let mut store = Store::open_in_memory().unwrap();
     let id = store

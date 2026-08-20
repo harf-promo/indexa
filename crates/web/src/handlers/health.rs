@@ -37,11 +37,12 @@ pub(crate) fn read_cli_skew_marker(data_dir: &Path) -> Option<serde_json::Value>
 }
 
 pub(crate) async fn api_health(State(state): State<AppState>) -> Response {
-    let (entries, chunks, last) = {
+    let (entries, chunks, summaries, last) = {
         let store = state.store.lock().await;
         (
             store.entry_count().unwrap_or(0),
             store.chunk_count().unwrap_or(0),
+            store.summary_count().unwrap_or(0),
             store.last_indexed_at().ok().flatten(),
         )
     };
@@ -51,6 +52,12 @@ pub(crate) async fn api_health(State(state): State<AppState>) -> Response {
         .unwrap_or(0);
     let age_days = last.map(|ts| ((now - ts) / 86_400).max(0));
     let stale = age_days.is_some_and(|d| d >= STALE_AFTER_DAYS);
+    // Searchable (chunks) but almost no hierarchical context (summaries). Distinct
+    // from `stale` (mtime). Threshold is 10% of entries — a populated index with
+    // a handful of summaries still needs the banner.
+    const THIN_RATIO: f64 = 0.10;
+    let thin_context = (summaries == 0 && chunks > 0)
+        || (entries > 0 && (summaries as f64 / entries as f64) < THIN_RATIO);
     // Best-effort, desktop-only signal — `null` under plain `indexa serve`.
     let cli_skew = indexa_core::config::default_data_dir()
         .as_deref()
@@ -59,8 +66,10 @@ pub(crate) async fn api_health(State(state): State<AppState>) -> Response {
         "version": env!("CARGO_PKG_VERSION"),
         "entries": entries,
         "chunks": chunks,
+        "summaries": summaries,
         "index_age_days": age_days,
         "stale": stale,
+        "thin_context": thin_context,
         "cli_skew": cli_skew,
     }))
     .into_response()

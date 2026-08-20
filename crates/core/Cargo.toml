@@ -19,7 +19,6 @@ rusqlite = { workspace = true }
 directories = { workspace = true }
 bytemuck = { version = "1", features = ["derive"] }
 toml = { workspace = true }
-shellexpand = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 mime_guess = "2"
@@ -27,6 +26,9 @@ hyperpolyglot = "0.1"
 sysinfo = { workspace = true }
 hnsw_rs = { workspace = true }
 sha2 = { workspace = true }
+# `git diff` subprocess timeout for changed_impact (2.3) — no git2 dependency, shells
+# out to the user's own git binary and bounds the wait so a hung child can't stall a tool call.
+wait-timeout = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Coverage honesty (web).** The topbar now shows `N summaries (P%)` next to files/chunks, and the "context not built" banner is **path-aware** — a handful of summaries in one repo no longer hide that the selected folder has none. Hover actions collapse to one **Build context** verb (deep+summarize if the folder isn't searchable yet, summarize if it is); Re-scan / Refresh / Remove move into a ⋯ menu. Starting a job stays on the current view and offers "Watch progress" on the toast instead of yanking you into Activity. **Build context** on a folder that contains several detected projects refuses the whole-tree job and points at the per-project list. `GET /api/health` adds `summaries` + `thin_context`; a third banner names a thin hierarchical layer without calling it "stale". New `GET /api/projects` lists top-level detected apps with coverage so the welcome view can offer per-project Build context. Ask's **Agentic** toggle is labeled **Think harder**; a scoped answer on an unsummarized folder says so and offers the same button.
+- **Review inbox noise (detectors + web).** Archive questions no longer fire on generated/toolchain caches (`/build/`, `SourcePackages`, `.xcframework`, `DerivedData`, `Pods`, gradle wrappers, `/gen/`). Duplicate questions skip ubiquitous sibling manifests (`Cargo.toml`, `package.json`, `go.mod`, …) unless they are exact copies in the same folder. `sweep_filtered_noise` retro-dismisses the existing inbox on the next `index`/`prune`. The Review drawer groups cards by type and pre-fills the batch "under" folder when every open question of that type shares a path prefix.
+- **Surface the product (web).** The toolbar **Export** menu lists named Context Packs and can create a pack from the selected folder — no need to open Settings. Map now opens on the coverage **Treemap** at whole-disk scope (the graph is a hairball there) and switches to **Graph** once you select a project-depth folder; an explicit tab click still sticks. Settings tucks passes / resources / insights / packs / weights under **More settings**. `docs/COMPETITIVE.md` "still open" list no longer claims Decision Ledger or token-savings are unshipped.
+
 ### Added
 
 - **Local contextualized-chunk embeddings — deterministic contextual prefix (`[describer]
@@ -19,19 +25,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   embed text **only** — the stored/hashed chunk text is untouched, so the embedding cache and FTS
   index are unaffected. Wired identically in the CLI and web deep paths; new pure helpers
   `build_context_prefix` / `contextual_prefix_texts` in `indexa_query::contextual` (unit-tested).
-- **`[chunking] size` / `overlap` are now honored by every parser.** The config existed but was
-  dead — all parsers hardcoded 800-word chunks / 100-word overlap. Chunk sizing now threads through
-  a defaulted `Parser::parse_chunked` trait method (the public `Parser` API and every external/plugin
-  parser are unaffected — the default delegates to `parse`), built once per run via
-  `Registry::with_chunk`. Defaults stay **800 / 100**, so an index built without a `[chunking]` block
-  is byte-identical to before. `strategy` remains a forward-looking selector (nothing branches on it
-  yet); it stays orthogonal to `[describer] contextual_prefix` (boundaries vs. embed input).
+- **`[chunking] size` / `overlap` are now honored by every word-window parser.** The config existed
+  but was dead — every word-window parser (PDF, Office, EPUB, email, HTML, Markdown, plain text, …)
+  hardcoded 800-word chunks / 100-word overlap. Chunk sizing now threads through a defaulted
+  `Parser::parse_chunked` trait method (the public `Parser` API and every external/plugin parser are
+  unaffected — the default delegates to `parse`), built once per run via `Registry::with_chunk`.
+  Code/image/media parsers don't word-window (`CodeParser` chunks by tree-sitter AST node instead),
+  so `size`/`overlap` don't apply to them — by design, not an oversight. Defaults stay **800 / 100**,
+  so an index built without a `[chunking]` block is byte-identical to before. `strategy` remains a
+  forward-looking selector (nothing branches on it yet); it stays orthogonal to `[describer]
+  contextual_prefix` (boundaries vs. embed input).
 - **Dense-mode retrieval eval recipe + manual workflow.** The hermetic CI gate scores sparse-only
   (no Ollama), so it can't measure an embedding change. A new `#[ignore]`-gated
   `dense_rrf_eval_over_golden` test and a `workflow_dispatch`-only `dense-eval` GitHub workflow run
   `indexa eval … --mode rrf` against a populated index (Ollama + `nomic-embed-text`), gating on
   hit_rate/MRR/recall/nDCG so a dense change (contextual-prefix, reranker) is promoted only when
   proven non-regressing. `docs/methodology.md` documents the baseline-vs-branch A/B recipe.
+- **`indexa eval --rerank`.** The eval gate scored `retrieve()` alone — it structurally could not
+  exercise the cross-encoder/LLM rerank pass, since that only runs afterward in the real `ask`
+  pipeline. The new flag threads eval's retrieval call through the exact same rerank dispatch `ask`
+  uses (`qa::synthesize::retrieve_and_rerank` and `qa::explain::explain_retrieval` now share it too,
+  via a new `rerank::apply_configured_rerank`, instead of three near-identical copies), so a
+  reranker regression is finally measurable via `indexa eval golden.json --rerank`. Off by default
+  (additive — no behavior change for existing callers/CI); preflights Ollama when configured, so an
+  unreachable LLM fails the run loudly rather than silently scoring an un-reranked pass as reranked.
+  Comments in `crates/query/src/eval.rs`, `crates/cli`, `ci.yml`, and `dense-eval.yml` that
+  (accurately, at the time) described the gap are updated to describe the fix.
 - **Configurable cross-encoder reranker model (`[retrieval] rerank_model`).** The candle DeBERTa-v2
   reranker's model was hardcoded to `mixedbread-ai/mxbai-rerank-xsmall-v1`; it's now a config knob.
   All three mxbai-rerank-**v1** variants share the same architecture, so `base-v1` (~370 MB) and
@@ -51,9 +70,261 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ImpactBreakdown`/`ImpactItem` in `indexa_query`. Surfaced everywhere: web **"Show the math"** table
   under the answer, CLI `indexa ask --explain-savings` (and `--json` `savings`), and an opt-in MCP
   `ask` `explain_savings` param. MCP tool count unchanged (47).
+- **A 4-wave feature backlog from external sources (Open Knowledge Format, ripgrep, GitNexus,
+  DeusData/codebase-memory-mcp) — 24 features deepening pack interop, code-graph intelligence, index
+  freshness, and agent distribution.** `SCHEMA_VERSION` moved 1→5 across the two waves that touched
+  storage; the MCP tool surface grew **47→50**.
+  - **Wave 1 — quick wins, no schema changes:** risk-grouped, depth-labeled `blast_radius` output
+    (`grouped: true` / `--grouped`, GitNexus's WILL BREAK / LIKELY AFFECTED / MAY NEED TESTING
+    contract); staleness attestation on `ask`/`search` citations (`[retrieval] staleness_flags`,
+    default on — a cited file changed since indexing is flagged inline); UTF-16/BOM transcoding for
+    the text-family parsers (`[parsers] encoding`, default `"auto"` — fixes silent data loss on
+    PowerShell redirects and Notepad "Save as UTF-16" files); export renderers now carry summary
+    provenance (`model`/`generated_at`/`source_hash`) that `SummaryRecord` already stored but every
+    renderer dropped; `.indexaignore`, a highest-precedence git-independent ignore layer with `!`
+    re-includes; Mermaid call-graph diagrams in pack exports (`--include-graph=mermaid`); `indexa
+    doctor` now reports the loaded config file and every non-default key in effect; `path:`/`ext:`
+    predicate grammar for free-text `search`/`ask` queries (`[retrieval] query_predicates`, default
+    off).
+  - **Wave 2 — code-graph & memory deepening:** a `symbols` table (kind + line range per top-level
+    symbol) and heritage edges (`extends`/`implements` across Rust/Python/JS/TS/Java/C++, surfaced via
+    `include_heritage` on `blast_radius`/`dependencies`); **three new MCP tools** — `changed_impact`
+    (git diff → changed symbols → blast radius, one call), `trace_path` (BFS shortest call-graph path
+    between two symbols/files), `symbol_context` (360° symbol view: definitions, callers, heritage,
+    outgoing references); note/decision anchoring to code (`add_note(anchor: ...)`, joined into
+    graph-tool output); co-change edges from git history (`indexa graph --compute-co-change`,
+    `related_files(include_co_change)`).
+  - **Wave 3 — distribution & freshness:** `indexa install-hooks [--write]` generates Claude Code
+    hook config (project-scoped only) — a SessionStart hook injects a freshness summary, an optional
+    PreToolUse-on-Grep hook injects related indexed context — plus a shipped SKILL.md teaching an
+    agent which Indexa tool fits which question; MCP tool-surface profiles
+    (`indexa mcp --tool-profile core` serves a ~10-tool subset, un-advertised *and* un-callable for
+    the rest; default `full` is byte-identical to before); `[scan] auto_reindex = "git-poll"`, a
+    persistent background task watching each indexed git root's HEAD/working-tree state at an
+    adaptive interval and re-indexing on change (baseline advances only on a successful reindex).
+  - **Wave 4 — packs interop & pipeline breadth:** an append-only `pack_events` history table
+    (giving packs an `updated_at` and a changelog source); OKF-conformant pack bundle export
+    (`--format okf` — one Markdown file per item with YAML frontmatter, a progressive-disclosure
+    `index.md`, and a generated `log.md`; pure Markdown, no `viz.html`); `indexa pack import <bundle>`
+    reconstructing a pack from an OKF export with checksum conflict detection; runtime preprocessor
+    hooks (`[[parsers.preprocessor]]`, config-file-only — an external command's stdout is indexed as
+    text for long-tail formats, with a timeout + output-size cap and graceful fallback to native
+    parsers on any failure); transparent gzip content indexing (`[parsers] compressed`, default
+    off — a standalone `.gz` file's decompressed content is indexed via its inner extension;
+    `.tar.gz`/`.tgz` are unaffected); persisted architecture-map modules (`indexa graph
+    --compute-modules` / `--modules`, MCP `code_graph`'s `modules: true`, `[graph] modules` config —
+    clusters the code graph via Louvain, directory-prior-boosted, into named functional areas each
+    labeled by a short local-LLM call; a web "Modules" toggle reads the persisted table, kept separate
+    from the existing live "Communities" overlay).
+- **Compressed content indexing now covers zstd, xz/lzma, and brotli — not just gzip.** The
+  transparent-decompression parser (`[parsers] compressed`) gains three more codecs alongside the
+  existing gzip support: `.zst` (`ruzstd`), `.xz`/`.lzma` (`lzma-rs`), and `.br` (`brotli`). All
+  three are pure-Rust implementations — no C toolchain or system library required, keeping the
+  build matrix as simple as before. Same single config flag gates all four codecs; `.tar.<codec>`
+  and its short aliases (`.tgz`/`.tzst`/`.txz`) are unaffected either way — those stay the archive
+  parser's job regardless of codec.
+- **Named file-type sets in search predicates (`type:python`, etc.).** A ripgrep-style curated
+  multi-extension shorthand joins the existing `path:`/`ext:` query predicates
+  (`[retrieval] query_predicates`) in MCP `search`/`ask` — `type:python` matches `.py` or `.pyi`
+  in one token instead of two separate `ext:` predicates. Deliberately a query-time filter (a
+  post-hoc hit filter over an already-indexed corpus), not a scan-time indexing filter — an
+  indexing-time positive allowlist would have interacted badly with the existing reconcile/prune
+  logic (files excluded by a type filter would look identical to files genuinely deleted from
+  disk). An unrecognized type name is never silently swallowed; it passes through as ordinary
+  query text, same safety property `ext:`/`path:` already have.
+
+### Performance
+
+- **Allocation-light brute-force dense search.** The cosine scan behind `ask`/`search` (the exact path
+  used below `ann_min_chunks` and for scoped queries) previously decoded each chunk's embedding into a fresh `Vec<f32>`,
+  materialized its path string, recomputed the query norm for every row, and full-sorted *all* rows to
+  take the top-k (~1 GB decoded per query at 300k chunks). It now hoists the query norm once, computes
+  the dot product and row norm in a single pass directly over the stored bytes (no per-row vector),
+  keeps only the top-k in a bounded heap, and resolves paths once at the end. Results are **byte-for-byte
+  identical** (a new oracle test asserts the exact top-k) — same answers, far less work per query.
+- **Opening the index skips redundant schema work.** Every `Store::open` re-ran the full DDL
+  (~20 `CREATE … IF NOT EXISTS`) plus ~10 `pragma_table_info`/`sqlite_master` migration probes and a
+  `wal_checkpoint(TRUNCATE)` — on every open, and the MCP server opens a fresh connection per tool call
+  and the Q&A path per question. The schema is now stamped with `PRAGMA user_version`; an already-current
+  DB skips straight past the DDL + migration probes (old DBs still migrate and re-stamp), and the
+  open-time WAL truncate now only runs when the WAL has actually grown large. Faster, quieter opens with
+  no behaviour change.
+- **Faster directory scanning.** The walker was hard-capped at 4 threads, funneled every entry through a
+  single shared-mutex `Vec`, and classified each directory three separate times (each doing filesystem
+  `stat`/`exists` syscalls). It now defaults to all cores (floored at 4, tunable via `[scan] threads`),
+  gives each worker its own buffer merged once at the end, and classifies each directory a single time —
+  a 2–3× scan speedup on many-core machines with identical output at any thread count (a new test asserts
+  the entry set is thread-count-invariant).
+- **Fast dense retrieval on by default, now including MCP.** `[retrieval] ann` (the in-memory HNSW index)
+  now defaults to **on**, so large indexes get fast approximate dense retrieval automatically in the
+  long-lived `serve` and `mcp` servers — it only engages above `ann_min_chunks` (50 000) and falls back to
+  the exact brute-force scan below that and for scoped queries, so small indexes and one-shot CLI `ask` are
+  unchanged. The **MCP server** (the primary AI surface) previously *never* used the ANN index and
+  brute-force-scanned every `ask`/`search`/`explain_retrieval`; it now builds and caches the same
+  watermark-keyed index the web server does. Set `ann = false` to force exact brute-force everywhere.
 
 ### Fixed
 
+- **A preprocessor hook could hang indexing forever.** `run_command`'s stdin write ran on the
+  calling thread *before* the stdout-reader thread was spawned — once a child's stdout pipe
+  filled (~64 KB) it stopped reading stdin, and once stdin filled the parent blocked in
+  `write_all`, downstream of both `wait_with_timeout` and `max_output_bytes`, so neither could
+  fire. Any input bigger than one pipe buffer whose converter output was also bigger than one
+  pipe buffer hung `deep`/`watch`/the web job indefinitely. Fixed by spawning the reader thread
+  first, matching the pattern `proc.rs::run_capped` already used.
+- **"Index this folder" silently force-regenerated every summary on every re-run.**
+  `run_summarize_phase` unconditionally called `requeue_subtree`, which blanks
+  `summaries.source_hash` — both freshness gates test `!source_hash.is_empty()` first, so with
+  the stored side blanked they could never skip anything. Re-running "Index" on a repo after
+  editing 3 files re-paid full local-LLM cost for every file, silently. `force: bool` now
+  threads through; only the explicit "Regenerate" button passes `true` and routes through
+  `requeue_subtree` — every other caller (including the web "Index" button) passes `false` and
+  correctly uses the incremental `enqueue_subtree`.
+- **`deep` without `scan` wrote chunks/embeddings/edges that the next `prune` silently deleted.**
+  Neither the CLI's nor the web's deep write path called `upsert_entries` before `upsert_chunks`,
+  so the new rows had no matching `entries` row — and `prune_orphans` (run on every `scan`) treats
+  entry-less rows as garbage and deletes them, wiping the embedding work that was just paid for.
+  Those files also never got summarized (`enqueue_subtree` seeds from
+  `entries_for_summarization`, which needs an `entries` row). Same bug class: `symbols` (written
+  by the same deep pass as `edges`) wasn't swept by prune at all, so a pruned file's stale
+  symbols kept being cited by `symbol_context`. Both deep paths now upsert the entry first; prune
+  now sweeps `symbols` too.
+- **Retrieval scoring was nondeterministic — same index, same query, different answer across
+  server restarts.** RRF ties resolved via `HashMap` iteration order, which is unspecified and
+  varies per-process; two hits tied on `1.0/(rrf_k+rank+1.0)` could rank either way depending on
+  hash-seed randomization. Separately, `mmr_score` mixed a raw RRF score (~0.016–0.052) against a
+  cosine similarity in `[0,1]` — a ~30× scale mismatch that made every `mmr_lambda` below 1.0
+  (the default is 0.5) behave as near-pure diversity, contradicting the documented "0.5 =
+  balanced" contract. Fixed with a stable tie-break (`total_cmp` then id) and min-max
+  normalization of the RRF pool before combining with cosine in MMR. Landed first and
+  re-baselined `fixtures/self-golden.json`, since every later retrieval change in this sweep was
+  otherwise measured through the noise this introduced.
+- **Scoped `ask`/search/batch-review/graph-scope leaked sibling directories.** Four call sites
+  (`search.rs`'s hybrid/cosine/path search, `decisions.rs`'s batch-answer, `modules.rs`'s graph
+  scope) used a bare `LIKE '{prefix}%'` with no `/`-boundary, while the repo's own
+  path-boundary-safe `subtree_match` already existed and was used by a neighboring function.
+  Consequence: `ask --scope ~/dev/indexa` also retrieved and cited chunks from
+  `~/dev/indexa-experiments`, indistinguishable from a real hit; `review answer --under
+  ~/Downloads` also answered and *wrote* sticky classifications for every open question under
+  `~/Downloads-2024-archive`. `search_paths` additionally had no wildcard escaping at all — a
+  bare `%` matched the whole index. All four now route through `subtree_match`'s
+  exact-or-descendant predicate (with an empty-prefix "match everything" mode preserved via a
+  new `subtree_match_or_all`, so the UI's documented empty-`under` = "all folders" semantics
+  didn't regress), and `search_paths` shares the same escaping helper as `LIKE` prefixes
+  elsewhere.
+- **The xz/lzma decompression-bomb guard didn't actually bound memory, contradicting its own
+  documented claim.** The gzip/zstd/brotli byte cap works by bounding a lazy `Read`, but
+  `lzma_rs` decodes an entire block into its own internal buffer before handing any bytes to the
+  caller's capped writer — a 600 KB `.xz` that decompresses to 20 GB could exhaust memory before
+  the cap ever saw a byte, regardless of the cap's value. `.xz` now pre-reads the Stream
+  Footer/Index's declared uncompressed size and bails before decoding if it exceeds the cap;
+  `.lzma` now passes `memlimit` to bound its dictionary-size allocation. (`[parsers] compressed`
+  defaults off, so exposure was opt-in; the doc claim of a protection that structurally couldn't
+  exist for this codec was the more load-bearing part of the bug.)
+- **The welcome multi-project chooser was a permanent no-op after the first click, and only
+  worked from the Context tab.** The refusal toast for "this folder has N projects" tried to
+  remediate itself by re-rendering `#welcome-projects` — but that container lives inside
+  `#summary-view`, which gets overwritten wholesale the moment anything else is selected, and the
+  same refusal is reachable from the Ask/chat tab, where the container isn't even mounted. Now
+  renders as a real modal (`showProjectChooserModal`) built from the already-fetched, correctly-
+  scoped `/api/projects` response, so it works identically from any tab, every time.
+- **`/api/projects` held the shared store lock across an unbounded per-project loop, and its
+  `covered`/`total` fields were computed and shipped over the wire with no reachable consumer.**
+  ~195 ms measured live for 16 projects (3 subtree scans each) serialized every other web request
+  needing the store for that whole window. Separately, the one intended consumer
+  (`chooseBuildKind`) could never see `covered`/`total` because the welcome row's `summary_state`
+  was hardcoded `null` and its own fallback always picked `'summarize'` regardless — a project at
+  67/68 folders still read as "no summaries." Now opens its own short-lived connection (mirroring
+  `tree.rs`'s `api_tree`), and `covered`/`total` render as "N/M folders" via a new shared
+  `buildProjectRow` helper used by both the welcome list and the chooser modal above.
+- **A cluster of small web-UI "the user is told nothing" bugs.** The post-index toast printed its
+  action link as raw, unclickable HTML text instead of a real button; confirm dialogs
+  (`confirmModal`) painted *under* an already-open drawer with focus still live on the hidden
+  button; pack-export errors could land inside a closed drawer, invisible; two functions
+  (`reindexAll`, the sound-toggle handlers) were silently shadowed by the concatenated-JS-bundle
+  architecture — the surviving copy of `reindexAll` had no `r.ok` check (a 500 read as "No
+  context roots yet"), and the sound toggle read/wrote the wrong `localStorage` key. Also:
+  Treemap/graph coverage colors were hardcoded Tailwind hex instead of Harf design tokens (stayed
+  a dark block in light mode); the thin-context banner's dismissal never persisted; "New pack
+  from selection" had no recovery path for the backend's own 409 name-collision response. Two new
+  pinned tests (`no_top_level_function_is_declared_in_two_js_fragments`,
+  `every_ui_fragment_on_disk_is_wired_into_the_concat_list`) guard the concat architecture that
+  let the shadowing bug ship silently in the first place.
+- **The Review inbox could accumulate open questions whose subject had already left the index,
+  forever, when driven only from the web UI.** The decision-expiry sweep (an open question whose
+  evidence vanished gets recorded as `expired`, never silently dropped) only ran inside
+  `run_detectors`, called from the CLI's `indexa index`/`indexa review` — never from the web job
+  pipeline. A user who only ever used "Build context" in the browser could accumulate stale
+  questions (e.g. from a path later excluded by a `[scan] ignore` edit) that no in-app action
+  would ever clear. The sweep is now a standalone `expire_vanished_decisions`, called from the
+  web scan phase alongside the existing orphan-chunk prune — the same "index hygiene after a
+  scan" moment, now covering both entry points.
+- **`[describer] mode` was unreachable, and `summaries-only` didn't actually skip chunking.**
+  Three bugs, one root cause: `--mode` on `index`/`deep`/`summarize` was a plain `String` with
+  a hardcoded `"augment"` CLI default, so clap always supplied *some* value and the config file's
+  `[describer] mode` could never win even when `--mode` was never typed — the documented
+  "set `mode = "summaries-only"` in config and just run `indexa index`" recipe silently did
+  nothing. `--mode` is now `Option<String>`; an omitted flag defers to config, an explicit one
+  still overrides it (same pattern as `--embed-model`). Separately, `summaries-only` mode (the
+  ~100×-smaller, no-chunking mode this project's whole-computer-indexing plan depends on) never
+  actually skipped chunk storage in either deep path — both the CLI's `cmd_deep` and the web's
+  `run_deep_phase` called `upsert_chunks` unconditionally regardless of mode. Both now skip
+  chunk storage (and the embedding/contextual-blurb/caption/transcribe/OCR work that only exists
+  to enrich a stored chunk) in `summaries-only` mode, while still parsing files and writing
+  entries/edges/symbols so the subtree stays summarizable. Without a stored chunk to sample from,
+  `summarize_file` used to fall back to a raw byte slice of the file — header/binary garbage for
+  the ~84 non-plaintext formats (PDF, DOCX, XLSX, EPUB, …) `summaries-only` mostly indexes; it now
+  re-parses the file with the default registry first (`sample_via_parse`) and only drops to raw
+  bytes when parsing itself fails. `Compress` mode's
+  "drop chunks after summarizing" cleanup existed only in the CLI's `summarize_subtree_sync`; the
+  web's `run_summarize_phase` had no equivalent at all, so a subtree switched to `compress` (or
+  the newly-fixed `summaries-only`) via the web never actually shrank. Both now share one
+  `cleanup_chunks_for_mode` in `indexa_query`, so switching an already-chunked/embedded subtree
+  to either leaner mode removes the now-unwanted chunk rows instead of just stopping future
+  growth, from either entry point.
+- **Ollama preflight/doctor checked models against the wrong host when the embedder and
+  describer used different Ollama endpoints.** `preflight_ollama` and `indexa doctor` both
+  resolved a single Ollama base URL from `cfg.embedding.base_url` and used it to check/pull/
+  benchmark models for BOTH providers — even though `cfg.describer.base_url` is independently
+  settable, and the web UI's own `POST /api/config/provider` only ever writes the describer's
+  URL. Result: false "model not pulled" aborts when the describer's real host had it, or
+  `doctor --latency`'s generation probe silently benchmarking the wrong server. Both now resolve
+  `embed_base`/`describer_base` independently and check each provider's models against its own
+  host, deduping the network call when both happen to resolve to the same host (the common case).
+- **The near-duplicate/noise detectors and `/api/projects` were silently dead on Windows.**
+  `basename`/`parent_dir` (near-dup clustering) and the generated-dir fragment matcher both split
+  on `/` only, so on a `\`-separated Windows path they never matched at all — the whole
+  near-duplicate detector was a no-op, and the CHANGELOG's own claim that generated/vendored
+  trees are excluded from archive questions was false on that platform. `top_projects_under`'s
+  nested-project filter had the same `/`-only assumption. Separately, `primary_apps_under` called
+  the plain `subtree_match` instead of the boundary-safe `subtree_match_or_all` added in the H4
+  fix above, so `GET /api/projects` with no `path` (the "all folders" default) returned `[]` on
+  Windows. Fixed with a shared `norm_sep` separator-normalizing helper at the actual string-match
+  choke points, plus the `subtree_match_or_all` fix; added the first `C:\`-literal test cases in
+  this part of the tree (previously zero).
+- **Job history retained one `Progress` event per file indefinitely — ~40 MB for a 193k-file
+  scan, re-serialized whole on every SSE reconnect — though no client ever reads more than the
+  latest one.** `Warning` events were already capped; `Progress` (which fires roughly once per
+  file) was not. Now stores only the single most recent `Progress` event separately from the
+  bounded history, spliced back in for replay only while the job is still running (so a client
+  reconnecting mid-run still sees where it stands, without ever seeing a stray `Progress` appear
+  *after* a `Done`/`Failed` terminal event). The live SSE broadcast — what a client watching in
+  real time actually sees — is unchanged; this only bounds what's retained for replay.
+- **PPTX speaker-notes bytes now count toward the zip-bomb running-total cap.** The
+  `MAX_ZIP_TOTAL_BYTES` guard in the PPTX parser was meant to cover slides *and* notes
+  (per its own comment) but only ever accumulated slide-body bytes — a deck with many
+  slides whose speaker notes were each individually under the per-entry cap
+  (`MAX_ZIP_ENTRY_BYTES`) could still sum to far more than the intended 64 MB total.
+  Notes bytes are now added to the running total, same as slides and chart/diagram parts.
+- **`worker --auto-reindex` git-poll mode no longer silently adopts a stale baseline on
+  start.** Its in-memory baseline map resets empty on every worker restart, and the first
+  poll of each root previously treated "no baseline yet" as "nothing changed" — so any
+  content changed while the worker was down got adopted as the new baseline without ever
+  being reindexed. The first poll of a root now checks the same staleness sweep the
+  non-git interval fallback already runs (`last_indexed_at_for_root` vs the default
+  window); if the persisted index itself is stale, that first poll reindexes before
+  establishing a baseline, exactly like a real change would. Extracted the shared check
+  into `root_is_stale`, reused by both arms.
 - **Cross-encoder reranker never actually loaded.** `rerank_backend = "cross-encoder"` silently fell
   open to the LLM reranker for every user who enabled it: candle's DeBERTa loader read the transformer
   at the safetensors root, but HF `DebertaV2ForSequenceClassification` checkpoints nest it under a
@@ -135,6 +406,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory to `0700` — so on a shared host other local users can't read the indexed corpus (which
   can include secrets on a whole-machine scan) or the logs. Fail-open; matches the existing
   `config.toml` 0600 hardening. No-op on Windows.
+- **`config.toml` permissions were only enforced on write, never on read.** `save()` has always
+  written `config.toml` 0600 (TOCTOU-safe create + re-tighten), but the documented way to set
+  `[api_keys]` is hand-authoring the TOML directly — a file created that way (e.g. by a text editor)
+  keeps whatever the umask left it at, commonly `0644` (group/other-readable), and `load()` never
+  checked. `config::load` now mirrors `Store::open`'s unconditional re-tighten on unix: when the
+  loaded config actually has a non-empty `[api_keys]` section, a group/other-readable file is
+  silently re-tightened to `0600` (fail-open — a permissions error never blocks startup); a config
+  with no keys set is left untouched, so this never fires as noise. `indexa doctor` now reports the
+  config file's permission status (only when keys are present) so a tighten that failed (e.g.
+  read-only mount) is visible rather than silent. `USAGE.md`'s `[api_keys]` comment corrected — it
+  previously implied the file is always 0600, which was only true for `save()`'s own writes.
 - **`pack add-url` can no longer be redirected into your private network (SSRF).** The remote-source
   fetch followed up to 10 redirects with no host check, so an external URL could `3xx` to
   `169.254.169.254` (cloud metadata), `localhost:7620`, or an internal service and pull the response
@@ -155,6 +437,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Mach-O/ELF/PE magic-byte sanity check. Verification is **fail-open** for pre-signature releases (no
   `.sig` published) so existing installs still update, but a signature that IS present and fails to
   verify is a hard error. Download requests also gained connect/request timeouts.
+- **`POST /api/config/features` no longer lets a LAN-shared token repoint the audio-transcription
+  binary.** `audio_binary` names an executable path the indexer later spawns
+  (`Command::new(binary)`) — the endpoint's own doc comment called it "ungated — no secrets
+  involved," which understated the blast radius: `pdf.ocr_binary`/`video.ffmpeg_binary` have no web
+  setter at all, so this was the one web-exposed knob that crosses into program selection. Now
+  gated behind `INDEXA_WEB_ALLOW_KEY_EDIT=1`, matching `api_config_provider_set` — but only on an
+  actual *change*, not on presence: the Features panel always resends the current value on every
+  Save, so gating on presence alone would have locked a caller out of every other, non-sensitive
+  toggle the moment a binary path was ever configured. The "changed" comparison reads the config
+  freshly from disk rather than `AppState.config` (a snapshot taken once at server startup and
+  never refreshed) — comparing against the stale snapshot would have let an ungated request
+  "restore" whatever value was merely present at boot, silently reverting a legitimate gated
+  change made since then.
+
+### Removed
+
+- **`[[region]]` per-directory config overrides.** `Config::region` / `RegionConfig` /
+  `Config::region_for` parsed, validated, and were unit-tested, but had zero production callers —
+  nothing in the CLI, web, or MCP surfaces ever consulted `region_for`, so a user following
+  `docs/config.md`'s own worked example (a `~/Pictures` image-captioning region, a
+  `~/Documents/Voice Memos` transcription region) got silently no effect. Deleted rather than
+  wired up — a real implementation would need per-region embedding-dimension reconciliation that
+  isn't worth building without a concrete need. Removed the field, struct, method, its tests, and
+  the `docs/config.md` section and worked examples that documented it.
 
 ## [0.76.0] — 2026-06-28
 
@@ -173,16 +479,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gets better over time."
 
 - **Catalog retrieval mode — progressive disclosure.** `ask(catalog: true)` runs the full
-  retrieval pipeline (hybrid + boosts + rerank + MMR) but returns only a scored file list
-  with L0 one-line abstracts — no chunk bodies, no local LLM synthesis. Use it as the "table
+  retrieval pipeline (hybrid + boosts + MMR) but returns only a scored file list
+  with L0 one-line abstracts — no chunk bodies, no local LLM synthesis. Rerank is force-disabled
+  in this mode (a rerank pass would only reorder chunks that catalog's file-level dedup/resort
+  immediately discards — see Wave 7 fix), so it never pays for a rerank call regardless of the
+  server's `[retrieval] rerank` default. Use it as the "table
   of contents" step: ask the catalog, pick the interesting files, then expand them with
   `get_summary`/`read_file`/`get_chunk_context` and synthesize with your own (stronger) model.
   This is the cheapest retrieval mode: minimal tokens, bounded KV-cache, zero local model
   calls. Compatible with `session_id` (conversational follow-ups rewrite the search query
   before retrieval). Incompatible with `agentic` (catalog is a single-pass retrieval, not a
   multi-hop loop). Usage is recorded as `ask_catalog` in the savings ledger. Optional param
-  on the existing `ask` tool — `catalog` absent ⇒ byte-identical behavior. MCP tool count
-  stays 47.
+  on the existing `ask` tool — `catalog` absent ⇒ byte-identical behavior. An optional param
+  on an existing tool, so this feature by itself added no new tool.
 
 - **`indexa_core::notes` module** — `slugify(s)` and `write_note_file(data_dir, pack, title,
   body)` as public, tested, reusable primitives. Future surfaces (CLI `indexa note add`,

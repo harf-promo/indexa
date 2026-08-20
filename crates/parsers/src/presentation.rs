@@ -186,6 +186,11 @@ fn parse_pptx(path: &Path, filename: &str, chunk: ChunkParams) -> anyhow::Result
                 let notes_entry = format!("ppt/notesSlides/notesSlide{n}.xml");
                 match read_zip_text(&mut archive, &notes_entry) {
                     Some(xml) => {
+                        // Count notes bytes toward the running total too — the per-slide loop's
+                        // MAX_ZIP_TOTAL_BYTES break (below) only ever saw slide-body bytes before
+                        // this, so a deck with many near-cap notes parts (each individually under
+                        // MAX_ZIP_ENTRY_BYTES) could sum to far more than the intended cap.
+                        extracted_bytes = extracted_bytes.saturating_add(xml.len() as u64);
                         let stripped = strip_xml_tags(&xml);
                         let stripped = stripped.trim().to_owned();
                         // Speaker-note XML also contains the slide body text (it embeds a copy).
@@ -462,6 +467,92 @@ mod tests {
         assert!(
             combined.contains("speaker note"),
             "notes not found: {combined}"
+        );
+    }
+
+    /// Build a PPTX whose speaker-notes parts are individually large (`note_bytes` each,
+    /// kept under `MAX_ZIP_ENTRY_BYTES` so `read_zip_text` returns them in full, not
+    /// truncated) but highly compressible (a repeated byte, `Deflated`) — the on-disk
+    /// fixture stays a few KB even at tens of MB of decompressed notes text, so the test
+    /// below exercises `MAX_ZIP_TOTAL_BYTES` without writing a large temp file.
+    fn build_pptx_big_notes(slide_count: u32, note_bytes: usize) -> Vec<u8> {
+        use zip::write::FileOptions;
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(cursor);
+        let stored =
+            FileOptions::<()>::default().compression_method(zip::CompressionMethod::Stored);
+        let deflated =
+            FileOptions::<()>::default().compression_method(zip::CompressionMethod::Deflated);
+
+        zip.start_file("[Content_Types].xml", stored).unwrap();
+        zip.write_all(b"<?xml version=\"1.0\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>").unwrap();
+
+        let padding = "x".repeat(note_bytes);
+
+        for num in 1..=slide_count {
+            let slide_xml = format!(
+                "<p:sld xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"\
+                        xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\">\
+                  <p:cSld><p:spTree><p:sp><p:txBody>\
+                    <a:p><a:r><a:t>Slide {num} body</a:t></a:r></a:p>\
+                  </p:txBody></p:sp></p:spTree></p:cSld>\
+                </p:sld>"
+            );
+            zip.start_file(format!("ppt/slides/slide{num}.xml"), stored)
+                .unwrap();
+            zip.write_all(slide_xml.as_bytes()).unwrap();
+
+            let notes_xml = format!(
+                "<p:notes xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"\
+                          xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\">\
+                  <p:cSld><p:spTree><p:sp><p:txBody>\
+                    <a:p><a:r><a:t>{padding}</a:t></a:r></a:p>\
+                  </p:txBody></p:sp></p:spTree></p:cSld>\
+                </p:notes>"
+            );
+            zip.start_file(format!("ppt/notesSlides/notesSlide{num}.xml"), deflated)
+                .unwrap();
+            zip.write_all(notes_xml.as_bytes()).unwrap();
+
+            let rels = format!(
+                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+                   <Relationship Id=\"rId1\" \
+                     Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide\" \
+                     Target=\"../notesSlides/notesSlide{num}.xml\"/>\
+                 </Relationships>"
+            );
+            zip.start_file(format!("ppt/slides/_rels/slide{num}.xml.rels"), stored)
+                .unwrap();
+            zip.write_all(rels.as_bytes()).unwrap();
+        }
+
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn pptx_notes_bytes_count_toward_the_running_total_cap() {
+        // Each note is 14 MB of highly-compressible padding — under MAX_ZIP_ENTRY_BYTES
+        // (16 MiB) so it's read in full, not per-entry-truncated. 6 slides: notes for
+        // slides 1-5 alone sum to 70 MB, crossing MAX_ZIP_TOTAL_BYTES (64 MiB, ~67.1 MB)
+        // partway through slide 5 — so slide 6 must never be read. Before the fix, only
+        // (tiny) slide-body bytes counted toward the running total, so it never tripped
+        // and all 6 slides — including 6's — were parsed.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("bigdeck.pptx");
+        std::fs::write(&p, build_pptx_big_notes(6, 14_000_000)).unwrap();
+
+        let ex = PresentationParser.parse(&p).unwrap();
+        let headings: Vec<&str> = ex.chunks.iter().map(|c| c.heading.as_str()).collect();
+        assert!(
+            !headings.iter().any(|h| h.contains("Slide 6")),
+            "the running total (slides + notes) should have broken the loop before slide 6 \
+             was ever read; headings: {headings:?}"
+        );
+        // Sanity: the fixture DID produce earlier slides, so this isn't vacuously true from a
+        // parse failure — `parse_pptx` degrading to `fallback_chunk` would also lack "Slide 6".
+        assert!(
+            headings.iter().any(|h| h.contains("Slide 1")),
+            "expected at least slide 1 to be parsed; headings: {headings:?}"
         );
     }
 

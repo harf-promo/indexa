@@ -150,6 +150,33 @@
 /* T9: destructive action visible at rest (not just on hover) */
 .tree-row-actions button[data-act="remove"] { color: color-mix(in srgb, var(--red) 55%, var(--muted)); }
 .tree-row-actions button[data-act="remove"]:hover { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); }
+.tree-row-more { position: relative; display: flex; }
+.tree-row-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  min-width: 168px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  padding: 4px;
+  z-index: 40;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--ink-1) 12%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tree-row-menu[hidden] { display: none; }
+.tree-row-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text);
+  border-radius: var(--r-2);
+}
+.tree-row-menu button[data-act="remove"] { color: var(--red); }
 
 /* Empty state */
 .empty-state { padding: 28px 18px; text-align: center; color: var(--muted); font-size: 13px; line-height: 1.8; }

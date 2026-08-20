@@ -209,10 +209,21 @@ pub(crate) async fn api_ask(
                     append_turn_best_effort(&state.db_path, id, &body.question, &answer);
                 }
             }
+            // Staleness attestation (1.2): flag sources whose on-disk mtime is newer than
+            // what's indexed. Fail-open — a store error just means no annotations.
+            let stale = if state.config.retrieval.staleness_flags {
+                stale_source_paths(&state.db_path, &answer.sources)
+            } else {
+                Default::default()
+            };
             Json(AskResponse {
                 confidence: into_ask_confidence(answer.confidence.as_ref()),
                 answer: answer.answer,
-                sources: answer.sources.into_iter().map(into_ask_source).collect(),
+                sources: answer
+                    .sources
+                    .into_iter()
+                    .map(|s| into_ask_source(s, &stale))
+                    .collect(),
                 impact,
                 session_id: body.session_id,
                 synthesized: answer.synthesized,
@@ -341,6 +352,8 @@ pub(crate) async fn api_ask_stream(
         "{}/{}",
         state.config.describer.provider, state.config.describer.model
     );
+    // Staleness attestation (1.2), captured before `state` goes out of scope.
+    let staleness_flags = state.config.retrieval.staleness_flags;
     // Conversational Ask: recent turns folded into the prompt (empty for a stateless ask).
     let history = load_history(&db_path, session_id.as_deref(), qa_cfg.scope.as_deref());
 
@@ -348,10 +361,22 @@ pub(crate) async fn api_ask_stream(
 
     tokio::spawn(async move {
         let send_tx = tx.clone();
+        // A separate clone for the `move` closure below — `db_path` itself is still needed by
+        // `&db_path` reference later in this async block, and a `move` closure would otherwise
+        // capture (move) the original.
+        let stale_db_path = db_path.clone();
         let mut on_chunk = move |chunk: AnswerChunk| {
             let payload = match chunk {
                 AnswerChunk::Sources(srcs) => {
-                    let sources: Vec<AskSource> = srcs.into_iter().map(into_ask_source).collect();
+                    let stale = if staleness_flags {
+                        stale_source_paths(&stale_db_path, &srcs)
+                    } else {
+                        Default::default()
+                    };
+                    let sources: Vec<AskSource> = srcs
+                        .into_iter()
+                        .map(|s| into_ask_source(s, &stale))
+                        .collect();
                     serde_json::json!({ "type": "sources", "sources": sources })
                 }
                 AnswerChunk::Fragment(text) => {
@@ -470,12 +495,31 @@ pub(crate) async fn api_ask_stream(
     Sse::new(UnboundedReceiverStream::new(rx)).keep_alive(KeepAlive::new())
 }
 
-fn into_ask_source(s: indexa_query::SourceCitation) -> AskSource {
+fn into_ask_source(
+    s: indexa_query::SourceCitation,
+    stale: &std::collections::HashSet<String>,
+) -> AskSource {
+    let is_stale = stale.contains(&s.path);
     AskSource {
         path: s.path,
         heading: s.heading,
         snippet: s.snippet,
+        stale: is_stale,
     }
+}
+
+/// The set of `sources` paths whose on-disk mtime is newer than what's indexed. Opens its own
+/// short-lived connection (matching `record_ask_usage`'s pattern) — fail-open, an unopenable
+/// store just yields no annotations.
+fn stale_source_paths(
+    db_path: &std::path::Path,
+    sources: &[indexa_query::SourceCitation],
+) -> std::collections::HashSet<String> {
+    let Ok(store) = Store::open(db_path) else {
+        return Default::default();
+    };
+    let paths = sources.iter().map(|s| s.path.as_str());
+    indexa_query::staleness::stale_paths(&store, paths).0
 }
 
 /// `POST /api/ask/explain` — the retrieval trace for a question ("why these sources"): per-stage

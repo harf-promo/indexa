@@ -113,12 +113,13 @@ an LLM, with a **web-dashboard graph visualization** and export to wiki/Obsidian
 
 **Still open (honest, ranked):**
 
-1. **Token-savings telemetry** — measure and show "Indexa served N KB where whole-file context would
-   have been M MB"; the core pitch, currently unquantified.
-2. **Decision Ledger** — record uncertain indexing judgments + user answers with history and re-ask;
-   no competitor has anything like "your index learns and remembers your judgment."
-3. **Scoped (tree-sitter) call resolution** — earn back the bare-name asterisk on the D2 graph.
-4. **GraphRAG-style thematic answers** — would build on the code/knowledge graph.
+1. **Scoped (tree-sitter) call resolution** — earn back the bare-name asterisk on the D2 graph.
+2. **GraphRAG-style thematic answers** — would build on the code/knowledge graph.
+
+**Closed since this list was last written (keep them off the open list):**
+
+- ✅ **Token-savings telemetry** — per-answer, per-session, and weekly Impact (≈4 bytes/token, labeled).
+- ✅ **Decision Ledger** — CLI / web / MCP, with revision chains and a Review inbox.
 
 ## What we deliberately won't build
 

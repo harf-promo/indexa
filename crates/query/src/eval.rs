@@ -1,16 +1,29 @@
 //! Retrieval-quality evaluation backing `indexa eval`.
 //!
-//! Scores the exact `retrieve()` ranking the ask pipeline uses (hybrid search +
-//! summary/importance boosts) against a golden-questions file — retrieval only,
-//! no LLM synthesis, so a sparse-mode run is deterministic and needs no Ollama.
-//! This is the regression gate for retrieval-affecting changes (chunking,
-//! parsing, ranking).
+//! Scores the `retrieve()` ranking the ask pipeline uses (hybrid search + summary/
+//! importance boosts + MMR in non-sparse modes) against a golden-questions file —
+//! retrieval only, no LLM synthesis by default. `retrieve()` never applies the
+//! cross-encoder/LLM rerank pass itself — that happens afterward, only in the real
+//! `ask` pipeline (`qa::synthesize::retrieve_and_rerank`) — so by default this gate
+//! cannot detect a reranker regression regardless of mode. [`evaluate_question_reranked`]
+//! is the opt-in counterpart (`indexa eval --rerank`) that routes retrieval through the
+//! SAME `apply_configured_rerank` dispatch `ask` uses, so a reranker regression becomes
+//! visible when a caller asks for it; plain [`evaluate_question`] stays LLM-free and
+//! hermetic. In sparse mode (CI's default) `retrieve()` additionally skips MMR entirely
+//! (`retrieve()` only applies MMR outside `HybridMode::Sparse`), so a sparse-mode run is
+//! deterministic and needs no Ollama, but is scoring strictly less of the ranking
+//! pipeline than `rrf`/`dense` mode does. This is the regression gate for
+//! retrieval-affecting changes (chunking, parsing, ranking, optionally reranking)
+//! within that scope — see `docs/methodology.md` for the A/B recipe that covers
+//! dense-mode retrieval.
 
 use anyhow::Result;
 use indexa_core::store::Store;
+use indexa_llm::Generator;
 use serde::{Deserialize, Serialize};
 
 use crate::qa::{retrieve, QaConfig};
+use crate::rerank::apply_configured_rerank;
 
 /// One golden question: a query plus the file paths a correct retrieval must surface.
 #[derive(Debug, Clone, Deserialize)]
@@ -85,6 +98,32 @@ pub fn evaluate_question(
     let mut run_cfg = cfg.clone();
     run_cfg.top_k = k;
     let hits = retrieve(store, &q.question, query_vec, &run_cfg, None)?;
+    let ranked: Vec<&str> = hits.iter().map(|h| h.entry_path.as_str()).collect();
+    Ok(score_ranking(&q.question, k, &ranked, &q.expect_paths))
+}
+
+/// Async counterpart to [`evaluate_question`] for `indexa eval --rerank`: identical retrieval,
+/// then — when `cfg.rerank` is set — the SAME `apply_configured_rerank` dispatch the real `ask`
+/// pipeline runs (`qa::synthesize::retrieve_and_rerank`, `qa::explain::explain_retrieval`), not a
+/// parallel reimplementation. `llm` backs the `"llm"` rerank_backend (the default); the
+/// `"cross-encoder"` backend ignores it. When `cfg.rerank` is `false` this scores identically to
+/// [`evaluate_question`] — the flag is purely additive.
+pub async fn evaluate_question_reranked(
+    store: &Store,
+    q: &EvalQuestion,
+    cfg: &QaConfig,
+    query_vec: Option<&[f32]>,
+    llm: &dyn Generator,
+) -> Result<QuestionMetrics> {
+    let k = q.k.unwrap_or(cfg.top_k).max(1);
+    let mut run_cfg = cfg.clone();
+    run_cfg.top_k = k;
+    let hits = retrieve(store, &q.question, query_vec, &run_cfg, None)?;
+    let hits = if run_cfg.rerank {
+        apply_configured_rerank(llm, &run_cfg, &q.question, hits).await
+    } else {
+        hits
+    };
     let ranked: Vec<&str> = hits.iter().map(|h| h.entry_path.as_str()).collect();
     Ok(score_ranking(&q.question, k, &ranked, &q.expect_paths))
 }
@@ -561,11 +600,97 @@ mod tests {
         assert!(m.hit);
     }
 
+    // ── `evaluate_question_reranked` (`indexa eval --rerank`) ──────────────────
+
+    /// A fake `Generator` that ignores the prompt entirely and always returns a fixed
+    /// "reverse the two candidates" ranking — deterministic and prompt-format-independent
+    /// (unlike inferring candidate count from the prompt text), so it can't be broken by an
+    /// unrelated edit to `LlmReranker`'s prompt template.
+    struct ReverseTwoRerankLlm;
+    #[async_trait::async_trait]
+    impl indexa_llm::Generator for ReverseTwoRerankLlm {
+        async fn generate(&self, _prompt: &str) -> Result<String> {
+            Ok("2,1".to_owned())
+        }
+    }
+
+    #[tokio::test]
+    async fn evaluate_question_reranked_changes_ranking_when_rerank_is_set() {
+        // Two chunks matching "widget" with very different term frequency, so plain BM25
+        // retrieval has a clear, deterministic winner at rank 1 — whichever hit that is,
+        // the fake reranker's fixed "2,1" reversal must flip it to rank 2 (and vice versa).
+        let (_dir, path) = temp_index(&[
+            ("/high.md", "widget widget widget widget widget"),
+            ("/low.md", "widget appears exactly once here"),
+        ]);
+        let store = Store::open(&path).unwrap();
+        let q = EvalQuestion {
+            question: "widget".to_owned(),
+            expect_paths: owned(&["/low.md"]),
+            k: None,
+        };
+
+        let baseline = evaluate_question(&store, &q, &sparse_cfg(), None).unwrap();
+        assert_eq!(baseline.retrieved, 2, "fixture must retrieve both chunks");
+        assert!(
+            baseline.hit,
+            "expected path must be retrieved to prove rerank moved its rank"
+        );
+
+        let mut rerank_cfg = sparse_cfg();
+        rerank_cfg.rerank = true;
+        rerank_cfg.rerank_backend = "llm".to_owned();
+        let reranked =
+            evaluate_question_reranked(&store, &q, &rerank_cfg, None, &ReverseTwoRerankLlm)
+                .await
+                .unwrap();
+        assert_eq!(reranked.retrieved, 2);
+        assert!(reranked.hit);
+        assert_ne!(
+            baseline.first_hit_rank, reranked.first_hit_rank,
+            "the rerank pass must actually reorder the hits, not just thread through inert"
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_question_reranked_is_a_noop_when_rerank_is_off() {
+        // `cfg.rerank == false` — the CLI's un-flagged default (`sparse_cfg()`/`QaConfig::default()`
+        // has `rerank: true`, matching production `ask`; the CLI explicitly overrides it to `false`
+        // unless `--rerank` is passed) — must score byte-identically to `evaluate_question`, proving
+        // `evaluate_question_reranked` is additive: passing the same fake reranker has zero effect
+        // when the flag it's gated on is off.
+        let (_dir, path) = temp_index(&[
+            ("/high.md", "widget widget widget widget widget"),
+            ("/low.md", "widget appears exactly once here"),
+        ]);
+        let store = Store::open(&path).unwrap();
+        let q = EvalQuestion {
+            question: "widget".to_owned(),
+            expect_paths: owned(&["/low.md"]),
+            k: None,
+        };
+
+        let mut no_rerank_cfg = sparse_cfg();
+        no_rerank_cfg.rerank = false;
+
+        let baseline = evaluate_question(&store, &q, &no_rerank_cfg, None).unwrap();
+        let via_reranked_fn =
+            evaluate_question_reranked(&store, &q, &no_rerank_cfg, None, &ReverseTwoRerankLlm)
+                .await
+                .unwrap();
+        assert_eq!(baseline.first_hit_rank, via_reranked_fn.first_hit_rank);
+        assert_eq!(baseline.precision, via_reranked_fn.precision);
+    }
+
     /// Live dense/RRF A/B eval over the committed golden set against a populated index. The CI gate
     /// scores sparse-only (hermetic, no Ollama), so it can't see an embedding change; this is the
     /// opt-in counterpart that *can* — run it on `main` and on a branch to prove a contextual-prefix
-    /// embedding change (or a reranker swap) doesn't regress recall/nDCG before promoting it to
-    /// default. `#[ignore]`d: needs a real Ollama (`nomic-embed-text`) + a populated index.
+    /// embedding change doesn't regress recall/nDCG before promoting it to default. Deliberately
+    /// calls bare `evaluate_question` with `rerank: false` (not [`evaluate_question_reranked`]) to
+    /// isolate the embedding/retrieval measurement from an extra LLM call; validating a reranker
+    /// swap is `evaluate_question_reranked` / `indexa eval --rerank`'s job, covered by the
+    /// `evaluate_question_reranked_*` unit tests below (fake in-process `Generator`, no network).
+    /// `#[ignore]`d: needs a real Ollama (`nomic-embed-text`) + a populated index.
     ///
     /// ```bash
     /// # uses the macOS default index unless INDEXA_TEST_INDEX_DB is set

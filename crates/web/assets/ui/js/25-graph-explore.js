@@ -51,7 +51,7 @@ function renderGraphLegend(d) {
   if (d && d.communities && d.communities.length) {
     var cap = (typeof COMMUNITY_COLOR_CAP === 'number') ? COMMUNITY_COLOR_CAP : 6;
     d.communities.slice(0, cap).forEach(function (cm, i) {
-      var swatch = (typeof communityTint === 'function') ? communityTint(i) : '#939598';
+      var swatch = (typeof communityTint === 'function') ? communityTint(i) : 'var(--ink-4)';
       var hub = String(cm.hub_path || '').split('/').pop() || cm.hub_path || '';
       items.push(
         '<span class="glegend-item"><span class="glegend-swatch-community" style="background:'
@@ -61,7 +61,7 @@ function renderGraphLegend(d) {
     });
     if (d.communities.length > cap) {
       items.push(
-        '<span class="glegend-item"><span class="glegend-swatch-community" style="background:#939598" aria-hidden="true"></span>'
+        '<span class="glegend-item"><span class="glegend-swatch-community" style="background:var(--ink-4)" aria-hidden="true"></span>'
         + (d.communities.length - cap) + ' more (grey)</span>'
       );
     }

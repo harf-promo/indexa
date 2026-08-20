@@ -14,6 +14,10 @@
 //! - [`weights`] — importance weight CRUD + search boost (v0.8).
 //! - [`insights`] — duplicate/stale/diff analysis (v0.10).
 //! - [`usage`] — token-savings telemetry (v0.23; the counterfactual definition lives there).
+//! - [`symbols`] — code symbol (kind + line range) writes and queries (2.1).
+//! - [`note_anchors`] — note-to-code anchor writes and queries (2.6).
+//! - [`co_change`] — git-history co-change edge writes and queries (2.7).
+//! - [`modules`] — persisted architecture-map clustering + labeling storage (4.6).
 //! - [`types`] — the public record structs.
 
 use anyhow::{Context, Result};
@@ -24,12 +28,15 @@ mod ann;
 mod category_edges;
 mod chunks;
 mod classify;
+mod co_change;
 mod communities;
 mod decisions;
 mod dir_apps;
 mod edges;
 mod entries;
 mod insights;
+mod modules;
+mod note_anchors;
 mod pack_edges;
 mod packs;
 mod pagerank;
@@ -41,6 +48,7 @@ mod search;
 mod semantic_edges;
 mod sessions;
 mod summaries;
+mod symbols;
 mod types;
 mod usage;
 mod weights;
@@ -51,14 +59,17 @@ mod tests;
 // Re-export every public record type so external paths (`indexa_core::store::*`)
 // are unchanged by the split.
 pub use ann::AnnIndex;
+pub use co_change::CoChangePair;
 pub use communities::detect_communities;
-pub use dir_apps::DetectedApp;
+pub use dir_apps::{is_project_noise_path, DetectedApp, PathCoverage};
 pub use edges::{
-    BlastRadius, ResolutionTier, ResolvedCaller, ResolvedRelatedFile, ScopedCodeGraph,
-    BARE_NAME_CAVEAT,
+    BlastRadius, BlastRadiusRisk, ResolutionTier, ResolvedCaller, ResolvedRelatedFile,
+    ScopedCodeGraph, TraceHop, BARE_NAME_CAVEAT,
 };
 pub use entries::CoverageEntry;
 pub use insights::{DuplicateCluster, LanguageStat, LargestEntry, StaleEntry, WeeklyDiff};
+pub use modules::{cluster_with_directory_priors, ComputedModule, GraphModule};
+pub use note_anchors::NoteAnchor;
 pub use prune::OrphanCounts;
 pub use saved::SavedQuery;
 pub use sessions::ConversationTurn;
@@ -67,9 +78,9 @@ pub use sessions::ConversationTurn;
 pub use search::is_stub_chunk;
 pub use types::{
     chunk_content_hash, ChunkRecord, ClassificationRecord, CodeGraph, CodeGraphEdge, CodeGraphNode,
-    DecisionRecord, EdgeRecord, EntryInfo, FailedQueueItem, HealthStats, NewDecision, PackRecord,
-    QueueItem, QueueStats, RegionSummary, RelatedFile, SearchHit, SummaryRecord, TreeNode,
-    WeightRecord,
+    DecisionRecord, EdgeRecord, EntryInfo, FailedQueueItem, HealthStats, NewDecision, PackEvent,
+    PackRecord, QueueItem, QueueStats, RegionSummary, RelatedFile, SearchHit, SummaryRecord,
+    SymbolRecord, TreeNode, WeightRecord,
 };
 pub use usage::{UsageSummary, USAGE_WEEK_SECS};
 
@@ -118,10 +129,12 @@ impl Store {
             db_path: path.to_path_buf(),
         };
         store.init_schema()?;
-        // Truncate any WAL that accumulated while the process was stopped.
-        // Fail-open: another reader holding a lock just means the checkpoint
-        // is deferred — it doesn't prevent the database from opening.
-        store.checkpoint_truncate();
+        // Truncate the WAL only if it grew large while the process was stopped. A full TRUNCATE
+        // checkpoint on EVERY open (MCP opens per tool call, qa per ask) contended with active
+        // writers for no benefit when the WAL is already small — `wal_autocheckpoint` keeps it
+        // bounded (~4 MB) in normal operation, so this only reclaims a WAL left oversized by an
+        // abrupt stop. Fail-open: a lock just defers the checkpoint.
+        store.checkpoint_truncate_if_large();
         Ok(store)
     }
 
@@ -156,6 +169,32 @@ impl Store {
         }
         if let Err(e) = self.conn.pragma_update(None, "wal_checkpoint", "TRUNCATE") {
             tracing::warn!("wal_checkpoint(TRUNCATE) failed (index is still usable): {e}");
+        }
+    }
+
+    /// WAL byte size above which an open-time [`checkpoint_truncate`](Self::checkpoint_truncate) is
+    /// worth its writer contention — comfortably above the ~4 MB `wal_autocheckpoint` boundary so a
+    /// normally-operating DB is never truncated at open, only one left oversized by an abrupt stop.
+    const WAL_TRUNCATE_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
+
+    /// Truncate the WAL only when the `-wal` sidecar has grown past
+    /// [`WAL_TRUNCATE_THRESHOLD_BYTES`](Self::WAL_TRUNCATE_THRESHOLD_BYTES). Called on every open;
+    /// avoids a TRUNCATE checkpoint (which contends with active writers) when the WAL is small.
+    pub fn checkpoint_truncate_if_large(&self) {
+        if self.db_path == std::path::Path::new(":memory:") {
+            return;
+        }
+        // SQLite names the WAL `<db>-wal` (appended, not an extension swap).
+        let wal = {
+            let mut s = self.db_path.clone().into_os_string();
+            s.push("-wal");
+            std::path::PathBuf::from(s)
+        };
+        let oversized = std::fs::metadata(&wal)
+            .map(|m| m.len() >= Self::WAL_TRUNCATE_THRESHOLD_BYTES)
+            .unwrap_or(false);
+        if oversized {
+            self.checkpoint_truncate();
         }
     }
 

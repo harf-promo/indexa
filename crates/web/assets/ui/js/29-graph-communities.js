@@ -26,7 +26,10 @@ function communityTint(rank) {
   var dark =
     (document.documentElement.getAttribute('data-theme') || 'dark') !== 'light';
   if (rank == null || rank >= COMMUNITY_COLOR_CAP) {
-    return dark ? '#6E7073' : '#939598'; // --ink-4 / --harf-grey neutral "other"
+    // var(--ink-4), not a hand-rolled light/dark literal pair — matches this file's own
+    // 19-graph.js sibling convention (setAttribute('fill', 'var(--…)')) and stays correct
+    // automatically if the token's resolved value ever changes.
+    return 'var(--ink-4)';
   }
   var hue = Math.round((rank * 360) / COMMUNITY_COLOR_CAP);
   var sat = 22; // low saturation: a tint, not a rainbow

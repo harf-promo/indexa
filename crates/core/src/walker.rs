@@ -45,6 +45,16 @@ pub struct WalkConfig {
     /// heuristic). Off by default — adds one file-open per file. When on (`[scan] skip_binary`),
     /// the deep phase skips flagged binaries. Fail-open: an unreadable file is never flagged.
     pub sniff_binary: bool,
+    /// Number of walker worker threads. `None` = `available_parallelism()` floored at 4 (the walk
+    /// is I/O-bound — classification does `stat`/`exists` syscalls — so it scales past the core
+    /// count). Set via `[scan] threads` to cap on a shared host or raise on a fast NVMe machine.
+    pub threads: Option<usize>,
+    /// Honor `.indexaignore` files (root AND nested, gitignore-style) as the highest-precedence
+    /// ignore layer — above `.gitignore` and `.ignore`, including `!`-prefixed re-includes (e.g.
+    /// `!docs/generated/` to index a gitignored-but-valuable dir without touching git behavior).
+    /// Gated on `respect_gitignore` like `.ignore` — turning that off disables every ignore-file
+    /// layer. Default on; a tree with no `.indexaignore` file is byte-identical to before.
+    pub custom_ignore: bool,
 }
 
 /// Default scan-time per-file size cap (8 MiB). Skips blobs that are almost
@@ -62,6 +72,8 @@ impl Default for WalkConfig {
             max_filesize: Some(DEFAULT_MAX_FILESIZE),
             include_sensitive: false,
             sniff_binary: false,
+            threads: None,
+            custom_ignore: true,
         }
     }
 }
@@ -139,14 +151,27 @@ pub fn is_sensitive_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Build a gitignore matcher for `root` combining the root `.gitignore` (when `respect_gitignore`)
-/// and the `[scan] ignore` config patterns, both anchored at `root`. Returns `None` when there are
-/// no rules. Shared by the walker prune callback and the watchers' per-event
-/// [`should_index_file`] check, so file selection can't drift between a scan and a live watch.
+/// Highest-precedence per-directory ignore filename (ripgrep's `.rgignore` pattern) — lets a user
+/// tune indexing without touching git behavior, including `!`-prefixed re-includes of paths
+/// `.gitignore`/`.ignore` exclude. Registered with `WalkBuilder::add_custom_ignore_filename`,
+/// which the `ignore` crate documents as taking precedence over `.gitignore`/`.ignore`/global
+/// gitignore at every directory level.
+pub const CUSTOM_IGNORE_FILENAME: &str = ".indexaignore";
+
+/// Build a gitignore matcher for `root` combining the root `.gitignore`, the `[scan] ignore`
+/// config patterns, and the root [`CUSTOM_IGNORE_FILENAME`] (when `respect_gitignore &&
+/// custom_ignore`), anchored at `root`. Added last so its rules — including `!` re-includes —
+/// take precedence, matching `.indexaignore`'s status as the highest-precedence layer in the
+/// walker. Returns `None` when there are no rules. Shared by the walker prune callback and the
+/// watchers' per-event [`should_index_file`] check, so file selection can't drift between a scan
+/// and a live watch. Note: unlike the walker (which honors *nested* `.indexaignore`/`.gitignore`
+/// via `ignore` crate machinery), this helper only loads the *root* file — the same documented
+/// asymmetry the root `.gitignore` load already has, for standalone/non-git directories.
 pub fn build_ignore_matcher(
     root: &Path,
     respect_gitignore: bool,
     ignore: &[String],
+    custom_ignore: bool,
 ) -> Option<ignore::gitignore::Gitignore> {
     let mut gb = ignore::gitignore::GitignoreBuilder::new(root);
     let mut has_rules = false;
@@ -161,6 +186,13 @@ pub fn build_ignore_matcher(
         let _ = gb.add_line(None, pat); // fail-open: a bad pattern is silently skipped
         has_rules = true;
     }
+    if respect_gitignore && custom_ignore {
+        let root_custom = root.join(CUSTOM_IGNORE_FILENAME);
+        if root_custom.is_file() {
+            let _ = gb.add(&root_custom); // fail-open: a bad file is silently skipped
+            has_rules = true;
+        }
+    }
     if has_rules {
         gb.build().ok()
     } else {
@@ -174,11 +206,13 @@ pub fn build_scan_matchers(
     roots: &[PathBuf],
     respect_gitignore: bool,
     ignore: &[String],
+    custom_ignore: bool,
 ) -> Vec<(PathBuf, ignore::gitignore::Gitignore)> {
     roots
         .iter()
         .filter_map(|r| {
-            build_ignore_matcher(r, respect_gitignore, ignore).map(|gi| (r.clone(), gi))
+            build_ignore_matcher(r, respect_gitignore, ignore, custom_ignore)
+                .map(|gi| (r.clone(), gi))
         })
         .collect()
 }
@@ -262,9 +296,14 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
     use ignore::{WalkBuilder, WalkState};
     use std::sync::{Arc, Mutex};
 
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get().min(4))
-        .unwrap_or(2);
+    // Default to all cores (floored at 4) — the walk is I/O/syscall-bound (classification does
+    // `stat`/`exists` calls) so it scales past the core count. A caller can cap or raise it via
+    // `[scan] threads`. The old hard `min(4)` cap left 8–16-core machines idle on a broad scan.
+    let threads = cfg.threads.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get().max(4))
+            .unwrap_or(4)
+    });
 
     // Capture the fields we need in the `'static` parallel closure.
     let skip_hidden = cfg.skip_hidden;
@@ -289,7 +328,8 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
     // Root `.gitignore` + `[scan] ignore` patterns, anchored at root — shared with the watchers'
     // per-event `should_index_file` so a scan and a live watch select the same files.
     let combined_matcher: Option<Arc<ignore::gitignore::Gitignore>> =
-        build_ignore_matcher(root, cfg.respect_gitignore, &cfg.ignore).map(Arc::new);
+        build_ignore_matcher(root, cfg.respect_gitignore, &cfg.ignore, cfg.custom_ignore)
+            .map(Arc::new);
 
     let mut b = WalkBuilder::new(root);
     b.threads(threads)
@@ -308,18 +348,43 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
         // Scan-time size cap: files above this are not yielded by the walker.
         .max_filesize(cfg.max_filesize);
 
+    // `.indexaignore` — highest-precedence ignore layer, nested per directory (see
+    // CUSTOM_IGNORE_FILENAME doc comment). Gated on respect_gitignore, matching `.ignore`.
+    if cfg.respect_gitignore && cfg.custom_ignore {
+        b.add_custom_ignore_filename(CUSTOM_IGNORE_FILENAME);
+    }
+
     if let Some(d) = cfg.max_depth {
         b.max_depth(Some(d));
     }
 
-    let entries: Arc<Mutex<Vec<Entry>>> = Arc::new(Mutex::new(Vec::new()));
+    // Each worker thread accumulates into its OWN Vec and flushes it to `batches` exactly once, on
+    // drop — replacing a per-entry lock on one shared Vec with a single lock per worker thread.
+    struct ThreadSink {
+        local: Vec<Entry>,
+        batches: Arc<Mutex<Vec<Vec<Entry>>>>,
+    }
+    impl Drop for ThreadSink {
+        fn drop(&mut self) {
+            if !self.local.is_empty() {
+                if let Ok(mut b) = self.batches.lock() {
+                    b.push(std::mem::take(&mut self.local));
+                }
+            }
+        }
+    }
+
+    let batches: Arc<Mutex<Vec<Vec<Entry>>>> = Arc::new(Mutex::new(Vec::new()));
 
     b.build_parallel().run({
-        let entries = entries.clone();
+        let batches = batches.clone();
         let combined_matcher = combined_matcher.clone();
         move || {
-            let entries = entries.clone();
             let combined_matcher = combined_matcher.clone();
+            let mut sink = ThreadSink {
+                local: Vec::new(),
+                batches: batches.clone(),
+            };
             Box::new(
                 move |result: std::result::Result<ignore::DirEntry, ignore::Error>| {
                     let de = match result {
@@ -356,20 +421,38 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
                         };
                     }
 
-                    // Prune build-artifact / VCS / cache directories by name.
-                    // `is_skip_dir` calls `classify()` which recognises target/, node_modules/,
-                    // .git/, __pycache__, .idea, Pods, vendor, build, etc.
-                    // Return WalkState::Skip: prevents both recording the entry AND descending.
-                    // Guard depth > 0 so we never prune the walk root itself.
-                    if is_dir && de.depth() > 0 && is_skip_dir(path) {
-                        return WalkState::Skip;
-                    }
+                    // Classify directories ONCE here for the prune AND hint decisions below —
+                    // previously three separate classify() calls per directory (is_skip_dir,
+                    // is_sensitive_dir, and the hint), each issuing stat/exists syscalls. Files are
+                    // classified after the ignore/size filters, so a filtered-out file still pays
+                    // nothing — same ordering as before.
+                    let dir_hint = if is_dir { classify(path) } else { None };
 
-                    // Privacy: prune credential/key stores (.ssh, .gnupg, Keychains, browser
-                    // profiles) unless the caller explicitly opted in via `include_sensitive`.
-                    // WalkState::Skip stops both recording the dir entry AND descending into it.
-                    if is_dir && de.depth() > 0 && !include_sensitive && is_sensitive_dir(path) {
-                        return WalkState::Skip;
+                    // Prune build-artifact / VCS / cache directories: a fast name check (VCS/cache
+                    // dirs), else a structure-aware `DeepScanPolicy::Skip` (target/ next to
+                    // Cargo.toml, Pods/, …). WalkState::Skip stops both recording AND descending;
+                    // depth > 0 protects the walk root itself.
+                    if is_dir && de.depth() > 0 {
+                        let name_skip = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| ALWAYS_SKIP_DIR_NAMES.contains(&n));
+                        if name_skip
+                            || dir_hint
+                                .as_ref()
+                                .is_some_and(|h| h.deep_scan == DeepScanPolicy::Skip)
+                        {
+                            return WalkState::Skip;
+                        }
+                        // Privacy: prune credential/key stores (.ssh, .gnupg, Keychains, browser
+                        // profiles) unless the caller explicitly opted in via `include_sensitive`.
+                        if !include_sensitive
+                            && dir_hint
+                                .as_ref()
+                                .is_some_and(|h| h.deep_scan == DeepScanPolicy::Sensitive)
+                        {
+                            return WalkState::Skip;
+                        }
                     }
 
                     // Apply the combined gitignore matcher: root .gitignore patterns +
@@ -398,20 +481,26 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
                         EntryKind::File
                     };
 
-                    let hint = classify(path).or_else(|| {
-                        if meta.is_file() {
-                            classify_file_by_extension(path)
-                        } else {
-                            None
-                        }
-                    });
+                    // Reuse the directory classification computed above; classify files here (once,
+                    // with the extension fallback) now that they've passed the ignore/size filters.
+                    let hint = if is_dir {
+                        dir_hint
+                    } else {
+                        classify(path).or_else(|| {
+                            if meta.is_file() {
+                                classify_file_by_extension(path)
+                            } else {
+                                None
+                            }
+                        })
+                    };
 
                     // Whole-computer groundwork: when opted in, NUL-sniff files so the deep phase
                     // can skip binaries without opening them. Fail-open (an unreadable file is
                     // never flagged). Only files; the entry itself is still recorded either way.
                     let is_binary = sniff_binary && meta.is_file() && file_is_binary(path);
 
-                    entries.lock().unwrap().push(Entry {
+                    sink.local.push(Entry {
                         path: path.to_path_buf(),
                         kind,
                         size: if meta.is_file() { meta.len() } else { 0 },
@@ -425,10 +514,12 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
         }
     });
 
-    // `run()` is synchronous — all worker threads have finished by here.
-    // The Arc clone moved into `run()` is dropped when `run()` returns, so
-    // `Arc::try_unwrap` finds exactly one strong reference remaining (ours).
-    Ok(Arc::try_unwrap(entries).unwrap().into_inner().unwrap())
+    // `run()` is synchronous — all worker threads (and their ThreadSinks) have finished and
+    // flushed their batches by here. The Arc clone moved into `run()` is dropped when `run()`
+    // returns, so `try_unwrap` finds exactly one strong reference (ours). Flatten the per-thread
+    // batches into one Vec (cross-thread order isn't significant — callers key/sort downstream).
+    let batches = Arc::try_unwrap(batches).unwrap().into_inner().unwrap();
+    Ok(batches.into_iter().flatten().collect())
 }
 
 #[cfg(test)]
@@ -610,7 +701,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let roots = vec![root.clone()];
-        let matchers = build_scan_matchers(&roots, true, &["*.log".to_string()]);
+        let matchers = build_scan_matchers(&roots, true, &["*.log".to_string()], true);
 
         let write = |p: &Path| {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -700,7 +791,7 @@ mod tests {
         let link = root.join("link.rs");
         symlink(&target, &link).unwrap();
         let roots = vec![root.clone()];
-        let matchers = build_scan_matchers(&roots, false, &[]);
+        let matchers = build_scan_matchers(&roots, false, &[], true);
         let cap = Some(DEFAULT_MAX_FILESIZE);
         assert!(should_index_file(&target, &roots, false, cap, &matchers));
         assert!(!should_index_file(&link, &roots, false, cap, &matchers));
@@ -800,5 +891,135 @@ mod tests {
         )));
         // A normal code dir is not sensitive.
         assert!(!is_sensitive_dir(&PathBuf::from("/Users/x/projects/myapp")));
+    }
+
+    #[test]
+    fn indexaignore_excludes_matched_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("keep.txt"), "keep").unwrap();
+        std::fs::write(dir.path().join("noisy.txt"), "noise").unwrap();
+        std::fs::write(dir.path().join(CUSTOM_IGNORE_FILENAME), "noisy.txt\n").unwrap();
+
+        let entries = walk(dir.path(), &WalkConfig::default()).unwrap();
+        assert!(entries.iter().any(|e| e.path.ends_with("keep.txt")));
+        assert!(
+            !entries.iter().any(|e| e.path.ends_with("noisy.txt")),
+            ".indexaignore patterns must exclude matched files"
+        );
+    }
+
+    #[test]
+    fn indexaignore_reincludes_gitignored_path() {
+        // The killer use case: `!` re-include a path .gitignore excludes, without touching git
+        // behavior. .indexaignore is added last (highest precedence) so its `!` line wins.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "generated/\n").unwrap();
+        let gen_dir = dir.path().join("generated");
+        std::fs::create_dir(&gen_dir).unwrap();
+        std::fs::write(gen_dir.join("docs.md"), "generated docs").unwrap();
+        std::fs::write(
+            dir.path().join(CUSTOM_IGNORE_FILENAME),
+            "!generated/\n!generated/docs.md\n",
+        )
+        .unwrap();
+
+        let entries = walk(dir.path(), &WalkConfig::default()).unwrap();
+        assert!(
+            entries.iter().any(|e| e.path.ends_with("docs.md")),
+            ".indexaignore `!` re-include must beat .gitignore's exclusion"
+        );
+    }
+
+    #[test]
+    fn indexaignore_never_reincludes_an_always_skip_dir() {
+        // is_skip_dir (ALWAYS_SKIP_DIR_NAMES) is a separate, unconditional gate in the walk
+        // callback, checked BEFORE the combined ignore matcher — a `.indexaignore` re-include
+        // must NOT resurrect it. The real `is_sensitive_dir` credential-store predicates
+        // (`.ssh`/`.gnupg`: home_subdir, real-home-only; Keychains/browser profiles:
+        // path_contains with a forward-slash fragment, not portable to a Windows path
+        // separator) aren't independently testable under a tempdir on every CI OS — but they
+        // sit at the exact same unconditional pre-ignore-matcher gate this test exercises via
+        // is_skip_dir, so the property (some prunes can't be defeated by .indexaignore) is
+        // covered either way.
+        let dir = tempfile::tempdir().unwrap();
+        let nm = dir.path().join("node_modules");
+        std::fs::create_dir(&nm).unwrap();
+        std::fs::write(nm.join("dep.js"), "generated").unwrap();
+        std::fs::write(dir.path().join(CUSTOM_IGNORE_FILENAME), "!node_modules/\n").unwrap();
+
+        let entries = walk(dir.path(), &WalkConfig::default()).unwrap();
+        assert!(
+            !entries.iter().any(|e| e.path.ends_with("dep.js")),
+            ".indexaignore must not be able to re-include an always-skip dir"
+        );
+    }
+
+    #[test]
+    fn indexaignore_disabled_by_custom_ignore_false() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("noisy.txt"), "noise").unwrap();
+        std::fs::write(dir.path().join(CUSTOM_IGNORE_FILENAME), "noisy.txt\n").unwrap();
+
+        let cfg = WalkConfig {
+            custom_ignore: false,
+            ..Default::default()
+        };
+        let entries = walk(dir.path(), &cfg).unwrap();
+        assert!(
+            entries.iter().any(|e| e.path.ends_with("noisy.txt")),
+            "custom_ignore = false must disable .indexaignore entirely"
+        );
+    }
+
+    #[test]
+    fn walk_is_thread_count_invariant_and_still_prunes() {
+        // D6: per-thread accumulators + classify-once must not change the walk output. The set of
+        // entries is identical at any thread count, and build-artifact/VCS dirs are still pruned.
+        let dir = tempfile::tempdir().unwrap();
+        // Spread files across nested dirs so multiple workers have real, overlapping work.
+        for i in 0..40 {
+            let sub = dir.path().join(format!("pkg{}", i % 8));
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(sub.join(format!("f{i}.rs")), "fn x() {}").unwrap();
+        }
+        // A build-artifact dir (target/ next to Cargo.toml → classified Skip) + a VCS dir (name
+        // fast-path). Both must be pruned by the single classify.
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"").unwrap();
+        let tgt = dir.path().join("target").join("debug");
+        std::fs::create_dir_all(&tgt).unwrap();
+        std::fs::write(tgt.join("app.o"), "obj").unwrap();
+        let git = dir.path().join(".git");
+        std::fs::create_dir_all(&git).unwrap();
+        std::fs::write(git.join("HEAD"), "ref: x").unwrap();
+
+        let sorted_paths = |threads: Option<usize>| -> Vec<String> {
+            let cfg = WalkConfig {
+                threads,
+                ..WalkConfig::default()
+            };
+            let mut v: Vec<String> = walk(dir.path(), &cfg)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.path.to_string_lossy().into_owned())
+                .collect();
+            v.sort();
+            v
+        };
+
+        let one = sorted_paths(Some(1));
+        let many = sorted_paths(Some(8));
+        assert_eq!(
+            one, many,
+            "walk output must be independent of thread count (no dropped/duplicated entries)"
+        );
+        assert!(
+            !one.iter()
+                .any(|p| p.contains("/target") || p.contains("/.git")),
+            "build-artifact + VCS dirs and their contents are pruned by the single classify"
+        );
+        assert!(
+            one.iter().filter(|p| p.ends_with(".rs")).count() == 40,
+            "all 40 real source files kept"
+        );
     }
 }

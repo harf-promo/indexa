@@ -1,7 +1,8 @@
 use anyhow::Result;
-use indexa_core::store::{ResolutionTier, Store};
+use indexa_core::config::Config;
+use indexa_core::store::{BlastRadius, ResolutionTier, Store};
 
-use super::helpers::{expand, require_index_db};
+use super::helpers::{build_llm, expand, require_index_db};
 
 fn basename(path: &str) -> String {
     std::path::Path::new(path)
@@ -23,25 +24,99 @@ fn rel_to_scope(path: &str, scope: &str) -> String {
         .to_owned()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn cmd_graph(
+    cfg: &Config,
     path: String,
     limit: usize,
     strict: bool,
     cycles: bool,
     blast: Option<String>,
     depth: usize,
+    grouped: bool,
+    heritage: bool,
+    compute_co_change: bool,
+    compute_modules: bool,
+    modules: bool,
 ) -> Result<()> {
     let Some(db_path) = require_index_db()? else {
         return Ok(());
     };
-    let store = Store::open(&db_path)?;
     let scope = expand(&path);
+
+    // --compute-co-change: recompute the co_change table from git history and return —
+    // every other flag is ignored in this mode (2.7).
+    if compute_co_change {
+        let mut store = Store::open(&db_path)?;
+        let root = std::path::Path::new(&scope);
+        let pairs = indexa_core::cochange::co_change_pairs(
+            root,
+            indexa_core::cochange::DEFAULT_COMMIT_LIMIT,
+        )?;
+        if pairs.is_empty() {
+            println!(
+                "No co-change pairs found under \"{scope}\" (not a git repo, no history, or every commit touched only one file)."
+            );
+            return Ok(());
+        }
+        let pair_count = pairs.len();
+        store.replace_co_change(&pairs)?;
+        println!("Computed {pair_count} co-change pair(s) under \"{scope}\" and stored them.");
+        println!("Run `indexa related --include-co-change <file>` to see them.");
+        return Ok(());
+    }
+
+    // --compute-modules: recompute the persisted architecture map (4.6) and return — every
+    // other flag is ignored in this mode, matching --compute-co-change's precedent.
+    if compute_modules {
+        let mut store = Store::open(&db_path)?;
+        let llm = build_llm(cfg, Some(&cfg.describer.dir_model))?;
+        let count =
+            indexa_query::modules::recompute_graph_modules(&mut store, llm.as_ref(), &scope, 5000)
+                .await?;
+        if count == 0 {
+            println!("No call graph under \"{scope}\" to cluster — nothing computed.");
+            println!("Run `indexa deep {path}` on source files first.");
+            return Ok(());
+        }
+        println!("Computed {count} architecture-map module(s) under \"{scope}\" and stored them.");
+        println!("Run `indexa graph --modules {path}` to see them.");
+        return Ok(());
+    }
+
+    // --modules: show the persisted architecture map instead of the whole-scope graph.
+    if modules {
+        let store = Store::open(&db_path)?;
+        let found = store.graph_modules_for_scope(&scope)?;
+        if found.is_empty() {
+            println!("No architecture-map modules under \"{scope}\".");
+            println!("Run `indexa graph --compute-modules {path}` first.");
+            return Ok(());
+        }
+        println!("{} module(s) under \"{scope}\":", found.len());
+        println!("{}", "─".repeat(60));
+        for m in &found {
+            println!(
+                "\n📦 {} (cohesion {:.2}, {} file(s)):",
+                m.label,
+                m.cohesion,
+                m.members.len()
+            );
+            for p in &m.members {
+                println!("  {}", rel_to_scope(p, &scope));
+            }
+        }
+        return Ok(());
+    }
+
+    let store = Store::open(&db_path)?;
 
     // --blast <symbol>: "what breaks if I change this?" — the caller reachability set to
     // `depth` hops, instead of the whole-scope graph. `path` is ignored in this mode.
     if let Some(symbol) = blast {
         let depth = depth.clamp(1, 5);
-        let radius = store.blast_radius_resolved(&symbol, limit.max(200), strict, depth)?;
+        let radius =
+            store.blast_radius_resolved(&symbol, limit.max(200), strict, depth, heritage)?;
         if radius.files.is_empty() {
             println!("No blast radius found for \"{symbol}\".");
             println!(
@@ -54,8 +129,12 @@ pub(crate) async fn cmd_graph(
             radius.files.len()
         );
         println!("{}", "─".repeat(60));
-        for f in &radius.files {
-            println!("  {}", basename(f));
+        if grouped {
+            print_blast_radius_grouped(&radius);
+        } else {
+            for f in &radius.files {
+                println!("  {}", basename(f));
+            }
         }
         println!();
         println!(
@@ -195,4 +274,36 @@ same-file/import are structural)"
         );
     }
     Ok(())
+}
+
+/// Hop → risk label, matching GitNexus's `impact` contract: hop 1 = direct callers (will
+/// break immediately), hop 2 = one transitive step (likely affected), hop 3+ = further steps
+/// (worth testing but less certain to break).
+fn hop_risk_label(hop: usize) -> &'static str {
+    match hop {
+        1 => "WILL BREAK",
+        2 => "LIKELY AFFECTED",
+        _ => "MAY NEED TESTING",
+    }
+}
+
+/// Print a blast radius grouped by hop with a risk label per group, plus an overall
+/// LOW/MEDIUM/HIGH summary line — the `--grouped` rendering shared in spirit with the MCP
+/// `blast_radius` tool's `grouped: true` output (same [`BlastRadius::grouped_by_hop`] data).
+fn print_blast_radius_grouped(radius: &BlastRadius) {
+    println!(
+        "risk: {} ({} direct caller(s))",
+        radius.risk().as_str(),
+        radius.direct
+    );
+    for (hop, files) in radius.grouped_by_hop() {
+        println!(
+            "\n  hop {hop} — {} ({} file(s)):",
+            hop_risk_label(hop),
+            files.len()
+        );
+        for f in &files {
+            println!("    {}", basename(f));
+        }
+    }
 }

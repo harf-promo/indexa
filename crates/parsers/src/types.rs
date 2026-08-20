@@ -17,13 +17,20 @@ pub struct Chunk {
 }
 
 /// A code-relationship-graph edge emitted by a parser (currently only the code parser):
-/// `from` imports a module / defines a symbol named `to`. `kind` is `"imports"` or
-/// `"defines"`.
+/// `from` imports a module / defines a symbol / calls a function named `to`. `kind` is
+/// `"imports"`, `"defines"`, or `"calls"`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edge {
     pub from: PathBuf,
     pub kind: &'static str,
     pub to: String,
+    /// For `kind == "defines"` only (2.1): the symbol's kind in a compact, cross-language
+    /// vocabulary (`"fn"`, `"struct"`, `"class"`, …) — see `code::simplify_symbol_kind`.
+    /// `None` for imports/calls edges.
+    pub symbol_kind: Option<&'static str>,
+    /// For `kind == "defines"` only (2.1): the symbol's 1-based, inclusive
+    /// `(start_line, end_line)` in its source file. `None` for imports/calls edges.
+    pub line_range: Option<(usize, usize)>,
 }
 
 /// Output of a parser run on one file.
@@ -74,14 +81,41 @@ pub fn read_zip_entry_bytes<R: std::io::Read>(entry: R, cap: u64) -> std::io::Re
     Ok(buf)
 }
 
-/// Chunk sizing knobs threaded from `[chunking]` config into the word-window parsers.
-/// `size` is the target words per chunk; `overlap` is the words shared between consecutive
-/// windows. [`Default`] is the historical `800`/`100` so every free-function / `Registry::new`
+/// Text-file encoding-detection mode ([parsers] encoding — 1.3). `Auto` (default) BOM-sniffs
+/// UTF-16 and transcodes it to UTF-8, falling back to lossy UTF-8 for everything else; a
+/// valid-UTF-8 file decodes identically to the old strict read, so `Auto` only changes outcomes
+/// for files that previously errored. `Utf8Strict` restores the old exact behavior (errors on
+/// invalid UTF-8) for callers who want a bad file detected rather than silently patched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextEncoding {
+    #[default]
+    Auto,
+    Utf8Strict,
+}
+
+impl TextEncoding {
+    /// Lenient string→enum mapping for the `[parsers] encoding` config value: any string other
+    /// than the exact `"utf-8"` is treated as `Auto` (matches the codebase's convention for
+    /// string-valued config knobs — an unrecognized value falls back to the safe default rather
+    /// than erroring).
+    pub fn from_config_str(s: &str) -> Self {
+        if s.eq_ignore_ascii_case("utf-8") {
+            TextEncoding::Utf8Strict
+        } else {
+            TextEncoding::Auto
+        }
+    }
+}
+
+/// Chunk sizing + encoding knobs threaded from config into the word-window parsers. `size` is
+/// the target words per chunk; `overlap` is the words shared between consecutive windows.
+/// [`Default`] is the historical `800`/`100`/`Auto` so every free-function / `Registry::new`
 /// path stays behavior-neutral.
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkParams {
     pub size: usize,
     pub overlap: usize,
+    pub encoding: TextEncoding,
 }
 
 impl Default for ChunkParams {
@@ -89,6 +123,7 @@ impl Default for ChunkParams {
         Self {
             size: 800,
             overlap: 100,
+            encoding: TextEncoding::Auto,
         }
     }
 }

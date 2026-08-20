@@ -107,7 +107,7 @@ pub(crate) async fn api_job_summarize(
     let model_override = model_override_from(&q, s.config.describer.num_ctx);
     let state = s.clone();
     tokio::spawn(async move {
-        run_summarize_phase(&state, &q.path, q.passes, &handle, model_override).await;
+        run_summarize_phase(&state, &q.path, q.passes, &handle, model_override, q.force).await;
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
     Json(JobStartResponse { job_id: id }).into_response()

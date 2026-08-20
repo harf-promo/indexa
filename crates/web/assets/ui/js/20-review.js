@@ -52,7 +52,20 @@ function renderReviewList(questions) {
   }
   var batch = buildBatchControl(questions);
   if (batch) list.appendChild(batch);
-  questions.forEach(function (q) { list.appendChild(buildReviewCard(q)); });
+  var groups = {};
+  var order = [];
+  questions.forEach(function (q) {
+    var t = q.decision_type || 'other';
+    if (!groups[t]) { groups[t] = []; order.push(t); }
+    groups[t].push(q);
+  });
+  order.forEach(function (t) {
+    var h = document.createElement('h3');
+    h.className = 'review-group-head';
+    h.textContent = (TYPE_LABELS[t] || t) + ' · ' + groups[t].length;
+    list.appendChild(h);
+    groups[t].forEach(function (q) { list.appendChild(buildReviewCard(q)); });
+  });
 }
 
 // Batch-safe answers per decision type — mirrors core::decisions::batch_answer_refusal
@@ -101,6 +114,8 @@ function buildBatchControl(questions) {
     (BATCH_CHOICES[typeSel.value] || []).forEach(function (c) {
       var o = document.createElement('option'); o.value = c; o.textContent = c; choiceSel.appendChild(o);
     });
+    var shared = sharedUnderPrefix(questions, typeSel.value);
+    if (shared) under.value = shared;
   }
   fillChoices();
   typeSel.addEventListener('change', fillChoices);
@@ -115,6 +130,27 @@ function buildBatchControl(questions) {
   form.appendChild(go);
   box.appendChild(form);
   return box;
+}
+
+/* Longest common directory prefix of subjects of one type. Empty when there
+   aren't enough shared segments to be a useful "under" filter. */
+function sharedUnderPrefix(questions, type) {
+  var paths = [];
+  questions.forEach(function (q) {
+    if (q.decision_type === type && q.subject) paths.push(q.subject);
+  });
+  if (paths.length < 2) return '';
+  var parts = paths[0].split('/');
+  for (var i = 1; i < paths.length; i++) {
+    var other = paths[i].split('/');
+    var n = 0;
+    while (n < parts.length && n < other.length && parts[n] === other[n]) n++;
+    parts = parts.slice(0, n);
+  }
+  // Skip home-directory-only prefixes (`/Users/name`) — too broad to batch on.
+  var depth = parts.filter(function (s) { return s.length > 0; }).length;
+  if (depth < 4) return '';
+  return parts.join('/');
 }
 
 function batchField(text, control) {
@@ -333,16 +369,43 @@ function dismissReview(id, card) {
 
 function removeReviewCard(card) {
   var list = card.parentElement;
-  // The focused button is about to vanish with its card — keep keyboard focus
-  // inside the drawer's logical flow instead of dropping it to <body>.
-  var next = card.nextElementSibling || card.previousElementSibling;
+  // This card's group header (nearest preceding .review-group-head sibling, found before
+  // removal) — recounted or removed once its group empties below. Previously left behind
+  // with a stale "N" count reading over zero remaining cards in that group.
+  var groupHead = null;
+  for (var h = card.previousElementSibling; h; h = h.previousElementSibling) {
+    if (h.classList.contains('review-group-head')) { groupHead = h; break; }
+  }
+  // The focused button is about to vanish with its card — keep keyboard focus inside the
+  // drawer's logical flow. Skip past group headers (no button) to the nearest actual card.
+  var focusTarget = null;
+  for (var n = card.nextElementSibling; n; n = n.nextElementSibling) {
+    if (n.classList.contains('review-card')) { focusTarget = n; break; }
+  }
+  if (!focusTarget) {
+    for (var p = card.previousElementSibling; p; p = p.previousElementSibling) {
+      if (p.classList.contains('review-card')) { focusTarget = p; break; }
+    }
+  }
   card.remove();
+  if (groupHead) {
+    var remaining = 0;
+    for (var s = groupHead.nextElementSibling; s && !s.classList.contains('review-group-head'); s = s.nextElementSibling) {
+      if (s.classList.contains('review-card')) remaining++;
+    }
+    if (remaining === 0) {
+      groupHead.remove();
+    } else {
+      var label = groupHead.textContent.split(' · ')[0];
+      groupHead.textContent = label + ' · ' + remaining;
+    }
+  }
   if (list && !list.children.length) {
     renderReviewEmpty(list);
     if (!list.hasAttribute('tabindex')) list.setAttribute('tabindex', '-1');
     list.focus();
-  } else if (next) {
-    var btn = next.querySelector('button');
+  } else if (focusTarget) {
+    var btn = focusTarget.querySelector('button');
     if (btn) btn.focus();
   }
 }

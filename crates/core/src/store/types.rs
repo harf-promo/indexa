@@ -34,6 +34,19 @@ pub struct EdgeRecord {
     pub to_ref: String,
 }
 
+/// One code symbol (2.1, the `symbols` table): a top-level definition's kind and 1-based
+/// inclusive line range, richer than a bare `defines` edge's name-only relation. `kind` is
+/// the compact cross-language vocabulary from `indexa_parsers::code::simplify_symbol_kind`
+/// (`"fn"`, `"struct"`, `"class"`, …).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolRecord {
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub start_line: i64,
+    pub end_line: i64,
+}
+
 /// Display facts for one indexed entry row, used by `indexa inspect`.
 #[derive(Debug, Clone)]
 pub struct EntryInfo {
@@ -278,4 +291,16 @@ pub struct PackRecord {
     pub description: Option<String>,
     pub path_count: usize,
     pub created_at: i64,
+    /// Latest `pack_events.at` for this pack (4.1) — `None` for a pack with no recorded
+    /// events yet (e.g. one created before this column existed and never touched since).
+    pub updated_at: Option<i64>,
+}
+
+/// One row in a pack's event history (4.1) — an append-only changelog entry.
+#[derive(Debug, Clone)]
+pub struct PackEvent {
+    pub pack_id: String,
+    pub event: String,
+    pub detail: Option<String>,
+    pub at: i64,
 }

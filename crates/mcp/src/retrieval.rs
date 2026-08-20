@@ -89,7 +89,9 @@ pub struct AskParams {
     pub agentic: Option<bool>,
     /// Enable cross-encoder reranking after retrieval (adds latency; improves ranking quality).
     /// Defaults to the server's `[retrieval] rerank`. Use with `rerank_backend` to choose
-    /// between `"llm"` (listwise, default) or `"cross-encoder"` (candle DeBERTa-v2).
+    /// between `"llm"` (listwise, default) or `"cross-encoder"` (candle DeBERTa-v2). Ignored
+    /// when `catalog: true` — catalog mode force-disables rerank regardless of this value (its
+    /// file-level dedup/resort would discard the reordering anyway; see `catalog` below).
     #[serde(default)]
     pub rerank: Option<bool>,
     /// Reranker backend when `rerank` is true: `"llm"` (default) or `"cross-encoder"`.
@@ -117,13 +119,14 @@ pub struct AskParams {
     /// own (stronger) model. Prefer `false` when you are a capable model and want the best answer.
     #[serde(default)]
     pub synthesize: Option<bool>,
-    /// Catalog (progressive-disclosure) mode. When `true`, Indexa runs its full retrieval
-    /// pipeline but returns only a scored list of files with their L0 one-line abstracts —
-    /// **no chunk bodies, no synthesis**. Use this to find which files are relevant, then
-    /// expand the ones you want with `get_summary`, `read_file`, or `get_chunk_context`.
-    /// This is the cheapest retrieval mode: minimal tokens, bounded KV-cache, no local LLM
-    /// call. Incompatible with `agentic`; ignored when `synthesize` is also set to `false`
-    /// (retrieval-only returns the full slice, which is richer than the catalog).
+    /// Catalog (progressive-disclosure) mode. When `true`, Indexa runs retrieval (hybrid +
+    /// boosts + MMR — rerank is force-disabled, see `rerank` above) but returns only a scored
+    /// list of files with their L0 one-line abstracts — **no chunk bodies, no synthesis**. Use
+    /// this to find which files are relevant, then expand the ones you want with `get_summary`,
+    /// `read_file`, or `get_chunk_context`. This is the cheapest retrieval mode: minimal tokens,
+    /// bounded KV-cache, no local LLM call at all. Incompatible with `agentic`; ignored when
+    /// `synthesize` is also set to `false` (retrieval-only returns the full slice, which is
+    /// richer than the catalog).
     #[serde(default)]
     pub catalog: Option<bool>,
 }
@@ -134,7 +137,7 @@ impl IndexaMcp {
     /// Returns matching chunks with their file path, heading, and a text snippet.
     /// Use `scope` to restrict to a subtree. For path-name browsing, prefer `browse_tree`.
     #[tool(
-        description = "Search indexed chunk content by keyword (BM25 + vector hybrid). Returns matching chunks with path, heading, and snippet — richer than path-name search. Each hit shows `#N`, the chunk seq — pass it to `get_chunk_context` to expand that chunk with its neighbors. Optionally scope to a path prefix."
+        description = "Search indexed chunk content by keyword (BM25 + vector hybrid). Returns matching chunks with path, heading, and snippet — richer than path-name search. Each hit shows `#N`, the chunk seq — pass it to `get_chunk_context` to expand that chunk with its neighbors. A result whose on-disk mtime is newer than what's indexed is marked '(stale)'. Optionally scope to a path prefix."
     )]
     pub(crate) async fn search(
         &self,
@@ -147,26 +150,93 @@ impl IndexaMcp {
             mode,
         } = params.0;
         let limit = limit.unwrap_or(20).min(100);
-        let scope = scope.as_deref().filter(|s| !s.is_empty());
         let mode = parse_hybrid_mode(mode.as_deref());
+
+        // Predicate grammar (1.8, +type: sets): `path:`/`ext:`/`type:` tokens stripped from the
+        // query and mapped onto the existing scope filter / a post-hoc extension filter. Off by
+        // default — an explicit `scope` param always wins over a `path:` predicate; a predicate
+        // parse that would leave nothing to search on (the whole query was predicates) falls
+        // back to the original query text rather than searching on an empty string.
+        let predicates = self
+            .config
+            .retrieval
+            .query_predicates
+            .then(|| indexa_query::predicates::parse_predicates(&query))
+            .filter(|p| !p.text.trim().is_empty());
+        let search_text = predicates.as_ref().map_or(query.as_str(), |p| &p.text);
+        let scope = scope
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| predicates.as_ref().and_then(|p| p.path.as_deref()));
+        // `ext:` and `type:` combine into one match-ANY-of-these-extensions filter (a named
+        // type set is just a curated multi-extension `ext:`); both still AND with `path`/scope.
+        let ext_filter: Option<Vec<String>> = predicates.as_ref().map(|p| {
+            let mut exts: Vec<String> = p.type_exts.clone().unwrap_or_default();
+            exts.extend(p.ext.clone());
+            exts
+        });
+        let ext_filter = ext_filter.filter(|exts| !exts.is_empty());
 
         // Try to embed the query for the dense arm; fall back to sparse if the embedder is
         // unavailable or the index has no embeddings.
         let embedding = if matches!(mode, HybridMode::Sparse) {
             None
         } else {
-            self.embedder.embed(&query).await.ok()
+            self.embedder.embed(search_text).await.ok()
         };
 
+        // Use the cached ANN index for the dense arm when available (unscoped, large index);
+        // `hybrid_search_with_ann` falls back to brute-force otherwise, so results are unchanged.
+        let ann = self.ensure_ann().await;
         let mut store = self.store()?;
-        let hits = store
-            .hybrid_search(&query, embedding.as_deref(), &mode, scope, limit, 60.0)
+        // `ext:`/`type:` filter after the SQL-side RRF fusion already truncated to `limit` — a
+        // real match ranked below that cutoff would be silently invisible ("no results" when a
+        // match genuinely exists further down). Over-fetch a larger candidate pool when a filter
+        // is active, THEN filter, THEN truncate to the real requested `limit` (mirrors the
+        // `limit * 3`-then-filter-then-`.take(limit)` pattern already used by
+        // `crates/web/src/handlers/packs.rs` / `apps/indexa/src/commands/pack.rs` for the same
+        // shape of problem). This narrows the gap a lot (`limit` → up to 200) but doesn't close
+        // it entirely: `hybrid_search_with_ann`'s own FTS/dense candidate pools are each hard-
+        // capped at 100 internally (shared with `ask`/web/CLI/eval, so not something to change
+        // here), so an ext/type match ranked below 100 in BOTH arms can still be missed. `.min(200)`
+        // just keeps `fetch_limit` from exceeding that real ceiling for pointlessly large `limit`s.
+        let fetch_limit = if ext_filter.is_some() {
+            limit.saturating_mul(5).min(200)
+        } else {
+            limit
+        };
+        let mut hits = store
+            .hybrid_search_with_ann(
+                search_text,
+                embedding.as_deref(),
+                &mode,
+                scope,
+                fetch_limit,
+                60.0,
+                ann.as_deref(),
+            )
             .map_err(mcp_err)?;
+        if let Some(exts) = &ext_filter {
+            // Case-insensitive both sides: `ext:RS` must match a stored `.rs` file and
+            // `ext:rs` must match a stored `.RS` file.
+            hits.retain(|h| {
+                let path_lower = h.entry_path.to_ascii_lowercase();
+                exts.iter()
+                    .any(|e| path_lower.ends_with(&format!(".{}", e.to_ascii_lowercase())))
+            });
+            hits.truncate(limit);
+        }
 
         if hits.is_empty() {
             return Ok(ok_text(format!("No results for '{query}'.")));
         }
 
+        // Staleness attestation (1.2): flag hits whose on-disk mtime is newer than what's
+        // indexed. Fail-open — a store error just means no annotations, never a failed search.
+        let staleness = self.config.retrieval.staleness_flags.then(|| {
+            let paths = hits.iter().map(|h| h.entry_path.as_str());
+            indexa_query::staleness::stale_paths(&store, paths)
+        });
         let body = hits
             .iter()
             .map(|h| {
@@ -176,11 +246,26 @@ impl IndexaMcp {
                     format!(" [{}]", h.heading)
                 };
                 let snippet: String = h.text.chars().take(120).collect();
-                format!("{}{} #{}\n  {}", h.entry_path, heading, h.seq, snippet)
+                let flag = staleness
+                    .as_ref()
+                    .is_some_and(|(stale, ..)| stale.contains(&h.entry_path));
+                let stale_note = if flag { " (stale)" } else { "" };
+                format!(
+                    "{}{}{} #{}\n  {}",
+                    h.entry_path, heading, stale_note, h.seq, snippet
+                )
             })
             .collect::<Vec<_>>()
             .join("\n\n");
-        let out = format!("{} result(s):\n\n{body}", hits.len());
+        let mut out = format!("{} result(s):\n\n{body}", hits.len());
+        if let Some((_, stale_count, total)) = &staleness {
+            if *stale_count > 0 {
+                out.push_str(&format!(
+                    "\n\n({stale_count} of {total} result file(s) changed on disk since \
+                     indexing — re-run `indexa deep` to refresh)"
+                ));
+            }
+        }
 
         let paths: Vec<&str> = hits.iter().map(|h| h.entry_path.as_str()).collect();
         let counterfactual = store.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
@@ -345,7 +430,7 @@ impl IndexaMcp {
 
     /// Answer a natural-language question against the index (grounded RAG).
     #[tool(
-        description = "Answer a natural-language question using the indexed context (hybrid retrieval + LOCAL LLM synthesis — e.g. ollama/gemma3:12b, NOT your model). Returns an answer with source paths. **If you are a capable model, prefer `synthesize: false`**: Indexa then runs the same retrieval pipeline but returns the packed context SLICE for YOU to answer with your own (stronger) model — better answers, and no local-model cost. Set `agentic: true` for compositional questions (a few extra model calls; ignored when `synthesize: false`). Optional `top_k` widens/narrows retrieval breadth."
+        description = "Answer a natural-language question using the indexed context (hybrid retrieval + LOCAL LLM synthesis — e.g. ollama/gemma3:12b, NOT your model). Returns an answer with source paths; a cited file whose on-disk mtime is newer than what's indexed is marked '(stale: modified since indexed)'. **If you are a capable model, prefer `synthesize: false`**: Indexa then runs the same retrieval pipeline but returns the packed context SLICE for YOU to answer with your own (stronger) model — better answers, and no local-model cost. Set `agentic: true` for compositional questions (a few extra model calls; ignored when `synthesize: false`). Optional `top_k` widens/narrows retrieval breadth."
     )]
     pub(crate) async fn ask(
         &self,
@@ -368,6 +453,19 @@ impl IndexaMcp {
         let catalog = catalog.unwrap_or(false);
         let synthesize = synthesize.unwrap_or(true);
         let agentic = agentic.unwrap_or(self.config.retrieval.agentic);
+        // Predicate grammar (1.8): only `path:` is honored for `ask` (it maps onto the
+        // existing pre-retrieval `scope` knob); `ext:` would need a post-retrieval,
+        // pre-synthesis hit filter the qa pipeline doesn't expose, so it's stripped from the
+        // question text (so it doesn't pollute retrieval/synthesis as a literal keyword) but
+        // has no filtering effect here — `search` is where `ext:` is fully honored.
+        let predicates = self
+            .config
+            .retrieval
+            .query_predicates
+            .then(|| indexa_query::predicates::parse_predicates(&question))
+            .filter(|p| !p.text.trim().is_empty());
+        let question = predicates.as_ref().map_or(question, |p| p.text.clone());
+        let predicate_path = predicates.and_then(|p| p.path);
         // Config-derived defaults from `[retrieval]`, then per-request overrides.
         let mut cfg = QaConfig::from_retrieval(&self.config.retrieval);
         if let Some(k) = top_k {
@@ -376,7 +474,7 @@ impl IndexaMcp {
         if let Some(m) = mode.as_deref() {
             cfg.mode = parse_hybrid_mode(Some(m));
         }
-        cfg.scope = scope.filter(|s| !s.is_empty());
+        cfg.scope = scope.filter(|s| !s.is_empty()).or(predicate_path);
         if let Some(r) = rerank {
             cfg.rerank = r;
         }
@@ -389,6 +487,12 @@ impl IndexaMcp {
         let history =
             load_session_history(&self.db_path, session_id.as_deref(), cfg.scope.as_deref());
 
+        // Build/cache the ANN index once for this call. MCP is long-lived, so the HNSW index
+        // amortizes across tool calls; `ensure_ann` returns `None` (→ brute-force) when ANN is off,
+        // the index is below `ann_min_chunks`, or the build fails. Threaded into every retrieval
+        // branch below (a scoped query falls back to brute-force inside the pipeline).
+        let ann = self.ensure_ann().await;
+
         // Catalog mode: return a scored file list with L0 abstracts — no chunk bodies,
         // no synthesis. Cheap progressive disclosure for capable caller models.
         if catalog {
@@ -398,7 +502,7 @@ impl IndexaMcp {
                 self.llm.as_ref(),
                 &question,
                 &cfg,
-                None,
+                ann.as_deref(),
                 &history,
             )
             .await
@@ -432,7 +536,7 @@ impl IndexaMcp {
                 self.llm.as_ref(),
                 &question,
                 &cfg,
-                None,
+                ann.as_deref(),
                 &history,
             )
             .await
@@ -456,7 +560,7 @@ impl IndexaMcp {
                 self.llm.as_ref(),
                 &question,
                 &cfg,
-                None,
+                ann.as_deref(),
                 &history,
             )
             .await
@@ -486,8 +590,34 @@ impl IndexaMcp {
         };
         if !answer.sources.is_empty() {
             out.push_str("\n\nSources:\n");
+            // Staleness attestation (1.2): flag citations whose on-disk mtime is newer than
+            // what's indexed, so the answer admits when it may be serving stale text. Fail-open
+            // (store errors just mean no annotations) — never blocks or alters the answer.
+            let staleness = if self.config.retrieval.staleness_flags {
+                self.store().ok().map(|store| {
+                    let paths = answer.sources.iter().map(|s| s.path.as_str());
+                    indexa_query::staleness::stale_paths(&store, paths)
+                })
+            } else {
+                None
+            };
             for s in &answer.sources {
-                out.push_str(&format!("- {}\n", s.path));
+                let flag = staleness
+                    .as_ref()
+                    .is_some_and(|(stale, ..)| stale.contains(&s.path));
+                if flag {
+                    out.push_str(&format!("- {} (stale: modified since indexed)\n", s.path));
+                } else {
+                    out.push_str(&format!("- {}\n", s.path));
+                }
+            }
+            if let Some((_, stale_count, total)) = &staleness {
+                if *stale_count > 0 {
+                    out.push_str(&format!(
+                        "({stale_count} of {total} cited file(s) changed on disk since indexing \
+                         — re-run `indexa deep` to refresh)\n"
+                    ));
+                }
             }
         }
         if agentic && steps.len() > 1 {

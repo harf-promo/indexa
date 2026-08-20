@@ -65,9 +65,11 @@ pub enum Commands {
         #[arg(long)]
         embed_model: Option<String>,
 
-        /// Summary storage mode: augment (default), compress, summaries-only.
-        #[arg(long, default_value = "augment")]
-        mode: String,
+        /// Summary storage mode: augment, compress, summaries-only. Overrides
+        /// `[describer] mode` when given; omit to use the configured default (augment
+        /// unless changed in config.toml).
+        #[arg(long)]
+        mode: Option<String>,
 
         /// Refinement passes per summary. Default: 2 for new context, 1 for refresh.
         #[arg(long)]
@@ -147,9 +149,11 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// Summary storage mode: augment (default), compress, summaries-only.
-        #[arg(long, default_value = "augment")]
-        mode: String,
+        /// Summary storage mode: augment, compress, summaries-only. Overrides
+        /// `[describer] mode` when given; omit to use the configured default (augment
+        /// unless changed in config.toml).
+        #[arg(long)]
+        mode: Option<String>,
 
         /// Enable Anthropic Contextual Retrieval: generate a 1–2 sentence situating blurb
         /// per chunk before embedding. Reduces retrieval failures by ~35% at the cost of
@@ -186,9 +190,11 @@ pub enum Commands {
         #[arg(num_args = 0..)]
         paths: Vec<String>,
 
-        /// Summary mode: augment (default), compress, summaries-only.
-        #[arg(long, default_value = "augment")]
-        mode: String,
+        /// Summary mode: augment, compress, summaries-only. Overrides `[describer] mode`
+        /// when given; omit to use the configured default (augment unless changed in
+        /// config.toml).
+        #[arg(long)]
+        mode: Option<String>,
 
         /// Refinement passes per summary. Default: 2 for new context, 1 for refresh.
         /// Capped at the config `passes-cap` (default 3).
@@ -317,15 +323,20 @@ pub enum Commands {
         action: SnapshotAction,
     },
 
-    /// Regression-test retrieval quality against a golden-questions file (no LLM).
+    /// Regression-test retrieval quality against a golden-questions file.
     ///
-    /// Runs each question through the same retrieval the `ask` pipeline uses and
-    /// scores the ranked hits against the paths you expect: hit@k, MRR, and citation
-    /// precision. Sparse mode (the default) needs no embedder or Ollama, so it can
-    /// gate CI. Golden file format: docs/how-to/evaluate-retrieval.md.
+    /// Runs each question through the same `retrieve()` the `ask` pipeline uses (in
+    /// whichever `--mode`) and scores the ranked hits against the paths you expect: hit@k,
+    /// MRR, recall, nDCG, and citation precision. No LLM synthesis, ever. By default no
+    /// rerank either (`retrieve()` itself never reranks — the LLM/cross-encoder pass runs
+    /// only afterward, in the real `ask` pipeline) and, in sparse mode (the default), no
+    /// embedder — so a plain run needs no Ollama and can gate CI. Pass `--rerank` to opt
+    /// into the ask pipeline's rerank pass too (needs a local LLM or the cross-encoder
+    /// model). Golden file format: docs/how-to/evaluate-retrieval.md.
     #[command(after_help = "Examples:
   indexa eval golden.json
   indexa eval golden.json --mode rrf --top-k 20
+  indexa eval golden.json --rerank              # also score the ask pipeline's rerank pass
   indexa eval golden.json --json --min-hit-rate 0.8   # exit 1 below 80% hit rate")]
     #[command(display_order = 38)]
     Eval {
@@ -362,6 +373,15 @@ pub enum Commands {
         /// drops by more than this fraction vs the baseline. `0.0` (default) = no regression allowed.
         #[arg(long, default_value_t = 0.0)]
         max_regression: f64,
+
+        /// Also route retrieval through the same rerank pass `ask` uses (off by default, so
+        /// existing callers/CI are unaffected). Needs a local LLM (`[retrieval] rerank_backend =
+        /// "llm"`, the default) or the cross-encoder model (`"cross-encoder"`). When the
+        /// describer is Ollama this preflights it — an unreachable Ollama is a hard error, so
+        /// the flag can never silently score an un-reranked run as if it had been reranked;
+        /// past that check, an individual rerank call still fails open on error (same as `ask`).
+        #[arg(long)]
+        rerank: bool,
     },
 
     /// Run several questions and render one document (answers + cited sources + TOC).
@@ -414,6 +434,40 @@ pub enum Commands {
         /// transitive hop (default), up to 5 for transitive reach through chains.
         #[arg(long, default_value = "2")]
         depth: usize,
+
+        /// With --blast: group results by hop with a risk label (hop 1 "WILL BREAK", hop 2
+        /// "LIKELY AFFECTED", hop 3+ "MAY NEED TESTING") plus a LOW/MEDIUM/HIGH risk summary,
+        /// instead of a flat file list.
+        #[arg(long)]
+        grouped: bool,
+
+        /// With --blast: also treat a file with an extends/implements edge to the symbol as
+        /// a direct hit (2.2) — pass a class/trait/interface name as --blast to see what
+        /// breaks if you change it. Without --blast: no effect (the whole-scope graph view
+        /// doesn't render heritage edges yet).
+        #[arg(long)]
+        heritage: bool,
+
+        /// Recompute co-change edges (2.7) from git history under `path` and store them —
+        /// files that historically change together, from `git log --name-only`. Ignores
+        /// every other flag; run this once after cloning/pulling, then `indexa related
+        /// --include-co-change` picks up the result. Requires `path` to be inside a git repo.
+        #[arg(long)]
+        compute_co_change: bool,
+
+        /// Recompute the persisted architecture map (4.6) under `path`: cluster the code
+        /// graph (Louvain, directory-prior-boosted) into named functional areas and label
+        /// each with a short local-LLM call from member file summaries. Ignores every other
+        /// flag; spends local-LLM time (uses `[describer] dir_model`, e.g. gemma3:12b) —
+        /// run it deliberately, not on every `indexa deep`.
+        #[arg(long)]
+        compute_modules: bool,
+
+        /// Show the persisted architecture map (4.6) instead of the whole-scope graph —
+        /// named functional-area clusters with a cohesion score and member files. Empty
+        /// until `--compute-modules` has been run at least once.
+        #[arg(long)]
+        modules: bool,
     },
 
     /// Find files related to a file via the call graph (it calls them, or they call it).
@@ -430,6 +484,10 @@ pub enum Commands {
         /// Emit as JSON.
         #[arg(long)]
         json: bool,
+        /// Also show files that historically changed together with this one in git
+        /// history (2.7) — run `indexa graph --compute-co-change` first to populate this.
+        #[arg(long)]
+        include_co_change: bool,
     },
 
     /// Export the hierarchical summary tree as XML, Markdown, or JSON for use as AI context.
@@ -665,6 +723,41 @@ pub enum Commands {
         // that invocation is what every client config points at.
         #[command(subcommand)]
         action: Option<McpAction>,
+
+        /// Tool-surface profile for this run (3.2): `full` (default — every tool) or `core`
+        /// (a small task-focused subset; the rest un-advertised and un-callable). Overrides
+        /// `[mcp] tool_profile` in config.toml when set.
+        #[arg(long)]
+        tool_profile: Option<String>,
+    },
+
+    /// Print (or install) Claude Code hook config that injects Indexa context automatically (3.1).
+    ///
+    /// A SessionStart hook injects a short freshness summary (entry/chunk counts, indexed
+    /// roots, last-indexed time) at the start of every session — fail-open, context-only,
+    /// never blocking. Prints the resulting `.claude/settings.json` by default; pass
+    /// `--write` to actually apply it (a `.bak` of the original is kept). Project-scoped only
+    /// — never touches your global `~/.claude/settings.json`. Claude Code only.
+    #[command(after_help = "Examples:
+  indexa install-hooks                    # preview what would be written
+  indexa install-hooks --write            # apply to ./.claude/settings.json
+  indexa install-hooks --write --with-pretooluse")]
+    #[command(display_order = 52)]
+    InstallHooks {
+        /// Apply the hook config to ./.claude/settings.json (default: preview only).
+        #[arg(long)]
+        write: bool,
+        /// Also install a PreToolUse hook on Grep that surfaces related indexed context for
+        /// the search pattern (sparse/BM25 only — no local model dependency).
+        #[arg(long)]
+        with_pretooluse: bool,
+    },
+
+    /// Internal: the hook script `install-hooks` wires up. Not meant to be run by hand.
+    #[command(hide = true)]
+    McpHook {
+        /// `session-start` or `pre-tool-use`.
+        event: String,
     },
 
     /// Show context store statistics.
@@ -934,26 +1027,40 @@ pub enum PackAction {
         /// Pack name.
         name: String,
     },
-    /// Export a pack as XML, Markdown, or JSON — ready to paste into any AI tool.
+    /// Export a pack as XML, Markdown, JSON, or an OKF bundle — ready to paste into any AI
+    /// tool, or (OKF) to hand to any OKF-aware tool (Obsidian, Knowledge Catalog, ...).
     #[command(after_help = "Examples:
   indexa pack export \"Auth\" --format xml > auth.xml
   indexa pack export \"Auth\" --format md
-  indexa pack export \"Auth\" --format json --output auth.json")]
+  indexa pack export \"Auth\" --format json --output auth.json
+  indexa pack export \"Auth\" --format okf --out ./auth-bundle")]
     Export {
         /// Pack name.
         name: String,
-        /// Output format: xml (default), md, json.
+        /// Output format: xml (default), md, json, or okf (4.2 — a directory bundle;
+        /// requires --out).
         #[arg(long, default_value = "xml")]
         format: String,
         /// Write to a file instead of stdout.
         #[arg(long, short)]
         output: Option<String>,
+        /// With --format okf: directory to write the bundle into (created if missing).
+        #[arg(long)]
+        out: Option<String>,
         /// Maximum tree depth per path (0 = top summary only).
         #[arg(long)]
         depth: Option<usize>,
         /// Append an importance-weights section (which files you've marked as important).
         #[arg(long)]
         include_weights: bool,
+        /// Append a call-graph section (which files relate to which) for the pack's paths,
+        /// capped at 200 heaviest edges. Format follows --graph-format.
+        #[arg(long)]
+        include_graph: bool,
+        /// With --include-graph: "text" (per-format list, default) or "mermaid" (a fenced
+        /// ```mermaid flowchart block — pure text, renders natively in most AI tools/viewers).
+        #[arg(long, default_value = "text")]
+        graph_format: String,
         /// Emit a code-skeleton view (symbol signatures, bodies elided) instead of summaries.
         #[arg(long)]
         signatures: bool,
@@ -992,6 +1099,27 @@ pub enum PackAction {
     Delete {
         /// Pack name.
         name: String,
+    },
+    /// Reconstruct a pack from an OKF bundle's manifest.json (4.3 — round-trip a
+    /// `pack export --format okf` bundle). Same-machine / migration scope, not team
+    /// sharing: every path must already be indexed on THIS machine.
+    #[command(after_help = "Examples:
+  indexa pack import ./auth-bundle
+  indexa pack import ./auth-bundle --name \"Auth (restored)\"
+  indexa pack import ./auth-bundle --force   # import despite content-hash drift since export")]
+    Import {
+        /// Path to a directory previously written by `pack export --format okf --out <dir>`.
+        bundle_dir: String,
+        /// Import an item even if its current content hash no longer matches the manifest's
+        /// recorded hash (the file changed since export). Without this, any such drift fails
+        /// the whole import (fix it or re-export first). Never overrides the unconditional
+        /// checks that a path is indexed and under an indexed root.
+        #[arg(long)]
+        force: bool,
+        /// Pack name to create (default: the name recorded in manifest.json). Required if the
+        /// manifest's name is already taken by an existing pack.
+        #[arg(long)]
+        name: Option<String>,
     },
 }
 
@@ -1489,6 +1617,7 @@ mod tests {
                 min_hit_rate,
                 baseline,
                 max_regression,
+                rerank,
             } => {
                 assert_eq!(golden, "golden.json");
                 assert_eq!(mode, "sparse", "hermetic sparse is the default");
@@ -1498,6 +1627,110 @@ mod tests {
                 assert!((min_hit_rate - 0.8).abs() < 1e-9);
                 assert!(baseline.is_none());
                 assert_eq!(max_regression, 0.0);
+                assert!(
+                    !rerank,
+                    "--rerank must default to off (additive, no behavior change)"
+                );
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_eval_rerank_flag() {
+        let cli = Cli::try_parse_from(["indexa", "eval", "golden.json", "--rerank"]).unwrap();
+        match cli.command {
+            Commands::Eval { rerank, .. } => {
+                assert!(rerank, "--rerank must thread through to true when passed");
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    // ── `--mode` (Index/Deep/Summarize): omitted must defer to `[describer] mode`, not a
+    // hardcoded CLI default — clap can no longer hand the command layer a value indistinguishable
+    // from an explicit `--mode augment` (see `resolve_summary_mode` in apps/indexa/commands/helpers.rs).
+
+    #[test]
+    fn cli_index_mode_omitted_is_none() {
+        let cli = Cli::try_parse_from(["indexa", "index", "~/Documents"]).unwrap();
+        match cli.command {
+            Commands::Index { mode, .. } => {
+                assert!(
+                    mode.is_none(),
+                    "omitted --mode must defer to config, not augment"
+                );
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_index_mode_explicit_is_some() {
+        let cli =
+            Cli::try_parse_from(["indexa", "index", "~/Documents", "--mode", "summaries-only"])
+                .unwrap();
+        match cli.command {
+            Commands::Index { mode, .. } => {
+                assert_eq!(mode.as_deref(), Some("summaries-only"));
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_deep_mode_omitted_is_none() {
+        let cli = Cli::try_parse_from(["indexa", "deep", "~/Documents"]).unwrap();
+        match cli.command {
+            Commands::Deep { mode, .. } => {
+                assert!(
+                    mode.is_none(),
+                    "omitted --mode must defer to config, not augment"
+                );
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_deep_mode_explicit_is_some() {
+        let cli =
+            Cli::try_parse_from(["indexa", "deep", "~/Documents", "--mode", "compress"]).unwrap();
+        match cli.command {
+            Commands::Deep { mode, .. } => {
+                assert_eq!(mode.as_deref(), Some("compress"));
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_summarize_mode_omitted_is_none() {
+        let cli = Cli::try_parse_from(["indexa", "summarize", "~/Documents"]).unwrap();
+        match cli.command {
+            Commands::Summarize { mode, .. } => {
+                assert!(
+                    mode.is_none(),
+                    "omitted --mode must defer to config, not augment"
+                );
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_summarize_mode_explicit_is_some() {
+        let cli = Cli::try_parse_from([
+            "indexa",
+            "summarize",
+            "~/Documents",
+            "--mode",
+            "summaries-only",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Summarize { mode, .. } => {
+                assert_eq!(mode.as_deref(), Some("summaries-only"));
             }
             _ => panic!("wrong command"),
         }

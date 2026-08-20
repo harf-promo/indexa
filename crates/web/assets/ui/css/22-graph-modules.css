@@ -1,0 +1,45 @@
+/* 22-graph-modules.css — the Map's "Modules" panel (4.6): a persisted architecture-map overview,
+   distinct from the live "Communities" overlay (21-graph-communities.css tints nodes at request
+   time; this reads a table written by `indexa graph --compute-modules`). Rendered as a simple
+   card list below the toolbar, not tinted onto the SVG canvas — the persisted map is its own
+   artifact, not a recoloring of the current view. */
+.graph-modules-panel {
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-0);
+  padding: 12px 16px;
+  margin: 4px 0 12px;
+  font-size: 13px;
+  color: var(--text);
+  max-width: 720px;
+}
+.graph-modules-panel h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.graph-module-card {
+  border-top: 1px solid var(--border-subtle);
+  padding: 8px 0;
+}
+.graph-module-card:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+.graph-module-label {
+  font-weight: 600;
+}
+.graph-module-meta {
+  color: var(--muted);
+  font-size: 12px;
+  margin-left: 6px;
+}
+.graph-module-members {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.graph-modules-empty {
+  color: var(--muted);
+}

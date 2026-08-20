@@ -231,6 +231,18 @@ pub(crate) struct RootResponse {
     pub(crate) name: String,
 }
 
+/// One top-level detected project for the welcome "Build context" list.
+#[derive(Serialize)]
+pub(crate) struct ProjectResponse {
+    pub(crate) path: String,
+    pub(crate) name: String,
+    pub(crate) app_name: String,
+    pub(crate) chunk_count: u64,
+    pub(crate) has_summary: bool,
+    pub(crate) covered: u64,
+    pub(crate) total: u64,
+}
+
 #[derive(Serialize)]
 pub(crate) struct FsEntry {
     pub(crate) name: String,
@@ -492,6 +504,9 @@ pub(crate) struct AskSource {
     pub(crate) path: String,
     pub(crate) heading: String,
     pub(crate) snippet: String,
+    /// True when this source's on-disk mtime is newer than what's indexed (1.2) — the answer
+    /// may be citing stale text. `false` when `[retrieval] staleness_flags` is off.
+    pub(crate) stale: bool,
 }
 
 #[derive(Deserialize)]
@@ -503,6 +518,13 @@ pub(crate) struct JobPathQuery {
     pub(crate) file_model: Option<String>,
     pub(crate) dir_model: Option<String>,
     pub(crate) num_ctx: Option<u32>,
+    /// `POST /api/jobs/summarize` only — set by the web UI's "↻ Regenerate" button.
+    /// Omitted/`false` (every other summarize trigger) stays incremental: only new or
+    /// stale content is re-run. `true` blanks stored hashes first and re-summarizes the
+    /// whole subtree even where content hasn't changed — the only way to pick up a
+    /// model/prompt change. Ignored by the other job kinds.
+    #[serde(default)]
+    pub(crate) force: bool,
 }
 
 #[derive(Serialize)]

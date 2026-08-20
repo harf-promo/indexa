@@ -18,9 +18,11 @@
 //! "where to add things" contributor map.
 
 pub mod app_detect;
+pub mod cochange;
 pub mod config;
 pub mod decisions;
 pub mod fingerprint;
+pub mod gitdiff;
 pub mod models_catalog;
 pub mod notes;
 pub mod pathutil;

@@ -7,6 +7,7 @@ async function showSummary(path) {
   // Keep tree selection + deep-link URL in sync with what's being viewed (v0.37).
   selectedPath = path;
   if (typeof writeHash === 'function') writeHash();
+  if (typeof refreshContextNotice === 'function') refreshContextNotice();
   var view = document.getElementById('summary-view');
   view.style.display = 'block';
   view.innerHTML = '<div class="summary-pending">Loading summary…</div>';
@@ -50,17 +51,20 @@ async function showSummary(path) {
     });
     var enqBtn = view.querySelector('#enqueue-btn');
     if (enqBtn) {
-      // Fire the draining summarize job (same path as Regenerate) instead of the bare
-      // /api/summarize enqueue, so items are actually processed — not just enqueued.
+      // Fire the draining summarize job (incremental — see the Regenerate button below
+      // for the force path) instead of the bare /api/summarize enqueue, so items are
+      // actually processed — not just enqueued.
       enqBtn.addEventListener('click', function() {
         if (typeof fireJob === 'function') fireJob('summarize', path);
       });
     }
-    // Regenerate button: triggers a new summarize job just like the row summarize action
+    // Regenerate button: force re-summarizes the whole subtree even where content hasn't
+    // changed (the only way to pick up a model/prompt change) — unlike the enqueue button
+    // above, which only processes new-or-stale items.
     var regenBtn = view.querySelector('#regen-btn');
     if (regenBtn) {
       regenBtn.addEventListener('click', function() {
-        if (typeof fireJob === 'function') fireJob('summarize', path);
+        if (typeof fireJob === 'function') fireJob('summarize', path, true);
       });
     }
     // "Ask about this file/folder" → switch to a scoped Ask for this selection.
@@ -94,7 +98,7 @@ function renderNoPendingSummary(path) {
     'You can still ask about it — answers use its raw content.</div>' +
     '<div class="summary-noctx-actions">' +
     '<button class="btn-sm summary-ask-btn" id="ask-cta-btn" title="Ask a question answered only from this file">' + ICO_CHAT + ' Ask about this file</button>' +
-    '<button class="enqueue-btn" id="enqueue-btn" title="Queue an AI summary for this file">Generate summary</button>' +
+    '<button class="enqueue-btn" id="enqueue-btn" title="Write summaries so Ask and Export can use this folder">Build context</button>' +
     '</div></div>';
 }
 
@@ -272,6 +276,7 @@ function toggleExportMenu(btn) {
   if (!menu.hidden) {
     // Move focus to first menu item so the menu is immediately keyboard-navigable.
     var menuItems = Array.from(menu.querySelectorAll('button:not([disabled])'));
+    if (typeof fillExportPacks === 'function') fillExportPacks(menu);
     if (menuItems.length) menuItems[0].focus();
 
     function closeExportMenu() {

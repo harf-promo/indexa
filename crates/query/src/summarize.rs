@@ -173,6 +173,30 @@ fn api_surface(store: &Store, path: &str) -> Option<String> {
     }
 }
 
+/// A summary sample doesn't need the whole file — bounded well below `deep`'s
+/// `[parsers] max_file_mb` (default 100 MB) so an oversized file degrades to the raw-byte
+/// fallback instead of paying a slow full parse just to feed a 4 000-char-capped prompt.
+const SUMMARY_SAMPLE_MAX_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Parse `path` with the default built-in registry to get a real content sample when no
+/// chunks are stored for it (`summaries-only` mode, or a file `summarize` reaches before
+/// `deep` ever ran for it) — `None` on any failure (size cap, unreadable, parser panic, no
+/// chunks produced), letting the caller fall back to a raw byte slice. Deliberately the
+/// *default* registry (800/100-word chunking, no `[chunking]`/`[parsers]` overrides): this
+/// is a best-effort describer-prompt sample, not a stored chunk record, so it doesn't need
+/// this crate to thread the full parser config through from `Config`.
+fn sample_via_parse(path: &str) -> Option<String> {
+    let p = Path::new(path);
+    let size_bytes = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let extracted =
+        indexa_parsers::registry::parse_guarded(p, size_bytes, SUMMARY_SAMPLE_MAX_BYTES).ok()?;
+    if extracted.chunks.is_empty() {
+        return None;
+    }
+    let texts: Vec<&str> = extracted.chunks.iter().map(|c| c.text.as_str()).collect();
+    Some(crate::contextual::build_doc_context(&texts))
+}
+
 /// Summarise one file and persist the row. Returns true if successful.
 ///
 /// When `on_fragment` is `Some`, each generated token is forwarded to the
@@ -214,21 +238,29 @@ pub async fn summarize_file(
 
     // Content sample for the describer. Compose a document-level sample from the file's
     // chunks via the shared contextual helper (representative across sections, bounded to
-    // 4 000 chars) rather than chunk 0 alone; fall back to raw bytes when no chunks are
-    // stored. For code files, prepend the API surface — the symbols this file defines,
-    // from the code graph — so the summary can name the functions/types it exports. Both
-    // reuse existing data (no extra LLM call) and fail open to the plain sample.
+    // 4 000 chars) rather than chunk 0 alone. When no chunks are stored (`summaries-only`
+    // mode never writes any, and a file `summarize` reaches before `deep` has ever run for
+    // it has none yet either), parse the file directly instead — a raw byte slice is fine
+    // for plain text but is header/binary garbage for the ~84 non-plaintext formats (PDF,
+    // DOCX, XLSX, EPUB, …), which is most of what a whole-disk `summaries-only` build
+    // indexes. Only fall back to the raw slice when parsing itself fails (unrecognized/
+    // corrupt format) or the file can't be read at all. For code files, prepend the API
+    // surface — the symbols this file defines, from the code graph — so the summary can
+    // name the functions/types it exports; that part reuses existing data (no extra call).
     let mut sample_text: String = match store.chunks_for_path(path, 64) {
         Ok(chunks) if !chunks.is_empty() => {
             let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
             crate::contextual::build_doc_context(&texts)
         }
-        _ => match std::fs::read(path) {
-            Ok(bytes) => {
-                let n = bytes.len().min(4096);
-                String::from_utf8_lossy(&bytes[..n]).into_owned()
-            }
-            Err(_) => return Ok(SummaryWrite::NoContent), // unreadable file
+        _ => match sample_via_parse(path) {
+            Some(text) => text,
+            None => match std::fs::read(path) {
+                Ok(bytes) => {
+                    let n = bytes.len().min(4096);
+                    String::from_utf8_lossy(&bytes[..n]).into_owned()
+                }
+                Err(_) => return Ok(SummaryWrite::NoContent), // unreadable file
+            },
         },
     };
     if let Some(api) = api_surface(store, path) {
@@ -713,6 +745,27 @@ pub fn requeue_subtree(store: &mut Store, root: &Path) -> Result<usize> {
     Ok(n)
 }
 
+/// Drop stored chunk rows for `root` when `mode` no longer wants them kept: `Compress`
+/// (summarize then drop — ~10× smaller) and `SummariesOnly` (never keep chunks — ~100×
+/// smaller) both clean up here; `Augment` leaves chunks untouched. Shared by the CLI's
+/// [`summarize_subtree_sync`] and the web `run_summarize_phase`, so switching an
+/// already-chunked/embedded subtree over to a leaner mode actually shrinks the index —
+/// not just stops future growth — from either entry point. Returns the number of chunk
+/// rows removed (0 for `Augment` or when nothing was stored).
+pub fn cleanup_chunks_for_mode(
+    store: &mut Store,
+    root: &Path,
+    mode: &SummaryMode,
+) -> Result<usize> {
+    match mode {
+        SummaryMode::Compress | SummaryMode::SummariesOnly => {
+            let root_str = root.to_string_lossy();
+            store.delete_chunks_for_subtree(&root_str)
+        }
+        SummaryMode::Augment => Ok(0),
+    }
+}
+
 /// Synchronously summarise an entire subtree (no background queue).
 /// Progress is printed to stdout. Returns the count of successful summaries.
 /// `passes_override` overrides the config's automatic first/refresh selection when Some.
@@ -826,11 +879,20 @@ pub async fn summarize_subtree_sync(
         eprintln!("Warning: summarize completed with {errors} errors.");
     }
 
-    if cfg.mode == SummaryMode::Compress {
-        // Drop chunks for this subtree after summarization
-        let root_str = root.to_string_lossy().into_owned();
-        store.delete_chunks_for_subtree(&root_str)?;
-        println!("Compress mode: chunks removed for {}", root.display());
+    // Compress and summaries-only both drop chunk rows after summarization — the latter used
+    // to be silently missing here, which meant switching an already-chunked subtree over to
+    // `summaries-only` never actually shrank the index (see `cleanup_chunks_for_mode`).
+    let removed = cleanup_chunks_for_mode(store, root, &cfg.mode)?;
+    if removed > 0 {
+        let label = if cfg.mode == SummaryMode::Compress {
+            "compress"
+        } else {
+            "summaries-only"
+        };
+        println!(
+            "{label} mode: {removed} chunk row(s) removed for {}",
+            root.display()
+        );
     }
 
     println!("Done. {done} summaries generated.");
@@ -1918,6 +1980,380 @@ mod incremental_tests {
         assert_eq!(
             store.queue_state("/r/a/f1").unwrap().as_deref(),
             Some("done")
+        );
+    }
+}
+
+#[cfg(test)]
+mod mode_cleanup_tests {
+    //! `cleanup_chunks_for_mode` and its wiring into `summarize_subtree_sync`: `Compress`
+    //! and `SummariesOnly` must both drop stored chunk rows once a subtree has been
+    //! (re-)summarized; `Augment` must leave them untouched. This is the fix for the M5
+    //! bug where switching an already-chunked/embedded subtree over to `summaries-only`
+    //! never actually shrank the index.
+
+    use super::{cleanup_chunks_for_mode, summarize_subtree_sync};
+    use indexa_core::config::{DescriberConfig, SummaryMode};
+    use indexa_core::store::{ChunkRecord, Store};
+    use indexa_core::walker::{Entry, EntryKind};
+    use indexa_embed::Embedder;
+    use indexa_llm::{ChildSummary, Describer};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
+    struct StubEmbedder;
+    #[async_trait::async_trait]
+    impl Embedder for StubEmbedder {
+        async fn embed(&self, _t: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.1; 8])
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+
+    /// Always succeeds with fixed text — these tests only care whether a summary row
+    /// gets written and whether chunks survive, not the summary's content.
+    struct StubDescriber;
+    #[async_trait::async_trait]
+    impl Describer for StubDescriber {
+        async fn describe(
+            &self,
+            _p: &str,
+            _c: &[u8],
+            _prev: Option<&str>,
+        ) -> anyhow::Result<String> {
+            Ok("a file summary".into())
+        }
+        async fn summarize_dir(
+            &self,
+            _d: &str,
+            _children: &[ChildSummary],
+            _prev: Option<&str>,
+        ) -> anyhow::Result<String> {
+            Ok("a dir summary".into())
+        }
+    }
+
+    fn entry(path: &str, kind: EntryKind) -> Entry {
+        Entry {
+            path: PathBuf::from(path),
+            kind,
+            size: 1,
+            modified: Some(std::time::SystemTime::now()),
+            hint: None,
+            is_binary: false,
+        }
+    }
+
+    /// Seed one chunk row for `path`, as if a prior `augment`-mode deep pass had already
+    /// stored it — the scenario `cleanup_chunks_for_mode` exists to clean up after.
+    fn seed_chunk(store: &mut Store, path: &str) {
+        store
+            .upsert_chunks(&[ChunkRecord {
+                entry_path: path.to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: "existing chunk content for this file, from a prior augment pass".into(),
+                language: None,
+                embedding: Some(vec![0.1; 8]),
+                embed_model: Some("stub".into()),
+                content_hash: None,
+            }])
+            .unwrap();
+    }
+
+    #[test]
+    fn cleanup_drops_chunks_for_compress_and_summaries_only_but_not_augment() {
+        // Three independent subtrees (not siblings under one root — `delete_chunks_for_subtree`
+        // matches by path PREFIX, so nesting them would make an earlier subtree's cleanup also
+        // sweep a later one's chunks and defeat the point of testing each mode in isolation).
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                entry("/augment-proj", EntryKind::Dir),
+                entry("/augment-proj/a.rs", EntryKind::File),
+                entry("/compress-proj", EntryKind::Dir),
+                entry("/compress-proj/b.rs", EntryKind::File),
+                entry("/summaries-proj", EntryKind::Dir),
+                entry("/summaries-proj/c.rs", EntryKind::File),
+            ])
+            .unwrap();
+        seed_chunk(&mut store, "/augment-proj/a.rs");
+        seed_chunk(&mut store, "/compress-proj/b.rs");
+        seed_chunk(&mut store, "/summaries-proj/c.rs");
+
+        // Augment: a no-op, chunks stay.
+        let n = cleanup_chunks_for_mode(
+            &mut store,
+            Path::new("/augment-proj"),
+            &SummaryMode::Augment,
+        )
+        .unwrap();
+        assert_eq!(n, 0, "augment must never drop chunks");
+        assert!(!store
+            .chunks_for_path("/augment-proj/a.rs", 0)
+            .unwrap()
+            .is_empty());
+
+        // Compress: drops chunks under the subtree.
+        let n = cleanup_chunks_for_mode(
+            &mut store,
+            Path::new("/compress-proj"),
+            &SummaryMode::Compress,
+        )
+        .unwrap();
+        assert!(n > 0, "compress must report the rows it removed");
+        assert!(store
+            .chunks_for_path("/compress-proj/b.rs", 0)
+            .unwrap()
+            .is_empty());
+
+        // SummariesOnly: also drops (this is the previously-missing arm).
+        let n = cleanup_chunks_for_mode(
+            &mut store,
+            Path::new("/summaries-proj"),
+            &SummaryMode::SummariesOnly,
+        )
+        .unwrap();
+        assert!(n > 0);
+        assert!(store
+            .chunks_for_path("/summaries-proj/c.rs", 0)
+            .unwrap()
+            .is_empty());
+
+        // The untouched augment subtree is unaffected by the other two subtrees' cleanups.
+        assert!(
+            !store
+                .chunks_for_path("/augment-proj/a.rs", 0)
+                .unwrap()
+                .is_empty(),
+            "cleaning up a sibling subtree must not touch augment-proj's chunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_to_summaries_only_removes_stale_chunks_but_still_summarizes() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                entry("/proj", EntryKind::Dir),
+                entry("/proj/a.rs", EntryKind::File),
+            ])
+            .unwrap();
+        // Simulate a previously-`augment`-mode file: its chunks are already stored.
+        seed_chunk(&mut store, "/proj/a.rs");
+        assert!(!store.chunks_for_path("/proj/a.rs", 0).unwrap().is_empty());
+
+        let cfg = DescriberConfig {
+            mode: SummaryMode::SummariesOnly,
+            ..DescriberConfig::default()
+        };
+
+        let (done, _skipped) = summarize_subtree_sync(
+            &mut store,
+            &StubDescriber,
+            &StubEmbedder,
+            Path::new("/proj"),
+            &cfg,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(done > 0, "summaries-only must still produce summaries");
+        assert!(
+            store.summary_by_path("/proj/a.rs").unwrap().is_some(),
+            "a summary row must exist for the file"
+        );
+        assert!(
+            store.chunks_for_path("/proj/a.rs", 0).unwrap().is_empty(),
+            "switching to summaries-only must remove the now-unwanted chunk rows, not just \
+             stop future ones from being written"
+        );
+    }
+
+    #[tokio::test]
+    async fn compress_mode_still_drops_chunks_after_summarizing() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                entry("/proj", EntryKind::Dir),
+                entry("/proj/a.rs", EntryKind::File),
+            ])
+            .unwrap();
+        seed_chunk(&mut store, "/proj/a.rs");
+
+        let cfg = DescriberConfig {
+            mode: SummaryMode::Compress,
+            ..DescriberConfig::default()
+        };
+
+        let (done, _skipped) = summarize_subtree_sync(
+            &mut store,
+            &StubDescriber,
+            &StubEmbedder,
+            Path::new("/proj"),
+            &cfg,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(done > 0);
+        assert!(
+            store.chunks_for_path("/proj/a.rs", 0).unwrap().is_empty(),
+            "compress mode must drop chunks after summarizing (regression guard: this path \
+             already worked before the summaries-only fix — must keep working)"
+        );
+    }
+
+    #[tokio::test]
+    async fn augment_mode_leaves_chunks_in_place_after_summarizing() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                entry("/proj", EntryKind::Dir),
+                entry("/proj/a.rs", EntryKind::File),
+            ])
+            .unwrap();
+        seed_chunk(&mut store, "/proj/a.rs");
+
+        let cfg = DescriberConfig::default(); // mode: Augment
+        assert_eq!(cfg.mode, SummaryMode::Augment);
+
+        let (done, _skipped) = summarize_subtree_sync(
+            &mut store,
+            &StubDescriber,
+            &StubEmbedder,
+            Path::new("/proj"),
+            &cfg,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(done > 0);
+        assert!(
+            !store.chunks_for_path("/proj/a.rs", 0).unwrap().is_empty(),
+            "augment mode must never drop chunks — it's the best-recall mode"
+        );
+    }
+
+    /// Records the raw `content` bytes it was asked to describe, so a test can assert what
+    /// the describer actually received (parsed text vs. a raw byte dump) without depending
+    /// on the summary text itself, which `StubDescriber`-style doubles fix regardless of input.
+    struct CapturingDescriber {
+        captured: Arc<Mutex<Option<Vec<u8>>>>,
+    }
+    #[async_trait::async_trait]
+    impl Describer for CapturingDescriber {
+        async fn describe(
+            &self,
+            _p: &str,
+            content: &[u8],
+            _prev: Option<&str>,
+        ) -> anyhow::Result<String> {
+            *self.captured.lock().unwrap() = Some(content.to_vec());
+            Ok("a file summary".into())
+        }
+        async fn summarize_dir(
+            &self,
+            _d: &str,
+            _children: &[ChildSummary],
+            _prev: Option<&str>,
+        ) -> anyhow::Result<String> {
+            Ok("a dir summary".into())
+        }
+    }
+
+    /// The primary path for `summaries-only`: a fresh build with NO prior chunks (unlike the
+    /// "switching modes" tests above, which seed a chunk that happens to make the describer
+    /// call succeed regardless of the no-chunks fallback). Uses a REAL temp file — a virtual
+    /// path like the other tests here can't exercise `sample_via_parse`'s parser call — of a
+    /// format (HTML) where parsed text is unambiguously different from a raw byte dump, so the
+    /// assertion can't pass by coincidence.
+    #[tokio::test]
+    async fn summaries_only_fresh_build_samples_parsed_content_not_raw_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let file_path = root.join("doc.html");
+        // Deliberately no heading — the HTML parser splits heading text into a chunk's
+        // `heading` field, not its `text` (which `build_doc_context` samples from), so a
+        // heading-only assertion would be sensitive to that split rather than to the thing
+        // this test actually checks: parsed prose vs. a raw byte dump.
+        std::fs::write(
+            &file_path,
+            "<html><body><p>A paragraph of real prose, not raw markup.</p></body></html>",
+        )
+        .unwrap();
+        let file_path_str = file_path.to_string_lossy().into_owned();
+
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[
+                Entry {
+                    path: root.clone(),
+                    kind: EntryKind::Dir,
+                    size: 1,
+                    modified: Some(std::time::SystemTime::now()),
+                    hint: None,
+                    is_binary: false,
+                },
+                Entry {
+                    path: file_path.clone(),
+                    kind: EntryKind::File,
+                    size: 1,
+                    modified: Some(std::time::SystemTime::now()),
+                    hint: None,
+                    is_binary: false,
+                },
+            ])
+            .unwrap();
+        // No chunks seeded — this is a fresh summaries-only build, the mode's primary path.
+        assert!(store.chunks_for_path(&file_path_str, 0).unwrap().is_empty());
+
+        let captured = Arc::new(Mutex::new(None));
+        let describer = CapturingDescriber {
+            captured: captured.clone(),
+        };
+        let cfg = DescriberConfig {
+            mode: SummaryMode::SummariesOnly,
+            ..DescriberConfig::default()
+        };
+
+        let (done, _skipped) =
+            summarize_subtree_sync(&mut store, &describer, &StubEmbedder, &root, &cfg, None)
+                .await
+                .unwrap();
+
+        assert!(
+            done > 0,
+            "a fresh summaries-only build must still produce summaries"
+        );
+        assert!(
+            store.summary_by_path(&file_path_str).unwrap().is_some(),
+            "a summary row must exist for the file"
+        );
+        assert!(
+            store.chunks_for_path(&file_path_str, 0).unwrap().is_empty(),
+            "summaries-only must never persist chunk rows, fresh build or not"
+        );
+
+        let sample = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the describer must have been called for the file");
+        let sample_text = String::from_utf8_lossy(&sample);
+        assert!(
+            !sample_text.contains("<html>") && !sample_text.contains("<body>"),
+            "the describer must receive PARSED content, not a raw byte dump with HTML markup \
+             still in it: {sample_text:?}"
+        );
+        assert!(
+            sample_text.contains("A paragraph of real prose"),
+            "the describer must receive the file's real extracted text: {sample_text:?}"
         );
     }
 }

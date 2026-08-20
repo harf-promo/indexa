@@ -10,6 +10,7 @@ mod fingerprint;
 mod formats;
 mod graph;
 mod helpers;
+mod hooks;
 mod index;
 mod insights;
 mod inspect;
@@ -47,6 +48,7 @@ pub(crate) use export::cmd_export;
 pub(crate) use fingerprint::cmd_fingerprint;
 pub(crate) use formats::cmd_formats;
 pub(crate) use graph::cmd_graph;
+pub(crate) use hooks::{cmd_install_hooks, cmd_mcp_hook, HookEvent};
 pub(crate) use index::cmd_index;
 pub(crate) use insights::{
     cmd_insights_diff, cmd_insights_duplicates, cmd_insights_languages, cmd_insights_largest,
@@ -59,7 +61,7 @@ pub(crate) use mcp_install::cmd_mcp_install;
 pub(crate) use multimodal::cmd_multimodal;
 pub(crate) use pack::{
     cmd_pack_add, cmd_pack_add_url, cmd_pack_create, cmd_pack_delete, cmd_pack_export,
-    cmd_pack_list, cmd_pack_remove, cmd_pack_rename, cmd_pack_show,
+    cmd_pack_import, cmd_pack_list, cmd_pack_remove, cmd_pack_rename, cmd_pack_show,
 };
 pub(crate) use prune::cmd_prune;
 pub(crate) use related::cmd_related;

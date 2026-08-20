@@ -9,6 +9,7 @@
 //! plus the crash-repair and expiry sweeps.
 
 use crate::config::ReviewConfig;
+use crate::pathutil::norm_sep;
 use crate::store::{abstract_from, DuplicateCluster, NewDecision, Store, SummaryRecord};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
@@ -80,6 +81,28 @@ const DUP_SKIP_DIR_FRAGMENTS: &[&str] = &[
     "/.next/",
     "/target/",
     "/competitors/",
+    "/gen/",
+    "/SourcePackages/",
+    ".xcframework",
+    "/DerivedData/",
+    "/Pods/",
+    "/.gradle/",
+    "/gradle_wrapper/",
+    "/gradle/wrapper/",
+];
+
+/// Filenames that every crate/package is *supposed* to have. Two `Cargo.toml`
+/// files in different crates are not a duplicate the user can consolidate.
+/// Ask only when they are exact copies in the same folder.
+const SIBLING_MANIFESTS: &[&str] = &[
+    "Cargo.toml",
+    "package.json",
+    "go.mod",
+    "pyproject.toml",
+    "Gemfile",
+    "composer.json",
+    "Package.swift",
+    "pubspec.yaml",
 ];
 
 /// Universal trait/idiom method names: legitimately defined independently by many
@@ -161,7 +184,50 @@ fn dup_ext_is_asset(path: &str) -> bool {
 }
 
 fn dup_in_generated_dir(path: &str) -> bool {
-    DUP_SKIP_DIR_FRAGMENTS.iter().any(|f| path.contains(f))
+    // Fragments are `/`-delimited literals; a Windows-persisted path uses `\`
+    // and would never match without normalizing first (M7).
+    let normalized = norm_sep(path);
+    DUP_SKIP_DIR_FRAGMENTS
+        .iter()
+        .any(|f| normalized.contains(f))
+}
+
+/// Generated / vendored / toolchain-cache trees: never ask "archive this?" —
+/// the user cannot usefully archive an xcframework or gradle wrapper.
+fn archive_path_is_noise(path: &str) -> bool {
+    dup_in_generated_dir(path)
+}
+
+fn is_sibling_manifest(name: &str) -> bool {
+    SIBLING_MANIFESTS
+        .iter()
+        .any(|m| name.eq_ignore_ascii_case(m))
+}
+
+fn parent_dir(path: &str) -> &str {
+    // Match on both separators (rather than normalizing first) so this keeps
+    // returning a borrowed slice of the original path — a Windows-persisted
+    // path uses `\`, never `/` (M7).
+    path.rsplit_once(['/', '\\']).map(|(p, _)| p).unwrap_or("")
+}
+
+fn same_parent(paths: &[String]) -> bool {
+    match paths.first() {
+        None => false,
+        Some(first) => {
+            let parent = parent_dir(first);
+            paths.iter().all(|p| parent_dir(p) == parent)
+        }
+    }
+}
+
+/// Sibling-crate manifests (`Cargo.toml`, `package.json`, …) are expected in
+/// every project. Only ask when they are exact copies in the *same* folder.
+fn sibling_manifest_noise(paths: &[String], exact: bool) -> bool {
+    if paths.is_empty() || !paths.iter().all(|p| is_sibling_manifest(basename(p))) {
+        return false;
+    }
+    !(exact && same_parent(paths))
 }
 
 /// Is a duplicate cluster worth a human's attention? Not when every member is an
@@ -175,8 +241,10 @@ fn duplicate_cluster_actionable(paths: &[String]) -> bool {
 }
 
 /// Extract the file name (basename without directory) from a path string.
+/// Matches on both separators — a Windows-persisted path uses `\`, never `/`
+/// (M7) — so this keeps returning a borrowed slice of the original path.
 fn basename(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// Do all members of a near-duplicate cluster share the same filename? A
@@ -241,7 +309,14 @@ pub fn sweep_filtered_noise(store: &mut Store, cfg: &ReviewConfig, dry_run: bool
                 .unwrap_or(1.0);
             let near_dup_false_pos =
                 similarity < 1.0 && !paths.is_empty() && !near_dup_same_basenames(&paths);
-            noisy_asset || near_dup_false_pos
+            let exact = params
+                .get("exact")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(similarity >= 1.0);
+            let manifest_noise = sibling_manifest_noise(&paths, exact);
+            noisy_asset || near_dup_false_pos || manifest_noise
+        } else if d.decision_type == DecisionType::Archive.as_str() {
+            archive_path_is_noise(&d.subject)
         } else {
             false
         };
@@ -270,31 +345,24 @@ pub struct DetectorReport {
     pub expired: usize,
 }
 
-/// The detector pass run at the end of `cmd_index`: repair sweep first (so a
-/// crashed projection heals before new questions stack on top), then the
-/// duplicate, archive, language, and symbol detectors — in that order, so the
-/// higher-priority question types get the cap budget first — honoring the
-/// fatigue caps in `cfg`.
-pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorReport> {
-    let mut report = DetectorReport {
-        repaired: super::repair_unapplied(store)?,
-        ..DetectorReport::default()
-    };
-
-    // v0.39: retroactively dismiss already-open questions the noise filters now reject
-    // (idiom / disabled symbol_ambiguity, asset/generated duplicate clusters) so an
-    // existing inbox gets quiet on the next index without a manual sweep.
-    report.skipped += sweep_filtered_noise(store, cfg, false)?;
-
-    // Expiry sweep: an open question whose evidence left the index would
-    // otherwise linger forever and permanently consume the open budget —
-    // starving new questions by attrition. "Left the index" = a member path
-    // has neither an entries row NOR a summary row (the deep-without-scan
-    // workflow legitimately produces summaries with no entries row, so
-    // entries-absence alone is not evidence of removal). Expired is recorded,
-    // never silently dropped; and expiry is not a sticky dismissal, so the
-    // question returns if the evidence does.
-    for d in store.open_decisions(None, cfg.max_open.max(64))? {
+/// Expire open questions whose evidence left the index — otherwise they linger forever
+/// and permanently consume the open budget, starving new questions by attrition.
+/// "Left the index" = a member path has neither an entries row NOR a summary row (the
+/// deep-without-scan workflow legitimately produces summaries with no entries row, so
+/// entries-absence alone is not evidence of removal). Expired is recorded, never
+/// silently dropped; and expiry is not a sticky dismissal, so the question returns if
+/// the evidence does. Returns the count expired.
+///
+/// Standalone (not folded into [`run_detectors`]) so callers that only want index
+/// hygiene — not the full duplicate/archive/language/symbol detector pass — can run it
+/// on its own. `run_detectors` (the CLI's `indexa index` "Phase 4") calls it as part of
+/// the full pass; the web job pipeline calls it directly alongside `prune_orphans` (H1)
+/// — before this, only a CLI `indexa index`/`indexa review` run ever expired a decision,
+/// so a subject excluded by a later `[scan] ignore` edit or removed via the web-only
+/// "Build context" flow could linger in the Review inbox indefinitely.
+pub fn expire_vanished_decisions(store: &mut Store, max_open: usize) -> Result<usize> {
+    let mut expired = 0;
+    for d in store.open_decisions(None, max_open.max(64))? {
         let params: serde_json::Value = serde_json::from_str(&d.params).unwrap_or_default();
         let members: Vec<String> = params
             .get("paths")
@@ -314,9 +382,29 @@ pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorRe
         }
         if let Some(gone) = vanished {
             store.expire_decision(d.id, &format!("{gone} left the index"))?;
-            report.expired += 1;
+            expired += 1;
         }
     }
+    Ok(expired)
+}
+
+/// The detector pass run at the end of `cmd_index`: repair sweep first (so a
+/// crashed projection heals before new questions stack on top), then the
+/// duplicate, archive, language, and symbol detectors — in that order, so the
+/// higher-priority question types get the cap budget first — honoring the
+/// fatigue caps in `cfg`.
+pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorReport> {
+    let mut report = DetectorReport {
+        repaired: super::repair_unapplied(store)?,
+        ..DetectorReport::default()
+    };
+
+    // v0.39: retroactively dismiss already-open questions the noise filters now reject
+    // (idiom / disabled symbol_ambiguity, asset/generated duplicate clusters) so an
+    // existing inbox gets quiet on the next index without a manual sweep.
+    report.skipped += sweep_filtered_noise(store, cfg, false)?;
+
+    report.expired += expire_vanished_decisions(store, cfg.max_open)?;
 
     // Exact clusters first: they are certain, so they deserve the cap budget
     // before the probabilistic near-duplicates.
@@ -340,6 +428,12 @@ pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorRe
         // embedding space. Only ask when all members share a basename (e.g.
         // `qa.rs` in two crates) or the cluster is exact-content. (v0.40)
         if !cluster.exact && !near_dup_same_basenames(&cluster.paths) {
+            report.skipped += 1;
+            continue;
+        }
+        // Two Cargo.toml files in different crates are not a copy the user
+        // can pick a canonical for — only exact twins in the same folder.
+        if sibling_manifest_noise(&cluster.paths, cluster.exact) {
             report.skipped += 1;
             continue;
         }
@@ -386,6 +480,10 @@ pub fn run_detectors(store: &mut Store, cfg: &ReviewConfig) -> Result<DetectorRe
     stale.sort_unstable();
     let mut kept: Vec<(String, i64)> = Vec::new();
     for (path, days) in stale {
+        if archive_path_is_noise(&path) {
+            report.skipped += 1;
+            continue;
+        }
         if !kept.iter().any(|(k, _)| is_path_ancestor(k, &path)) {
             kept.push((path, days));
         }

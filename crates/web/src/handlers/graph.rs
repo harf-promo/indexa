@@ -409,6 +409,46 @@ pub(crate) async fn api_graph(
     }
 }
 
+#[derive(Deserialize)]
+pub(crate) struct GraphModulesQuery {
+    scope: Option<String>,
+}
+
+/// GET /api/graph/modules?scope=<path> — the PERSISTED architecture map (4.6), written by
+/// `indexa graph --compute-modules`. Distinct from `/api/graph`'s live `communities` layer:
+/// this reads a table, not a request-time recomputation, and its own front-end panel
+/// (30-graph-modules.js) renders it separately rather than tinting the current graph view.
+/// Read-only; empty `scope` means "every module" (matches `Store::graph_modules`).
+pub(crate) async fn api_graph_modules(
+    State(state): State<AppState>,
+    Query(q): Query<GraphModulesQuery>,
+) -> Response {
+    let scope = q.scope.unwrap_or_default();
+    let db_path = state.db_path.clone();
+    let modules = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let store = indexa_core::store::Store::open(&db_path)?;
+        store.graph_modules_for_scope(&scope)
+    })
+    .await
+    .unwrap_or_else(|e| Err(anyhow::anyhow!("graph-modules task panicked: {e}")));
+
+    match modules {
+        Ok(modules) => Json(serde_json::json!({
+            "modules": modules
+                .into_iter()
+                .map(|m| serde_json::json!({
+                    "module_id": m.module_id,
+                    "label": m.label,
+                    "cohesion": m.cohesion,
+                    "members": m.members,
+                }))
+                .collect::<Vec<_>>(),
+        }))
+        .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

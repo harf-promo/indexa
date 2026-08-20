@@ -119,6 +119,7 @@ function renderSources(sources) {
     sources.map(function(s) {
       return '<div class="source-item"><span class="path">' + escapeHtml(s.path) + '</span>' +
         (s.heading ? '<span class="heading">' + escapeHtml(s.heading) + '</span>' : '') +
+        (s.stale ? '<span class="stale-badge" title="This file changed on disk since it was indexed — re-run indexa deep to refresh.">stale</span>' : '') +
         '<div class="snippet">' + escapeHtml(s.snippet) + '</div></div>';
     }).join('') + '</div>';
 }
@@ -375,6 +376,23 @@ async function doAsk() {
   // Few results under a single-file/folder scope? Offer to broaden one level up,
   // rather than silently falling back to a whole-index search (which re-introduces
   // the noise scoping was meant to remove). The user stays in control.
+  if (scopeForAsk && pathLooksThin(typeof coverageByPath === 'object' ? coverageByPath[scopeForAsk] : null)) {
+    var thin = document.createElement('div');
+    thin.className = 'ask-broaden';
+    thin.appendChild(document.createTextNode('Answered from raw chunks — this folder isn\u2019t summarized. '));
+    var tBtn = document.createElement('button');
+    tBtn.type = 'button';
+    tBtn.className = 'btn-sm';
+    tBtn.textContent = 'Build context';
+    tBtn.addEventListener('click', function () {
+      if (typeof fireBuildContext === 'function') {
+        fireBuildContext(scopeForAsk, coverageByPath[scopeForAsk] || { kind: 'dir', chunk_count: 1 });
+      } else if (typeof fireJob === 'function') fireJob('summarize', scopeForAsk);
+    });
+    thin.appendChild(tBtn);
+    thinking.appendChild(thin);
+  }
+
   if (scopeForAsk && (sources.length < 3 || (confidence && confidence.level === 'low'))) {
     var parent = scopeForAsk.replace(/\/[^/]+$/, '');
     if (parent && parent !== scopeForAsk) {
@@ -526,30 +544,52 @@ async function saveResource() {
 }
 
 /* ── Queue stats (shown in Jobs tab + sidebar failed badge) ── */
-/* "Context not built yet" banner — shown when the index is embedded (chunks>0) but has no
-   summaries, so Ask falls back to raw chunks. Auto-hides once summaries exist; dismissible
-   for the session. Refreshed alongside the 5 s queue poll. */
+/* "Context not built" banner — path-aware. A handful of summaries in one repo
+   must NOT hide the fact that the selected (or typical) folder has none.
+   Dismissible for the session; never latches on a global summaries>0. */
 var lastQueuePending = 0;
 var contextNoticeDismissed = false;
-var contextNoticeResolved = false; // summaries confirmed present → stop re-checking
+var contextNoticeTarget = null; // path the CTA will summarize, or null for global
+
+function pathLooksThin(cov) {
+  if (!cov) return false;
+  return (cov.chunk_count || 0) > 0 && !(cov.covered > 0) && cov.summary_state !== 'done';
+}
 
 async function refreshContextNotice() {
   var el = document.getElementById('context-notice');
   if (!el) return;
-  if (contextNoticeDismissed || contextNoticeResolved) { el.hidden = true; return; }
+  if (contextNoticeDismissed) { el.hidden = true; return; }
   try {
     var s = await (await fetch('/api/stats')).json();
-    if (s.summaries > 0) { contextNoticeResolved = true; el.hidden = true; return; }
-    if (s.chunks === 0) { el.hidden = true; return; } // empty index → onboarding handles it
-    el.hidden = false;
-    el.innerHTML =
-      '<span class="context-notice-msg"><strong>Context not built yet.</strong> ' +
-      'Answers fall back to raw file chunks' +
-      (lastQueuePending ? ' &mdash; ' + lastQueuePending.toLocaleString() + ' file' +
-        (lastQueuePending === 1 ? '' : 's') + ' queued' : '') +
-      '. Build summaries for sharper, grounded answers.</span>' +
-      '<button type="button" class="btn-sm" onclick="buildContextNow()">Build context</button>' +
-      '<button type="button" class="context-notice-x" title="Dismiss" aria-label="Dismiss" onclick="dismissContextNotice()">&#x2715;</button>';
+    if (s.chunks === 0) { el.hidden = true; return; }
+    var sel = (typeof selectedPath === 'string') ? selectedPath : null;
+    var cov = sel && typeof coverageByPath === 'object' ? coverageByPath[sel] : null;
+    if (sel && pathLooksThin(cov)) {
+      contextNoticeTarget = sel;
+      var name = sel.split('/').filter(Boolean).pop() || sel;
+      el.hidden = false;
+      el.innerHTML =
+        '<span class="context-notice-msg"><strong>' + escapeHtml(name) +
+        ' is searchable but not summarized.</strong> Answers use raw chunks. ' +
+        'Build context for sharper, grounded answers.</span>' +
+        '<button type="button" class="btn-sm" onclick="buildContextNow()">Build context</button>' +
+        '<button type="button" class="context-notice-x" title="Dismiss" aria-label="Dismiss" onclick="dismissContextNotice()">&#x2715;</button>';
+      return;
+    }
+    if ((s.summaries || 0) === 0) {
+      contextNoticeTarget = null;
+      el.hidden = false;
+      el.innerHTML =
+        '<span class="context-notice-msg"><strong>Context not built yet.</strong> ' +
+        'Answers fall back to raw file chunks' +
+        (lastQueuePending ? ' &mdash; ' + lastQueuePending.toLocaleString() + ' file' +
+          (lastQueuePending === 1 ? '' : 's') + ' queued' : '') +
+        '. Pick a project and build context.</span>' +
+        '<button type="button" class="context-notice-x" title="Dismiss" aria-label="Dismiss" onclick="dismissContextNotice()">&#x2715;</button>';
+      return;
+    }
+    el.hidden = true;
   } catch (_) { el.hidden = true; }
 }
 
@@ -559,21 +599,16 @@ function dismissContextNotice() {  // eslint-disable-line no-unused-vars
   if (el) el.hidden = true;
 }
 
-// Kick off summarization for every root, draining the queue into real summaries.
-async function buildContextNow() {  // eslint-disable-line no-unused-vars
-  dismissContextNotice();
-  try {
-    var roots = await (await fetch('/api/roots')).json();
-    (roots || []).forEach(function (r) {
-      if (typeof fireJob === 'function') fireJob('summarize', r.path);
-    });
-    if (roots && roots.length && typeof toast === 'function') {
-      toast('Building context for ' + roots.length + ' folder' +
-        (roots.length === 1 ? '' : 's') + '…', 'info');
-    }
-  } catch (e) {
-    if (typeof toast === 'function') toast('Could not start: ' + e.message, 'error');
+// Summarize the selected folder — never the whole-disk root.
+function buildContextNow() {  // eslint-disable-line no-unused-vars
+  var path = contextNoticeTarget || ((typeof selectedPath === 'string') ? selectedPath : null);
+  if (!path) {
+    if (typeof toast === 'function') toast('Select a folder first, then build context.', 'warn');
+    return;
   }
+  var cov = (typeof coverageByPath === 'object') ? coverageByPath[path] : null;
+  if (typeof fireBuildContext === 'function') fireBuildContext(path, cov || { path: path, kind: 'dir' });
+  else if (typeof fireJob === 'function') fireJob('summarize', path);
 }
 
 async function pollQueue() {

@@ -33,3 +33,5 @@ indexa-update = { path = "../update" }
 tower = { version = "0.5", features = ["util"] }
 # Stub Embedder/Generator impls in tests use the same async-trait the traits do.
 async-trait = { workspace = true }
+rusqlite = { workspace = true }
+tempfile = "3"
