@@ -15,6 +15,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Two more pinned invariant tests, plus the doc/dead-reference gaps they caught.**
+  `every_get_element_by_id_call_resolves_to_a_real_html_id` (`crates/web/src/lib.rs`) is a
+  third guard on the `include_str!`-concatenated web bundle: every literal
+  `getElementById('…')`/`getElementById("…")` call in `UI_JS` must resolve to a static
+  `id="…"` in `UI_HTML`, with an explicit, commented allowlist for the handful of ids
+  created at runtime (`document.createElement` + `.id =`, or built into an `innerHTML`
+  template string). Ran against the pre-existing bundle it flagged 6 ids with no static
+  match; all 6 triaged as genuinely dynamic (2 banners in `27-health.js`, three
+  export-slice/classify fields in `05-summary.js`) — zero dead references found, so the
+  guard is preventive going forward, not a fix for a live bug. `every_config_field_is_mentioned_in_docs`
+  + `all_config_fields_list_stays_in_sync_with_the_struct` (`crates/core/src/config.rs`) do
+  the same for `docs/config.md`: every `Config` field (hand-enumerated as
+  `ALL_CONFIG_FIELDS`, since Rust has no runtime struct-field reflection) must be mentioned
+  in the docs, and the list itself is cross-checked against a `toml::Value` walk of
+  `Config::default()` so a newly-added field can't silently go missing from both places at
+  once. That walk was considered as the *sole* source (mirroring `non_default_keys` in the
+  same file) and rejected: it silently omits every `Option<T>` field defaulting to `None`,
+  which is exactly the category most likely to go undocumented. This run caught 9 real
+  gaps — `retrieval.rerank_model`, `describer.contextual_prefix`, `describer.num_ctx`,
+  `parsers.max_file_mb`, `parsers.video.fps_sample`, `parsers.video.max_frames`, and the
+  entire `[api_keys]` section (`openai`/`anthropic`/`google` — persisted cloud-provider
+  keys were never documented at all) — now fixed in `docs/config.md`, including a new
+  **API keys** section. (Note: the review plan that flagged this test as missing had also
+  named `claude_bin`, `tool_profile`, `catalog_url`, `include_sensitive`,
+  `redact_at_index`, `[review]`, `[sources]`, `auto_select_model`, and `"git-poll"` as
+  gaps — all nine were already documented on `main` by the time this landed, i.e. that
+  list was stale, not a live backlog.)
 - **Ask: stop a streaming answer, and click a cited source to open it.** The Ask button now morphs
   into **Stop** while an answer is streaming — it aborts the request via `AbortController`, keeping
   whatever streamed so far (a muted "Stopped.", not a red error) — and Enter no longer fires a
