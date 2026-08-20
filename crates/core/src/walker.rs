@@ -280,7 +280,23 @@ fn file_is_binary(path: &Path) -> bool {
     }
 }
 
-/// Walk `root` and return all entries.
+/// Per-thread flush threshold for [`walk_streaming`]: a worker sends its accumulated entries as a
+/// batch once it has this many, so resident memory stays bounded regardless of tree size (peak
+/// buffered entries is `O(threads × STREAM_BATCH_SIZE)`, independent of total entry count). Kept
+/// small (not e.g. 8192) — a large batch size makes the "streaming" bound indistinguishable from
+/// the old collect-everything behavior on a machine with many worker threads.
+const STREAM_BATCH_SIZE: usize = 1024;
+/// Bounded channel depth for [`walk_streaming`]: at most this many batches sit between the walk
+/// threads and the consumer, so the walk backpressures when the consumer (upsert) falls behind.
+const STREAM_CHANNEL_BOUND: usize = 4;
+
+/// Walk `root`, emitting entries to `on_batch` in bounded batches *as they are discovered* instead
+/// of collecting them all into one `Vec` — so a whole-computer scan stays bounded-memory (peak
+/// buffered entries ≈ `(threads + STREAM_CHANNEL_BOUND) × STREAM_BATCH_SIZE`, flat regardless of
+/// tree size) rather than holding one entry per file in memory at once. The parallel walk runs on
+/// its own thread; batches arrive on the calling thread (which typically owns the store),
+/// backpressured by a small bounded channel. `on_batch` returning `Err` stops the walk promptly
+/// and propagates the error out of this function.
 ///
 /// Uses `ignore::WalkBuilder` (ripgrep's parallel walker) so that **nested**
 /// `.gitignore` files are honoured automatically — the old `jwalk` implementation
@@ -292,9 +308,17 @@ fn file_is_binary(path: &Path) -> bool {
 /// `__pycache__`, `.idea`, …) are pruned by name via `is_skip_dir` even when no
 /// `.gitignore` is present. In the parallel walk, `WalkState::Skip` prevents both
 /// yielding the entry AND descending into its subtree.
-pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
+///
+/// [`walk`] is a thin collector over this — the single implementation of the walk/prune/classify
+/// logic, so a scan and a batch-collecting caller can never drift in what they see.
+pub fn walk_streaming(
+    root: &Path,
+    cfg: &WalkConfig,
+    mut on_batch: impl FnMut(Vec<Entry>) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     use ignore::{WalkBuilder, WalkState};
-    use std::sync::{Arc, Mutex};
+    use std::sync::mpsc::sync_channel;
+    use std::sync::Arc;
 
     // Default to all cores (floored at 4) — the walk is I/O/syscall-bound (classification does
     // `stat`/`exists` calls) so it scales past the core count. A caller can cap or raise it via
@@ -358,168 +382,210 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
         b.max_depth(Some(d));
     }
 
-    // Each worker thread accumulates into its OWN Vec and flushes it to `batches` exactly once, on
-    // drop — replacing a per-entry lock on one shared Vec with a single lock per worker thread.
-    struct ThreadSink {
+    // Each worker accumulates into its OWN Vec and flushes a batch to the channel every
+    // STREAM_BATCH_SIZE entries (and once more on Drop, for whatever's left). `flush` returns
+    // `false` once the receiver is gone (the consumer errored/stopped), letting the visitor Quit
+    // the whole walk instead of blocking forever on a full, abandoned channel.
+    struct StreamSink {
         local: Vec<Entry>,
-        batches: Arc<Mutex<Vec<Vec<Entry>>>>,
+        tx: std::sync::mpsc::SyncSender<Vec<Entry>>,
     }
-    impl Drop for ThreadSink {
-        fn drop(&mut self) {
-            if !self.local.is_empty() {
-                if let Ok(mut b) = self.batches.lock() {
-                    b.push(std::mem::take(&mut self.local));
-                }
+    impl StreamSink {
+        fn flush(&mut self) -> bool {
+            if self.local.is_empty() {
+                return true;
             }
+            self.tx.send(std::mem::take(&mut self.local)).is_ok()
+        }
+    }
+    impl Drop for StreamSink {
+        fn drop(&mut self) {
+            let _ = self.flush();
         }
     }
 
-    let batches: Arc<Mutex<Vec<Vec<Entry>>>> = Arc::new(Mutex::new(Vec::new()));
-
-    b.build_parallel().run({
-        let batches = batches.clone();
-        let combined_matcher = combined_matcher.clone();
-        move || {
+    let (tx, rx) = sync_channel::<Vec<Entry>>(STREAM_CHANNEL_BOUND);
+    // `build_parallel()` returns an owned `WalkParallel` (no borrow of `b`), so it can move onto a
+    // dedicated thread while we drain batches on the calling thread below.
+    let parallel = b.build_parallel();
+    let walk_thread = std::thread::spawn(move || {
+        parallel.run({
             let combined_matcher = combined_matcher.clone();
-            let mut sink = ThreadSink {
-                local: Vec::new(),
-                batches: batches.clone(),
-            };
-            Box::new(
-                move |result: std::result::Result<ignore::DirEntry, ignore::Error>| {
-                    let de = match result {
-                        Ok(d) => d,
-                        Err(_) => return WalkState::Continue, // fail-open: skip unreadable
-                    };
-                    let path = de.path();
-                    let is_dir = de.file_type().map(|t| t.is_dir()).unwrap_or(false);
-
-                    // Skip symlinks entirely. With follow_links(false) the walker lstat's a symlink
-                    // as a size-0 File entry, but the deep phase OPENs the path — following the link
-                    // — indexing content OUTSIDE the root (e.g. a `notes.txt` link to ~/.ssh/id_rsa)
-                    // past both the size cap (0 bytes never trips it) and the sensitive deny-list
-                    // (which keys on the link's own name, not its target). Guard on is_symlink(),
-                    // NOT the name — an innocuously-named link would otherwise slip through.
-                    if de.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
-                        return WalkState::Continue; // don't record; keep walking siblings
-                    }
-
-                    // Belt-and-suspenders hidden check: WalkBuilder.hidden(true) handles
-                    // this, but guard in the callback too for robustness. Depth > 0 so we
-                    // never accidentally prune the walk root itself.
-                    if skip_hidden
-                        && de.depth() > 0
-                        && path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .is_some_and(|n| n.starts_with('.'))
-                    {
-                        return if is_dir {
-                            WalkState::Skip
-                        } else {
-                            WalkState::Continue
+            let tx = tx.clone();
+            move || {
+                let combined_matcher = combined_matcher.clone();
+                let mut sink = StreamSink {
+                    local: Vec::new(),
+                    tx: tx.clone(),
+                };
+                Box::new(
+                    move |result: std::result::Result<ignore::DirEntry, ignore::Error>| {
+                        let de = match result {
+                            Ok(d) => d,
+                            Err(_) => return WalkState::Continue, // fail-open: skip unreadable
                         };
-                    }
+                        let path = de.path();
+                        let is_dir = de.file_type().map(|t| t.is_dir()).unwrap_or(false);
 
-                    // Classify directories ONCE here for the prune AND hint decisions below —
-                    // previously three separate classify() calls per directory (is_skip_dir,
-                    // is_sensitive_dir, and the hint), each issuing stat/exists syscalls. Files are
-                    // classified after the ignore/size filters, so a filtered-out file still pays
-                    // nothing — same ordering as before.
-                    let dir_hint = if is_dir { classify(path) } else { None };
-
-                    // Prune build-artifact / VCS / cache directories: a fast name check (VCS/cache
-                    // dirs), else a structure-aware `DeepScanPolicy::Skip` (target/ next to
-                    // Cargo.toml, Pods/, …). WalkState::Skip stops both recording AND descending;
-                    // depth > 0 protects the walk root itself.
-                    if is_dir && de.depth() > 0 {
-                        let name_skip = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .is_some_and(|n| ALWAYS_SKIP_DIR_NAMES.contains(&n));
-                        if name_skip
-                            || dir_hint
-                                .as_ref()
-                                .is_some_and(|h| h.deep_scan == DeepScanPolicy::Skip)
-                        {
-                            return WalkState::Skip;
+                        // Skip symlinks entirely. With follow_links(false) the walker lstat's a
+                        // symlink as a size-0 File entry, but the deep phase OPENs the path —
+                        // following the link — indexing content OUTSIDE the root (e.g. a
+                        // `notes.txt` link to ~/.ssh/id_rsa) past both the size cap (0 bytes never
+                        // trips it) and the sensitive deny-list (which keys on the link's own
+                        // name, not its target). Guard on is_symlink(), NOT the name — an
+                        // innocuously-named link would otherwise slip through.
+                        if de.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
+                            return WalkState::Continue; // don't record; keep walking siblings
                         }
-                        // Privacy: prune credential/key stores (.ssh, .gnupg, Keychains, browser
-                        // profiles) unless the caller explicitly opted in via `include_sensitive`.
-                        if !include_sensitive
-                            && dir_hint
-                                .as_ref()
-                                .is_some_and(|h| h.deep_scan == DeepScanPolicy::Sensitive)
-                        {
-                            return WalkState::Skip;
-                        }
-                    }
 
-                    // Apply the combined gitignore matcher: root .gitignore patterns +
-                    // [scan] ignore config patterns. Both are anchored at root.
-                    if let Some(m) = &combined_matcher {
-                        if m.matched(path, is_dir).is_ignore() {
-                            // Skip dirs (prunes subtree); for files just don't record — continue
-                            // so the walker keeps processing siblings.
-                            if is_dir {
+                        // Belt-and-suspenders hidden check: WalkBuilder.hidden(true) handles
+                        // this, but guard in the callback too for robustness. Depth > 0 so we
+                        // never accidentally prune the walk root itself.
+                        if skip_hidden
+                            && de.depth() > 0
+                            && path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .is_some_and(|n| n.starts_with('.'))
+                        {
+                            return if is_dir {
+                                WalkState::Skip
+                            } else {
+                                WalkState::Continue
+                            };
+                        }
+
+                        // Classify directories ONCE here for the prune AND hint decisions below —
+                        // previously three separate classify() calls per directory (is_skip_dir,
+                        // is_sensitive_dir, and the hint), each issuing stat/exists syscalls.
+                        // Files are classified after the ignore/size filters, so a filtered-out
+                        // file still pays nothing — same ordering as before.
+                        let dir_hint = if is_dir { classify(path) } else { None };
+
+                        // Prune build-artifact / VCS / cache directories: a fast name check
+                        // (VCS/cache dirs), else a structure-aware `DeepScanPolicy::Skip` (target/
+                        // next to Cargo.toml, Pods/, …). WalkState::Skip stops both recording AND
+                        // descending; depth > 0 protects the walk root itself.
+                        if is_dir && de.depth() > 0 {
+                            let name_skip = path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .is_some_and(|n| ALWAYS_SKIP_DIR_NAMES.contains(&n));
+                            if name_skip
+                                || dir_hint
+                                    .as_ref()
+                                    .is_some_and(|h| h.deep_scan == DeepScanPolicy::Skip)
+                            {
                                 return WalkState::Skip;
-                            } else {
-                                return WalkState::Continue; // don't push; move on
+                            }
+                            // Privacy: prune credential/key stores (.ssh, .gnupg, Keychains,
+                            // browser profiles) unless the caller explicitly opted in via
+                            // `include_sensitive`.
+                            if !include_sensitive
+                                && dir_hint
+                                    .as_ref()
+                                    .is_some_and(|h| h.deep_scan == DeepScanPolicy::Sensitive)
+                            {
+                                return WalkState::Skip;
                             }
                         }
-                    }
 
-                    // Fetch metadata for size / mtime; skip entries we can't read.
-                    let meta = match de.metadata() {
-                        Ok(m) => m,
-                        Err(_) => return WalkState::Continue,
-                    };
-
-                    let kind = if meta.is_dir() {
-                        EntryKind::Dir
-                    } else {
-                        EntryKind::File
-                    };
-
-                    // Reuse the directory classification computed above; classify files here (once,
-                    // with the extension fallback) now that they've passed the ignore/size filters.
-                    let hint = if is_dir {
-                        dir_hint
-                    } else {
-                        classify(path).or_else(|| {
-                            if meta.is_file() {
-                                classify_file_by_extension(path)
-                            } else {
-                                None
+                        // Apply the combined gitignore matcher: root .gitignore patterns +
+                        // [scan] ignore config patterns. Both are anchored at root.
+                        if let Some(m) = &combined_matcher {
+                            if m.matched(path, is_dir).is_ignore() {
+                                // Skip dirs (prunes subtree); for files just don't record —
+                                // continue so the walker keeps processing siblings.
+                                if is_dir {
+                                    return WalkState::Skip;
+                                } else {
+                                    return WalkState::Continue; // don't push; move on
+                                }
                             }
-                        })
-                    };
+                        }
 
-                    // Whole-computer groundwork: when opted in, NUL-sniff files so the deep phase
-                    // can skip binaries without opening them. Fail-open (an unreadable file is
-                    // never flagged). Only files; the entry itself is still recorded either way.
-                    let is_binary = sniff_binary && meta.is_file() && file_is_binary(path);
+                        // Fetch metadata for size / mtime; skip entries we can't read.
+                        let meta = match de.metadata() {
+                            Ok(m) => m,
+                            Err(_) => return WalkState::Continue,
+                        };
 
-                    sink.local.push(Entry {
-                        path: path.to_path_buf(),
-                        kind,
-                        size: if meta.is_file() { meta.len() } else { 0 },
-                        modified: meta.modified().ok(),
-                        hint,
-                        is_binary,
-                    });
-                    WalkState::Continue
-                },
-            )
-        }
+                        let kind = if meta.is_dir() {
+                            EntryKind::Dir
+                        } else {
+                            EntryKind::File
+                        };
+
+                        // Reuse the directory classification computed above; classify files here
+                        // (once, with the extension fallback) now that they've passed the
+                        // ignore/size filters.
+                        let hint = if is_dir {
+                            dir_hint
+                        } else {
+                            classify(path).or_else(|| {
+                                if meta.is_file() {
+                                    classify_file_by_extension(path)
+                                } else {
+                                    None
+                                }
+                            })
+                        };
+
+                        // Whole-computer groundwork: when opted in, NUL-sniff files so the deep
+                        // phase can skip binaries without opening them. Fail-open (an unreadable
+                        // file is never flagged). Only files; the entry itself is still recorded
+                        // either way.
+                        let is_binary = sniff_binary && meta.is_file() && file_is_binary(path);
+
+                        sink.local.push(Entry {
+                            path: path.to_path_buf(),
+                            kind,
+                            size: if meta.is_file() { meta.len() } else { 0 },
+                            modified: meta.modified().ok(),
+                            hint,
+                            is_binary,
+                        });
+                        if sink.local.len() >= STREAM_BATCH_SIZE && !sink.flush() {
+                            // Consumer is gone (on_batch errored/stopped) — stop the whole walk.
+                            return WalkState::Quit;
+                        }
+                        WalkState::Continue
+                    },
+                )
+            }
+        });
+        // All per-worker `tx` clones (and this outer one) drop here → the receiver disconnects
+        // once the calling thread has drained everything already sent.
     });
 
-    // `run()` is synchronous — all worker threads (and their ThreadSinks) have finished and
-    // flushed their batches by here. The Arc clone moved into `run()` is dropped when `run()`
-    // returns, so `try_unwrap` finds exactly one strong reference (ours). Flatten the per-thread
-    // batches into one Vec (cross-thread order isn't significant — callers key/sort downstream).
-    let batches = Arc::try_unwrap(batches).unwrap().into_inner().unwrap();
-    Ok(batches.into_iter().flatten().collect())
+    // Drain batches on the calling thread, which is free to touch non-Send state (e.g. a
+    // `rusqlite::Connection`) that could never cross into the parallel walk's closures. On an
+    // `on_batch` error, stop draining and drop `rx` so the walk threads' blocked `send`s fail and
+    // the visitor Quits — no leaked or permanently-blocked worker thread.
+    let mut result = Ok(());
+    while let Ok(batch) = rx.recv() {
+        if let Err(e) = on_batch(batch) {
+            result = Err(e);
+            break;
+        }
+    }
+    drop(rx);
+    walk_thread
+        .join()
+        .map_err(|_| anyhow::anyhow!("scan walk thread panicked"))?;
+    result
+}
+
+/// Walk `root` and return all entries. A thin collector over [`walk_streaming`] — see it for the
+/// (identical) gitignore / skip-dir / sensitive / symlink / classify-once semantics and the
+/// bounded-memory streaming variant.
+pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
+    let mut all = Vec::new();
+    walk_streaming(root, cfg, |batch| {
+        all.extend(batch);
+        Ok(())
+    })?;
+    Ok(all)
 }
 
 #[cfg(test)]
@@ -1020,6 +1086,109 @@ mod tests {
         assert!(
             one.iter().filter(|p| p.ends_with(".rs")).count() == 40,
             "all 40 real source files kept"
+        );
+    }
+
+    #[test]
+    fn walk_streaming_matches_walk_and_propagates_error() {
+        // D5: the streaming walk must yield the same entry SET as the collecting `walk()` (which
+        // now delegates to it), invoke the callback at least once, and propagate a callback error
+        // out (stopping the walk cleanly — no hang, no panic, no leaked thread).
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..30 {
+            std::fs::write(dir.path().join(format!("f{i}.rs")), "fn x() {}").unwrap();
+        }
+        let cfg = WalkConfig::default();
+
+        let mut streamed: Vec<String> = Vec::new();
+        let mut batches = 0usize;
+        walk_streaming(dir.path(), &cfg, |batch| {
+            batches += 1;
+            streamed.extend(
+                batch
+                    .into_iter()
+                    .map(|e| e.path.to_string_lossy().into_owned()),
+            );
+            Ok(())
+        })
+        .unwrap();
+        streamed.sort();
+
+        let mut collected: Vec<String> = walk(dir.path(), &cfg)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.path.to_string_lossy().into_owned())
+            .collect();
+        collected.sort();
+
+        assert_eq!(
+            streamed, collected,
+            "walk_streaming yields the same entry set as walk()"
+        );
+        assert!(batches >= 1, "the callback received at least one batch");
+
+        // A callback error stops the walk and propagates (the blocked walk threads unwind cleanly).
+        let err = walk_streaming(dir.path(), &cfg, |_batch| {
+            Err(anyhow::anyhow!("consumer stopped"))
+        });
+        assert!(
+            err.is_err(),
+            "an on_batch error must propagate out of walk_streaming"
+        );
+    }
+
+    #[test]
+    fn walk_streaming_flushes_batches_smaller_than_stream_batch_size() {
+        // The tree has far fewer entries than STREAM_BATCH_SIZE — this only exercises the Drop
+        // flush path (never the len() >= STREAM_BATCH_SIZE mid-walk flush), so it pins that a
+        // small tree still fully arrives via on_batch instead of being silently dropped.
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.path().join(format!("f{i}.rs")), "fn x() {}").unwrap();
+        }
+        let mut count = 0usize;
+        walk_streaming(dir.path(), &WalkConfig::default(), |batch| {
+            // Count files only — the walk also yields the root directory itself as one entry.
+            count += batch.iter().filter(|e| e.kind == EntryKind::File).count();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 5, "every entry must arrive despite no full batch");
+    }
+
+    #[test]
+    fn walk_streaming_flushes_mid_walk_past_stream_batch_size() {
+        // The load-bearing case the two tests above don't reach: with MORE than
+        // STREAM_BATCH_SIZE entries, a worker must flush a full batch to `on_batch` mid-walk (the
+        // `sink.local.len() >= STREAM_BATCH_SIZE` branch), not just once via Drop at the end — that
+        // branch is the entire point of the streaming/bounded-memory change. `threads: Some(1)`
+        // makes this deterministic (a single worker accumulates in one Vec, so it must cross the
+        // threshold and flush at least once before the walk finishes).
+        let dir = tempfile::tempdir().unwrap();
+        let n = STREAM_BATCH_SIZE + 100;
+        for i in 0..n {
+            std::fs::write(dir.path().join(format!("f{i}.rs")), "fn x() {}").unwrap();
+        }
+        let cfg = WalkConfig {
+            threads: Some(1),
+            ..WalkConfig::default()
+        };
+
+        let mut total = 0usize;
+        let mut batches = 0usize;
+        walk_streaming(dir.path(), &cfg, |batch| {
+            // Count files only — the walk also yields the root directory itself as one entry.
+            total += batch.iter().filter(|e| e.kind == EntryKind::File).count();
+            batches += 1;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(total, n, "every entry must arrive, split across batches");
+        assert!(
+            batches >= 2,
+            "more than STREAM_BATCH_SIZE entries with one worker must flush mid-walk, not just \
+             once via Drop at the end (got {batches} batch(es))"
         );
     }
 }
