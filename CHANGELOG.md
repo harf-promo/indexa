@@ -165,6 +165,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Code-graph edges migrations no longer risk silently dropping rows.** Both one-time table-recreates
+  that widen the `edges.kind` CHECK constraint — to add `'calls'` (D2), and separately to add
+  `'extends'`/`'implements'` (2.2, heritage edges) — copied rows with `INSERT OR IGNORE SELECT *`,
+  which swallows any row that fails to insert instead of failing the migration. Both now copy explicit
+  columns with a plain `INSERT` (like the `chunks` migration): a row the new CHECK accepts is preserved
+  as before; a row it rejects for any reason now fails the migration loudly (the IMMEDIATE transaction
+  rolls back, leaving the original table untouched and the error visible) instead of vanishing without
+  a trace. Since both migrations only ever widen the CHECK, no valid row from either prior schema can
+  be affected in practice — this closes the failure mode for already-corrupt data, not a reachable path
+  for ordinary indexes. Locked by four new upgrade tests (two per migration site) that build a
+  pre-widened `edges` table and assert every seeded row survives `Store::open`, plus a discriminating
+  test per site proving a row that violates even the old CHECK now fails the open loudly rather than
+  being dropped.
 - **The "hierarchical %" coverage figure (web) was neither a file nor a folder
   percentage.** The topbar stat and the thin-context banner both computed
   `100 * summaries / entries`, but `summary_count`/`entry_count` are unfiltered
