@@ -1,0 +1,21 @@
+# .orchestration/lanes.yml — indexa
+# Rust workspace. verify matches ci.yml's actual steps exactly.
+verify: "cargo fmt --all -- --check && cargo clippy --all-targets --all-features --locked && cargo test --all --locked"
+
+hot_files: []
+counters: {}
+singleton_paths: []
+
+# release.yml triggers on version tags (v*.*.*), not on merge to main — confirmed by
+# reading the trigger. No merge-triggered deploy exists for this repo.
+deploy_on_merge: []
+
+setup:
+  run: null
+  copy_env: []
+  ports: {}
+
+required_checks: [ci]
+merge: squash
+force_push: blocked
+serialized_ci: []
