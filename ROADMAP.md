@@ -9,8 +9,9 @@ Vote on upcoming features and suggest new ones in [Discussions → Ideas](../../
 > releases (web UI, resource engine, MCP + reranking) rather than the themes once sketched here.
 > **Fingerprints (v0.6) shipped in the `v0.6.0` release.** The `v0.7.0` release then shipped the
 > instrument-first foundation of the web-UI redesign — an always-on Engine status bar plus a live
-> telemetry API — a platform release ahead of the **Smart classification** theme below, which is the
-> next feature milestone. The theme numbers (through Context Packs at v0.9) are directional and stay put.
+> telemetry API — a platform release that ran ahead of the **Smart classification** theme below, which
+> itself started shipping the next day in `v0.8.0` and has since completed. Every theme through
+> Context Packs (v0.9) has shipped by now; the theme numbers stay put as directional, historical labels.
 
 > **Two headline differentiators** (added 2026-05; priority is high, exact slotting flexible — see the
 > dedicated sections near the end): **local multimodal understanding** (make images / audio / video

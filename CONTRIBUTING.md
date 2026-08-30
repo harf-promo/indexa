@@ -109,7 +109,7 @@ Full DCO text: https://developercertificate.org/
 ## Adding a new LLM adapter
 
 1. Implement the `Embedder` and/or `Describer` traits in `crates/embed/src/` or `crates/llm/src/`.
-2. Add a `[dependencies]` entry in that crate's `Cargo.toml` and a config struct in `crates/cli/src/config.rs`.
+2. Add a `[dependencies]` entry in that crate's `Cargo.toml` and a config struct in `crates/core/src/config.rs`.
 3. Wire the adapter into `apps/indexa/src/main.rs`.
 4. Add an integration test that hits a mock HTTP server (see existing adapter tests for the pattern).
 5. Document the config options in `docs/config.md`.

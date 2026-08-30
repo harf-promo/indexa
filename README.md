@@ -138,9 +138,9 @@ This is not a repo-to-prompt converter. It is not a document chat app. It is not
 
 - **One-command context** — `indexa index <path>` scans, embeds, and summarises in a single step. Context is ready immediately; no pipeline to manage.
 - **Context that rolls up** — an instant surface scan (zero AI; classifies code vs media vs build artifacts), then deep context: parse → chunk → embed → an LLM summary for **every file**, composed **bottom-up** into a summary for **every folder**, up to one whole-project synthesis — all addressable at **L0 / L1 / L2** (one-line abstract → full summary → raw content). See *[How the context builds](#how-the-context-builds--every-file-rolled-up)* above.
-- **Hybrid retrieval** — keyword (BM25) + semantic (vector) fused with RRF, plus an **opt-in ANN index** that keeps dense search fast on 50K-plus-chunk corpora.
+- **Hybrid retrieval** — keyword (BM25) + semantic (vector) fused with RRF, plus an **ANN index** (on by default above 50K chunks) that keeps dense search fast on large corpora.
 - **Local multimodal** *(opt-in, on-device)* — caption images with a local vision model and transcribe audio with a local whisper CLI, so you can find media by what's *in* it, not just its filename.
-- **Code intelligence** — a code-relationship graph (imports + defined symbols + call edges) across Rust, Python, JS/TS, Go, and Java, plus `who_calls`, `blast_radius`, and an interactive **call-graph visualization** in the web Map tab — all queryable over MCP.
+- **Code intelligence** — a code-relationship graph (imports + defined symbols + call edges) across Rust, Python, JS/TS, Go, Java, C, and C++ (8 languages), plus `who_calls`, `blast_radius`, and an interactive **call-graph visualization** in the web Map tab — all queryable over MCP.
 - **Four ways to reach the index** — a CLI, a live web workspace with an Engine status bar, a native macOS desktop app (menu-bar, auto-updating), and an MCP server (51 tools) that AI agents call directly.
 - **Resource-aware** — a memory watchdog that won't freeze your machine, and a hardware-aware model picker that annotates every model with its memory footprint, fit against your live RAM, and a per-job ETA.
 - **Use your Claude subscription** — the `claude-code` provider runs summaries and answers on your Claude Pro/Max plan (no per-token billing); embeddings always stay local.
@@ -163,7 +163,7 @@ This is not a repo-to-prompt converter. It is not a document chat app. It is not
 
 ## Code intelligence
 
-Deep-indexing records each code file's graph edges — what it **imports**, the symbols it **defines**, and what it **calls** — across Rust, Python, JS/TS, Go, and Java. Query it over MCP, so your agent reasons about structure without reading every file:
+Deep-indexing records each code file's graph edges — what it **imports**, the symbols it **defines**, and what it **calls** — across Rust, Python, JS/TS, Go, Java, C, and C++ (8 languages). Query it over MCP, so your agent reasons about structure without reading every file:
 
 ```text
 dependencies("src/auth/session.rs")

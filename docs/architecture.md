@@ -109,7 +109,7 @@ so the future is `Send` (required by the axum web server and the rmcp MCP server
 2. Retrieve      crates/query::retrieve(&store, …)  (sync scope — store dropped before any await)
                  └─ Store::hybrid_search(query_text, Some(&query_vec), mode (Rrf|Sparse|Dense), scope, top_k, rrf_k)
                     ┌─ Sparse branch: FTS5 BM25 query  → ranked by BM25 score
-                    ├─ Dense branch:  brute-force cosine scan → ranked by similarity
+                    ├─ Dense branch:  cosine scan (brute-force, or HNSW above ann_min_chunks) → ranked by similarity
                     └─ RRF fusion: score = Σ 1/(k + rank_i), k=60 default
                     + optional parent-summary boost (summary_weight)
                  → Vec<SearchHit> { chunk_id, entry_path, heading, text, rrf_score }
@@ -147,7 +147,7 @@ Core tables:
 - **`summaries`** — hierarchical per-node summaries with tiered L0 (abstract) / L1 (full) text and an optional summary embedding
 - **`summary_queue`** — background summarization work queue (`pending` / `in_flight` / `done` / `failed`)
 
-Vector search is brute-force cosine scan over the `embedding` BLOBs — fast enough for <300K chunks (typically under 200ms on a laptop).
+Vector search is brute-force cosine scan over the `embedding` BLOBs — exact and fast enough for <300K chunks (typically under 200ms on a laptop). Past `ann_min_chunks` (default 50,000), `serve`/`mcp` build and cache an in-memory HNSW index instead (`[retrieval] ann`, on by default); see [methodology.md](methodology.md#index-storage).
 
 ---
 

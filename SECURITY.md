@@ -10,12 +10,12 @@ binds to `localhost`; config-write endpoints are gated behind an explicit opt-in
 
 ## Supported versions
 
-Indexa is pre-1.0 and ships on a steady release cadence. Security fixes land on the latest release
-(currently **v0.11.0**) and `main`.
+Indexa is pre-1.0 and ships on a steady release cadence. Security fixes land on the latest tagged
+release and `main` — see [CHANGELOG.md](CHANGELOG.md) for the current version.
 
 | Version | Supported |
 |---------|-----------|
-| latest release (v0.11.0) | ✅ |
+| latest tagged release | ✅ |
 | `main` | ✅ |
 
 ## Reporting a Vulnerability

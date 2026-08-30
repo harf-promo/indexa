@@ -170,7 +170,7 @@ All index data lives in a single SQLite database (`~/.indexa/index.db` or platfo
 
 Embeddings are stored as little-endian `f32` byte blobs directly in the `chunks` table. No external vector database is needed.
 
-**Why SQLite?** Zero ops: one file, easy to back up, easy to delete. Brute-force cosine similarity is fast enough for up to ~300K vectors on commodity hardware. An HNSW sidecar will be added when needed.
+**Why SQLite?** Zero ops: one file, easy to back up, easy to delete. Brute-force cosine similarity is exact and fast enough for up to ~300K vectors on commodity hardware; above that, an in-memory HNSW sidecar (`hnsw_rs`, `[retrieval] ann`) takes over the dense arm automatically — on by default in `serve`/`mcp` above `ann_min_chunks` (default 50,000), see [CHANGELOG.md](../CHANGELOG.md) for when it shipped and went default-on.
 
 ---
 
