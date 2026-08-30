@@ -319,7 +319,11 @@ pub async fn claude_status(claude_bin: &str) -> ClaudeStatus {
     status
 }
 
-#[cfg(test)]
+// Linux-only: the only test in this module needs `/proc/<pid>` (see its own doc comment), so
+// the whole module — not just the function — is gated on `target_os = "linux"`. Gating only the
+// function would leave `use super::*` unused (and thus a hard clippy error under `-D warnings`)
+// on any other CI target, since nothing else in the module would consume it.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
@@ -329,10 +333,9 @@ mod tests {
     /// on every Settings-page load and every `doctor` run, so a leak here accumulates one
     /// orphaned process per timed-out probe.
     ///
-    /// Linux-only: checks liveness via `/proc/<pid>` rather than pulling in a new dependency
-    /// just for this test (mirrors the `#[cfg(unix)]`-gated platform tests already used
-    /// elsewhere in this codebase, e.g. `crates/core/src/walker.rs`).
-    #[cfg(target_os = "linux")]
+    /// Checks liveness via `/proc/<pid>` rather than pulling in a new dependency just for this
+    /// test (mirrors the `#[cfg(unix)]`-gated platform tests already used elsewhere in this
+    /// codebase, e.g. `crates/core/src/walker.rs`).
     #[tokio::test]
     async fn timed_out_version_probe_actually_kills_the_child_process() {
         use std::os::unix::fs::PermissionsExt;
