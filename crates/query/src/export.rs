@@ -267,6 +267,69 @@ fn render_md_node(node: &ExportNode, out: &mut String, level: usize) {
     }
 }
 
+/// Render one **pinned** pack item (v0.78) — its frozen L2 snapshot (raw chunk text captured
+/// when the item was switched to pinned inclusion mode), format-matched to the rest of a pack
+/// export. Unlike [`render_xml`]/[`render_markdown`]/[`render_json`] (which walk a live
+/// `summaries` tree via [`build_tree`]), a pinned item has no tree to walk — just the captured
+/// text — so it gets its own minimal per-format wrapper, carrying an explicit `mode="pinned"` /
+/// `"mode": "pinned"` marker so a consumer can tell a frozen block from a live one. `snapshot`
+/// is `None` when the item was pinned before anything was indexed under it (see
+/// `Store::capture_l2_snapshot`) — rendered as an explicit placeholder rather than silently
+/// omitted, since the item is still a deliberate member of the pack.
+pub fn render_pinned_item(path: &str, snapshot: Option<&str>, format: &str) -> String {
+    const EMPTY_NOTE: &str = "(pinned, but no indexed content was captured at pin time)";
+    let body = snapshot.unwrap_or(EMPTY_NOTE);
+    match format {
+        "md" | "markdown" => format!(
+            "## \u{1f4cc} {path}\n\n`{path}` — pinned snapshot (frozen L2 content, not resolved fresh)\n\n{body}\n\n"
+        ),
+        "json" => format!(
+            "{{\n  \"path\": {},\n  \"mode\": \"pinned\",\n  \"content\": {}\n}}\n",
+            json_str(path),
+            json_str(body)
+        ),
+        _ => format!(
+            "  <file path=\"{}\" mode=\"pinned\">\n    <pinned_content>{}</pinned_content>\n  </file>\n",
+            xml_attr(path),
+            xml_text(body)
+        ),
+    }
+}
+
+/// Convert `redact_secrets`' typed markers (`[REDACTED-<kind>]` — see `crate::redact`) into the
+/// lowercase, colon-style label pack exports use (`[redacted:<kind>]`). Purely cosmetic and
+/// pack-export-scoped: it runs strictly AFTER `redact_secrets` has already produced its
+/// `(clean, count)` output, so the redaction decision and its count (AGENTS.md's pinned "redact
+/// count" invariant) are completely untouched — this only reformats marker text already present
+/// in the string. `<kind>` is always one of `redact.rs`'s fixed lowercase-kebab pattern labels
+/// (e.g. `aws-key`, `private-key`, `secret`), so a plain literal-prefix replace is enough — no
+/// regex needed, and it can never touch anything that isn't already a marker `redact_secrets`
+/// itself emitted.
+pub fn relabel_pack_redaction_markers(s: &str) -> String {
+    s.replace("[REDACTED-", "[redacted:")
+}
+
+/// A rough size/cost estimate for a would-be export, computed WITHOUT writing or delivering
+/// anything — the `--dry-run` (CLI `pack export`) / `dry_run` (MCP `export_pack`) report. The
+/// caller renders the body exactly as it would for a real export (redaction, relabeling, and all)
+/// and passes that rendered string here, so the estimate reflects the true output rather than a
+/// separate, possibly-diverging code path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct DryRunReport {
+    /// [`approx_tokens`] over the rendered body.
+    pub approx_tokens: usize,
+    /// The rendered body's length in bytes.
+    pub bytes: usize,
+}
+
+/// Build a [`DryRunReport`] for an already-rendered export body.
+pub fn dry_run_report(body: &str) -> DryRunReport {
+    DryRunReport {
+        approx_tokens: approx_tokens(body),
+        bytes: body.len(),
+    }
+}
+
 /// Render the tree as JSON for programmatic piping.
 pub fn render_json(node: &ExportNode) -> String {
     let mut out = String::with_capacity(4096);
@@ -916,6 +979,55 @@ mod tests {
         assert!(render_markdown(&tree).contains("tokens (estimate"));
         assert!(approx_tokens("abcdefgh") == 2); // 8 chars / 4
         assert!(approx_tokens("") == 0);
+    }
+
+    // ── Pack inclusion mode / dry-run (v0.78) ───────────────────────────────────
+
+    #[test]
+    fn render_pinned_item_carries_a_pinned_marker_per_format() {
+        let xml = render_pinned_item("/root/a.rs", Some("frozen body"), "xml");
+        assert!(xml.contains(r#"mode="pinned""#));
+        assert!(xml.contains("frozen body"));
+
+        let md = render_pinned_item("/root/a.rs", Some("frozen body"), "md");
+        assert!(md.contains("pinned snapshot"));
+        assert!(md.contains("frozen body"));
+
+        let json = render_pinned_item("/root/a.rs", Some("frozen body"), "json");
+        assert!(json.contains("\"mode\": \"pinned\""));
+        assert!(json.contains("frozen body"));
+    }
+
+    #[test]
+    fn render_pinned_item_with_no_snapshot_uses_a_placeholder_not_a_blank() {
+        let xml = render_pinned_item("/root/a.rs", None, "xml");
+        assert!(xml.contains("no indexed content was captured"));
+    }
+
+    #[test]
+    fn relabel_pack_redaction_markers_converts_shouty_kebab_to_lowercase_colon() {
+        let redacted = "aws_key = [REDACTED-aws-key]\ntoken: [REDACTED-secret]";
+        let relabeled = relabel_pack_redaction_markers(redacted);
+        assert_eq!(
+            relabeled,
+            "aws_key = [redacted:aws-key]\ntoken: [redacted:secret]"
+        );
+        // Never touches surrounding prose or content that wasn't already a marker.
+        assert!(!relabeled.contains("REDACTED"));
+    }
+
+    #[test]
+    fn relabel_pack_redaction_markers_is_a_no_op_on_clean_text() {
+        let clean = "fn retrieve() -> Result<Vec<Hit>> { hybrid_search() }";
+        assert_eq!(relabel_pack_redaction_markers(clean), clean);
+    }
+
+    #[test]
+    fn dry_run_report_matches_approx_tokens_and_byte_len() {
+        let body = "abcdefgh"; // 8 chars → 2 tokens (chars/4)
+        let report = dry_run_report(body);
+        assert_eq!(report.approx_tokens, 2);
+        assert_eq!(report.bytes, 8);
     }
 
     #[test]

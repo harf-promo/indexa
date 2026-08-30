@@ -7,7 +7,9 @@
 //!   GET    /api/packs/:name/paths      — list paths in a pack
 //!   POST   /api/packs/:name/paths      — add paths     { paths: [...] }
 //!   DELETE /api/packs/:name/paths      — remove paths  { paths: [...] }
-//!   GET    /api/packs/:name/export     — export as XML/MD/JSON  ?format=&depth=
+//!   GET    /api/packs/:name/items      — list paths with their inclusion mode (v0.78)
+//!   POST   /api/packs/:name/items/mode — set one item's inclusion mode { path, mode }
+//!   GET    /api/packs/:name/export     — export as XML/MD/JSON  ?format=&depth=&dry_run=
 //!   POST   /api/packs/:name/refresh    — reindex stale members as a background job
 //!   POST   /api/packs/:name/note       — attach a Markdown note { title, body }, best-effort indexed
 //!   GET    /api/packs/:name/search     — search chunk content within the pack  ?q=&limit=
@@ -62,6 +64,26 @@ pub(crate) struct ExportQuery {
     /// With `include_graph=true`: `text` (per-format list, default) or `mermaid` (a fenced
     /// ```mermaid flowchart block).
     graph_format: Option<String>,
+    /// Preview only (v0.78): report the estimated token/byte cost as JSON instead of the
+    /// rendered body, and record no "exported" pack event. Not supported with `format=okf`
+    /// (this route never wrote an OKF bundle anyway — that's the CLI's job).
+    #[serde(default)]
+    dry_run: bool,
+}
+
+#[derive(Serialize)]
+struct PackItemDto {
+    path: String,
+    inclusion_mode: String,
+    /// Whether a pinned snapshot was actually captured (never the snapshot text itself — it can
+    /// be large, and this endpoint backs a lightweight list view, not a content viewer).
+    has_pinned_snapshot: bool,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SetItemModeBody {
+    path: String,
+    mode: String,
 }
 
 #[derive(Deserialize)]
@@ -200,14 +222,76 @@ pub(crate) async fn api_packs_paths_remove(
     }
 }
 
+/// `GET /api/packs/:name/items` — list a pack's members with their per-item inclusion mode
+/// (v0.78): `"reference"` (a live pointer, resolved fresh at export — the default, matching the
+/// export behavior every pack item had before this field existed) or `"pinned"` (a frozen L2
+/// snapshot). The richer sibling of `api_packs_paths_get`'s bare path list.
+pub(crate) async fn api_packs_items_get(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Response {
+    let store = state.store.lock().await;
+    let pack = match store.pack_by_name(&name) {
+        Ok(Some(p)) => p,
+        Ok(None) => return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\"")),
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    };
+    match store.pack_item_records(&pack.id) {
+        Ok(items) => Json(serde_json::json!({
+            "name": name,
+            "items": items.into_iter().map(|i| PackItemDto {
+                has_pinned_snapshot: i.pinned_snapshot.is_some(),
+                path: i.path,
+                inclusion_mode: i.inclusion_mode,
+            }).collect::<Vec<_>>(),
+        }))
+        .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
+}
+
+/// `POST /api/packs/:name/items/mode` — set one pack member's inclusion mode
+/// (`{ "path": "...", "mode": "reference" | "pinned" }`). Switching to `"pinned"` captures the
+/// item's CURRENT indexed (L2) content as the frozen snapshot; switching to `"reference"` clears
+/// any previously-captured snapshot.
+pub(crate) async fn api_packs_items_set_mode(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<SetItemModeBody>,
+) -> Response {
+    let mut store = state.store.lock().await;
+    let pack = match store.pack_by_name(&name) {
+        Ok(Some(p)) => p,
+        Ok(None) => return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\"")),
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    };
+    match store.set_pack_item_inclusion_mode(&pack.id, &body.path, &body.mode) {
+        Ok(0) => err_json(
+            StatusCode::NOT_FOUND,
+            format!("no path \"{}\" in pack \"{name}\"", body.path),
+        ),
+        Ok(_) => Json(serde_json::json!({ "path": body.path, "inclusion_mode": body.mode }))
+            .into_response(),
+        Err(e) => {
+            let msg = format!("{e:#}");
+            if msg.contains("invalid inclusion mode") {
+                err_json(StatusCode::BAD_REQUEST, msg)
+            } else {
+                err_json(StatusCode::INTERNAL_SERVER_ERROR, msg)
+            }
+        }
+    }
+}
+
 pub(crate) async fn api_packs_export(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(q): Query<ExportQuery>,
 ) -> Response {
     use indexa_query::{
-        build_export_filter, build_tree, prune_tree, render_graph, render_graph_mermaid,
-        render_json, render_markdown, render_xml,
+        build_export_filter, build_tree, dry_run_report, prune_tree,
+        relabel_pack_redaction_markers, render_graph, render_graph_mermaid, render_json,
+        render_markdown, render_pinned_item, render_xml,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -220,16 +304,27 @@ pub(crate) async fn api_packs_export(
     let format = q.format.as_deref().unwrap_or("xml");
     let depth = q.depth;
 
+    if q.dry_run && format == "okf" {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            "dry_run is not supported with format=okf (this route doesn't write an OKF bundle \
+             anyway — use the CLI `indexa pack export --format okf --out <dir>`)",
+        );
+    }
+
     let mut store = state.store.lock().await;
     let pack = match store.pack_by_name(&name) {
         Ok(Some(p)) => p,
         Ok(None) => return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\"")),
         Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     };
-    let paths = match store.pack_paths(&pack.id) {
+    // Per-item inclusion mode (v0.78): `items` carries each member's mode/pinned snapshot;
+    // `paths` is kept alongside for the `--include-graph` scope below, which is mode-agnostic.
+    let items = match store.pack_item_records(&pack.id) {
         Ok(p) => p,
         Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     };
+    let paths: Vec<String> = items.iter().map(|i| i.path.clone()).collect();
     if paths.is_empty() {
         return err_json(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -268,7 +363,23 @@ pub(crate) async fn api_packs_export(
     }
 
     let mut exported = 0usize;
-    for root_path in &paths {
+    for item in &items {
+        let root_path = &item.path;
+        // Per-item inclusion mode (v0.78): "pinned" renders the frozen L2 snapshot verbatim,
+        // bypassing the live summaries tree and the relational slice (a pinned item deliberately
+        // no longer tracks the live file metadata --changed-since/category filter on).
+        // "reference" (and any legacy row, which defaults to it) is the unchanged pre-existing
+        // behavior.
+        if item.inclusion_mode == "pinned" {
+            buf.push_str(&render_pinned_item(
+                root_path,
+                item.pinned_snapshot.as_deref(),
+                format,
+            ));
+            buf.push('\n');
+            exported += 1;
+            continue;
+        }
         let tree = match build_tree(&store, root_path, depth) {
             Ok(Some(t)) => t,
             Ok(None) => continue,
@@ -330,15 +441,33 @@ pub(crate) async fn api_packs_export(
         return err_json(StatusCode::UNPROCESSABLE_ENTITY, msg);
     }
 
+    // Scan exported content for secrets before it leaves the machine over HTTP — same invariant
+    // the whole-tree export (api_export), MCP export_pack, and CLI `pack export` enforce. The
+    // pack-only typed label relabel (v0.78, `[REDACTED-<kind>]` → `[redacted:<kind>]`) runs
+    // strictly AFTER redact_secrets, so its output/count (AGENTS.md's pinned "redact count"
+    // invariant) is unchanged — this only reformats marker text redact_secrets already produced.
+    let (buf, _redacted) = indexa_query::redact::redact_secrets(&buf);
+    let buf = relabel_pack_redaction_markers(&buf);
+
+    // dry_run (v0.78): report the estimated size as JSON instead of the rendered body, and
+    // record no "exported" event — nothing was actually exported.
+    if q.dry_run {
+        let report = dry_run_report(&buf);
+        return Json(serde_json::json!({
+            "name": name,
+            "format": format,
+            "approx_tokens": report.approx_tokens,
+            "bytes": report.bytes,
+            "items_exported": exported,
+        }))
+        .into_response();
+    }
+
     let content_type = if format == "json" {
         "application/json"
     } else {
         "text/plain; charset=utf-8"
     };
-    // Scan exported content for secrets before it leaves the machine over HTTP —
-    // same invariant the whole-tree export (api_export), MCP export_pack, and CLI
-    // `pack export` enforce. This pack route was the one surface that skipped it.
-    let (buf, _redacted) = indexa_query::redact::redact_secrets(&buf);
     // Best-effort (4.1) — a history-write hiccup must never fail an otherwise-successful export.
     let _ = store.record_pack_exported(&pack.id, format);
     ([(axum::http::header::CONTENT_TYPE, content_type)], buf).into_response()

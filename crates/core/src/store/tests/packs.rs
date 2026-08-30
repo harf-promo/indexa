@@ -495,3 +495,162 @@ fn deleting_a_pack_cascades_its_events() {
     store.delete_pack(&id).unwrap();
     assert!(store.pack_events(&id).unwrap().is_empty());
 }
+
+// ── Per-item inclusion mode (v0.78) ─────────────────────────────────────────────
+
+#[test]
+fn new_pack_items_default_to_reference_inclusion_mode() {
+    // A freshly-added item, on a brand-new (already-migrated) DB, must default to
+    // "reference" — the export behavior every pack item had before this field existed
+    // (build fresh from the current summaries tree at export time), not "pinned".
+    let mut store = Store::open_in_memory().unwrap();
+    let pid = store.create_pack("proj", None).unwrap();
+    store.add_pack_paths(&pid, &["/a.rs".to_owned()]).unwrap();
+
+    let items = store.pack_item_records(&pid).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].path, "/a.rs");
+    assert_eq!(items[0].inclusion_mode, "reference");
+    assert!(items[0].pinned_snapshot.is_none());
+}
+
+#[test]
+fn pinning_a_pack_item_captures_its_indexed_chunks() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_chunks(&[
+            dummy_chunk("/a.rs", 0, "fn one() {}"),
+            dummy_chunk("/a.rs", 1, "fn two() {}"),
+        ])
+        .unwrap();
+    let pid = store.create_pack("proj", None).unwrap();
+    store.add_pack_paths(&pid, &["/a.rs".to_owned()]).unwrap();
+
+    let n = store
+        .set_pack_item_inclusion_mode(&pid, "/a.rs", "pinned")
+        .unwrap();
+    assert_eq!(n, 1);
+
+    let items = store.pack_item_records(&pid).unwrap();
+    assert_eq!(items[0].inclusion_mode, "pinned");
+    let snapshot = items[0].pinned_snapshot.as_deref().unwrap();
+    assert!(snapshot.contains("fn one() {}"), "got: {snapshot}");
+    assert!(snapshot.contains("fn two() {}"), "got: {snapshot}");
+
+    // Switching back to "reference" clears the frozen snapshot — it must not linger as
+    // invisible dead weight once the item no longer reads from it.
+    store
+        .set_pack_item_inclusion_mode(&pid, "/a.rs", "reference")
+        .unwrap();
+    let items = store.pack_item_records(&pid).unwrap();
+    assert_eq!(items[0].inclusion_mode, "reference");
+    assert!(items[0].pinned_snapshot.is_none());
+}
+
+#[test]
+fn pinning_a_directory_member_captures_its_whole_indexed_subtree() {
+    // Same member→indexed-file prefix expansion `stale_pack_paths` uses (subtree_match),
+    // exercised here for the snapshot capture instead of the staleness check.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_chunks(&[dummy_chunk("/proj/src/a.rs", 0, "mod a;")])
+        .unwrap();
+    let pid = store.create_pack("proj", None).unwrap();
+    store
+        .add_pack_paths(&pid, &["/proj/src".to_owned()])
+        .unwrap();
+
+    store
+        .set_pack_item_inclusion_mode(&pid, "/proj/src", "pinned")
+        .unwrap();
+    let items = store.pack_item_records(&pid).unwrap();
+    let snapshot = items[0].pinned_snapshot.as_deref().unwrap();
+    assert!(snapshot.contains("mod a;"), "got: {snapshot}");
+}
+
+#[test]
+fn pinning_an_unindexed_item_leaves_snapshot_none() {
+    // Pinning is valid even when nothing has been indexed for that path yet — it just
+    // captures nothing (rather than erroring), consistent with "pin now, backfill later".
+    let mut store = Store::open_in_memory().unwrap();
+    let pid = store.create_pack("proj", None).unwrap();
+    store
+        .add_pack_paths(&pid, &["/never-indexed.rs".to_owned()])
+        .unwrap();
+
+    store
+        .set_pack_item_inclusion_mode(&pid, "/never-indexed.rs", "pinned")
+        .unwrap();
+    let items = store.pack_item_records(&pid).unwrap();
+    assert_eq!(items[0].inclusion_mode, "pinned");
+    assert!(items[0].pinned_snapshot.is_none());
+}
+
+#[test]
+fn set_pack_item_inclusion_mode_rejects_unknown_mode() {
+    let mut store = Store::open_in_memory().unwrap();
+    let pid = store.create_pack("proj", None).unwrap();
+    store.add_pack_paths(&pid, &["/a.rs".to_owned()]).unwrap();
+    let err = store
+        .set_pack_item_inclusion_mode(&pid, "/a.rs", "bogus")
+        .unwrap_err();
+    assert!(err.to_string().contains("invalid inclusion mode"));
+}
+
+#[test]
+fn set_pack_item_inclusion_mode_on_nonexistent_path_changes_nothing() {
+    let mut store = Store::open_in_memory().unwrap();
+    let pid = store.create_pack("proj", None).unwrap();
+    let n = store
+        .set_pack_item_inclusion_mode(&pid, "/never-added.rs", "pinned")
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
+#[test]
+fn migrates_legacy_pack_paths_adding_inclusion_mode_preserving_all_rows() {
+    // Pre-v0.78 indexes have no inclusion_mode/pinned_snapshot columns on pack_paths.
+    // Store::open must add both AND preserve every legacy row, defaulting each to
+    // "reference" — the export behavior those rows already had.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pre_inclusion_mode.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE packs (
+                 id          TEXT PRIMARY KEY,
+                 name        TEXT NOT NULL UNIQUE,
+                 description TEXT,
+                 created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+             );
+             CREATE TABLE pack_paths (
+                 pack_id  TEXT NOT NULL REFERENCES packs(id) ON DELETE CASCADE,
+                 path     TEXT NOT NULL,
+                 added_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                 PRIMARY KEY (pack_id, path)
+             );
+             INSERT INTO packs (id, name) VALUES ('p1', 'proj');
+             INSERT INTO pack_paths (pack_id, path) VALUES ('p1', '/legacy.rs');",
+        )
+        .unwrap();
+    }
+
+    let mut store = Store::open(&path).expect("must open & migrate a pre-inclusion-mode index");
+    let items = store.pack_item_records("p1").unwrap();
+    assert_eq!(items.len(), 1, "the legacy row must survive the migration");
+    assert_eq!(items[0].path, "/legacy.rs");
+    assert_eq!(
+        items[0].inclusion_mode, "reference",
+        "a legacy row must default to 'reference', matching its pre-migration export behavior"
+    );
+    assert!(items[0].pinned_snapshot.is_none());
+
+    // The migrated column is fully usable, not just present.
+    store
+        .set_pack_item_inclusion_mode("p1", "/legacy.rs", "pinned")
+        .unwrap();
+    assert_eq!(
+        store.pack_item_records("p1").unwrap()[0].inclusion_mode,
+        "pinned"
+    );
+}

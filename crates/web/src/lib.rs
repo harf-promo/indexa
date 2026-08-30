@@ -198,6 +198,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/28-graph-layers.js"),
     include_str!("../assets/ui/js/29-graph-communities.js"),
     include_str!("../assets/ui/js/30-graph-modules.js"),
+    include_str!("../assets/ui/js/32-pack-inclusion-mode.js"),
 );
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -523,6 +524,11 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
             get(api_packs_paths_get)
                 .post(api_packs_paths_add)
                 .delete(api_packs_paths_remove),
+        )
+        .route("/api/packs/{name}/items", get(api_packs_items_get))
+        .route(
+            "/api/packs/{name}/items/mode",
+            post(api_packs_items_set_mode),
         )
         .route("/api/packs/{name}/export", get(api_packs_export))
         .route("/api/packs/{name}/refresh", post(api_packs_refresh))
@@ -1412,7 +1418,10 @@ mod tests {
         // Regression guard: the pack export route must scrub secrets before content
         // leaves the machine over HTTP — the same invariant the whole-tree export,
         // MCP export_pack, and CLI `pack export` enforce. A summary carrying an AWS
-        // key must come back redacted, never verbatim.
+        // key must come back redacted, never verbatim. v0.78: pack exports also relabel the
+        // marker to the pack-only `[redacted:<kind>]` style (display-only, applied after
+        // redact_secrets — see `relabel_pack_redaction_markers`), so the marker checked below
+        // is that style, not the shared `[REDACTED-<kind>]` one `redact_secrets` itself emits.
         let mut store = Store::open_in_memory().unwrap();
         store
             .upsert_summary(&indexa_core::store::SummaryRecord {
@@ -1455,9 +1464,98 @@ mod tests {
             "AWS key leaked through pack export: {body}"
         );
         assert!(
-            body.contains("[REDACTED-aws-key]"),
-            "expected redaction marker in pack export, got: {body}"
+            !body.contains("[REDACTED-"),
+            "pack exports must relabel to the pack-only style, not the shared marker: {body}"
         );
+        assert!(
+            body.contains("[redacted:aws-key]"),
+            "expected the pack-style redaction marker in pack export, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_packs_items_get_and_set_mode() {
+        let mut store = Store::open_in_memory().unwrap();
+        let pack_id = store.create_pack("modes", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, &["/a.rs".to_owned()])
+            .unwrap();
+        store
+            .upsert_chunks(&[chunk("/a.rs", 0, "fn a() {}")])
+            .unwrap();
+
+        let app = build_router(state_with(store), 7620);
+
+        // Defaults to "reference".
+        let (status, json) = get_json(app.clone(), "/api/packs/modes/items").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["items"][0]["path"], "/a.rs");
+        assert_eq!(json["items"][0]["inclusion_mode"], "reference");
+        assert_eq!(json["items"][0]["has_pinned_snapshot"], false);
+
+        // Pin it.
+        let (status, json) = post_json(
+            app.clone(),
+            "/api/packs/modes/items/mode",
+            serde_json::json!({ "path": "/a.rs", "mode": "pinned" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["inclusion_mode"], "pinned");
+
+        let (_, json) = get_json(app.clone(), "/api/packs/modes/items").await;
+        assert_eq!(json["items"][0]["inclusion_mode"], "pinned");
+        assert_eq!(json["items"][0]["has_pinned_snapshot"], true);
+
+        // An invalid mode is rejected with 400, not silently accepted.
+        let (status, _) = post_json(
+            app.clone(),
+            "/api/packs/modes/items/mode",
+            serde_json::json!({ "path": "/a.rs", "mode": "bogus" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // A path not in the pack 404s.
+        let (status, _) = post_json(
+            app,
+            "/api/packs/modes/items/mode",
+            serde_json::json!({ "path": "/never-added.rs", "mode": "pinned" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn api_packs_export_dry_run_reports_size_and_writes_no_exported_event() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_summary(&indexa_core::store::SummaryRecord {
+                path: "/r/a.rs".into(),
+                kind: "file".into(),
+                parent_path: Some("/r".into()),
+                depth: 1,
+                summary: "a summary".into(),
+                summary_l0: None,
+                embedding: None,
+                child_count: 0,
+                byte_size: 10,
+                model: "test".into(),
+                source_hash: "H1".into(),
+                generated_at: 1,
+            })
+            .unwrap();
+        let pack_id = store.create_pack("dry", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, &["/r/a.rs".to_owned()])
+            .unwrap();
+
+        let app = build_router(state_with(store), 7620);
+        let (status, json) = get_json(app, "/api/packs/dry/export?format=xml&dry_run=true").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["approx_tokens"].as_u64().unwrap() > 0, "got: {json}");
+        assert!(json["bytes"].as_u64().unwrap() > 0, "got: {json}");
+        assert_eq!(json["items_exported"], 1);
     }
 
     /// A dedicated temp directory per test tag (mirrors `temp_db_path`'s style) — real files

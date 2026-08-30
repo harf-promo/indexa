@@ -1358,6 +1358,7 @@ mod tests {
                 category: None,
                 include_graph: false,
                 graph_format: None,
+                dry_run: false,
             }))
             .await
             .unwrap();
@@ -1376,6 +1377,139 @@ mod tests {
                 .iter()
                 .any(|(tool, s)| tool == "export_pack" && s.calls > 0),
             "export_pack must record usage telemetry, got: {usage:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_pack_pinned_item_renders_frozen_snapshot_not_live_summary() {
+        use indexa_core::store::{ChunkRecord, SummaryRecord};
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let id = store.create_pack("proj", None).unwrap();
+            store
+                .add_pack_paths(&id, &["/root/a.rs".to_owned()])
+                .unwrap();
+            store
+                .upsert_summary(&SummaryRecord {
+                    path: "/root/a.rs".to_owned(),
+                    kind: "file".to_owned(),
+                    parent_path: None,
+                    depth: 0,
+                    summary: "LIVE SUMMARY TEXT".to_owned(),
+                    summary_l0: None,
+                    embedding: None,
+                    child_count: 0,
+                    byte_size: 0,
+                    model: "t".to_owned(),
+                    source_hash: "h1".to_owned(),
+                    generated_at: 0,
+                })
+                .unwrap();
+            store
+                .upsert_chunks(&[ChunkRecord {
+                    entry_path: "/root/a.rs".to_owned(),
+                    seq: 0,
+                    heading: String::new(),
+                    text: "FROZEN CHUNK TEXT".to_owned(),
+                    language: None,
+                    embedding: None,
+                    embed_model: None,
+                    content_hash: None,
+                }])
+                .unwrap();
+            store
+                .set_pack_item_inclusion_mode(&id, "/root/a.rs", "pinned")
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let res = mcp
+            .export_pack(Parameters(ExportPackParams {
+                name: "proj".into(),
+                format: None,
+                depth: None,
+                signatures: None,
+                changed_since: None,
+                category: None,
+                include_graph: false,
+                graph_format: None,
+                dry_run: false,
+            }))
+            .await
+            .unwrap();
+        let text = tool_text(res);
+        assert!(text.contains("mode=\"pinned\""), "got: {text}");
+        assert!(text.contains("FROZEN CHUNK TEXT"), "got: {text}");
+        assert!(
+            !text.contains("LIVE SUMMARY TEXT"),
+            "a pinned item must never render the live summary tree: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_pack_dry_run_reports_size_and_skips_usage_telemetry() {
+        use indexa_core::store::SummaryRecord;
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let id = store.create_pack("proj", None).unwrap();
+            store
+                .add_pack_paths(&id, &["/root/a.rs".to_owned()])
+                .unwrap();
+            store
+                .upsert_summary(&SummaryRecord {
+                    path: "/root/a.rs".to_owned(),
+                    kind: "file".to_owned(),
+                    parent_path: None,
+                    depth: 0,
+                    summary: "A summary.".to_owned(),
+                    summary_l0: None,
+                    embedding: None,
+                    child_count: 0,
+                    byte_size: 0,
+                    model: "t".to_owned(),
+                    source_hash: "h1".to_owned(),
+                    generated_at: 0,
+                })
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let res = mcp
+            .export_pack(Parameters(ExportPackParams {
+                name: "proj".into(),
+                format: None,
+                depth: None,
+                signatures: None,
+                changed_since: None,
+                category: None,
+                include_graph: false,
+                graph_format: None,
+                dry_run: true,
+            }))
+            .await
+            .unwrap();
+        let text = tool_text(res);
+        assert!(text.contains("Dry run"), "got: {text}");
+        assert!(text.contains("tokens"), "got: {text}");
+        // A dry run must not read as a real export in the pack's own event history.
+        let store = Store::open(&dbpath).unwrap();
+        let pack = store.pack_by_name("proj").unwrap().unwrap();
+        let events = store.pack_events(&pack.id).unwrap();
+        assert!(
+            !events.iter().any(|e| e.event == "exported"),
+            "a dry run must not record a pack 'exported' event: {events:?}"
+        );
+        // Nor should it count toward export_pack's usage telemetry.
+        let usage = store
+            .usage_by_tool(indexa_core::store::USAGE_WEEK_SECS)
+            .unwrap();
+        assert!(
+            !usage
+                .iter()
+                .any(|(tool, s)| tool == "export_pack" && s.calls > 0),
+            "a dry run must not record usage telemetry, got: {usage:?}"
         );
     }
 
@@ -2342,6 +2476,7 @@ mod tests {
                 category: None,
                 include_graph: false,
                 graph_format: None,
+                dry_run: false,
             }))
             .await;
         assert!(res.is_ok(), "export should succeed: {res:?}");
@@ -2425,6 +2560,7 @@ mod tests {
                 category: None,
                 include_graph: false,
                 graph_format: None,
+                dry_run: false,
             }))
             .await
             .unwrap(),
@@ -2442,6 +2578,7 @@ mod tests {
                 category: None,
                 include_graph: true,
                 graph_format: Some("mermaid".into()),
+                dry_run: false,
             }))
             .await
             .unwrap(),
@@ -2508,6 +2645,7 @@ mod tests {
                 category: None,
                 include_graph: false,
                 graph_format: None,
+                dry_run: false,
             }))
             .await
             .unwrap(),

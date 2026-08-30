@@ -1056,7 +1056,8 @@ pub enum PackAction {
   indexa pack export \"Auth\" --format xml > auth.xml
   indexa pack export \"Auth\" --format md
   indexa pack export \"Auth\" --format json --output auth.json
-  indexa pack export \"Auth\" --format okf --out ./auth-bundle")]
+  indexa pack export \"Auth\" --format okf --out ./auth-bundle
+  indexa pack export \"Auth\" --dry-run")]
     Export {
         /// Pack name.
         name: String,
@@ -1110,6 +1111,12 @@ pub enum PackAction {
         /// (e.g. `code`, `document`, `media`, `work`). Combine with `--changed-since` to intersect.
         #[arg(long, value_name = "CAT")]
         category: Option<String>,
+        /// Preview only: report the estimated token/byte cost (reusing the same redaction +
+        /// rendering pipeline a real export would use) and write nothing — no file, no
+        /// clipboard, no recorded pack event. Not supported with `--format okf` (a directory
+        /// bundle, not a single sized artifact).
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Rename a pack.
     Rename {

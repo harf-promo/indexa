@@ -4,8 +4,9 @@ use indexa_core::{
     store::Store,
 };
 use indexa_query::{
-    build_export_filter, build_tree, prune_tree, render_graph, render_graph_mermaid, render_json,
-    render_markdown, render_xml,
+    build_export_filter, build_tree, dry_run_report, prune_tree, relabel_pack_redaction_markers,
+    render_graph, render_graph_mermaid, render_json, render_markdown, render_pinned_item,
+    render_xml,
 };
 
 use super::cmd_deep;
@@ -368,6 +369,7 @@ pub(crate) async fn cmd_pack_export(
     no_redact: bool,
     changed_since: Option<String>,
     category: Option<String>,
+    dry_run: bool,
 ) -> Result<()> {
     // Like `indexa export`, a pack export must produce a valid artifact or fail loudly — never
     // a silent stdout notice that gets written into a piped file with a zero exit.
@@ -393,6 +395,7 @@ pub(crate) async fn cmd_pack_export(
         no_redact,
         changed_since,
         category,
+        dry_run,
     )
     .await
 }
@@ -418,12 +421,18 @@ pub(crate) async fn cmd_pack_export_at(
     no_redact: bool,
     changed_since: Option<String>,
     category: Option<String>,
+    dry_run: bool,
 ) -> Result<()> {
     let mut store = Store::open(db_path)?;
     let pack = store
         .pack_by_name(&name)?
         .ok_or_else(|| anyhow::anyhow!("no pack named \"{name}\""))?;
-    let paths = store.pack_paths(&pack.id)?;
+    // Per-item inclusion mode (v0.78): `items` carries each member's mode/pinned snapshot;
+    // `paths` (bare path strings) is kept alongside for the call sites below that are
+    // deliberately mode-agnostic — OKF bundling, `--signatures`, and the `--include-graph` scope
+    // — none of which this task's inclusion-mode work touches.
+    let items = store.pack_item_records(&pack.id)?;
+    let paths: Vec<String> = items.iter().map(|i| i.path.clone()).collect();
     if paths.is_empty() {
         bail!("Pack \"{name}\" has no paths. Add paths first with `indexa pack add`.");
     }
@@ -432,6 +441,12 @@ pub(crate) async fn cmd_pack_export_at(
     // separately from the xml/md/json rendering path below (no --output/--clipboard/
     // --token-budget — those are single-artifact concepts that don't apply to a bundle).
     if format == "okf" {
+        if dry_run {
+            bail!(
+                "--dry-run is not supported with --format okf (a multi-file directory bundle, \
+                 not a single sized artifact). Drop --dry-run, or preview a different format."
+            );
+        }
         let Some(out_dir) = out else {
             bail!("--format okf requires --out <dir> (a directory to write the bundle into).");
         };
@@ -507,9 +522,12 @@ pub(crate) async fn cmd_pack_export_at(
     }
 
     let mut exported = 0usize;
-    for root_path in &paths {
+    for item in &items {
+        let root_path = &item.path;
         if signatures {
-            // Code-skeleton view (reads chunks; works without summaries).
+            // Code-skeleton view (reads chunks; works without summaries) — deliberately
+            // mode-agnostic, same as the OKF/--include-graph paths above: it already reads
+            // straight from the live chunk index, so it has no separate "pinned" behavior to add.
             let mut chunks = store.code_chunks_under(root_path, 0)?;
             if let Some(a) = &allow {
                 chunks.retain(|c| a.contains(&c.entry_path));
@@ -522,6 +540,21 @@ pub(crate) async fn cmd_pack_export_at(
                 &chunks,
                 &format,
                 !strip_comments,
+            ));
+            out_buf.push('\n');
+            exported += 1;
+            continue;
+        }
+        // Per-item inclusion mode (v0.78): "pinned" renders the frozen L2 snapshot verbatim,
+        // never touching the live summaries tree or the relational slice (--changed-since /
+        // --category filter live file metadata a pinned item deliberately no longer tracks).
+        // "reference" (and any legacy row, which defaults to it) keeps the exact pre-existing
+        // behavior: build fresh from the current summaries tree, then apply the slice.
+        if item.inclusion_mode == "pinned" {
+            out_buf.push_str(&render_pinned_item(
+                root_path,
+                item.pinned_snapshot.as_deref(),
+                &format,
             ));
             out_buf.push('\n');
             exported += 1;
@@ -600,10 +633,35 @@ pub(crate) async fn cmd_pack_export_at(
         bail!("No paths in pack \"{name}\" {hint}");
     }
 
+    // Redaction + the pack-only typed-label relabel (v0.78) happen HERE, not inside the shared
+    // `finalize_export` (which also backs plain `indexa export` and must keep its marker style
+    // untouched) — `[REDACTED-<kind>]` → `[redacted:<kind>]` runs strictly AFTER
+    // `redact_secrets`, so its output and count (AGENTS.md's pinned "redact count" invariant)
+    // are unchanged; this only reformats marker text redact_secrets already produced. `finalize_export`
+    // is then told `redact: false` so it doesn't redact a second time.
+    if !no_redact {
+        let (clean, n) = indexa_query::redact::redact_secrets(&out_buf);
+        if n > 0 {
+            eprintln!("⚠ Redacted {n} suspected secret(s) from the export.");
+        }
+        out_buf = relabel_pack_redaction_markers(&clean);
+    }
+
+    // --dry-run (v0.78): report the estimated size WITHOUT writing/copying/delivering
+    // anything, and without recording an "exported" event (nothing was actually exported).
+    if dry_run {
+        let report = dry_run_report(&out_buf);
+        println!(
+            "Dry run: pack \"{name}\" would export ~{} tokens ({} bytes) as {format} across {} item(s). Nothing was written.",
+            report.approx_tokens, report.bytes, exported
+        );
+        return Ok(());
+    }
+
     finalize_export(
         out_buf,
         ExportSink {
-            redact: !no_redact,
+            redact: false, // already redacted above
             token_budget,
             strict_budget,
             clipboard,
@@ -1116,6 +1174,7 @@ mod tests {
             false,
             None,
             None,
+            false, // dry_run
         )
         .await
         .unwrap();
@@ -1220,5 +1279,236 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("1 vanished"));
+    }
+
+    // ── Per-item inclusion mode + --dry-run (v0.78) ─────────────────────────────
+
+    #[tokio::test]
+    async fn pinned_item_exports_frozen_snapshot_not_the_live_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("idx.db");
+        let mut store = Store::open(&db_path).unwrap();
+
+        // A summary exists for the path — what "reference" mode would render.
+        store
+            .upsert_summary(&SummaryRecord {
+                path: "/pinned.rs".to_owned(),
+                kind: "file".to_owned(),
+                parent_path: None,
+                depth: 0,
+                summary: "LIVE SUMMARY TEXT must not appear in a pinned export".to_owned(),
+                summary_l0: None,
+                embedding: None,
+                child_count: 0,
+                byte_size: 0,
+                model: "test".to_owned(),
+                source_hash: "h".to_owned(),
+                generated_at: 0,
+            })
+            .unwrap();
+        // Its indexed chunk carries different text — the frozen snapshot a pinned item exports.
+        store
+            .upsert_chunks(&[dummy_chunk_embedded("/pinned.rs", "FROZEN CHUNK TEXT")])
+            .unwrap();
+
+        let pack_id = store.create_pack("pinned-pack", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, &["/pinned.rs".to_owned()])
+            .unwrap();
+        store
+            .set_pack_item_inclusion_mode(&pack_id, "/pinned.rs", "pinned")
+            .unwrap();
+        drop(store);
+
+        let out_path = dir.path().join("out.xml");
+        cmd_pack_export_at(
+            &db_path,
+            "pinned-pack".to_string(),
+            "xml".to_string(),
+            Some(out_path.to_string_lossy().to_string()),
+            None,
+            None,
+            false,
+            false,
+            "text".to_string(),
+            false, // signatures
+            None,
+            false,
+            false,
+            false,
+            false, // no_redact
+            None,
+            None,
+            false, // dry_run
+        )
+        .await
+        .unwrap();
+
+        let xml = std::fs::read_to_string(&out_path).unwrap();
+        assert!(xml.contains("mode=\"pinned\""), "got: {xml}");
+        assert!(xml.contains("FROZEN CHUNK TEXT"), "got: {xml}");
+        assert!(
+            !xml.contains("LIVE SUMMARY TEXT"),
+            "a pinned item must never render the live summary tree: {xml}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reference_item_still_exports_the_live_summary_tree_unchanged() {
+        // A legacy/default "reference" item's export must be byte-for-byte the same shape it
+        // always was: built fresh from the current summaries tree, never a pinned block.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("idx.db");
+        let mut store = Store::open(&db_path).unwrap();
+        store
+            .upsert_summary(&SummaryRecord {
+                path: "/ref.rs".to_owned(),
+                kind: "file".to_owned(),
+                parent_path: None,
+                depth: 0,
+                summary: "LIVE SUMMARY TEXT".to_owned(),
+                summary_l0: None,
+                embedding: None,
+                child_count: 0,
+                byte_size: 0,
+                model: "test".to_owned(),
+                source_hash: "h".to_owned(),
+                generated_at: 0,
+            })
+            .unwrap();
+        let pack_id = store.create_pack("ref-pack", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, &["/ref.rs".to_owned()])
+            .unwrap();
+        drop(store);
+
+        let out_path = dir.path().join("out.xml");
+        cmd_pack_export_at(
+            &db_path,
+            "ref-pack".to_string(),
+            "xml".to_string(),
+            Some(out_path.to_string_lossy().to_string()),
+            None,
+            None,
+            false,
+            false,
+            "text".to_string(),
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let xml = std::fs::read_to_string(&out_path).unwrap();
+        assert!(xml.contains("LIVE SUMMARY TEXT"), "got: {xml}");
+        assert!(!xml.contains("mode=\"pinned\""), "got: {xml}");
+    }
+
+    #[tokio::test]
+    async fn dry_run_reports_size_and_writes_no_output_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("idx.db");
+        let mut store = Store::open(&db_path).unwrap();
+        store
+            .upsert_summary(&SummaryRecord {
+                path: "/dry.rs".to_owned(),
+                kind: "file".to_owned(),
+                parent_path: None,
+                depth: 0,
+                summary: "some summary text".to_owned(),
+                summary_l0: None,
+                embedding: None,
+                child_count: 0,
+                byte_size: 0,
+                model: "test".to_owned(),
+                source_hash: "h".to_owned(),
+                generated_at: 0,
+            })
+            .unwrap();
+        let pack_id = store.create_pack("dry-pack", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, &["/dry.rs".to_owned()])
+            .unwrap();
+        drop(store);
+
+        let out_path = dir.path().join("should_not_exist.xml");
+        cmd_pack_export_at(
+            &db_path,
+            "dry-pack".to_string(),
+            "xml".to_string(),
+            Some(out_path.to_string_lossy().to_string()),
+            None,
+            None,
+            false,
+            false,
+            "text".to_string(),
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            None,
+            None,
+            true, // dry_run
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !out_path.exists(),
+            "--dry-run must not write the output file"
+        );
+        // No "exported" event either — nothing was actually exported.
+        let store = Store::open(&db_path).unwrap();
+        let pack = store.pack_by_name("dry-pack").unwrap().unwrap();
+        let events = store.pack_events(&pack.id).unwrap();
+        assert!(
+            !events.iter().any(|e| e.event == "exported"),
+            "a dry run must not record a pack 'exported' event: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn okf_format_rejects_dry_run_with_a_clear_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("idx.db");
+        let mut store = Store::open(&db_path).unwrap();
+        let pack_id = store.create_pack("okf-pack", None).unwrap();
+        store
+            .add_pack_paths(&pack_id, &["/x.rs".to_owned()])
+            .unwrap();
+        drop(store);
+
+        let err = cmd_pack_export_at(
+            &db_path,
+            "okf-pack".to_string(),
+            "okf".to_string(),
+            None,
+            None,
+            None,
+            false,
+            false,
+            "text".to_string(),
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            None,
+            None,
+            true, // dry_run
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("--dry-run"), "got: {err}");
     }
 }

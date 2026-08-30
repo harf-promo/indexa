@@ -18,9 +18,10 @@ pub use eval::{
     EvalQuestion, EvalSummary, GoldenSet, MetricDelta, QuestionMetrics,
 };
 pub use export::{
-    approx_tokens, build_export_filter, build_tree, prune_tree, render_graph, render_graph_mermaid,
-    render_json, render_markdown, render_okf_bundle, render_signatures, render_weights, render_xml,
-    ManifestItem, PackManifest,
+    approx_tokens, build_export_filter, build_tree, dry_run_report, prune_tree,
+    relabel_pack_redaction_markers, render_graph, render_graph_mermaid, render_json,
+    render_markdown, render_okf_bundle, render_pinned_item, render_signatures, render_weights,
+    render_xml, DryRunReport, ManifestItem, PackManifest,
 };
 pub use impact::{
     ask_impact_breakdown, record_ask_impact, served_bytes, AnswerImpact, ImpactBreakdown,
