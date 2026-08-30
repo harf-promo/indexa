@@ -1,0 +1,14 @@
+scripts:
+  setup: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="$HOME/.cargo/bin:$PATH"
+
+    echo "== cargo fetch (workspace) =="
+    cargo fetch --locked
+
+    echo "== cargo fetch (apps/indexa-desktop, workspace-excluded) =="
+    cargo fetch --locked --manifest-path apps/indexa-desktop/Cargo.toml
+
+    echo "Worktree setup complete."
+    echo "Not run automatically: cargo build (608 crates, per-worktree target/, ~36GB in the main checkout), ollama pulls, indexa serve (:7620)"
