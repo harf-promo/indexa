@@ -2,7 +2,7 @@
 
 Where Indexa sits, who's nearby, and what makes it defensible. Honest, with the gaps named.
 
-> **Snapshot updated 2026-06-11 (v0.20.1).** Competitor capabilities drift; for what Indexa has
+> **Snapshot updated 2026-08-30 (v0.77.0).** Competitor capabilities drift; for what Indexa has
 > shipped since this date, [CHANGELOG.md](../CHANGELOG.md) is canonical, not this file.
 
 ## The one-line position
@@ -69,12 +69,11 @@ an LLM, with a **web-dashboard graph visualization** and export to wiki/Obsidian
 *inside* Claude Code / Cursor / Codex / Gemini CLI and lead with a "massively fewer tokens" hook.
 
 **What they do that Indexa doesn't (yet):**
-- The **knowledge graph + a real graph visualization is the product** — Indexa's "Map" is still a plain
-  table. This is Indexa's most visible gap and biggest UX opportunity.
-- **Distribution as a one-line AI-assistant skill/plugin** — an enormous adoption lever. Indexa is a
-  separate binary you install.
-- Community detection (Leiden), "highest-degree concepts / surprising connections," multimodal extraction
-  via cloud vision, and strong marketing surface (homepage, Discord, token-savings headline).
+- **Distribution as a one-line AI-assistant skill/plugin with zero separate install** — Indexa closed
+  most of the practical gap (`mcp install --client …`, `install-hooks`, a shipped SKILL.md — see
+  "borrowed" below), but is still fundamentally a binary you install, not a pure assistant-side plugin.
+- A strong dedicated marketing surface (homepage, Discord, a "massively fewer tokens" headline) — a
+  marketing gap, not a product one.
 
 **What Indexa does that they don't:**
 - Truly **local / offline** (they require the cloud); a **persistent indexed store + hybrid retrieval**
@@ -85,13 +84,18 @@ an LLM, with a **web-dashboard graph visualization** and export to wiki/Obsidian
 - ✅ **Local multimodal** understanding — what they do with cloud vision, Indexa does **offline**
   (opt-in image captioning + audio transcription).
 - ✅ A **code-relationship graph** — they prove the demand; Indexa does it in **local SQLite, behind
-  MCP** (`dependencies` / `who_imports`), not Neo4j/cloud. (Cross-file call edges are the next step.)
-- ✅ A **signature graph visualization** — the Map tab's force-directed call graph (v0.18), with
-  weighted-PageRank node sizing (v0.20), plus the coverage treemap (v0.13).
-- Still open: **making token-savings visible** in `export` and the workspace (export gained a
-  token-count estimate in v0.20; per-session "tokens saved" telemetry is the next step); and an
-  **Indexa MCP/skill distribution** so AI assistants can adopt it as easily as a one-line skill
-  (an `indexa mcp install --client …` configurator is planned).
+  MCP**, now including cross-file call edges (`who_calls` / `blast_radius`, scoped resolution since
+  v0.25) and open-ended traversal (`dependency_closure`, `trace_path`, `symbol_context`) — not
+  Neo4j/cloud.
+- ✅ A **signature graph visualization** — the Map tab's force-directed call graph, treemap, community
+  and architecture-module overlays (see "The Map, as a real map" below). The Map is no longer a plain
+  table — this was the biggest closed gap on this page.
+- ✅ **Token-savings visible** in `export` and the workspace — per-answer/per-session/weekly Impact
+  telemetry, plus a per-file "show the math" breakdown.
+- ✅ **Indexa MCP/skill distribution** — `indexa mcp install --client claude-code|claude-desktop|
+  cursor|vscode` auto-detects and configures installed clients; `indexa install-hooks` generates
+  Claude Code hook config and a shipped SKILL.md teaches an agent which tool fits which question —
+  this closed what was the one remaining open gap on this page.
 
 ## Capability arc — what we closed, and what's next
 
@@ -101,25 +105,32 @@ an LLM, with a **web-dashboard graph visualization** and export to wiki/Obsidian
   queryable over MCP (`dependencies`, `who_imports`).
 - ✅ **Local multimodal** — opt-in on-device image captioning and audio transcription; media is no
   longer metadata-only.
-- ✅ **ANN/HNSW + batch embedding** — an opt-in HNSW index lifts the brute-force ceiling on large
-  corpora, and deep-phase embedding now batches.
+- ✅ **ANN/HNSW + batch embedding** — an HNSW index lifts the brute-force ceiling on large corpora
+  (now on by default in `serve`/`mcp` above `ann_min_chunks`), and deep-phase embedding now batches.
 - ✅ **First-run onboarding + streaming `ask`** — guided empty-state flow; answers stream token-by-token.
 - ✅ **Cross-file call edges / blast-radius (D2)** — `who_calls` / `blast_radius` (v0.12; bare-name
-  matched, honestly labeled), plus a strict precision mode (v0.20).
-- ✅ **The Map, as a real map** — coverage treemap (v0.13) and the force-directed call-graph view
-  (v0.18) with PageRank centrality sizing (v0.20).
+  matched, honestly labeled), a strict precision mode (v0.20), and scoped resolution tiers
+  (same-file/import/same-dir before falling back to labeled bare-name matching, v0.25) — the
+  bare-name asterisk now applies only to the labeled remainder.
+- ✅ **The Map, as a real map** — coverage treemap (v0.13), the force-directed call-graph view (v0.18)
+  with PageRank centrality sizing (v0.20), a Louvain communities overlay (v0.72, opt-in), and
+  persisted architecture-map modules (v0.77).
 - ✅ **Context Packs** — subject-scoped portable bundles (v0.14), with `--auto` semantic gathering.
 - ✅ **Agentic, multi-step `ask`** — bounded plan → search → refine loop, opt-in, fails open (v0.20).
-
-**Still open (honest, ranked):**
-
-1. **Scoped (tree-sitter) call resolution** — earn back the bare-name asterisk on the D2 graph.
-2. **GraphRAG-style thematic answers** — would build on the code/knowledge graph.
 
 **Closed since this list was last written (keep them off the open list):**
 
 - ✅ **Token-savings telemetry** — per-answer, per-session, and weekly Impact (≈4 bytes/token, labeled).
 - ✅ **Decision Ledger** — CLI / web / MCP, with revision chains and a Review inbox.
+- ✅ **GraphRAG-style thematic answers (v0.70)** — opt-in topic-clustered synthesis
+  (`[retrieval] graphrag_clusters`) groups a broad question's hits into themed sections before
+  synthesis. Ships default-off: the pre-registered A/B on Indexa's own (topically cohesive) corpus
+  showed no lift over flat packing, so it's unpromoted — a real lever for corpora that span more
+  genuinely distinct topics.
+
+**Still open:** nothing currently tracked here — the two items previously listed (scoped call
+resolution, folded into the D2 bullet above; GraphRAG synthesis, just above) have both shipped.
+New gaps get logged here as identified.
 
 ## What we deliberately won't build
 

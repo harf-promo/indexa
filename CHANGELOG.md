@@ -34,6 +34,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     redaction runs. `redact.rs` itself, what gets redacted, and the redaction count are all
     unchanged everywhere else (`indexa export`, chunk storage, …).
 
+### Changed
+
+- **Docs staleness/redundancy pass (no code changes).** A sweep of `docs/**` (excl. `docs/archive/`)
+  and root `*.md` files against `CHANGELOG.md`'s actual shipped history, since several docs had
+  drifted from what's true today:
+  - `docs/COMPETITIVE.md`: refreshed the snapshot banner (`2026-06-11 (v0.20.1)` → `2026-08-30
+    (v0.77.0)`); moved scoped call resolution (v0.25) and GraphRAG-style synthesis (v0.70) from
+    "still open" to closed, both of which shipped well before this snapshot; corrected "Indexa's Map
+    is still a plain table" (false since v0.18's force-directed graph, long since joined by
+    treemap/communities/modules overlays) and "an opt-in HNSW index" (default-on above
+    `ann_min_chunks` since v0.77.0); marked the MCP/skill-distribution gap closed
+    (`mcp install --client …`, `install-hooks`, a shipped SKILL.md). Kept the file's purpose as
+    positioning/competitive analysis — pointed at `CHANGELOG.md` for detail rather than narrating it.
+  - `ROADMAP.md`: fixed a self-contradiction in the version-numbers note — it called **Smart
+    classification** "the next feature milestone" while the very next section marks that same
+    milestone `(shipped)`; now states it started shipping in `v0.8.0` and has completed.
+  - `docs/plans/2026-07-external-sources-features.md`: the "plan only — nothing implemented" banner
+    was stale — every item in the backlog (Top 8 + Waves 1–4, 24 features) shipped in `[0.77.0]`'s
+    "4-wave feature backlog" entry (confirmed via CHANGELOG cross-check, not assumed). Re-flagged the
+    banner and each Wave heading as shipped, pointing back to `CHANGELOG.md` as canonical rather than
+    re-narrating per-feature detail; fixed two inner passages that still read as present-tense "gap
+    still open" for a gap this same backlog closed.
+  - General link/accuracy sweep: `docs/methodology.md` and `docs/architecture.md` both still claimed
+    vector search was pure brute-force with no ANN fallback (`docs/methodology.md`'s "An HNSW sidecar
+    will be added when needed" contradicted its own shipped state); `README.md` called its ANN index
+    "opt-in" (default-on since v0.77.0) and undercounted the code graph at 6 languages instead of the
+    shipped 8 (missing C/C++, in two places); `SECURITY.md` pinned supported versions at a
+    66-releases-stale `v0.11.0`; `docs/TROUBLESHOOTING.md`
+    called PDF OCR "a planned opt-in, not shipped" (shipped since v0.48.0); `CONTRIBUTING.md` pointed
+    new-adapter contributors at a nonexistent `crates/cli/src/config.rs` (config structs live in
+    `crates/core/src/config.rs`); `docs/config.md` had a dead `(#)` placeholder link. No tool-count
+    strings touched (owned by other in-flight work this round); every relative link/anchor this pass
+    touched was verified to resolve locally (offline lychee-equivalent check) before opening the PR.
+
 ## [0.77.0] — 2026-08-20
 
 ### Added

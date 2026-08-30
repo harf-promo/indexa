@@ -1,6 +1,11 @@
 # Feature Plan — Learnings from 5 External Sources
 
-> Status: **plan only** — nothing here is implemented. Written 2026-07-19.
+> Status: **shipped in full** — every item in this backlog (Top 8 + Waves 1–4, 24 features) landed in
+> the "4-wave feature backlog from external sources" entry of [CHANGELOG.md](../../CHANGELOG.md)
+> under `[0.77.0]`; the MCP tool surface it grew (47→50) later reached 51 via unrelated follow-up
+> work. This document is now a historical design record of the plan, not a live backlog — CHANGELOG.md
+> is canonical for what shipped and how; per-item "✅ shipped" notes below point back to it rather
+> than re-narrating the detail. Written 2026-07-19.
 >
 > Sources studied: the Google Cloud [Open Knowledge Format blog post](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing),
 > [GoogleCloudPlatform/knowledge-catalog](https://github.com/GoogleCloudPlatform/knowledge-catalog),
@@ -87,11 +92,14 @@ Already borrowed: parallel walker + `WalkState::Skip`, GitignoreBuilder, NUL-sni
 8. No freshness automation by default; no staleness flags on results; no coverage attestation.
 9. Notes/decisions not linked to graph symbols; note surface is add-only.
 10. 47 tool schemas injected into every MCP session; no profiles.
-11. No agent lifecycle-hook distribution story (the one COMPETITIVE.md gap still open).
+11. No agent lifecycle-hook distribution story (was the one COMPETITIVE.md gap still open at the
+    time this was written; closed by Wave 3.1's `install-hooks` + SKILL.md).
 
 ---
 
 ## Top 8 by value (product ranking)
+
+All 8 rows below shipped (see the Wave sections and `Remaining owner decision points` below).
 
 | # | Feature | Wave item | Moat | Size |
 |---|---------|-----------|------|------|
@@ -106,7 +114,9 @@ Already borrowed: parallel walker + `WalkState::Skip`, GitignoreBuilder, NUL-sni
 
 ---
 
-## Wave 1 — Quick wins (S-class, no schema changes)
+## Wave 1 — Quick wins (S-class, no schema changes) — ✅ shipped
+
+All 8 items below shipped in `[0.77.0]`'s external-sources-backlog entry.
 
 ### 1.1 ★ Risk-grouped, depth-labeled `blast_radius` output *(GitNexus)*
 - **What:** group hits by hop with `d=1 WILL BREAK / d=2 LIKELY AFFECTED / d=3+ MAY NEED TESTING`
@@ -196,7 +206,9 @@ Already borrowed: parallel walker + `WalkState::Skip`, GitignoreBuilder, NUL-sni
 
 ---
 
-## Wave 2 — Graph & memory deepening (schema work; spine is 2.1 → 2.2 → 2.3)
+## Wave 2 — Graph & memory deepening (schema work; spine is 2.1 → 2.2 → 2.3) — ✅ shipped
+
+All 7 items below shipped in `[0.77.0]`'s external-sources-backlog entry.
 
 ### 2.1 Symbols table: kind + line ranges *(GitNexus/codebase-memory; prerequisite for 2.3/2.5)*
 - **What:** today `defines` rows are bare names — no kind, no positions. A `symbols` table unlocks
@@ -284,10 +296,13 @@ strongest convergence signal — two independent competitors built the identical
 
 ---
 
-## Wave 3 — Distribution & freshness (independent of Wave 2; can run in parallel)
+## Wave 3 — Distribution & freshness (independent of Wave 2; can run in parallel) — ✅ shipped
+
+All 3 items below shipped in `[0.77.0]`'s external-sources-backlog entry.
 
 ### 3.1 ★ `indexa install-hooks` + shipped SKILL.md *(codebase-memory hooks + knowledge-catalog SKILL)*
-- **What:** the distribution play for the one COMPETITIVE.md gap still open. (a) A command that
+- **What:** the distribution play for what was then the one COMPETITIVE.md gap still open (now
+  closed by this item, per that file). (a) A command that
   prints — and only with `--write` applies, after showing a diff — Claude Code hook config:
   SessionStart injects `indexa status --brief` + overview/freshness; optional PreToolUse-on-Grep
   injects top `ask --catalog` hits as additionalContext. Fail-open, context-only, never blocking.
@@ -323,7 +338,9 @@ strongest convergence signal — two independent competitors built the identical
 
 ---
 
-## Wave 4 — Packs interop & pipeline breadth (chains: pack_events → 4.2 → 4.3)
+## Wave 4 — Packs interop & pipeline breadth (chains: pack_events → 4.2 → 4.3) — ✅ shipped
+
+All 6 items below shipped in `[0.77.0]`'s external-sources-backlog entry.
 
 ### 4.1 `pack_events` history *(prerequisite; enables log.md + versioning-lite)*
 - **What:** append-only `pack_events(pack_id, event CHECK IN ('created','path_added','path_removed',

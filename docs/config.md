@@ -124,7 +124,7 @@ custom_ignore     = true   # honor .indexaignore files (see below); set false to
 > `respect_gitignore` reads the scan root's own `.gitignore`; nested per-subdirectory `.gitignore`
 > files are not separately loaded. `ignore` patterns use gitignore syntax (globs, `dir/`, `!negation`).
 > Anything skipped here is never walked, so it can't be indexed or summarized. Use
-> [`indexa prune`](#) to clean rows left from content that *was* indexed before you ignored it.
+> `indexa prune` to clean rows left from content that *was* indexed before you ignored it.
 
 ### `.indexaignore` — tune indexing without touching git behavior
 

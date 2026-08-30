@@ -99,9 +99,11 @@ local model freeze the machine. It resumes when pressure clears. If it happens c
 
 ## Scanned PDFs / images produce empty results
 
-Image-only PDFs have no extractable text — they produce empty chunks (OCR is a planned opt-in, not
-shipped). For images and audio, enable the opt-in **local multimodal** parsers (vision captioning,
-whisper transcription) in the config; otherwise media is indexed by metadata only.
+Image-only PDFs have no text layer under the default `[parsers.pdf] backend = "text"` — they produce
+empty chunks. Set `[parsers.pdf] backend = "ocr"` (opt-in, needs poppler + Tesseract) to recognize
+scanned PDFs — see [docs/config.md](config.md). For images and audio, enable the opt-in **local
+multimodal** parsers (vision captioning, whisper transcription) in the config; otherwise media is
+indexed by metadata only.
 
 ## The summary queue looks stuck
 
