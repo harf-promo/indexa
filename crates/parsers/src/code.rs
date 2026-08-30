@@ -1,3 +1,4 @@
+use crate::text::decode_text_bytes;
 use crate::types::{Chunk, Edge, Extracted, Parser};
 use anyhow::Result;
 use std::path::Path;
@@ -236,7 +237,12 @@ impl Parser for CodeParser {
     }
 
     fn parse(&self, path: &Path) -> Result<Extracted> {
-        let source = std::fs::read_to_string(path)?;
+        // `decode_text_bytes` (always lossy), not a strict `read_to_string`: `CodeParser`
+        // doesn't override `parse_chunked`, so it never sees the `[parsers] encoding` config —
+        // but that config's own default is `Auto` (lossy), so this matches the default behavior
+        // every other text-shaped parser already gives out of the box, instead of hard-erroring
+        // a source file that has one stray non-UTF-8 byte in a comment/string literal.
+        let source = decode_text_bytes(&std::fs::read(path)?);
         let mime = mime_guess::from_path(path)
             .first_or_octet_stream()
             .to_string();
@@ -914,6 +920,27 @@ impl Greeter {
         let extracted = parser.parse(&p).unwrap();
         assert!(extracted.chunks.len() >= 2);
         assert_eq!(extracted.chunks[0].language.as_deref(), Some("rust"));
+    }
+
+    /// Regression test: a source file with one stray non-UTF-8 byte (e.g. in a comment or
+    /// string literal) must still be indexed (lossily), not hard-error the whole file — matches
+    /// every other text-shaped parser's default `[parsers] encoding = "auto"` behavior.
+    #[test]
+    fn parses_source_file_with_invalid_utf8_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("lib.rs");
+        let mut bytes = b"// Caf".to_vec();
+        bytes.push(0xE9); // Latin-1 "e"-acute — invalid on its own as UTF-8.
+        bytes.extend_from_slice(b" note\npub fn hello() -> i32 { 42 }\n");
+        assert!(
+            std::str::from_utf8(&bytes).is_err(),
+            "fixture must actually be invalid UTF-8"
+        );
+        std::fs::write(&p, &bytes).unwrap();
+
+        let extracted = CodeParser.parse(&p).unwrap();
+        assert!(!extracted.chunks.is_empty());
+        assert!(extracted.chunks.iter().any(|c| c.text.contains("hello")));
     }
 
     #[test]

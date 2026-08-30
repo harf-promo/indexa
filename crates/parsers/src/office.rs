@@ -67,7 +67,7 @@ impl Parser for OfficeParser {
 
         let text = match ext {
             "xlsx" | "xls" | "xlsm" | "ods" => parse_spreadsheet(path)?,
-            "csv" | "tsv" => parse_csv(path)?,
+            "csv" | "tsv" => parse_csv(path, chunk.encoding)?,
             "docx" => parse_docx_zip(path).unwrap_or_else(|_| {
                 format!(
                     "Document: {}",
@@ -309,8 +309,13 @@ fn parse_spreadsheet(path: &Path) -> Result<String> {
 }
 
 /// Parse CSV/TSV files as plain text (calamine handles xlsx; CSV is simpler).
-fn parse_csv(path: &Path) -> Result<String> {
-    let content = std::fs::read_to_string(path)?;
+fn parse_csv(path: &Path, encoding: crate::types::TextEncoding) -> Result<String> {
+    // `read_text_lossy`, not a strict `read_to_string`: a Windows-1252/Latin-1 CSV export from
+    // Excel (common) should still get indexed under the default `[parsers] encoding = "auto"`,
+    // matching `TextParser`'s handling instead of hard-erroring the whole file — unlike the
+    // adjacent docx/rtf/ppt branches in `parse_chunked`'s dispatch, which already degrade to a
+    // stub on failure rather than propagating an error.
+    let content = crate::text::read_text_lossy(path, encoding)?;
     let mut parts = Vec::new();
 
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
@@ -488,6 +493,33 @@ mod tests {
             .join(" ");
         assert!(combined.contains("Alice"));
         assert!(combined.contains("Bob"));
+    }
+
+    /// Regression test: a Windows-1252/Latin-1 CSV export from Excel (a common real-world case —
+    /// unlike the adjacent docx/rtf/ppt branches, this format used to hard-error the whole file
+    /// instead of degrading gracefully) must still be indexed under the default
+    /// `[parsers] encoding = "auto"`.
+    #[test]
+    fn csv_with_invalid_utf8_bytes_still_parses_under_the_default_encoding() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("legacy.csv");
+        let mut bytes = b"name,city\nCaf".to_vec();
+        bytes.push(0xE9); // Latin-1 "e"-acute — invalid on its own as UTF-8.
+        bytes.extend_from_slice(b" Owner,Paris\n");
+        assert!(
+            std::str::from_utf8(&bytes).is_err(),
+            "fixture must actually be invalid UTF-8"
+        );
+        std::fs::write(&p, &bytes).unwrap();
+
+        let extracted = OfficeParser.parse(&p).unwrap();
+        let combined: String = extracted
+            .chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(combined.contains("Paris"), "{combined}");
     }
 
     #[test]

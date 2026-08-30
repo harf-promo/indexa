@@ -271,6 +271,10 @@ pub async fn claude_status(claude_bin: &str) -> ClaudeStatus {
         Command::new(bin)
             .arg("--version")
             .env_remove("ANTHROPIC_API_KEY")
+            // As in `run()`: if the timeout fires and this future is dropped, kill the
+            // child instead of leaking it detached — a probe run on every Settings load
+            // must not accumulate orphaned `claude` processes.
+            .kill_on_drop(true)
             .output(),
     )
     .await;
@@ -297,6 +301,9 @@ pub async fn claude_status(claude_bin: &str) -> ClaudeStatus {
             .arg("status")
             .arg("--json")
             .env_remove("ANTHROPIC_API_KEY")
+            // Same reasoning as the `--version` probe above: this one may touch the
+            // network (OAuth validation), making a timeout-then-leak more likely, not less.
+            .kill_on_drop(true)
             .output(),
     )
     .await;
@@ -310,4 +317,61 @@ pub async fn claude_status(claude_bin: &str) -> ClaudeStatus {
     }
 
     status
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for a missing `.kill_on_drop(true)` on the `claude_status` probes: when
+    /// the 5s probe timeout fires and `tokio::time::timeout` drops the still-running child
+    /// future, the underlying process must actually die, not keep running detached. This runs
+    /// on every Settings-page load and every `doctor` run, so a leak here accumulates one
+    /// orphaned process per timed-out probe.
+    ///
+    /// Linux-only: checks liveness via `/proc/<pid>` rather than pulling in a new dependency
+    /// just for this test (mirrors the `#[cfg(unix)]`-gated platform tests already used
+    /// elsewhere in this codebase, e.g. `crates/core/src/walker.rs`).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn timed_out_version_probe_actually_kills_the_child_process() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A fake "claude" binary that outlives the probe's 5s timeout by a wide margin, and
+        // records its own pid so the test can check afterward whether it's still alive.
+        let dir = std::env::temp_dir().join(format!(
+            "indexa-claude-status-kill-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("pid");
+        let script = dir.join("claude");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho $$ > {}\nsleep 30\n", pid_file.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        claude_status(script.to_str().unwrap()).await;
+
+        // Give the OS a brief moment to finish reaping the killed child after `output()` returns.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("fake claude script should have written its pid before the 5s timeout")
+            .trim()
+            .to_owned();
+        let still_alive = std::path::Path::new(&format!("/proc/{pid}")).exists();
+        assert!(
+            !still_alive,
+            "probe subprocess pid {pid} was not killed when the timeout dropped its future"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

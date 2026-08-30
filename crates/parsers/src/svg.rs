@@ -6,6 +6,7 @@
 //! rasterisation/OCR — text drawn as outlined vector paths (glyphs converted to shapes) is
 //! not recovered. This indexes the *words in a diagram*, not its drawing instructions.
 
+use crate::text::read_text_lossy;
 use crate::types::{chunk_words, Chunk, ChunkParams, Extracted, Parser};
 use anyhow::Result;
 use std::path::Path;
@@ -31,7 +32,10 @@ impl Parser for SvgParser {
     }
 
     fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> Result<Extracted> {
-        let raw = std::fs::read_to_string(path)?;
+        // `read_text_lossy`, not a strict `read_to_string`: an SVG exported by an older tool in
+        // Latin-1/Windows-1252 should still get indexed under the default `[parsers] encoding =
+        // "auto"`, matching `TextParser`'s handling instead of hard-erroring the whole file.
+        let raw = read_text_lossy(path, chunk.encoding)?;
         let text = extract_svg_text(&raw);
 
         let mut chunks = Vec::new();
@@ -144,6 +148,31 @@ mod tests {
         // Geometry and CSS are not indexed.
         assert!(!all.contains("M10"), "path geometry dropped: {all}");
         assert!(!all.contains("fill: red"), "style content skipped: {all}");
+    }
+
+    /// Regression test: a non-UTF-8 SVG (e.g. exported by an older tool in Latin-1) must still
+    /// be indexed under the default `[parsers] encoding = "auto"`, not hard-error the whole file.
+    #[test]
+    fn svg_with_invalid_utf8_bytes_still_parses_under_the_default_encoding() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("legacy.svg");
+        let mut bytes = br#"<svg xmlns="http://www.w3.org/2000/svg"><text>Caf"#.to_vec();
+        bytes.push(0xE9); // Latin-1 "é" — invalid on its own as UTF-8.
+        bytes.extend_from_slice(b" bar</text></svg>");
+        assert!(
+            std::str::from_utf8(&bytes).is_err(),
+            "fixture must actually be invalid UTF-8"
+        );
+        std::fs::write(&p, &bytes).unwrap();
+
+        let ex = SvgParser.parse(&p).unwrap();
+        let all: String = ex
+            .chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(all.contains("bar"), "{all}");
     }
 
     #[test]

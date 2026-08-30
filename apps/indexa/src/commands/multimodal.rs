@@ -29,7 +29,7 @@ pub(crate) async fn multimodal_readiness(cfg: &Config) -> Readiness {
 
     // A vision model in Ollama (captioning uses the configured/default vision model).
     let vision_model = cfg.parsers.image.caption_model().to_owned();
-    let base = indexa_llm::OllamaLlm::resolve_base_url(Some(cfg.embedding.base_url.as_str()));
+    let base = vision_probe_base_url(cfg);
     let installed = indexa_llm::ollama_list_models(&base)
         .await
         .unwrap_or_default();
@@ -133,6 +133,17 @@ pub(crate) async fn cmd_multimodal(enable: bool, cfg: &Config, config_path: &Pat
     Ok(())
 }
 
+/// The Ollama host to probe for the vision/captioning model. Image/video captioning shares the
+/// describer's Ollama endpoint (see `deep.rs`'s captioner setup), NOT the embedder's —
+/// `cfg.embedding.base_url` and `cfg.describer.base_url` are independently settable (see
+/// `helpers.rs`'s `ollama_requirements_resolves_each_provider_against_its_own_base`), so
+/// resolving against the wrong one under-/over-reports readiness whenever the two point at
+/// different hosts. Split out to a pure function so this resolution is unit-testable without a
+/// live/mocked Ollama server.
+fn vision_probe_base_url(cfg: &Config) -> String {
+    indexa_llm::OllamaLlm::resolve_base_url(Some(cfg.describer.base_url.as_str()))
+}
+
 fn feat_line(name: &str, ready: bool, already_on: bool, needs: &str, flag: &str) {
     let status = if already_on {
         "✅ enabled"
@@ -160,4 +171,20 @@ fn model_present(installed: &[String], want: &str) -> bool {
     installed
         .iter()
         .any(|m| m == want || model_base(m) == model_base(want))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test: the vision-model readiness check must resolve against the describer's
+    /// Ollama host, not the embedder's — they're independently configurable, and captioning
+    /// actually runs against the describer's endpoint (`deep.rs`).
+    #[test]
+    fn vision_probe_resolves_against_describer_base_not_embedder_base() {
+        let mut cfg = Config::default();
+        cfg.embedding.base_url = "http://embed-host:11434".into();
+        cfg.describer.base_url = "http://describer-host:11434".into();
+        assert_eq!(vision_probe_base_url(&cfg), "http://describer-host:11434");
+    }
 }

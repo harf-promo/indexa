@@ -1,5 +1,6 @@
 //! Org-mode parser — heading-aware, handles code blocks, mirrors MarkdownParser pattern.
 
+use crate::text::read_text_lossy;
 use crate::types::{Chunk, ChunkParams, Extracted, Parser};
 use anyhow::Result;
 use std::path::Path;
@@ -21,7 +22,10 @@ impl Parser for OrgParser {
     }
 
     fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> Result<Extracted> {
-        let raw = std::fs::read_to_string(path)?;
+        // `read_text_lossy`, not a strict `read_to_string`: an `.org` file authored on a
+        // non-UTF-8 locale should still get indexed under the default `[parsers] encoding =
+        // "auto"`, matching `TextParser`'s handling instead of hard-erroring the whole file.
+        let raw = read_text_lossy(path, chunk.encoding)?;
         let sections = collect_sections(&raw);
 
         let mut chunks = Vec::new();
@@ -294,6 +298,31 @@ mod tests {
         let text = &ex.chunks[0].text;
         assert!(text.contains("Click here"), "{text}");
         assert!(!text.contains("[["), "{text}");
+    }
+
+    /// Regression test: a non-UTF-8 `.org` file (e.g. authored on a non-UTF-8 locale) must
+    /// still be indexed under the default `[parsers] encoding = "auto"`, not hard-error.
+    #[test]
+    fn org_parser_with_invalid_utf8_bytes_still_parses_under_the_default_encoding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.org");
+        let mut bytes = b"* Notes\nCaf".to_vec();
+        bytes.push(0xE9); // Latin-1 "é" — invalid on its own as UTF-8.
+        bytes.extend_from_slice(b" con leche\n");
+        assert!(
+            std::str::from_utf8(&bytes).is_err(),
+            "fixture must actually be invalid UTF-8"
+        );
+        std::fs::write(&path, &bytes).unwrap();
+
+        let ex = OrgParser.parse(&path).unwrap();
+        let all: String = ex
+            .chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(all.contains("con leche"), "{all}");
     }
 
     #[test]
