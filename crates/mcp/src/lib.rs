@@ -60,7 +60,9 @@ pub use graph::{
     DependencyClosureParams, RelatedFilesParams, SymbolContextParams, TracePathParams,
     WhoCallsParams, WhoImportsParams,
 };
-pub use insights::{InsightsDaysParams, InsightsDuplicatesParams, InsightsLargestParams};
+pub use insights::{
+    InsightsDaysParams, InsightsDuplicatesParams, InsightsLargestParams, SummarizePassStatusParams,
+};
 pub use packs::{
     CreatePackMcpParams, DeletePackMcpParams, ExportPackParams, GetPackParams, PackPathsParams,
     SearchPackParams,
@@ -71,7 +73,7 @@ pub use retrieval::{
 };
 pub use review::{
     AnswerDecisionParams, DecisionHistoryParams, DismissDecisionParams, GetDecisionParams,
-    ListOpenDecisionsParams,
+    ListOpenDecisionsParams, RecordDecisionParams,
 };
 
 /// Max bytes returned by `read_file` (L2 raw content).
@@ -410,7 +412,7 @@ impl ServerHandler for IndexaMcp {
 
     // ── Resources (read-only index artifacts) ──────────────────────────────────
     // Hand-written (resources have no router macro); the inner methods live in
-    // `resources.rs`. Tools stay the source of truth for the 51-tool golden list —
+    // `resources.rs`. Tools stay the source of truth for the 53-tool golden list —
     // resources/prompts are a separate protocol surface and don't affect it.
 
     async fn list_resources(
@@ -1756,6 +1758,7 @@ mod tests {
             "confirm_classification",
             "set_weight",
             "delete_weight",
+            "record_decision",
         ]
         .into_iter()
         .collect();
@@ -1802,18 +1805,18 @@ mod tests {
                 );
             }
         }
-        // Sanity: the three buckets partition the full 51-tool surface with no overlap and
+        // Sanity: the three buckets partition the full 53-tool surface with no overlap and
         // nothing left over.
         let total = IndexaMcp::tool_router().list_all().len();
         assert_eq!(
             destructive.len() + safe_mutating.len(),
-            13,
-            "expected exactly 13 mutating tools (6 destructive + 7 safe)"
+            14,
+            "expected exactly 14 mutating tools (6 destructive + 8 safe)"
         );
         assert_eq!(
             total - destructive.len() - safe_mutating.len(),
-            38,
-            "expected exactly 38 read-only tools"
+            39,
+            "expected exactly 39 read-only tools"
         );
     }
 

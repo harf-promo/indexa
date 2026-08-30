@@ -32,6 +32,14 @@ pub struct InsightsLargestParams {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SummarizePassStatusParams {
+    /// Max paths listed per bucket (stale/orphaned/uncovered). Default 50, max 500 — the
+    /// header always reports true totals even when a bucket is truncated.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
 #[tool_router(router = router_insights, vis = "pub(crate)")]
 impl IndexaMcp {
     // ── Insights (v0.10) ───────────────────────────────────────────────────────
@@ -224,5 +232,63 @@ impl IndexaMcp {
         Ok(ok_text(format!(
             "Language breakdown ({total} chunks):\n{body}"
         )))
+    }
+
+    /// Summarize-pass coverage: stale / orphaned / uncovered, relative to `summaries`.
+    #[tool(
+        description = "Classify every indexed file/folder against the LAST `summarize` pass: \
+                       `stale` (the entry changed on disk after its summary was generated), \
+                       `orphaned` (a summary row points at a path no longer in the index), or \
+                       `uncovered` (indexed but never summarized). This is summarize-pass \
+                       coverage — a different axis from insights_stale (directory mtime age, \
+                       unrelated to whether anything was ever summarized) and from the \
+                       per-citation freshness `ask` checks internally. Run `indexa summarize` \
+                       to close the gaps this reports.",
+        annotations(read_only_hint = true)
+    )]
+    pub(crate) async fn summarize_pass_status(
+        &self,
+        params: Parameters<SummarizePassStatusParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let limit = params.0.limit.unwrap_or(50).clamp(1, 500);
+        let store = self.store()?;
+        let report = indexa_core::summary_drift::drift_report(&store).map_err(mcp_err)?;
+        if report.is_empty() {
+            return Ok(ok_text(
+                "No drift — every indexed path is covered by an up-to-date summary.",
+            ));
+        }
+        let section = |label: &str, rows: &[indexa_core::summary_drift::DriftEntry]| {
+            if rows.is_empty() {
+                return String::new();
+            }
+            let lines: Vec<String> = rows
+                .iter()
+                .take(limit)
+                .map(|e| format!("  {}", e.path))
+                .collect();
+            let trunc = if rows.len() > limit {
+                format!(" (showing first {limit})")
+            } else {
+                String::new()
+            };
+            format!("\n\n{label} ({}){trunc}:\n{}", rows.len(), lines.join("\n"))
+        };
+        let mut out = format!(
+            "Summarize-pass drift: {} stale, {} orphaned, {} uncovered.",
+            report.stale.len(),
+            report.orphaned.len(),
+            report.uncovered.len()
+        );
+        out.push_str(&section(
+            "Stale (changed on disk after the last summarize pass)",
+            &report.stale,
+        ));
+        out.push_str(&section(
+            "Orphaned (summary for a path no longer indexed)",
+            &report.orphaned,
+        ));
+        out.push_str(&section("Uncovered (never summarized)", &report.uncovered));
+        Ok(ok_text(out))
     }
 }

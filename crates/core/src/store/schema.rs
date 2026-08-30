@@ -481,7 +481,12 @@ impl Store {
                 effects             TEXT,     -- applied projection (JSON); NULL ⇒ repair-sweep target
                 effects_applied_at  INTEGER,
                 created_at    INTEGER NOT NULL DEFAULT (unixepoch()),
-                decided_at    INTEGER
+                decided_at    INTEGER,
+                -- Durable content-based reference (v0.78): a `git patch-id` for the subject's
+                -- content at record time (see core::decisions::patch_id) — unlike a commit SHA,
+                -- survives a rebase/squash. NULL when no git reference was available. Populated
+                -- by the MCP `record_decision` tool; every other decision type leaves it NULL.
+                patch_id      TEXT
             );
             -- At most one OPEN question per (type, subject); record_decision races
             -- resolve via ON CONFLICT DO NOTHING against this partial index.
@@ -518,6 +523,19 @@ impl Store {
         if !has_scan_generation {
             self.conn
                 .execute_batch("ALTER TABLE entries ADD COLUMN scan_generation INTEGER;")?;
+        }
+
+        // Migration: add decisions.patch_id (v0.78) — the durable content-based reference (see
+        // the base DDL comment above). Nullable, NO backfill: pre-existing rows have no
+        // recorded git state to derive one from, and NULL correctly means "no durable
+        // reference" for them, same as a fresh row where `record_decision` found no repo.
+        let has_patch_id: bool = self
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('decisions') WHERE name = 'patch_id'")?
+            .exists([])?;
+        if !has_patch_id {
+            self.conn
+                .execute_batch("ALTER TABLE decisions ADD COLUMN patch_id TEXT;")?;
         }
 
         // Migration: add entries.first_indexed_at (v0.10) — the original discovery

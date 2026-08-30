@@ -29,6 +29,7 @@ pub mod pathutil;
 pub mod resource;
 pub mod smart_classify;
 pub mod store;
+pub mod summary_drift;
 pub mod surface;
 pub mod text;
 pub mod walker;

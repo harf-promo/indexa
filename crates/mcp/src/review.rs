@@ -5,15 +5,17 @@
 //! surface: the ledger row commits first (provenance is never lost), then the
 //! idempotent projection updates the domain tables.
 
+use std::path::Path;
+
 use rmcp::{
     handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router, ErrorData,
 };
 use serde::Deserialize;
 
-use indexa_core::decisions::{self, templates::render_question, DecisionType};
+use indexa_core::decisions::{self, patch_id, templates::render_question, DecisionType};
 use indexa_core::store::DecisionRecord;
 
-use crate::{mcp_err, ok_text, IndexaMcp};
+use crate::{mcp_err, mcp_invalid, ok_text, IndexaMcp};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListOpenDecisionsParams {
@@ -55,6 +57,15 @@ pub struct DecisionHistoryParams {
     /// The subject the decisions are about — a path or duplicate-cluster key,
     /// exactly as shown by the other decision tools.
     pub subject: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RecordDecisionParams {
+    /// Stable key this note is about — an indexed file/dir path (recommended: enables a
+    /// durable git patch-id reference that survives rebase/squash) or a free-form topic key.
+    pub subject: String,
+    /// The note text to record durably in the Decision Ledger.
+    pub note: String,
 }
 
 /// One rendered question as agents see it: id, title, detail, then each option
@@ -304,6 +315,49 @@ impl IndexaMcp {
             "{} revision(s) for \"{subject}\" (oldest first):\n\n{}",
             rows.len(),
             lines.join("\n")
+        )))
+    }
+
+    /// Push a durable, agent-authored note into the Decision Ledger mid-session.
+    #[tool(
+        description = "Record a durable note in the Decision Ledger — e.g. \"chose the RRF \
+                       fusion over a hard cutoff because eval regressed\". Unlike \
+                       list_open_decisions' judgment calls, this is context YOU choose to pin, \
+                       not a question Indexa asks; it's recorded immediately, never left open. \
+                       When `subject` is an indexed file or directory path, the entry is \
+                       anchored to a git patch-id — a content hash of that path's committed \
+                       state, not a commit SHA — so the reference still resolves after the \
+                       commit that captured it is rebased or squashed. Retrieve it later with \
+                       decision_history(subject) or get_decision(id).",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    pub(crate) async fn record_decision(
+        &self,
+        params: Parameters<RecordDecisionParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let RecordDecisionParams { subject, note } = params.0;
+        if note.trim().is_empty() {
+            return Err(mcp_invalid("note text must not be empty"));
+        }
+        let anchor = Path::new(&subject)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| Path::new(".").to_path_buf());
+        let patch = patch_id::compute_patch_id(&anchor, Path::new(&subject));
+
+        let mut store = self.store()?;
+        let (id, _effects) =
+            decisions::record_annotation(&mut store, &subject, &note, patch.as_deref())
+                .map_err(mcp_err)?;
+        let ref_note = match &patch {
+            Some(pid) => format!(" (pinned to patch-id {pid} — survives rebase/squash)"),
+            None => {
+                " (no git patch-id available — recorded without a durable reference)".to_owned()
+            }
+        };
+        Ok(ok_text(format!(
+            "Recorded ledger entry #{id} for \"{subject}\"{ref_note}:\n{note}"
         )))
     }
 }

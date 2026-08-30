@@ -24,7 +24,7 @@ use rusqlite::{params, OptionalExtension, Transaction};
 /// Shared SELECT column list — keep in sync with [`row_to_decision`].
 const DECISION_COLS: &str = "id, decision_type, subject, params, options, auto_value, chosen, \
      source, confidence, evidence_hash, priority, status, parent_id, superseded_by, \
-     effects, effects_applied_at, created_at, decided_at";
+     effects, effects_applied_at, created_at, decided_at, patch_id";
 
 fn row_to_decision(r: &rusqlite::Row) -> rusqlite::Result<DecisionRecord> {
     Ok(DecisionRecord {
@@ -47,6 +47,7 @@ fn row_to_decision(r: &rusqlite::Row) -> rusqlite::Result<DecisionRecord> {
         effects_applied_at: r.get(15)?,
         created_at: r.get(16)?,
         decided_at: r.get(17)?,
+        patch_id: r.get(18)?,
     })
 }
 
@@ -455,6 +456,22 @@ impl Store {
             params![id, v.to_string()],
         )?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Stamp the durable content-based reference (v0.78) computed for a freshly-recorded row —
+    /// see `crate::decisions::patch_id::compute_patch_id` and `crate::decisions::record_annotation`,
+    /// the only caller today. A separate call rather than a `NewDecision` field: widening
+    /// `NewDecision` would touch every one of its many construction sites across the codebase
+    /// for a value only one caller ever supplies.
+    pub fn set_decision_patch_id(&mut self, id: i64, patch_id: &str) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE decisions SET patch_id = ?2 WHERE id = ?1",
+            params![id, patch_id],
+        )?;
+        if n == 0 {
+            bail!("no decision with id {id}");
+        }
         Ok(())
     }
 

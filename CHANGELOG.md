@@ -34,6 +34,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     redaction runs. `redact.rs` itself, what gets redacted, and the redaction count are all
     unchanged everywhere else (`indexa export`, chunk storage, …).
 
+- **Durable, patch-id-anchored Decision Ledger entries — new MCP tool `record_decision` (53
+  tools).** The Decision Ledger's rows previously carried no reference that survives history
+  rewrites; `record_decision` lets an agent push a free-form note mid-session (e.g. "chose the
+  RRF fusion over a hard cutoff because eval regressed") that is recorded immediately (never
+  left open) and, when `subject` is an indexed path, anchored to a `git patch-id` — a content
+  hash of that path's committed state (`git diff <empty-tree> HEAD -- <path> | git patch-id`),
+  not a commit SHA, so the reference still resolves after a rebase or squash. No new
+  dependency: patch-id computation shells out to the user's own `git` binary via
+  `std::process::Command`, the same house style as `crates/core/src/gitdiff.rs`, and fails open
+  (`None`) when no repo/binary/tracked path is available. New `decisions.patch_id` column
+  (nullable, additive migration) and `DecisionType::Annotation` — an entry type that is always
+  recorded already-`decided`, distinct from every question type Indexa itself raises, and from
+  the unrelated `notes`/`add_note` feature. Read it back via `decision_history`/`get_decision`.
+  `read_only_hint = false, destructive_hint = false` (mutating-but-safe, same bucket as
+  `add_note`).
+
+- **Summarize-pass drift report — new read-only MCP tool `summarize_pass_status` (53 tools).**
+  Classifies every indexed file/folder against the LAST `summarize` pass into `stale` (the
+  entry changed on disk after its summary was generated), `orphaned` (a summary row points at a
+  path no longer in the index), or `uncovered` (indexed but never summarized) — a coverage
+  question distinct from `insights_stale` (directory mtime age, unrelated to summarization) and
+  from the per-citation freshness `ask` checks internally (`indexa_query::staleness::is_stale`,
+  keyed on `chunks.indexed_at`). Built in a new `crates/core/src/summary_drift.rs`, reading only
+  already-recorded state (`entries.modified_s` vs. `summaries.generated_at`) — no new schema, no
+  live filesystem re-scan.
+
+- **`ToolAnnotations`, golden tool list, and doc counts updated for the two new tools (51 → 53
+  tools)** across `AGENTS.md`, `README.md`, `USAGE.md`, and `docs/how-to/live-retrieval-over-mcp.md`.
+
 ### Changed
 
 - **Docs staleness/redundancy pass (no code changes).** A sweep of `docs/**` (excl. `docs/archive/`)

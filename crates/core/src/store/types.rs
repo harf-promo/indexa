@@ -302,6 +302,12 @@ pub struct DecisionRecord {
     pub effects_applied_at: Option<i64>,
     pub created_at: i64,
     pub decided_at: Option<i64>,
+    /// Durable content-based reference (v0.78) — a `git patch-id` for the subject's content
+    /// at record time, computed by `crate::decisions::patch_id::compute_patch_id`. Unlike a
+    /// commit SHA, a patch-id survives rebase/squash (it hashes diff content, not history).
+    /// `None` when no git reference was available (no repo, untracked path, no `git` binary)
+    /// or for any decision recorded before this column existed.
+    pub patch_id: Option<String>,
 }
 
 /// Input for [`Store::record_decision`] — everything a detector knows when it

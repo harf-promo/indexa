@@ -48,7 +48,16 @@ pub fn apply_decision_effects(store: &mut Store, d: &DecisionRecord) -> Result<s
         DecisionType::SummaryDrift => apply_summary_drift(store, d, chosen),
         DecisionType::Language => apply_language(store, d, chosen),
         DecisionType::SymbolAmbiguity => apply_symbol_ambiguity(d, chosen),
+        DecisionType::Annotation => apply_annotation(),
     }
+}
+
+/// Annotation projection: the note text IS the artifact — no domain table changes, same
+/// rationale as [`apply_symbol_ambiguity`]. In practice this only ever runs once, inline with
+/// `record_annotation` recording the row already-decided; it exists so `decide_and_apply`
+/// (and the crash-repair sweep, defensively) stay total over every [`DecisionType`].
+fn apply_annotation() -> Result<serde_json::Value> {
+    Ok(json!({ "annotation": "recorded" }))
 }
 
 /// Summary-drift projection. `keep_new` = nothing to do (the regenerated
@@ -288,6 +297,7 @@ mod tests {
             effects_applied_at: None,
             created_at: 1,
             decided_at: Some(2),
+            patch_id: None,
         }
     }
 
@@ -505,6 +515,22 @@ mod tests {
         assert_eq!(
             apply_decision_effects(&mut store, &ig).unwrap(),
             json!({"language": null})
+        );
+    }
+
+    #[test]
+    fn annotation_projection_is_a_recorded_noop() {
+        let mut store = Store::open_in_memory().unwrap();
+        let d = decided(
+            71,
+            "annotation",
+            "/r/proj",
+            json!({"note": "chose X"}),
+            "chose X",
+        );
+        assert_eq!(
+            apply_decision_effects(&mut store, &d).unwrap(),
+            json!({ "annotation": "recorded" })
         );
     }
 
