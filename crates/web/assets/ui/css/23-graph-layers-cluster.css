@@ -1,0 +1,34 @@
+/* 23-graph-layers-cluster.css — the Map's "Architecture layers" overlay: clusters/colours
+   nodes by an INFERRED layer (API/Service/Data/UI/Utility), guessed client-side from each
+   node's path in 31-graph-layers-cluster.js. Node colours are set INLINE on the SVG circles
+   (data-driven, same convention as 21-graph-communities.css) — no rule names a layer colour
+   here; this file styles only the toggle + legend chrome, and reuses the existing
+   `.graph-layer-toggle` toolbar-checkbox style (20-graph-layers.css) and `.glegend-item`
+   legend-row style (18-graph-explore.css) rather than redefining them. */
+
+/* Own container (not the shared `#graph-legend`, which 25-graph-explore.js's
+   renderGraphLegend fully overwrites on every render) — same layout as `.graph-legend`. */
+.garch-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  align-items: center;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Swatch: same shape/size as `.glegend-swatch-community`; its background colour is set
+   inline by JS (one of the fixed per-layer hues, or the neutral --ink-4 "Other" fallback). */
+.garch-swatch {
+  display: inline-block;
+  width: 0.7em;
+  height: 0.7em;
+  border-radius: var(--r-0);
+  vertical-align: -0.05em;
+  margin-right: 4px;
+}
+
+@media (max-width: 768px) {
+  .garch-legend { gap: 4px 12px; }
+}
