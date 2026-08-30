@@ -111,6 +111,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     strings touched (owned by other in-flight work this round); every relative link/anchor this pass
     touched was verified to resolve locally (offline lychee-equivalent check) before opening the PR.
 
+- **Cross-file embed batching wired into both deep-index loops — closes #367.** The
+  `MissBatcher` accumulator landed in 0.77.0 as a standalone primitive; this wires it into the
+  CLI `indexa deep`/`index` loop (`apps/indexa/src/commands/deep.rs`) and the web deep job
+  (`crates/web/src/jobs_exec/deep.rs`), the two execution loops that previously called the
+  embedder once per file's cache-miss chunks. Each loop now registers a file's cache-miss
+  embed-texts with a `MissBatcher` instead of embedding them inline, flushing (one `embed_all`
+  round-trip, sub-batched at `EMBED_BATCH_SIZE` = 64, then scattering results back to the
+  owning file+chunk and persisting every file that completes) when the batcher reports
+  `is_full()`, once more at end-of-run to drain a final partial batch, and — on the web job,
+  which also runs the memory watchdog — at the watchdog's pre-embed check, which now gates the
+  batched embed call directly (moved from its old per-file call site, so it still runs
+  immediately before every real Ollama round-trip) and, on cancellation, flushes rather than
+  discards already-parsed and already-LLM-enriched files. A deep index over N files with 1-3
+  misses each now issues roughly N/64 embed round-trips instead of N. Retrieval-equivalent, not
+  byte-identical: stored chunk `text`/`content_hash` are pure functions of the raw chunk text
+  regardless of which HTTP call embeds it, and both retrieval consumers (brute-force cosine and
+  the HNSW `AnnIndex`) are cosine/scale-invariant, so reordering which files' misses share a
+  batch does not change ranking (see `crates/embed/src/batcher.rs`'s correctness note).
+  `--no-embed`, `summaries-only` mode, dimension-mismatch handling
+  (`enforce_embedding_dim`-equivalent per-vector dim checking, now built into
+  `MissBatcher::scatter`), and the cache-hit path (a cache-hit chunk's vector rides along in the
+  file's `embeddings` slot and never enters the batcher — only cache-miss embed-texts are ever
+  buffered) are all unchanged. Verified with `cargo test --workspace`; a live deep index of a
+  120-file synthetic corpus against local Ollama (`nomic-embed-text`) — a clean run (240/240
+  chunks embedded, zero warnings) plus three follow-up reruns proving the cache-hit,
+  mtime-skip, and mixed-hit/miss-with-tail-flush paths each behave exactly as before; and a
+  dense-mode `indexa eval` against `fixtures/self-golden.json` (against a live but only
+  partially-embedded self-hosted index — see the Fixed entry below for why — so its exact
+  numbers aren't a clean regression baseline) that completed without error and returned sane,
+  non-degenerate metrics, exercising the real batch-produced vectors end-to-end through
+  retrieval. The stronger, deterministic proof of retrieval-equivalence is `MissBatcher`'s own
+  `record_parity_with_per_text_embedding` unit test, which asserts every batched embedding is
+  byte-identical to embedding that same text alone.
+
 ### Fixed
 
 - **Invariant audit + small correctness fixes (report: `docs/reviews/2026-08-30-invariant-audit.md`).**
@@ -141,6 +175,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Two further findings (a zstd multi-frame decoding gap in `compressed.rs`, and `indexa update`'s
   non-interactive-without-`--yes` self-update path) are written up in the report rather than
   patched — both need a deliberate design decision, not a same-day fix.
+
+- **`OllamaEmbedder::embed_batch`'s fixed 30 s timeout didn't scale with batch size.** Found
+  while live-verifying the cross-file batching above: batches were previously always 1–3 texts
+  (one file's misses), so `embed_batch`'s HTTP call — sharing `embed()`'s single-item
+  `EMBED_TIMEOUT_SECS` (30 s) — never came close to timing out. Once `MissBatcher` started
+  actually filling batches up to `EMBED_BATCH_SIZE` (64), and Ollama serializes a batch request
+  internally (`num_parallel: 1`, pinned to prevent KV-cache multiplication), wall time scales
+  with batch size while the timeout didn't — live-measured on this box under heavy concurrent
+  load: a lone item ~7.6–27 s, a 64-item batch ~137 s, both routinely blowing past 30 s and
+  falling back to (mostly also-timing-out) sequential re-embeds, silently degrading many chunks
+  to text-only. `crates/embed/src/ollama.rs`'s batch request now gets its own per-request
+  timeout (`reqwest`'s `RequestBuilder::timeout` override), scaled by item count
+  (`EMBED_BATCH_TIMEOUT_PER_ITEM_SECS` = 3 s/item, `EMBED_TIMEOUT_SECS` as the floor); a
+  64-item batch now gets up to 192 s. Single-item `embed()` is unaffected. Confirmed fixed
+  live: the same 120-file corpus that previously would have hung went from indefinite
+  hangs/mass failures to a clean 240/240-chunk run with zero warnings.
 
 ## [0.77.0] — 2026-08-20
 

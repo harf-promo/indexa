@@ -21,8 +21,22 @@ pub const DEFAULT_NUM_CTX: u32 = 4096;
 /// this version — it errors — so the guard must live client-side.
 const EMBED_MAX_CHARS: usize = 8000;
 
-/// Timeout for embedding requests. Embeddings are fast; 30 s is generous.
+/// Timeout for a single-text embedding request. Embeddings are fast; 30 s is generous.
 const EMBED_TIMEOUT_SECS: u64 = 30;
+
+/// Per-item timeout budget for a **batched** `/api/embed` request (#367). Ollama's batch
+/// endpoint processes the whole `input` array in one request — with `num_parallel: 1` (pinned
+/// above to prevent KV-cache multiplication) that's effectively serial, so wall time scales
+/// with batch size, not a fixed per-request cost. `EMBED_TIMEOUT_SECS` alone was calibrated
+/// for the pre-#367 reality where a batch was always 1–3 chunks (one file's misses); now that
+/// the cross-file `MissBatcher` actually fills batches up to `EMBED_BATCH_SIZE` (64), reusing
+/// that same fixed 30 s budget for a 64-item batch made every such batch time out on ordinary
+/// (let alone loaded) CPU-only hardware — live-measured on this box: a lone item ~7.6 s under
+/// load, a 64-item batch ~137 s, both comfortably past 30 s. The batch request therefore gets
+/// its own per-request timeout override (`RequestBuilder::timeout`, layered over the client's
+/// `EMBED_TIMEOUT_SECS` default), scaled by item count with `EMBED_TIMEOUT_SECS` itself as the
+/// floor for a small batch. Single-item `embed()` is unaffected — it keeps the client default.
+const EMBED_BATCH_TIMEOUT_PER_ITEM_SECS: u64 = 3;
 
 pub struct OllamaEmbedder {
     base_url: String,
@@ -226,11 +240,17 @@ impl Embedder for OllamaEmbedder {
                 num_ctx: self.num_ctx,
             }),
         };
+        // Scale this request's timeout with batch size (see `EMBED_BATCH_TIMEOUT_PER_ITEM_SECS`)
+        // — overrides the client's `EMBED_TIMEOUT_SECS` default for this call only.
+        let batch_timeout = std::time::Duration::from_secs(
+            EMBED_TIMEOUT_SECS.max(EMBED_BATCH_TIMEOUT_PER_ITEM_SECS * texts.len() as u64),
+        );
         let attempt: Result<Vec<Vec<f32>>> = async {
             let resp = self
                 .client
                 .post(&url)
                 .json(&body)
+                .timeout(batch_timeout)
                 .send()
                 .await
                 .with_context(|| format!("Ollama batch request to {url}"))?;

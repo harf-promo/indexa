@@ -13,10 +13,10 @@
 //! as [`Completed`] only once every one of *its* misses has been embedded, so the caller can
 //! upsert it exactly once, in FIFO completion order.
 //!
-//! **Not yet wired into any indexing path.** This is the standalone accumulator only —
-//! neither the CLI `deep` command (`apps/indexa/src/commands/deep.rs`) nor the web deep job
-//! (`crates/web/src/jobs_exec/deep.rs`) call it yet. Adopting it there is a deliberate,
-//! separate follow-up; see `CHANGELOG.md`.
+//! **Wired into both indexing paths** (#367): the CLI `deep` command
+//! (`apps/indexa/src/commands/deep.rs`) and the web deep job (`crates/web/src/jobs_exec/deep.rs`)
+//! both accumulate cache-miss chunks across files into a `MissBatcher`, flushing at `is_full()`,
+//! at end-of-run, and (web only) at the memory watchdog's pre-embed check; see `CHANGELOG.md`.
 //!
 //! **Correctness note (why cross-file batching is safe):** a chunk's stored `text` and
 //! `content_hash` are pure functions of its raw text, independent of which HTTP call its
