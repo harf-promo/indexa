@@ -94,7 +94,12 @@ struct ChatChoice {
 
 #[derive(Deserialize)]
 struct ChatMessageResp {
-    content: String,
+    // `Option`, not `String`: several OpenAI-compatible backends (Azure-style content-filtered
+    // completions, tool-call-only assistant turns) send `"content": null` for an otherwise valid
+    // response. A bare `String` field hard-fails the whole `.json()` deserialize on that shape;
+    // `None` degrades to an empty answer below instead, matching how `anthropic.rs`'s equivalent
+    // `ContentBlock.text` field (also `Option<String>`) is handled.
+    content: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -139,7 +144,7 @@ impl Generator for OpenAICompatLlm {
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
+            .map(|c| c.message.content.unwrap_or_default())
             .context("OpenAI-compat response had no choices")
     }
 }
@@ -153,6 +158,29 @@ mod tests {
         let llm = OpenAICompatLlm::local_llamacpp("http://localhost:8080", "llama3.2");
         assert_eq!(llm.api_key, "");
         assert_eq!(llm.base_url, "http://localhost:8080");
+    }
+
+    /// Some OpenAI-compatible backends send `"content": null` for an otherwise valid message
+    /// (e.g. a content-filtered or tool-call-only completion). This must deserialize and yield
+    /// an empty string, not fail the whole response parse.
+    #[test]
+    fn chat_response_with_null_content_deserializes_to_empty_string() {
+        let raw = r#"{"choices":[{"message":{"content":null}}]}"#;
+        let parsed: ChatResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            parsed.choices.into_iter().next().unwrap().message.content,
+            None
+        );
+    }
+
+    #[test]
+    fn chat_response_with_string_content_deserializes_normally() {
+        let raw = r#"{"choices":[{"message":{"content":"hello"}}]}"#;
+        let parsed: ChatResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            parsed.choices.into_iter().next().unwrap().message.content,
+            Some("hello".to_owned())
+        );
     }
 
     #[tokio::test]

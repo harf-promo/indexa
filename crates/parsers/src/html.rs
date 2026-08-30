@@ -3,7 +3,7 @@
 //! the same breadcrumb headings a `.md` file would get. Dynamic/JS-rendered content is not
 //! executed; tables are flattened to Markdown.
 
-use crate::text::chunk_markdown;
+use crate::text::{chunk_markdown, read_text_lossy};
 use crate::types::{Chunk, ChunkParams, Extracted, Parser};
 use anyhow::Result;
 use std::path::Path;
@@ -32,7 +32,11 @@ impl Parser for HtmlParser {
     }
 
     fn parse_chunked(&self, path: &Path, chunk: ChunkParams) -> Result<Extracted> {
-        let html = std::fs::read_to_string(path)?;
+        // `read_text_lossy`, not a strict `read_to_string`: a non-UTF-8 HTML page (a legacy
+        // Windows-1252/Latin-1 export without a recognized charset declaration) should still get
+        // indexed under the default `[parsers] encoding = "auto"`, matching `TextParser`'s own
+        // handling instead of hard-erroring the whole file.
+        let html = read_text_lossy(path, chunk.encoding)?;
         // htmd does not drop <script>/<style> content, so remove those blocks first (mirrors
         // the remote-source fetch path), then convert to Markdown. Fall back to the cleaned
         // HTML if conversion fails — the Markdown sectioner still extracts its text.
@@ -124,6 +128,33 @@ mod tests {
             "headings preserved: {:?}",
             ex.chunks.iter().map(|c| &c.heading).collect::<Vec<_>>()
         );
+    }
+
+    /// Regression test: a non-UTF-8 HTML page (e.g. a legacy Windows-1252 export with no
+    /// recognized charset declaration) must still be indexed under the default
+    /// `[parsers] encoding = "auto"`, not hard-error the whole file.
+    #[test]
+    fn html_with_invalid_utf8_bytes_still_parses_under_the_default_encoding() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("legacy.html");
+        let mut bytes =
+            b"<html><body><h1>Caf\xE9 menu</h1><p>Prix fixe available.</p></body></html>".to_vec();
+        // 0xE9 alone (no valid UTF-8 continuation) is invalid UTF-8 — Windows-1252 "é".
+        assert!(
+            std::str::from_utf8(&bytes).is_err(),
+            "fixture must actually be invalid UTF-8"
+        );
+        bytes.push(b'\n');
+        std::fs::write(&p, &bytes).unwrap();
+
+        let ex = HtmlParser.parse(&p).unwrap();
+        let all: String = ex
+            .chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(all.contains("Prix fixe available."), "{all}");
     }
 
     #[test]

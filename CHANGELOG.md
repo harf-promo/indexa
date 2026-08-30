@@ -111,6 +111,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     strings touched (owned by other in-flight work this round); every relative link/anchor this pass
     touched was verified to resolve locally (offline lychee-equivalent check) before opening the PR.
 
+### Fixed
+
+- **Invariant audit + small correctness fixes (report: `docs/reviews/2026-08-30-invariant-audit.md`).**
+  Re-verified every AGENTS.md load-bearing invariant this lane owns (archive penalty/code-intent
+  boost multipliers, the openssl-free tree, the web fragment self-check test, `resource::compute_budget`,
+  `update_control.rs`'s copy-before-`send(None)`, the hand-rolled fingerprint glob, `directory_apps`
+  orphan-guard coverage) — all seven still hold, no invariant needed correction. Alongside that, a
+  general correctness sweep of `crates/parsers/**`, `crates/llm/**`, and untouched CLI commands
+  turned up and fixed seven real bugs, each with its own regression test:
+  - `ollama_pull` (`crates/llm/src/ollama.rs`) reported a model pull as complete even when the
+    stream closed before the terminal `"success"` frame (e.g. the Ollama server restarts mid-pull)
+    — it now bails, matching the sibling streaming methods' `done: true` check.
+  - `claude_status`'s two CLI probes (`crates/llm/src/claude_code.rs`) leaked their subprocess on
+    timeout (missing `.kill_on_drop(true)`, unlike `run()`) — one orphaned `claude` process per
+    timed-out probe on every Settings-page load / `doctor` run.
+  - The OpenAI-compat adapter (`crates/llm/src/openai_compat.rs`) hard-failed parsing a
+    `"content": null` response shape some compatible backends send.
+  - The compressed-file parser's gzip codec (`crates/parsers/src/compressed.rs`) silently dropped
+    every member after the first in a concatenated multi-member `.gz` — exactly what log-rotation
+    tooling produces for `.log.gz`, this module's own named use case. Now uses `MultiGzDecoder`.
+  - `html.rs`/`svg.rs`/`org.rs`/`code.rs` and `office.rs`'s CSV path hard-errored on non-UTF-8
+    input instead of the lossy fallback `TextParser`/`MarkdownParser` already use under the
+    default `[parsers] encoding = "auto"`.
+  - `indexa multimodal`'s vision-model readiness check (`multimodal.rs`) resolved against the
+    embedder's Ollama host instead of the describer's (the host that actually runs captioning).
+  - `indexa weight delete --kind file` (`weight.rs`) silently also deleted an unrelated
+    `dir`-kind weight for the same target; an explicit `--kind` is now honored exactly.
+  Two further findings (a zstd multi-frame decoding gap in `compressed.rs`, and `indexa update`'s
+  non-interactive-without-`--yes` self-update path) are written up in the report rather than
+  patched — both need a deliberate design decision, not a same-day fix.
+
 ## [0.77.0] — 2026-08-20
 
 ### Added

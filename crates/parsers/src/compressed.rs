@@ -10,7 +10,7 @@
 use crate::registry::Registry;
 use crate::types::{ChunkParams, Extracted, Parser, MAX_ZIP_ENTRY_BYTES};
 use anyhow::{anyhow, bail, Context, Result};
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -96,7 +96,13 @@ impl CompressedParser {
         let mut buf = Vec::new();
         match codec {
             Codec::Gz => {
-                GzDecoder::new(file)
+                // `MultiGzDecoder`, not `GzDecoder`: a single-member decoder silently stops
+                // after the FIRST gzip member with no error, dropping the rest of a
+                // concatenated multi-member file (`cat a.gz b.gz > c.gz`) — exactly what
+                // log-rotation tooling produces, and this module's own doc comment names
+                // rotated `.log.gz` as a primary target. `MultiGzDecoder` decodes every
+                // member in sequence, same `Read` interface, same cap below.
+                MultiGzDecoder::new(file)
                     .take(MAX_ZIP_ENTRY_BYTES + 1)
                     .read_to_end(&mut buf)
                     .with_context(|| format!("decompressing {}", path.display()))?;
@@ -437,6 +443,35 @@ mod tests {
                 "{ext} must refuse to fully decompress an oversized payload"
             );
         }
+    }
+
+    /// Regression test: a `cat a.gz b.gz > combined.gz`-style multi-member gzip file (exactly
+    /// what log-rotation tooling produces for `.log.gz`, this module's own named use case) must
+    /// have BOTH members' content indexed, not just the first — a single-member `GzDecoder`
+    /// stops cleanly after the first member with no error, silently dropping the rest.
+    #[test]
+    fn parse_decodes_every_member_of_a_multi_member_gzip_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rotated.log.gz");
+        let mut combined = gzip_bytes(b"FIRST-MEMBER-MARKER line one\n");
+        combined.extend(gzip_bytes(b"SECOND-MEMBER-MARKER line two\n"));
+        std::fs::write(&path, &combined).unwrap();
+
+        let extracted = CompressedParser.parse(&path).unwrap();
+        let full_text: String = extracted
+            .chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            full_text.contains("FIRST-MEMBER-MARKER"),
+            "first gzip member must still be indexed: {full_text:?}"
+        );
+        assert!(
+            full_text.contains("SECOND-MEMBER-MARKER"),
+            "second gzip member must ALSO be indexed, not silently dropped: {full_text:?}"
+        );
     }
 
     #[test]
