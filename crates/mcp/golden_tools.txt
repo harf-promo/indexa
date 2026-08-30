@@ -39,11 +39,13 @@ project_overview
 prune
 query_config
 read_file
+record_decision
 related_files
 remove_pack_paths
 search
 search_pack
 set_weight
+summarize_pass_status
 symbol_context
 trace_path
 trigger_index

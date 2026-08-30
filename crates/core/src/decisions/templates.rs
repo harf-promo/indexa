@@ -42,6 +42,7 @@ pub fn render_question(d: &DecisionRecord) -> RenderedQuestion {
         Some(DecisionType::SummaryDrift) => summary_drift_text(d, &params),
         Some(DecisionType::Language) => language_text(d, &params),
         Some(DecisionType::SymbolAmbiguity) => symbol_ambiguity_text(d, &params, &option_values),
+        Some(DecisionType::Annotation) => annotation_text(d, &params),
         None => (
             format!("{}: {}", d.decision_type, d.subject),
             "This question was recorded by a newer indexa — update to see it properly.".to_owned(),
@@ -196,6 +197,22 @@ fn language_text(d: &DecisionRecord, params: &serde_json::Value) -> (String, Str
     (title, detail)
 }
 
+/// Annotation rendering: an already-decided ledger entry, so `detail` is the note text itself
+/// plus its durable reference (or the lack of one) rather than a question to answer.
+fn annotation_text(d: &DecisionRecord, params: &serde_json::Value) -> (String, String) {
+    let note = params.get("note").and_then(|v| v.as_str()).unwrap_or("");
+    let title = format!("Note on {}", d.subject);
+    let detail = match &d.patch_id {
+        Some(pid) => {
+            format!("{note}\n\n(pinned to patch-id {pid} — resolves across a rebase or squash)")
+        }
+        None => {
+            format!("{note}\n\n(no git patch-id available — recorded without a durable reference)")
+        }
+    };
+    (title, detail)
+}
+
 fn symbol_ambiguity_text(
     d: &DecisionRecord,
     params: &serde_json::Value,
@@ -305,6 +322,7 @@ mod tests {
             effects_applied_at: None,
             created_at: 1,
             decided_at: None,
+            patch_id: None,
         }
     }
 
@@ -445,6 +463,24 @@ mod tests {
         assert!(q.title.contains("defined in 2 files"));
         assert!(q.detail.contains("3 calling file(s)"));
         assert_eq!(q.options[2].1, "All (keep every definition)");
+    }
+
+    #[test]
+    fn annotation_renders_the_note_and_its_patch_id() {
+        let mut d = record(
+            "annotation",
+            json!({"note": "chose the RRF fusion over a hard cutoff because eval regressed"}),
+            json!(["chose the RRF fusion over a hard cutoff because eval regressed"]),
+        );
+        d.patch_id = Some("abc123def".to_owned());
+        let q = render_question(&d);
+        assert_eq!(q.title, "Note on /r/proj");
+        assert!(q.detail.contains("chose the RRF fusion"));
+        assert!(q.detail.contains("pinned to patch-id abc123def"));
+
+        d.patch_id = None;
+        let q = render_question(&d);
+        assert!(q.detail.contains("no git patch-id available"));
     }
 
     #[test]

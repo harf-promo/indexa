@@ -14,6 +14,7 @@
 
 pub mod detectors;
 pub mod effects;
+pub mod patch_id;
 pub mod templates;
 
 use crate::store::Store;
@@ -39,6 +40,13 @@ pub enum DecisionType {
     /// "This symbol is defined in more than one file — which definition is
     /// authoritative for call tracing?" (subject = the bare symbol name). v0.25.
     SymbolAmbiguity,
+    /// A durable, agent-authored ledger entry recorded via the MCP `record_decision` tool —
+    /// not a judgment call Indexa itself raised, but context an agent chose to pin
+    /// mid-session (subject = a path or free-form topic key). Distinct from the unrelated
+    /// `notes` feature (`crate::notes`, MCP `add_note`) — this lives in the Decision Ledger
+    /// and carries a `patch_id` for durability across rebase/squash. Always recorded already
+    /// `decided` — there is no open question to answer. v0.78.
+    Annotation,
 }
 
 impl DecisionType {
@@ -51,6 +59,7 @@ impl DecisionType {
             DecisionType::SummaryDrift => "summary_drift",
             DecisionType::Language => "language",
             DecisionType::SymbolAmbiguity => "symbol_ambiguity",
+            DecisionType::Annotation => "annotation",
         }
     }
 
@@ -64,6 +73,7 @@ impl DecisionType {
             "summary_drift" => DecisionType::SummaryDrift,
             "language" => DecisionType::Language,
             "symbol_ambiguity" => DecisionType::SymbolAmbiguity,
+            "annotation" => DecisionType::Annotation,
             _ => return None,
         })
     }
@@ -79,13 +89,14 @@ impl DecisionType {
     }
 
     /// Every type, for UI filters and `--type` validation.
-    pub const ALL: [DecisionType; 6] = [
+    pub const ALL: [DecisionType; 7] = [
         DecisionType::Classification,
         DecisionType::Duplicate,
         DecisionType::Archive,
         DecisionType::SummaryDrift,
         DecisionType::Language,
         DecisionType::SymbolAmbiguity,
+        DecisionType::Annotation,
     ];
 }
 
@@ -112,6 +123,11 @@ pub fn batch_answer_refusal(ty: DecisionType, chosen: &str) -> Option<String> {
         DecisionType::SummaryDrift => chosen == "keep_new" || chosen == "restore_old",
         DecisionType::Language => chosen == "ignore",
         DecisionType::SymbolAmbiguity => chosen == "all",
+        // A note's text is inherently per-row — there is no batch-safe value. Notes are
+        // recorded already-decided via `record_decision`, so this arm is unreachable through
+        // the normal open→answer flow; it exists only so `--under --type annotation` (an
+        // off-menu but type-checking CLI invocation) fails with an explanation, not a panic.
+        DecisionType::Annotation => false,
     };
     if ok {
         return None;
@@ -132,6 +148,9 @@ pub fn batch_answer_refusal(ty: DecisionType, chosen: &str) -> Option<String> {
             .to_string(),
         DecisionType::SymbolAmbiguity => "the only batch-safe symbol answer is all — an \
             authoritative definition is per-symbol, so answer those individually"
+            .to_string(),
+        DecisionType::Annotation => "annotation entries are recorded directly via \
+            record_decision and have no batch-safe answer"
             .to_string(),
     })
 }
@@ -185,6 +204,44 @@ pub fn decide_and_apply(
     let effects = effects::apply_decision_effects(store, &d)?;
     store.mark_effects_applied(id, &effects)?;
     Ok(effects)
+}
+
+/// Record a durable, agent-authored ledger entry (the MCP `record_decision` tool): opens an
+/// [`DecisionType::Annotation`] row and immediately answers it with `note` — unlike every
+/// other decision type, an annotation is never left open for a human to answer; the agent IS
+/// the answer. `patch_id` is best-effort (see [`patch_id::compute_patch_id`]) — `None` when no
+/// durable git reference could be computed (no repo, untracked path, no `git` binary); the
+/// entry is still recorded, just without the rebase/squash-proof reference.
+///
+/// Returns the new row's id plus the effects receipt (always a no-op projection — the note
+/// text IS the artifact, same rationale as [`DecisionType::SymbolAmbiguity`]).
+pub fn record_annotation(
+    store: &mut Store,
+    subject: &str,
+    note: &str,
+    patch_id: Option<&str>,
+) -> Result<(i64, serde_json::Value)> {
+    use crate::store::NewDecision;
+    let id = store
+        .record_decision(NewDecision {
+            decision_type: DecisionType::Annotation.as_str().to_owned(),
+            subject: subject.to_owned(),
+            params: serde_json::json!({ "note": note }),
+            options: serde_json::json!([note]),
+            auto_value: None,
+            confidence: None,
+            evidence_hash: String::new(),
+            priority: 0,
+            paths: vec![subject.to_owned()],
+        })?
+        .ok_or_else(|| {
+            anyhow!("a ledger entry for \"{subject}\" is already being recorded — try again")
+        })?;
+    if let Some(pid) = patch_id {
+        store.set_decision_patch_id(id, pid)?;
+    }
+    let effects = decide_and_apply(store, id, note, "user")?;
+    Ok((id, effects))
 }
 
 /// How a fresh Tier-0 suggestion was routed through the ledger's
@@ -762,6 +819,31 @@ mod tests {
             .unwrap();
         let err = revert_decision(&mut store, p).unwrap_err();
         assert!(err.to_string().contains("open question"), "{err}");
+    }
+
+    #[test]
+    fn record_annotation_is_immediately_decided_and_carries_its_patch_id() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (id, effects) = record_annotation(
+            &mut store,
+            "/r/proj/f.rs",
+            "chose X because Y",
+            Some("abc123"),
+        )
+        .unwrap();
+        assert_eq!(effects, json!({ "annotation": "recorded" }));
+
+        let d = store.decision_by_id(id).unwrap().unwrap();
+        assert_eq!(d.decision_type, "annotation");
+        assert_eq!(d.status, "decided", "never left open for a human");
+        assert_eq!(d.chosen.as_deref(), Some("chose X because Y"));
+        assert_eq!(d.source.as_deref(), Some("user"));
+        assert_eq!(d.patch_id.as_deref(), Some("abc123"));
+        assert!(d.effects_applied_at.is_some());
+
+        // No durable reference available — still recorded, just without one.
+        let (id2, _) = record_annotation(&mut store, "/r/other", "a plain note", None).unwrap();
+        assert_eq!(store.decision_by_id(id2).unwrap().unwrap().patch_id, None);
     }
 
     #[test]
