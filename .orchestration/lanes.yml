@@ -2,9 +2,49 @@
 # Rust workspace. verify matches ci.yml's actual steps exactly.
 verify: "cargo fmt --all -- --check && cargo clippy --all-targets --all-features --locked && cargo test --all --locked"
 
-hot_files: []
-counters: {}
-singleton_paths: []
+hot_files:
+  # Pure-addition edits by 2+ lanes — expect a trivial rebase, not a logic conflict.
+  - crates/mcp/src/lib.rs                   # new-tool lane(s) register in tool_router()
+  - crates/web/src/lib.rs                   # UI_JS/UI_CSS concat! lists — new fragments only
+  - AGENTS.md                               # tool-count token; owned by whichever lane changes the MCP tool count
+  - README.md                               # tool-count token; owned likewise
+  - USAGE.md                                # tool-count token; owned likewise
+  - docs/how-to/live-retrieval-over-mcp.md  # tool-count mention; owned likewise
+  - CHANGELOG.md                            # every lane appends its own [Unreleased] bullet, never edits another's
+
+counters:
+  mcp_tool_count: 51
+  ui_js_fragment_count: 31
+  ui_css_fragment_count: 22
+
+singleton_paths:
+  # 2026-08-30 six-lane round — exclusive per-lane territory. See
+  # ~/.claude/plans/i-need-you-to-indexed-bentley.md for the full task briefs.
+  - crates/query/**                         # retrieval-batcher-wiring
+  - crates/embed/**                         # retrieval-batcher-wiring
+  - apps/indexa/src/commands/deep.rs        # retrieval-batcher-wiring
+  - crates/web/src/jobs_exec/deep.rs        # retrieval-batcher-wiring
+  - crates/mcp/src/retrieval.rs             # mcp-ledger-and-drift-tools
+  - crates/mcp/src/graph.rs                 # mcp-ledger-and-drift-tools
+  - crates/mcp/src/curation.rs              # mcp-ledger-and-drift-tools
+  - crates/mcp/src/review.rs                # mcp-ledger-and-drift-tools
+  - crates/mcp/src/insights.rs              # mcp-ledger-and-drift-tools
+  - crates/mcp/src/admin.rs                 # mcp-ledger-and-drift-tools
+  - crates/mcp/src/query_extras.rs          # mcp-ledger-and-drift-tools
+  - crates/mcp/src/resources.rs             # mcp-ledger-and-drift-tools
+  - crates/mcp/src/prompts.rs               # mcp-ledger-and-drift-tools
+  - crates/mcp/golden_tools.txt             # mcp-ledger-and-drift-tools
+  - crates/core/src/decisions/**            # mcp-ledger-and-drift-tools
+  - crates/core/src/summary_drift.rs        # mcp-ledger-and-drift-tools (new file)
+  - crates/web/assets/ui/js/31-graph-layers-cluster.js    # graph-layer-clustering-ui (new file)
+  - crates/web/assets/ui/css/23-graph-layers-cluster.css  # graph-layer-clustering-ui (new file)
+  - crates/mcp/src/packs.rs                 # pack-inclusion-modes-and-dryrun
+  - crates/core/src/store/packs.rs          # pack-inclusion-modes-and-dryrun
+  - crates/web/assets/ui/js/32-pack-inclusion-mode.js     # pack-inclusion-modes-and-dryrun (new file)
+  - docs/**                                 # docs-staleness-and-redundancy-audit (excl. docs/archive/**)
+  - ROADMAP.md                              # docs-staleness-and-redundancy-audit
+  - docs/COMPETITIVE.md                     # docs-staleness-and-redundancy-audit
+  - docs/plans/2026-07-external-sources-features.md       # docs-staleness-and-redundancy-audit
 
 # release.yml triggers on version tags (v*.*.*), not on merge to main — confirmed by
 # reading the trigger. No merge-triggered deploy exists for this repo.
