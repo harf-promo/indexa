@@ -178,6 +178,7 @@ async fn main() -> Result<()> {
                 no_redact,
                 changed_since,
                 category,
+                dry_run,
             } => {
                 commands::cmd_pack_export(
                     name,
@@ -196,6 +197,7 @@ async fn main() -> Result<()> {
                     no_redact,
                     changed_since,
                     category,
+                    dry_run,
                 )
                 .await
             }

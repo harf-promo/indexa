@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Context Packs: per-item inclusion mode, `--dry-run`, and typed redaction labels.** Three
+  additive pack-export features (schema `SCHEMA_VERSION` 8 → 9):
+  - **Inclusion mode.** Each pack member (`pack_paths` row) now carries an `inclusion_mode`:
+    `"reference"` (a live pointer, resolved fresh at export time from the CURRENT summaries
+    tree — the default, and the export behavior every pack item already had) or `"pinned"` (a
+    frozen L2 snapshot of the item's indexed chunk content, captured the moment it's pinned via
+    the new `Store::set_pack_item_inclusion_mode`). Every existing/legacy pack item defaults to
+    `"reference"` — verified against the current `pack export` code path (`build_tree` always
+    reads live from `summaries`, never a frozen snapshot), so this migration changes zero
+    existing export output. Surfaced in the web UI via a new pack-editor panel
+    (`32-pack-inclusion-mode.js`) backed by two new endpoints: `GET /api/packs/:name/items` and
+    `POST /api/packs/:name/items/mode`.
+  - **`--dry-run` / `dry_run`.** The CLI `pack export --dry-run`, the MCP `export_pack` tool's
+    `dry_run` parameter, and `GET /api/packs/:name/export?dry_run=true` all report the estimated
+    token/byte cost of an export (reusing `approx_tokens`) — the same render/redaction pipeline
+    a real export uses, but nothing is written to disk, copied to the clipboard, or recorded as
+    a pack `"exported"` event. Not supported with `--format okf` (a multi-file directory bundle,
+    not a single sized artifact).
+  - **Typed redaction labels in pack exports.** All three pack export surfaces (CLI, MCP, web)
+    now relabel `redact_secrets`' `[REDACTED-<kind>]` markers to a lowercase, colon-style
+    `[redacted:<kind>]` for pack exports specifically — a purely cosmetic, display-only
+    relabeling (`relabel_pack_redaction_markers` in `crates/query/src/export.rs`) applied AFTER
+    redaction runs. `redact.rs` itself, what gets redacted, and the redaction count are all
+    unchanged everywhere else (`indexa export`, chunk storage, …).
+
 ## [0.77.0] — 2026-08-20
 
 ### Added

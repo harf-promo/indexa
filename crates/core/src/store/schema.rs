@@ -8,7 +8,7 @@ use anyhow::Result;
 ///
 /// **INVARIANT: bump this whenever the DDL or any migration in `init_schema` changes** — otherwise a
 /// DB stamped at the old value would skip the new migration and silently miss a column/table.
-pub(super) const SCHEMA_VERSION: i64 = 8;
+pub(super) const SCHEMA_VERSION: i64 = 9;
 
 /// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
 /// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
@@ -53,6 +53,13 @@ fn pack_events_allows_refreshed(conn: &rusqlite::Connection) -> bool {
         |r| r.get::<_, bool>(0),
     )
     .unwrap_or(true)
+}
+
+/// Does `pack_paths` already carry the per-item inclusion-mode columns (v0.78)? Returns `true`
+/// when the table is absent (fresh DB — the CREATE above already includes both columns).
+fn pack_paths_has_inclusion_mode(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
+    conn.prepare("SELECT 1 FROM pragma_table_info('pack_paths') WHERE name = 'inclusion_mode'")?
+        .exists([])
 }
 
 impl Store {
@@ -336,6 +343,19 @@ impl Store {
                 pack_id  TEXT NOT NULL REFERENCES packs(id) ON DELETE CASCADE,
                 path     TEXT NOT NULL,
                 added_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                -- Per-item inclusion mode (v0.78): 'reference' (default — a live pointer,
+                -- resolved fresh at export time from the CURRENT summaries/chunks; the export
+                -- behavior every pack item had before this column existed) or 'pinned' (a frozen
+                -- L2 snapshot captured into pinned_snapshot when the item was switched to
+                -- pinned). No CHECK constraint deliberately (SQLite can't ALTER one in later
+                -- migrations without a copy-table rebuild — see the edges.kind /
+                -- pack_events.event widening migrations above); validity is enforced in Rust by
+                -- Store::set_pack_item_inclusion_mode.
+                inclusion_mode  TEXT NOT NULL DEFAULT 'reference',
+                -- The frozen L2 (raw chunk) snapshot for a 'pinned' item, captured at the moment
+                -- it was pinned. NULL for 'reference' items, and for a 'pinned' item that had no
+                -- indexed chunks yet at pin time.
+                pinned_snapshot TEXT,
                 PRIMARY KEY (pack_id, path)
             );
             -- Pack event history (4.1): an append-only changelog per pack, feeding a pack's
@@ -752,6 +772,26 @@ impl Store {
                     "ALTER TABLE chunks ADD COLUMN content_hash TEXT;
                      CREATE INDEX IF NOT EXISTS idx_chunks_content_hash
                          ON chunks(entry_path, content_hash);",
+                )?;
+            }
+            tx.commit()?;
+        }
+
+        // Migration: add pack_paths.inclusion_mode / pack_paths.pinned_snapshot (v0.78, per-item
+        // inclusion mode). Same IMMEDIATE-tx double-check pattern as the content_hash migration
+        // above (a fast lock-free pre-check, then a re-check under the write lock, bounded by
+        // busy_timeout) — a legacy pack_paths row has no inclusion_mode, and the column DEFAULT
+        // ('reference') makes every existing row resolve to exactly the export behavior it had
+        // before this migration (build fresh from the current summaries tree at export time),
+        // never 'pinned' (which would freeze it on content it never actually captured).
+        if !pack_paths_has_inclusion_mode(&self.conn)? {
+            let tx = self
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if !pack_paths_has_inclusion_mode(&tx)? {
+                tx.execute_batch(
+                    "ALTER TABLE pack_paths ADD COLUMN inclusion_mode TEXT NOT NULL DEFAULT 'reference';
+                     ALTER TABLE pack_paths ADD COLUMN pinned_snapshot TEXT;",
                 )?;
             }
             tx.commit()?;

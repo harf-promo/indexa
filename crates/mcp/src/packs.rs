@@ -50,6 +50,11 @@ pub struct ExportPackParams {
     /// ```mermaid flowchart block — pure text, renders natively in most AI tools/viewers).
     #[serde(default)]
     pub graph_format: Option<String>,
+    /// Preview only: report the estimated token/byte cost (same redaction + rendering
+    /// pipeline a real export uses) instead of the full rendered body. Not supported with
+    /// `format: "okf"` (a multi-file bundle, not a single sized artifact). Default false.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -164,8 +169,11 @@ impl IndexaMcp {
                        frontmatter, plus an index.md/log.md changelog) consumable by other \
                        OKF-aware tools — concatenated here with `--- file: <path> ---` \
                        separators (for a real directory bundle, use the CLI `indexa pack \
-                       export --format okf --out <dir>`). Ideal for giving an AI tool focused \
-                       context on a specific topic (e.g. 'Auth', 'Tax 2025', 'Client X').",
+                       export --format okf --out <dir>`). Set `dry_run: true` to get back only \
+                       an estimated token/byte cost instead of the full body — handy for sizing \
+                       an export before committing to it (not supported with `format: \"okf\"`). \
+                       Ideal for giving an AI tool focused context on a specific topic (e.g. \
+                       'Auth', 'Tax 2025', 'Client X').",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn export_pack(
@@ -181,6 +189,7 @@ impl IndexaMcp {
             category,
             include_graph,
             graph_format,
+            dry_run,
         } = params.0;
         let mut store = self.store()?;
         let fmt = format.as_deref().unwrap_or("xml");
@@ -194,7 +203,13 @@ impl IndexaMcp {
             category.as_deref(),
             include_graph,
             graph_format.as_deref().unwrap_or("text"),
+            dry_run,
         )?;
+        // A dry run reports size only — nothing was actually exported, so it skips the
+        // "exported" pack event and the usage/savings telemetry a real export records below.
+        if dry_run {
+            return Ok(ok_text(buf));
+        }
         // Record the export (4.1) — best-effort, a history-write hiccup must never fail an
         // otherwise-successful export. Also record savings telemetry (like every other
         // retrieval/export tool) — the export (buf) vs. the counterfactual of reading every
@@ -401,10 +416,12 @@ pub(crate) fn export_pack_body(
     category: Option<&str>,
     include_graph: bool,
     graph_format: &str,
+    dry_run: bool,
 ) -> Result<String, ErrorData> {
     use indexa_query::{
-        build_export_filter, build_tree, prune_tree, redact::redact_secrets, render_graph,
-        render_graph_mermaid, render_json, render_markdown, render_signatures, render_xml,
+        build_export_filter, build_tree, dry_run_report, prune_tree, redact::redact_secrets,
+        relabel_pack_redaction_markers, render_graph, render_graph_mermaid, render_json,
+        render_markdown, render_pinned_item, render_signatures, render_xml,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -418,11 +435,22 @@ pub(crate) fn export_pack_body(
         .pack_by_name(name)
         .map_err(mcp_err)?
         .ok_or_else(|| mcp_err(format!("no pack named \"{name}\"")))?;
-    let paths = store.pack_paths(&pack.id).map_err(mcp_err)?;
+    // Per-item inclusion mode (v0.78): `items` carries each member's mode/pinned snapshot;
+    // `paths` is kept alongside for the call sites below that are deliberately mode-agnostic
+    // (OKF bundling, `--signatures`, the `--include-graph` scope).
+    let items = store.pack_item_records(&pack.id).map_err(mcp_err)?;
+    let paths: Vec<String> = items.iter().map(|i| i.path.clone()).collect();
     if paths.is_empty() {
         return Err(mcp_err(format!(
             "pack \"{name}\" is empty — add paths first with: indexa pack add \"{name}\" <paths…>"
         )));
+    }
+
+    if dry_run && format == "okf" {
+        return Err(mcp_err(
+            "dry_run is not supported with format: \"okf\" (a multi-file bundle, not a single \
+             sized artifact) — drop dry_run, or preview a different format.",
+        ));
     }
 
     // 4.2 — OKF bundle: a directory-shaped artifact doesn't fit the single-string return of
@@ -479,7 +507,8 @@ pub(crate) fn export_pack_body(
     }
 
     let mut exported = 0usize;
-    for root_path in &paths {
+    for item in &items {
+        let root_path = &item.path;
         if signatures {
             let mut chunks = store.code_chunks_under(root_path, 0).map_err(mcp_err)?;
             if let Some(a) = &allow {
@@ -489,6 +518,21 @@ pub(crate) fn export_pack_body(
                 continue;
             }
             buf.push_str(&render_signatures(&chunks, format, true));
+            buf.push('\n');
+            exported += 1;
+            continue;
+        }
+        // Per-item inclusion mode (v0.78): "pinned" renders the frozen L2 snapshot verbatim,
+        // bypassing the live summaries tree and the relational slice entirely (a pinned item
+        // deliberately no longer tracks the live file metadata --changed-since/category filter
+        // on). "reference" (and any legacy row, which defaults to it) is the unchanged
+        // pre-existing behavior.
+        if item.inclusion_mode == "pinned" {
+            buf.push_str(&render_pinned_item(
+                root_path,
+                item.pinned_snapshot.as_deref(),
+                format,
+            ));
             buf.push('\n');
             exported += 1;
             continue;
@@ -553,7 +597,23 @@ pub(crate) fn export_pack_body(
         return Err(mcp_err(msg));
     }
 
-    // Never hand a model a secret that slipped into the indexed content.
+    // Never hand a model a secret that slipped into the indexed content. The pack-only typed
+    // label relabel (v0.78, `[REDACTED-<kind>]` → `[redacted:<kind>]`) runs strictly AFTER
+    // redact_secrets, so its output/count (AGENTS.md's pinned "redact count" invariant) is
+    // unchanged — this only reformats marker text redact_secrets already produced.
     let (buf, _redacted) = redact_secrets(&buf);
+    let buf = relabel_pack_redaction_markers(&buf);
+
+    // dry_run (v0.78): report the estimated size instead of the full body — nothing was
+    // "delivered", so the caller (export_pack) skips the exported-event/usage telemetry it
+    // otherwise records.
+    if dry_run {
+        let report = dry_run_report(&buf);
+        return Ok(format!(
+            "Dry run: pack \"{name}\" would export ~{} tokens ({} bytes) as {format} across {exported} item(s).",
+            report.approx_tokens, report.bytes
+        ));
+    }
+
     Ok(buf)
 }

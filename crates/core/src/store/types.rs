@@ -342,3 +342,18 @@ pub struct PackEvent {
     pub detail: Option<String>,
     pub at: i64,
 }
+
+/// One pack member with its per-item inclusion mode (v0.78) — the richer sibling of
+/// [`Store::pack_paths`](super::Store::pack_paths)'s bare `Vec<String>`, used by the
+/// export/render path and the web UI's pack editor.
+#[derive(Debug, Clone)]
+pub struct PackItemRecord {
+    pub path: String,
+    /// `"reference"` (live pointer, resolved fresh at export from the current L0/L1 summary —
+    /// the export behavior every pack item had before this field existed) or `"pinned"` (a
+    /// frozen L2 snapshot captured into `pinned_snapshot` when the item was pinned).
+    pub inclusion_mode: String,
+    /// The frozen raw-chunk snapshot for a `"pinned"` item. `None` for `"reference"` items, and
+    /// for a `"pinned"` item that had no indexed chunks yet at pin time.
+    pub pinned_snapshot: Option<String>,
+}

@@ -1,8 +1,14 @@
 //! Context Packs: named, cross-directory context bundles.
 
-use super::{PackEvent, PackRecord, Store};
-use anyhow::Result;
+use super::{PackEvent, PackItemRecord, PackRecord, Store};
+use anyhow::{bail, Result};
 use rusqlite::params;
+
+/// Cap on a pinned snapshot's captured text (chars), generous but bounded so pinning a whole
+/// directory can't balloon the DB with an unbounded blob. ~500k chars ≈ 125k tokens under the
+/// query crate's `approx_tokens` 4-chars/token estimate — comfortably past any single AI tool's
+/// context window, so truncation here is a safety valve, not a normal-case limit.
+const PINNED_SNAPSHOT_CHAR_CAP: usize = 500_000;
 
 impl Store {
     /// Append one row to `pack_events` (4.1). Best-effort in spirit but propagates errors
@@ -246,5 +252,107 @@ impl Store {
             }
         }
         Ok(stale)
+    }
+
+    /// A pack's members with their per-item inclusion mode (v0.78) — the render-time input for
+    /// `pack export`'s XML/MD/JSON path: a `"reference"` item still walks the live summaries tree
+    /// via [`super::export`]-style callers' own `build_tree`; a `"pinned"` item renders its
+    /// `pinned_snapshot` verbatim instead. Ordered by path, like [`Store::pack_paths`].
+    pub fn pack_item_records(&self, pack_id: &str) -> Result<Vec<PackItemRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, inclusion_mode, pinned_snapshot FROM pack_paths
+              WHERE pack_id = ?1 ORDER BY path",
+        )?;
+        let rows = stmt.query_map(params![pack_id], |r| {
+            Ok(PackItemRecord {
+                path: r.get(0)?,
+                inclusion_mode: r.get(1)?,
+                pinned_snapshot: r.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Concatenate the indexed (L2 raw chunk) content at or under `member_path` into one string —
+    /// the snapshot a `"pinned"` pack item freezes. `None` when nothing is indexed there yet.
+    /// Reuses the same subtree expansion [`Store::stale_pack_paths`] uses, so a pinned directory
+    /// captures every indexed file beneath it, not just the directory's own (nonexistent) chunks.
+    /// Capped at [`PINNED_SNAPSHOT_CHAR_CAP`] chars — a truncated capture is marked as such rather
+    /// than silently cut off.
+    fn capture_l2_snapshot(&self, member_path: &str) -> Result<Option<String>> {
+        let (exact, like) = super::entries::subtree_match(member_path);
+        let mut stmt = self.conn.prepare(
+            "SELECT entry_path, seq, heading, text FROM chunks
+              WHERE entry_path = ?1 OR entry_path LIKE ?2 ESCAPE '\\'
+              ORDER BY entry_path, seq",
+        )?;
+        let rows = stmt.query_map(params![exact, like], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+
+        let mut out = String::new();
+        let mut truncated = false;
+        for row in rows {
+            let (path, seq, heading, text) = row?;
+            if out.len() >= PINNED_SNAPSHOT_CHAR_CAP {
+                truncated = true;
+                break;
+            }
+            if heading.is_empty() {
+                out.push_str(&format!("### {path} [{seq}]\n"));
+            } else {
+                out.push_str(&format!("### {path} [{seq}] {heading}\n"));
+            }
+            out.push_str(&text);
+            out.push_str("\n\n");
+        }
+        if out.is_empty() {
+            return Ok(None);
+        }
+        if truncated {
+            out.push_str("…(pinned snapshot truncated at capture time)\n");
+        }
+        Ok(Some(out))
+    }
+
+    /// Set one pack member's inclusion mode (v0.78): `"reference"` (a live pointer, resolved
+    /// fresh at export time — the default, and the ONLY behavior every pack item had before this
+    /// field existed) or `"pinned"` (freezes the item's current L2 content into
+    /// `pinned_snapshot`, captured right now via [`Store::capture_l2_snapshot`]).
+    ///
+    /// Switching back to `"reference"` clears `pinned_snapshot` (it would otherwise be a stale,
+    /// invisible leftover — dead weight in the DB and a footgun if some future code path started
+    /// reading it without checking `inclusion_mode` first). Re-pinning an already-pinned item
+    /// re-captures the snapshot from the CURRENT chunks, so "pin" always means "freeze what's
+    /// indexed right now", not "freeze once and never again unless you unpin first".
+    ///
+    /// Returns the number of rows changed (0 = no such pack/path). Errors on any `mode` other
+    /// than `"reference"`/`"pinned"` — there is deliberately no CHECK constraint on the column
+    /// (see the schema DDL's comment), so this is the one enforcement point.
+    pub fn set_pack_item_inclusion_mode(
+        &mut self,
+        pack_id: &str,
+        path: &str,
+        mode: &str,
+    ) -> Result<usize> {
+        if mode != "reference" && mode != "pinned" {
+            bail!("invalid inclusion mode '{mode}' — must be 'reference' or 'pinned'");
+        }
+        let snapshot = if mode == "pinned" {
+            self.capture_l2_snapshot(path)?
+        } else {
+            None
+        };
+        let n = self.conn.execute(
+            "UPDATE pack_paths SET inclusion_mode = ?1, pinned_snapshot = ?2
+              WHERE pack_id = ?3 AND path = ?4",
+            params![mode, snapshot, pack_id, path],
+        )?;
+        Ok(n)
     }
 }

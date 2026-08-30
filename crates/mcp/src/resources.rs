@@ -89,8 +89,11 @@ impl IndexaMcp {
         } else if let Some(name) = rest.strip_prefix("pack/") {
             let name = percent_decode(name);
             let store = self.store()?;
-            // Already redacted inside export_pack_body.
-            export_pack_body(&store, &name, "md", None, false, None, None, false, "text")?
+            // Already redacted inside export_pack_body. dry_run: false — a resource read always
+            // wants the real body.
+            export_pack_body(
+                &store, &name, "md", None, false, None, None, false, "text", false,
+            )?
         } else if let Some(path) = rest.strip_prefix("summary/") {
             let path = percent_decode(path);
             let store = self.store()?;
