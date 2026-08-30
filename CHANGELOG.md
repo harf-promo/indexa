@@ -63,6 +63,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ToolAnnotations`, golden tool list, and doc counts updated for the two new tools (51 → 53
   tools)** across `AGENTS.md`, `README.md`, `USAGE.md`, and `docs/how-to/live-retrieval-over-mcp.md`.
 
+- **Map "Architecture layers" overlay — cluster/colour nodes by inferred layer (client-side,
+  default-off).** A new opt-in overlay on the code graph's Map view that colours each file node
+  by an **inferred architectural layer** — API, Service, Data, UI, or Utility — guessed purely
+  from its path (`handlers/`, `routes/`, `api/` → API; `commands/`, `services/`, `workers/` →
+  Service; `store/`, `db/`, `models/` → Data; `assets/ui/`, `views/`, `components/` → UI;
+  `utils/`, `helpers/`, `lib/` → Utility; anything else renders as a neutral "Other"). Entirely
+  client-side heuristics (`js/31-graph-layers-cluster.js` + `css/23-graph-layers-cluster.css`) —
+  no new `/api/graph` param, no server change, since `node.path` is already in the existing
+  response. A toggle + counted legend are injected next to the existing graph toolbar/legend
+  (same low-saturation-HSL "tint, not a rainbow" convention as the Communities overlay), and
+  recolouring follows every re-render (scope change, focus/expand, reset) via a `MutationObserver`
+  on the graph SVG rather than a hook added to the render path itself. Default-off; toggling it
+  off restores whatever was rendered before (the plain default, or a live Communities tint).
+
 ### Changed
 
 - **Docs staleness/redundancy pass (no code changes).** A sweep of `docs/**` (excl. `docs/archive/`)

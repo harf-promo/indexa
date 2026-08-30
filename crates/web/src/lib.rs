@@ -165,6 +165,7 @@ pub(crate) const UI_CSS: &str = concat!(
     include_str!("../assets/ui/css/21-graph-communities.css"),
     include_str!("../assets/ui/css/19-conversation.css"),
     include_str!("../assets/ui/css/22-graph-modules.css"),
+    include_str!("../assets/ui/css/23-graph-layers-cluster.css"),
 );
 pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/00-auth-bootstrap.js"),
@@ -198,6 +199,7 @@ pub(crate) const UI_JS: &str = concat!(
     include_str!("../assets/ui/js/28-graph-layers.js"),
     include_str!("../assets/ui/js/29-graph-communities.js"),
     include_str!("../assets/ui/js/30-graph-modules.js"),
+    include_str!("../assets/ui/js/31-graph-layers-cluster.js"),
     include_str!("../assets/ui/js/32-pack-inclusion-mode.js"),
 );
 
