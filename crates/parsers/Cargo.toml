@@ -63,7 +63,7 @@ libc = "0.2"
 # Transparent .zst content indexing — pure-Rust zstd decoder (decode-only, no C toolchain).
 # Already a transitive dep of `object` (above) at this exact version; promoted to a direct dep,
 # zero new tree entries.
-ruzstd = "0.8.3"
+ruzstd = "0.9.0"
 # Transparent .xz/.lzma content indexing — pure-Rust, decode-only. Genuinely new to the tree.
 lzma-rs = "0.3"
 # Transparent .br content indexing — pure-Rust brotli decoder. Exact pin (not a range): already
