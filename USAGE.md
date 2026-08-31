@@ -365,7 +365,9 @@ also re-scans roots that go stale past `[scan] auto_reindex`.
 
 **Share one topic, not the whole repo.** Group scattered files into a named **Context Pack** and export
 just that bundle: `indexa pack create "Auth" --auto` → `indexa pack export "Auth" --format xml > auth.xml`.
-Paste `auth.xml` into any AI tool — it's the subject, not the directory tree.
+Paste `auth.xml` into any AI tool — it's the subject, not the directory tree. Check the cost first with
+`indexa pack export "Auth" --dry-run` (estimated tokens, no file written); each item defaults to a live
+`reference` (resolved fresh from the current summary) or can be pinned to a frozen snapshot.
 
 **Debug a wrong answer.** `indexa ask --explain "…"` prints the sparse + dense + fused/reranked hits with
 scores, so you can see exactly which sources were chosen and why (see TROUBLESHOOTING → *Ask returns

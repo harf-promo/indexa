@@ -2743,7 +2743,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-core"
-version = "0.77.0"
+version = "0.78.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2768,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-desktop"
-version = "0.77.0"
+version = "0.78.0"
 dependencies = [
  "anyhow",
  "brotli",
@@ -2790,7 +2790,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-embed"
-version = "0.77.0"
+version = "0.78.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2805,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-http-util"
-version = "0.77.0"
+version = "0.78.0"
 dependencies = [
  "reqwest",
  "tokio",
@@ -2813,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-llm"
-version = "0.77.0"
+version = "0.78.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2830,7 +2830,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-parsers"
-version = "0.77.0"
+version = "0.78.0"
 dependencies = [
  "anyhow",
  "brotli",
@@ -2869,7 +2869,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-query"
-version = "0.77.0"
+version = "0.78.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2893,7 +2893,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-update"
-version = "0.77.0"
+version = "0.78.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2910,7 +2910,7 @@ dependencies = [
 
 [[package]]
 name = "indexa-web"
-version = "0.77.0"
+version = "0.78.0"
 dependencies = [
  "anyhow",
  "axum",
