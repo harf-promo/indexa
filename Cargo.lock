@@ -2130,6 +2130,7 @@ name = "indexa"
 version = "0.79.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap 4.6.6",
  "clap_complete",
  "directories",

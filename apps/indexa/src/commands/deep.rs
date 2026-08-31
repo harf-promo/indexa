@@ -1,7 +1,10 @@
 use anyhow::Result;
 use indexa_core::{
     config::{Config, SummaryMode},
-    resource::{detect_machine, estimate_eta, format_duration_pub},
+    resource::{
+        assess, detect_machine, estimate_eta, format_duration_pub, pause_step, MachineSpec,
+        PauseAction, Pressure, WatchdogState, MAX_PAUSE_SECS,
+    },
     store::{chunk_content_hash, ChunkRecord, EdgeRecord, Store, SymbolRecord},
     walker::{walk, WalkConfig},
 };
@@ -54,6 +57,77 @@ fn warn_embed_issues(
         eprintln!(
             "  ⚠  {embed_failures}/{miss_count} chunk(s) in {path_str} failed to embed (stored text-only)."
         );
+    }
+}
+
+/// Memory-pressure watchdog for the CLI `deep` command. `indexa deep` never had one at all
+/// (confirmed via git history predating even the cross-file `MissBatcher` change) — a
+/// separate, pre-existing gap from the one #505 fixed on the web-job side
+/// (`crates/web/src/jobs_exec/watchdog.rs`'s `run_watchdog_check`). Mirrors that function's
+/// logic — same `indexa_core::resource` primitives, same recover-aware entry gate, same
+/// unload-once-on-Critical + capped recovery-wait shape as `crates/query/src/worker.rs`'s
+/// `run_worker` — but driven by `eprintln!` (matching this file's own warning convention, see
+/// `warn_embed_issues`) instead of a `JobEvent::Warning` push, since `JobHandle`/`JobEvent` are
+/// web-only constructs that must not be pulled into `apps/indexa` (wrong dependency direction).
+///
+/// Called (1) per-file, right before a file registers its cache misses with the cross-file
+/// `MissBatcher`, and (2) inside `flush_deep_batcher`, before its `embed_all` round-trip —
+/// batching cross-file misses (#367) must not widen the pause cadence to "once per flush".
+async fn check_deep_watchdog(
+    wdog: &mut WatchdogState,
+    spec: &MachineSpec,
+    headroom: u64,
+    embedder: Option<&(dyn indexa_embed::Embedder + Send + Sync)>,
+    ctx_llm: Option<&(dyn indexa_llm::Describer + Send + Sync)>,
+) {
+    let sample = wdog.sample();
+    // Gate entry on the same recover-aware predicate as resume, not raw `assess()` — macOS
+    // swap is sticky, so `assess()` keeps reporting Critical for the rest of the run even after
+    // RAM has actually recovered, which would re-pause (and reload the model) on every
+    // subsequent file. `pause_step(.., 0) == Resume` means "RAM is fine OR no real signal".
+    if pause_step(spec, &sample, headroom, 0) == PauseAction::Resume {
+        return;
+    }
+    // RAM is genuinely low. Use `assess()` only to choose the unload gate (Critical vs Throttle).
+    let pressure = assess(&sample, spec, headroom);
+    let avail_gb = sample.available_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let swap_gb = sample.swap_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    eprintln!(
+        "  ⚠  low on memory (available: {avail_gb:.1} GB, swap: {swap_gb:.1} GB) — easing off \
+         and freeing the model; this resumes automatically."
+    );
+
+    // On a Critical entry, unload the resident model(s) once so their wired pages free and
+    // `compute_budget` can climb back above 0 — macOS swap is sticky and never drains on its
+    // own, so gating resume on swap level alone would stall here for the full backstop.
+    if pressure == Pressure::Critical {
+        if let Some(e) = embedder {
+            e.unload().await;
+        }
+        if let Some(l) = ctx_llm {
+            l.unload().await;
+        }
+    }
+
+    // Wait until memory actually recovers, capped at `MAX_PAUSE_SECS`. `pause_step` re-evaluates
+    // a fresh sample each tick: it resumes when free RAM returns above headroom (recovery)
+    // regardless of sticky swap, and escalation (Throttle → Critical) tightens the cadence
+    // immediately.
+    let mut elapsed = 0u64;
+    loop {
+        match pause_step(spec, &wdog.sample(), headroom, elapsed) {
+            PauseAction::Resume => break,
+            PauseAction::Proceed => {
+                eprintln!(
+                    "  ⚠  memory didn't recover within {MAX_PAUSE_SECS}s — continuing gently."
+                );
+                break;
+            }
+            PauseAction::Sleep(secs) => {
+                tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
+                elapsed += secs;
+            }
+        }
     }
 }
 
@@ -155,14 +229,24 @@ fn persist_completed_file(
 /// Flush the batcher: embed every currently-buffered cross-file miss in one (internally
 /// sub-batched) round-trip, scatter results back to owning files, and persist every file that
 /// completes. Called at `is_full()` and once more at end-of-root to drain a final partial batch.
+///
+/// Checks the memory watchdog once, right before `embed_all`, mirroring the per-file check the
+/// caller runs before ever registering a file's misses here (see `check_deep_watchdog`'s doc
+/// comment) — this is the "once per flush" half of that two-point cadence.
+#[allow(clippy::too_many_arguments)] // mirrors persist_completed_file's existing precedent for this same allow
 async fn flush_deep_batcher(
     batcher: &mut MissBatcher<PendingFile>,
-    embedder: &dyn indexa_embed::Embedder,
+    embedder: &(dyn indexa_embed::Embedder + Send + Sync),
     store: &mut Store,
     embed_model: &str,
     configured_dim: usize,
     redact_at_index: bool,
+    wdog: &mut WatchdogState,
+    spec: &MachineSpec,
+    headroom: u64,
+    ctx_llm: Option<&(dyn indexa_llm::Describer + Send + Sync)>,
 ) -> Result<usize> {
+    check_deep_watchdog(wdog, spec, headroom, Some(embedder), ctx_llm).await;
     let refs = batcher.batch_refs();
     let results = indexa_embed::embed_all(embedder, &refs, indexa_embed::EMBED_BATCH_SIZE).await;
     drop(refs);
@@ -347,6 +431,13 @@ pub(crate) async fn cmd_deep(
     } else {
         Some(build_embedder(cfg, Some(&embed_model))?)
     };
+
+    // Memory-pressure watchdog: `indexa deep` never had one at all (see `check_deep_watchdog`'s
+    // doc comment). Detected once and reused across every root/file this invocation walks —
+    // cheap, and `WatchdogState`'s `sysinfo::System` is meant to be long-lived per job.
+    let watchdog_spec = detect_machine();
+    let watchdog_headroom = cfg.resource.effective_headroom_bytes();
+    let mut wdog = WatchdogState::new();
 
     // Effective contextual-retrieval flag: CLI --contextual OR config [describer] contextual_retrieval.
     // Forced off when embedding work is skipped — a situating blurb needs an LLM call.
@@ -759,6 +850,24 @@ pub(crate) async fn cmd_deep(
                     Vec::new()
                 };
 
+                // Memory watchdog: checked before every file registers its misses with the
+                // cross-file batcher, not just at flush points (`is_full()`/end-of-root) —
+                // batching the embed round-trips (#367/MissBatcher) must not widen the pause
+                // cadence: up to `EMBED_BATCH_SIZE` files' worth of parsed chunks/edges/
+                // LLM-enrichment could otherwise accumulate before a Critical-pressure pause is
+                // even checked. This restores per-file cadence; `flush_deep_batcher` checks
+                // again right before the actual (and possibly much-later) `embed_all` round-trip.
+                check_deep_watchdog(
+                    &mut wdog,
+                    &watchdog_spec,
+                    watchdog_headroom,
+                    embedder.as_deref(),
+                    ctx_llm
+                        .as_ref()
+                        .map(|l| l as &(dyn indexa_llm::Describer + Send + Sync)),
+                )
+                .await;
+
                 // Register this file's misses with the cross-file batcher instead of embedding
                 // them here directly (#367) — the batcher accumulates buffered embed-texts
                 // across files so the eventual `embed_all` call runs on a full batch rather
@@ -812,13 +921,18 @@ pub(crate) async fn cmd_deep(
                     total_chunks += flush_deep_batcher(
                         &mut batcher,
                         embedder
-                            .as_ref()
-                            .expect("embedder is built whenever embedding work isn't skipped")
-                            .as_ref(),
+                            .as_deref()
+                            .expect("embedder is built whenever embedding work isn't skipped"),
                         &mut store,
                         &embed_model,
                         cfg.embedding.dim,
                         cfg.scan.redact_at_index,
+                        &mut wdog,
+                        &watchdog_spec,
+                        watchdog_headroom,
+                        ctx_llm
+                            .as_ref()
+                            .map(|l| l as &(dyn indexa_llm::Describer + Send + Sync)),
                     )
                     .await?;
                 }
@@ -831,13 +945,18 @@ pub(crate) async fn cmd_deep(
             total_chunks += flush_deep_batcher(
                 &mut batcher,
                 embedder
-                    .as_ref()
-                    .expect("embedder is built whenever embedding work isn't skipped")
-                    .as_ref(),
+                    .as_deref()
+                    .expect("embedder is built whenever embedding work isn't skipped"),
                 &mut store,
                 &embed_model,
                 cfg.embedding.dim,
                 cfg.scan.redact_at_index,
+                &mut wdog,
+                &watchdog_spec,
+                watchdog_headroom,
+                ctx_llm
+                    .as_ref()
+                    .map(|l| l as &(dyn indexa_llm::Describer + Send + Sync)),
             )
             .await?;
         }
@@ -1099,6 +1218,97 @@ mod tests {
         assert!(
             estimated > true_total / 2,
             "estimate {estimated} collapsed toward zero — oversized file likely wasn't clamped"
+        );
+    }
+}
+
+/// Regression coverage for the CLI `deep` memory-pressure watchdog (previously nonexistent —
+/// see `check_deep_watchdog`'s doc comment). Mirrors the technique
+/// `crates/web/src/jobs_exec/deep.rs`'s own watchdog-cadence regression test uses
+/// (`deep_phase_checks_the_watchdog_per_file_not_only_at_batch_flush`): force deterministic
+/// `Pressure::Critical` via `spec.gpu_wired_limit_bytes = 0` (independent of the real test
+/// machine's memory) combined with `#[tokio::test(start_paused = true)]` so the recovery-wait
+/// loop (capped at `MAX_PAUSE_SECS`) resolves in virtual time instead of real seconds.
+///
+/// `cmd_deep` itself is large and CLI-config-driven (walks the real filesystem, resolves a
+/// config-file-backed index DB path via `require_index_db`), so rather than building a harness
+/// around the whole command, this exercises the extracted `check_deep_watchdog` helper
+/// directly — the same helper both the per-file call site (before a file registers its misses
+/// with the `MissBatcher`) and `flush_deep_batcher` (before `embed_all`) call. A fake
+/// `Embedder` counts `unload()` calls, which only happen on a `Pressure::Critical` entry — so
+/// calling the helper N times under forced-Critical pressure and seeing exactly N unloads
+/// proves it fires on *every* invocation, not just once overall (which is what the CLI's
+/// prior — nonexistent — watchdog would have looked like: zero unloads regardless of N).
+#[cfg(test)]
+mod watchdog_tests {
+    use super::check_deep_watchdog;
+    use indexa_core::resource::{detect_machine, WatchdogState};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts `unload()` calls instead of doing any real embedding work — this test only
+    /// exercises the watchdog's pause/unload plumbing, never `embed`/`embed_batch`.
+    #[derive(Default)]
+    struct CountingEmbedder {
+        unloads: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl indexa_embed::Embedder for CountingEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            unreachable!("watchdog test never calls embed()")
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+        async fn unload(&self) {
+            self.unloads.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn check_deep_watchdog_fires_on_every_call_under_sustained_critical_pressure() {
+        let mut spec = detect_machine();
+        // Deterministically forces `compute_budget` (and therefore `assess`/`pause_step`) to
+        // Critical regardless of the real test machine's memory: `compute_budget` clamps
+        // truly-available RAM to `min(available, gpu_wired_limit_bytes)`, so zeroing this
+        // ceiling makes the budget <= 0 (and therefore <= -(headroom/2), the Critical
+        // threshold) on every sample, headroom = 0 included.
+        spec.gpu_wired_limit_bytes = 0;
+        let mut wdog = WatchdogState::new();
+        let embedder = CountingEmbedder::default();
+
+        // Simulates 3 files each independently checking the watchdog (the per-file call site)
+        // plus a 4th standing in for a batch flush — under the pre-fix code there was no such
+        // call at all anywhere in `cmd_deep`, so this loop is exactly the coverage that was
+        // previously missing.
+        for _ in 0..4 {
+            check_deep_watchdog(&mut wdog, &spec, 0, Some(&embedder), None).await;
+        }
+
+        assert_eq!(
+            embedder.unloads.load(Ordering::SeqCst),
+            4,
+            "watchdog must unload the embedder on every Critical-pressure invocation — proving \
+             it fires once per call site, not just once overall"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_deep_watchdog_is_a_noop_under_ok_pressure() {
+        // Real machine spec (generous `gpu_wired_limit_bytes`) + zero headroom: on any host
+        // with nonzero available RAM, `compute_budget` is positive, so `pause_step` resumes
+        // immediately and the helper returns before ever touching the embedder — proving it
+        // doesn't unconditionally unload regardless of pressure.
+        let spec = detect_machine();
+        let mut wdog = WatchdogState::new();
+        let embedder = CountingEmbedder::default();
+
+        check_deep_watchdog(&mut wdog, &spec, 0, Some(&embedder), None).await;
+
+        assert_eq!(
+            embedder.unloads.load(Ordering::SeqCst),
+            0,
+            "watchdog must not unload the embedder when pressure is Ok"
         );
     }
 }
