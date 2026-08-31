@@ -355,7 +355,8 @@ pub enum Commands {
   indexa eval golden.json --rerank              # also score the ask pipeline's rerank pass
   indexa eval golden.json --json --min-hit-rate 0.8   # exit 1 below 80% hit rate
   indexa eval golden.json --judge               # also grade synthesized answers via an LLM
-  indexa eval golden.json --judge --judge-model gemma3:12b --min-judge-score 3.5")]
+  indexa eval golden.json --judge --judge-model gemma3:12b --min-judge-score 3.5
+  indexa eval golden.json --save-run ~/indexa-eval-runs   # write a dated run for later --baseline use")]
     #[command(display_order = 38)]
     Eval {
         /// Golden-questions JSON file (see docs/how-to/evaluate-retrieval.md).
@@ -383,7 +384,8 @@ pub enum Commands {
 
         /// Compare this run against a saved baseline (an earlier `indexa eval --json` output, or a
         /// bare summary object) and print the per-metric deltas. Pair with `--max-regression` to
-        /// fail the run on a drop. Save one with: `indexa eval golden.json --json > baseline.json`.
+        /// fail the run on a drop. Save one with: `indexa eval golden.json --json > baseline.json`,
+        /// or use `--save-run` for a first-class, dated equivalent.
         #[arg(long)]
         baseline: Option<String>,
 
@@ -421,6 +423,13 @@ pub enum Commands {
         /// gate is never added to a required workflow by Indexa itself. Requires `--judge`.
         #[arg(long, requires = "judge")]
         min_judge_score: Option<f64>,
+
+        /// Write this run's `--json` payload (mode/questions/summary) to `<dir>/eval-<unix>.json`
+        /// — a first-class alternative to manually redirecting `--json` output, giving you a
+        /// dated file ready to hand back in later via `--baseline`. Composes with `--baseline`,
+        /// `--rerank`, and `--judge`; works standalone without also passing `--json`.
+        #[arg(long)]
+        save_run: Option<String>,
     },
 
     /// Run several questions and render one document (answers + cited sources + TOC).
@@ -1732,6 +1741,7 @@ mod tests {
                 judge,
                 judge_model,
                 min_judge_score,
+                save_run,
             } => {
                 assert_eq!(golden, "golden.json");
                 assert_eq!(mode, "sparse", "hermetic sparse is the default");
@@ -1751,6 +1761,25 @@ mod tests {
                 );
                 assert!(judge_model.is_none());
                 assert!(min_judge_score.is_none());
+                assert!(save_run.is_none(), "--save-run must default to off");
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_eval_save_run_flag() {
+        let cli = Cli::try_parse_from([
+            "indexa",
+            "eval",
+            "golden.json",
+            "--save-run",
+            "~/indexa-eval-runs",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Eval { save_run, .. } => {
+                assert_eq!(save_run.as_deref(), Some("~/indexa-eval-runs"));
             }
             _ => panic!("wrong command"),
         }

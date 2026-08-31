@@ -53,6 +53,7 @@ pub(crate) async fn cmd_eval(
     judge: bool,
     judge_model: Option<String>,
     min_judge_score: Option<f64>,
+    save_run: Option<String>,
     cfg: &Config,
 ) -> Result<()> {
     if !(0.0..=1.0).contains(&min_hit_rate) {
@@ -188,16 +189,14 @@ pub(crate) async fn cmd_eval(
         per_question.push(metrics);
     }
     let summary = aggregate(&per_question);
+    let eval_json = EvalJson {
+        mode: &mode,
+        questions: &per_question,
+        summary: &summary,
+    };
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&EvalJson {
-                mode: &mode,
-                questions: &per_question,
-                summary: &summary,
-            })?
-        );
+        println!("{}", serde_json::to_string_pretty(&eval_json)?);
     } else {
         println!(
             "{:>3}  {:>4}  {:>6}  {:>5}  {:>5}  {:>5}  question",
@@ -245,6 +244,20 @@ pub(crate) async fn cmd_eval(
             mode,
             judge_line
         );
+    }
+
+    // Optional `--save-run`: a first-class alternative to manually redirecting `--json` output
+    // (see the `--baseline` doc comment) — writes the same payload to a dated file, ready to hand
+    // back in later via `--baseline`. Standalone (doesn't require `--json`) and composes with
+    // `--baseline`/`--rerank`/`--judge` since it just reuses `eval_json`, already built above.
+    // The confirmation goes to stderr when `--json` is set so stdout stays machine-parseable.
+    if let Some(dir) = &save_run {
+        let path = save_eval_run(dir, &eval_json)?;
+        if json {
+            eprintln!("Saved run to {path}");
+        } else {
+            println!("Saved run to {path}");
+        }
     }
 
     // Optional baseline regression gate: load a saved run, print the per-metric deltas, and flag
@@ -359,6 +372,23 @@ async fn run_judge_for_question(
     }
 }
 
+/// `--save-run`: write `json` (the same shape `--json` prints) to `<dir>/eval-<unix>.json` and
+/// return the path written. `dir` is tilde-expanded and created if missing. The filename keys on
+/// `helpers::now_unix()` so repeated runs never collide and sort chronologically.
+fn save_eval_run(dir: &str, payload: &EvalJson<'_>) -> Result<String> {
+    let dir = super::helpers::expand(dir);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating --save-run directory '{dir}'"))?;
+    let path = std::path::Path::new(&dir)
+        .join(format!("eval-{}.json", super::helpers::now_unix()))
+        .to_string_lossy()
+        .into_owned();
+    let body = serde_json::to_string_pretty(payload)?;
+    std::fs::write(&path, body)
+        .with_context(|| format!("writing --save-run output to '{path}'"))?;
+    Ok(path)
+}
+
 /// Char-safe truncation for the table's question column.
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -371,8 +401,8 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate;
-    use indexa_query::GoldenSet;
+    use super::{save_eval_run, truncate, EvalJson};
+    use indexa_query::{EvalSummary, GoldenSet, QuestionMetrics};
 
     #[test]
     fn golden_file_parses_with_and_without_k() {
@@ -404,5 +434,95 @@ mod tests {
         let cut = truncate(&long, 10);
         assert!(cut.ends_with('…'));
         assert_eq!(cut.chars().count(), 10);
+    }
+
+    fn sample_metrics() -> Vec<QuestionMetrics> {
+        vec![QuestionMetrics {
+            question: "where is auth handled?".to_owned(),
+            k: 10,
+            retrieved: 3,
+            hit: true,
+            first_hit_rank: Some(1),
+            reciprocal_rank: 1.0,
+            precision: 0.5,
+            recall: 1.0,
+            ndcg: 1.0,
+            judge: None,
+        }]
+    }
+
+    fn sample_summary() -> EvalSummary {
+        EvalSummary {
+            questions: 1,
+            hit_rate: 1.0,
+            mrr: 1.0,
+            mean_precision: 0.5,
+            mean_recall: 1.0,
+            mean_ndcg: 1.0,
+            mean_judge_score: None,
+            judged_questions: None,
+        }
+    }
+
+    /// `--save-run` writes `<dir>/eval-<unix>.json` with the exact `{mode, questions, summary}`
+    /// shape `--json` prints — this is what a later `--baseline` load expects to parse back.
+    #[test]
+    fn save_eval_run_writes_dated_file_with_json_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let questions = sample_metrics();
+        let summary = sample_summary();
+        let eval_json = EvalJson {
+            mode: "sparse",
+            questions: &questions,
+            summary: &summary,
+        };
+
+        let path = save_eval_run(dir.path().to_str().unwrap(), &eval_json).unwrap();
+
+        assert!(
+            path.starts_with(dir.path().to_str().unwrap()),
+            "path {path} must live under the requested --save-run dir"
+        );
+        let filename = std::path::Path::new(&path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            filename.starts_with("eval-") && filename.ends_with(".json"),
+            "got: {filename}"
+        );
+        let unix_part = filename
+            .strip_prefix("eval-")
+            .and_then(|s| s.strip_suffix(".json"))
+            .unwrap();
+        assert!(
+            unix_part.parse::<i64>().is_ok(),
+            "filename's timestamp segment must be a plain unix seconds integer, got: {unix_part}"
+        );
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(parsed["mode"], "sparse");
+        assert_eq!(parsed["summary"]["questions"], 1);
+        assert_eq!(parsed["questions"][0]["question"], "where is auth handled?");
+    }
+
+    /// A nonexistent `--save-run` directory is created, not an error — mirrors `finalize_export`
+    /// only erroring on a *file* write into a missing parent, never on the `--save-run` dir itself.
+    #[test]
+    fn save_eval_run_creates_missing_directory() {
+        let base = tempfile::tempdir().unwrap();
+        let nested = base.path().join("does/not/exist/yet");
+        let questions = sample_metrics();
+        let summary = sample_summary();
+        let eval_json = EvalJson {
+            mode: "sparse",
+            questions: &questions,
+            summary: &summary,
+        };
+
+        let path = save_eval_run(nested.to_str().unwrap(), &eval_json).unwrap();
+        assert!(std::path::Path::new(&path).exists());
     }
 }
