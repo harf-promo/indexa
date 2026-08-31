@@ -1,5 +1,6 @@
 //! File type parsers: text, Markdown, source code (tree-sitter), images, audio/video, office.
 
+pub mod agent_sessions;
 pub mod archive;
 pub mod binary;
 pub mod code;

@@ -14,6 +14,8 @@ Task-focused recipes. For the conceptual overview start with the
   file: hit@k / MRR / precision as a CI regression gate (no LLM needed).
 - **[Tune Indexa for a small machine](tune-for-a-small-machine.md)** — keep an 8–16 GB laptop
   responsive while it builds context.
+- **[Index your own Claude Code session history](index-agent-session-history.md)** — search past
+  AI conversations the same way you search your code (opt-in, never auto-scanned).
 
 For contributors:
 
