@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.79.1] — 2026-08-31
+
 ### Fixed
 
 A critique-driven fix round over the two prior lane batches (base `88a8d7c..3b3f176`). Each
