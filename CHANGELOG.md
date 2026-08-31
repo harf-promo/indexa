@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.80.0] — 2026-08-31
+
 ### Added
 
 - **`indexa eval golden.json --save-run <dir>`** — writes the run's `{mode, questions, summary}`
