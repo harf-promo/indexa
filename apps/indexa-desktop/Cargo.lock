@@ -2849,7 +2849,7 @@ dependencies = [
  "pdf-extract",
  "pulldown-cmark",
  "quick-xml 0.41.0",
- "ruzstd",
+ "ruzstd 0.9.0",
  "serde",
  "serde_json",
  "tar",
@@ -4089,7 +4089,7 @@ checksum = "2e5a6c098c7a3b6547378093f5cc30bc54fd361ce711e05293a5cc589562739b"
 dependencies = [
  "flate2",
  "memchr",
- "ruzstd",
+ "ruzstd 0.8.3",
 ]
 
 [[package]]
@@ -5174,6 +5174,15 @@ name = "ruzstd"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7c1c839d570d835527c9a5e4db7cb2198683a988cb9d7293fc8674e6bd58fc8"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
+name = "ruzstd"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a252f5e20f038fe7b4ea53e073e65398d652c864cc162fc77c56c2f13717b888"
 dependencies = [
  "twox-hash",
 ]
