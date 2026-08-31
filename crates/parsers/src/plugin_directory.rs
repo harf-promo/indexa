@@ -7,13 +7,21 @@
 //! re-inventing the snippet each time.
 //!
 //! The list ships embedded in the binary (`../plugins.toml`, via `include_str!`) and is
-//! parsed on each [`load`] call — no network fetch, fully local-first. A future version
-//! could fetch a remote curated list instead of (or in addition to) this file; that's
-//! explicitly out of scope for now. `indexa plugin list` / `indexa plugin info <name>`
-//! (`apps/indexa/src/commands/plugin.rs`) are the CLI surface over this module.
+//! parsed on each [`load`] call — fully local-first, no network fetch required. [`load_remote`]
+//! additionally fetches the same file straight off `main` on GitHub, so a user can see
+//! newly-curated entries without upgrading their `indexa` binary — `indexa plugin list
+//! --refresh` (`apps/indexa/src/commands/plugin.rs`) is the CLI surface for that, and it
+//! always fails open to [`load`] on any network/parse error.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+
+/// Raw `plugins.toml` off `main`, mirroring the embedded copy but always current.
+const REMOTE_DIRECTORY_URL: &str =
+    "https://raw.githubusercontent.com/harf-promo/indexa/main/crates/parsers/plugins.toml";
+
+/// Same `User-Agent` convention as `crates/update`'s GitHub client.
+const USER_AGENT: &str = concat!("indexa/", env!("CARGO_PKG_VERSION"));
 
 /// One entry in the plugin directory: everything needed to find, evaluate, and wire in
 /// a third-party parser crate.
@@ -72,12 +80,50 @@ struct DirectoryFile {
 /// The curated directory data, embedded at compile time — hand-edited, not generated.
 const PLUGINS_TOML: &str = include_str!("../plugins.toml");
 
+/// Parse `plugins.toml`'s shape (`[[plugin]] ...`) out of raw TOML text — shared by
+/// [`load`] (the embedded copy) and [`load_remote`] (the fetched one), so the two never
+/// drift apart.
+fn parse_directory_toml(raw: &str) -> Result<Vec<PluginEntry>> {
+    let file: DirectoryFile = toml::from_str(raw).context("parsing the plugin directory TOML")?;
+    Ok(file.plugin)
+}
+
 /// Load and parse the embedded plugin directory. Cheap (a few KB of TOML); no caching —
 /// call it once per command invocation.
 pub fn load() -> Result<Vec<PluginEntry>> {
-    let file: DirectoryFile = toml::from_str(PLUGINS_TOML)
-        .context("parsing the embedded plugin directory (crates/parsers/plugins.toml)")?;
-    Ok(file.plugin)
+    parse_directory_toml(PLUGINS_TOML)
+        .context("parsing the embedded plugin directory (crates/parsers/plugins.toml)")
+}
+
+/// Build the `reqwest::Client` used for [`load_remote`]: rustls-only (the workspace's
+/// openssl-free-tree invariant), the same `User-Agent` convention as `crates/update`'s
+/// GitHub client, a short connect timeout and a modest whole-request timeout — this is a
+/// small text file, not a release binary, so it should fail fast rather than hang.
+pub fn build_remote_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .context("failed to build HTTP client for the remote plugin directory")
+}
+
+/// Fetch and parse `plugins.toml` off `main` on GitHub — the same curated list as
+/// [`load`], but reflecting whatever's currently committed upstream rather than what
+/// shipped with this binary. No caching; callers decide how to handle failure (this
+/// module never falls back on its own — see `cmd_plugin_list`'s `--refresh` handling).
+pub async fn load_remote(client: &reqwest::Client) -> Result<Vec<PluginEntry>> {
+    let raw = client
+        .get(REMOTE_DIRECTORY_URL)
+        .send()
+        .await
+        .context("fetching the remote plugin directory")?
+        .error_for_status()
+        .context("remote plugin directory request failed")?
+        .text()
+        .await
+        .context("reading the remote plugin directory response body")?;
+    parse_directory_toml(&raw).context("parsing the remote plugin directory")
 }
 
 /// Find one entry by name, case-insensitive.
@@ -140,6 +186,51 @@ mod tests {
         assert_eq!(p.handles(), "application/x-foo");
         p.mime_types.clear();
         assert_eq!(p.handles(), "—");
+    }
+
+    #[test]
+    fn parse_directory_toml_parses_a_crafted_entry() {
+        let raw = r#"
+[[plugin]]
+name = "crafted"
+crate_name = "indexa-parser-crafted"
+parser_type = "CraftedParser"
+description = "A hand-crafted test entry."
+extensions = ["crf"]
+mime_types = []
+repo = "https://example.com/crafted"
+"#;
+        let entries = parse_directory_toml(raw).expect("valid TOML must parse");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "crafted");
+        assert_eq!(entries[0].handles(), ".crf");
+    }
+
+    #[test]
+    fn parse_directory_toml_empty_string_is_an_empty_list() {
+        // No `[[plugin]]` tables at all is valid TOML (an empty directory), not an error.
+        let entries = parse_directory_toml("").expect("empty input is a valid, empty directory");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_directory_toml_rejects_malformed_toml() {
+        let malformed = "this is not [[valid toml at all";
+        assert!(parse_directory_toml(malformed).is_err());
+    }
+
+    #[test]
+    fn parse_directory_toml_rejects_a_plugin_missing_a_required_field() {
+        // `repo` is required (no `#[serde(default)]`) — a curator dropping it should error
+        // cleanly at parse time, not panic or silently substitute an empty string.
+        let raw = r#"
+[[plugin]]
+name = "incomplete"
+crate_name = "indexa-parser-incomplete"
+parser_type = "IncompleteParser"
+description = "Missing the repo field."
+"#;
+        assert!(parse_directory_toml(raw).is_err());
     }
 
     #[test]

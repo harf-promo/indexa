@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   needed, and prints the path written. A first-class alternative to manually redirecting `--json`
   output into a baseline file (`--baseline`'s doc comment used to be the only guidance); works
   standalone and composes with `--baseline`/`--rerank`/`--judge`.
+- **`indexa plugin list --refresh`.** The curated third-party parser plugin directory
+  (`crates/parsers/plugins.toml`) previously only loaded the copy embedded in the binary
+  at compile time. `--refresh` fetches the same file straight off `main` on GitHub instead,
+  so newly-added community plugins show up without an `indexa` upgrade; any network or
+  parse error falls back to the embedded list rather than failing the command outright.
 
 ## [0.79.1] — 2026-08-31
 

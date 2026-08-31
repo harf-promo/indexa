@@ -2,9 +2,18 @@ use anyhow::{bail, Result};
 use indexa_parsers::plugin_directory::{self, PluginEntry};
 
 /// `indexa plugin list` — print the curated third-party parser plugin directory
-/// (`crates/parsers/plugins.toml`, embedded at compile time — no network fetch).
-pub(crate) async fn cmd_plugin_list(json: bool) -> Result<()> {
-    let plugins = plugin_directory::load()?;
+/// (`crates/parsers/plugins.toml`, embedded at compile time — no network fetch by
+/// default). With `refresh`, fetches the same file off `main` on GitHub instead, so
+/// newly-curated entries show up without an `indexa` upgrade; any network/parse error
+/// falls back to the embedded list rather than failing the command outright.
+pub(crate) async fn cmd_plugin_list(json: bool, refresh: bool) -> Result<()> {
+    let plugins = if refresh {
+        let client = plugin_directory::build_remote_client()?;
+        let remote = plugin_directory::load_remote(&client).await;
+        resolve_refreshed_plugins(remote)?
+    } else {
+        plugin_directory::load()?
+    };
 
     if json {
         let arr: Vec<serde_json::Value> = plugins.iter().map(entry_json).collect();
@@ -87,4 +96,53 @@ fn entry_json(p: &PluginEntry) -> serde_json::Value {
         "mime_types": p.mime_types,
         "repo": p.repo,
     })
+}
+
+/// Resolve `--refresh`'s outcome: a successful fetch wins outright; a failed one prints a
+/// warning and falls back to the embedded directory. Split out from `cmd_plugin_list` so
+/// the fallback path is testable against an injected `Err` — never a real network call.
+fn resolve_refreshed_plugins(remote: Result<Vec<PluginEntry>>) -> Result<Vec<PluginEntry>> {
+    match remote {
+        Ok(entries) => Ok(entries),
+        Err(e) => {
+            eprintln!(
+                "⚠ could not fetch the remote plugin directory ({e:#}) — showing the locally embedded list."
+            );
+            plugin_directory::load()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn example_entry(name: &str) -> PluginEntry {
+        PluginEntry {
+            name: name.into(),
+            crate_name: format!("indexa-parser-{name}"),
+            parser_type: "ExampleParser".into(),
+            description: "d".into(),
+            extensions: vec!["xyz".into()],
+            mime_types: vec![],
+            repo: "https://example.com".into(),
+        }
+    }
+
+    #[test]
+    fn resolve_refreshed_plugins_uses_the_remote_list_on_success() {
+        let plugins = resolve_refreshed_plugins(Ok(vec![example_entry("remote-only")])).unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].name, "remote-only");
+    }
+
+    #[test]
+    fn resolve_refreshed_plugins_falls_back_to_the_embedded_list_on_error() {
+        // Injected failure, not a real network call — proves the fallback path is a soft
+        // failure (the embedded directory), never a hard error from `--refresh`.
+        let plugins =
+            resolve_refreshed_plugins(Err(anyhow::anyhow!("connection refused"))).unwrap();
+        // The embedded plugins.toml always has at least the template entry.
+        assert!(!plugins.is_empty());
+    }
 }

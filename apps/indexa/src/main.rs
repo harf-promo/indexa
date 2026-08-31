@@ -475,7 +475,7 @@ async fn main() -> Result<()> {
         Commands::Update { check, yes, pin } => commands::cmd_update(check, yes, pin).await,
         Commands::Completion { shell } => commands::cmd_completion(shell),
         Commands::Plugin { action } => match action {
-            PluginAction::List { json } => commands::cmd_plugin_list(json).await,
+            PluginAction::List { json, refresh } => commands::cmd_plugin_list(json, refresh).await,
             PluginAction::Info { name } => commands::cmd_plugin_info(name).await,
         },
     };
