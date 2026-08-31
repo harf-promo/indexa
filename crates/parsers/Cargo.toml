@@ -55,7 +55,7 @@ tar = "0.4.46"
 flate2 = "1.1.9"
 mail-parser = "0.11.3"
 object = "0.39.1"
-wasmparser = "0.252.0"
+wasmparser = "0.258.0"
 cfb = "0.14.0"
 # UTF-16/BOM transcoding for the text-family parsers ([parsers] encoding = "auto")
 encoding_rs = { workspace = true }
