@@ -32,3 +32,7 @@ wait-timeout = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# `#[tokio::test(start_paused = true)]` — lets `run_watchdog`'s recovery-wait loop regression
+# test run capped at `MAX_PAUSE_SECS` in virtual time instead of real seconds. The main
+# [dependencies] tokio doesn't enable `test-util`, so it's added here.
+tokio = { workspace = true, features = ["test-util"] }

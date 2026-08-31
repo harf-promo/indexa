@@ -921,6 +921,98 @@ pub fn pause_step(
     pause_decision(assess(sample, spec, headroom), elapsed_secs)
 }
 
+// ── Shared watchdog sequencing ────────────────────────────────────────────────
+
+/// A moment in [`run_watchdog`]'s sequencing a caller may want to report on. Each call site
+/// renders these into its own reporting channel (`tracing::warn!`, a `JobEvent::Warning` push,
+/// `eprintln!`, …) — this module stays agnostic of how (or whether) a caller reports at all.
+pub enum WatchdogEvent<'a> {
+    /// The entry gate tripped: pressure was genuinely detected (not just a transient signal),
+    /// and the recovery-wait loop is about to start. `sample` is the sample the gate itself
+    /// used, so a caller can render "available: X GB, swap: Y GB" without re-sampling.
+    Entered {
+        pressure: Pressure,
+        sample: &'a MemSample,
+    },
+    /// One recovery-wait tick did not resolve — memory is still under pressure and the loop is
+    /// about to sleep. Fired on every tick; a caller wanting a slower cadence (e.g. web's 30 s
+    /// periodic status push) filters this down itself.
+    StillWaiting { elapsed_secs: u64 },
+    /// The recovery-wait loop hit [`MAX_PAUSE_SECS`] without recovering — proceeding anyway.
+    GaveUp,
+}
+
+/// Extracted, call-site-agnostic memory-pressure watchdog sequencing, shared by the CLI worker
+/// (`crates/query/src/worker.rs`), the web job executor
+/// (`crates/web/src/jobs_exec/watchdog.rs`), and the CLI `deep` command
+/// (`apps/indexa/src/commands/deep.rs`) — three previously independent, byte-identical
+/// implementations of the same six-step algorithm. Deliberately network/model-agnostic: it
+/// knows nothing of `Embedder`/`Describer`/`JobHandle` — `unload` is the caller's own closure
+/// over whatever model handles it holds, and `on_report` is the caller's own reporting channel.
+///
+/// Steps: (1) sample; (2) entry gate via [`pause_step`] — return immediately if pressure has
+/// already cleared (or was never real, e.g. sticky macOS swap); (3) [`assess`] to pick the
+/// unload gate; (4) report [`WatchdogEvent::Entered`] (the one genuinely call-site-specific
+/// piece); (5) unload the resident model(s) once, only on a [`Pressure::Critical`] entry — macOS
+/// swap is sticky and never drains on its own, so freeing the model's wired pages is what lets
+/// the recovery check below actually resume; (6) a recovery-wait loop re-evaluating
+/// [`pause_step`] each iteration, capped at [`MAX_PAUSE_SECS`].
+pub async fn run_watchdog<F, U, UFut>(
+    wdog: &mut WatchdogState,
+    spec: &MachineSpec,
+    headroom: u64,
+    mut on_report: F,
+    unload: U,
+) where
+    F: FnMut(WatchdogEvent<'_>),
+    U: FnOnce() -> UFut,
+    UFut: std::future::Future<Output = ()>,
+{
+    // Gate entry on the recover-aware predicate, not raw `assess()`: macOS swap is sticky, so
+    // `assess()` keeps reporting Critical for the rest of a job even after RAM has actually
+    // recovered, which would re-enter this pause (warn + unload + reload the model) on every
+    // subsequent call. `pause_step(.., 0) == Resume` means "RAM is fine OR no real signal".
+    let sample = wdog.sample();
+    if pause_step(spec, &sample, headroom, 0) == PauseAction::Resume {
+        return;
+    }
+    // RAM is genuinely low. Use `assess()` only to choose the unload gate (Critical vs Throttle).
+    let pressure = assess(&sample, spec, headroom);
+    on_report(WatchdogEvent::Entered {
+        pressure,
+        sample: &sample,
+    });
+
+    // On a Critical entry, unload the resident model(s) once so their wired pages free and
+    // `compute_budget` can climb back above 0 — macOS swap is sticky and never drains on its
+    // own, so gating resume on swap level alone would stall here for the full backstop.
+    if pressure == Pressure::Critical {
+        unload().await;
+    }
+
+    // Wait until memory actually recovers, capped at `MAX_PAUSE_SECS`. `pause_step` re-evaluates
+    // a fresh sample each tick: it resumes when free RAM returns above headroom (recovery)
+    // regardless of sticky swap, and escalation (Throttle → Critical) tightens the cadence
+    // immediately.
+    let mut elapsed = 0u64;
+    loop {
+        match pause_step(spec, &wdog.sample(), headroom, elapsed) {
+            PauseAction::Resume => break,
+            PauseAction::Proceed => {
+                on_report(WatchdogEvent::GaveUp);
+                break;
+            }
+            PauseAction::Sleep(secs) => {
+                on_report(WatchdogEvent::StillWaiting {
+                    elapsed_secs: elapsed,
+                });
+                tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                elapsed += secs;
+            }
+        }
+    }
+}
+
 // ── ETA estimation ────────────────────────────────────────────────────────────
 
 /// Per-model ETA estimates.
@@ -1617,5 +1709,112 @@ mod tests {
         let eta = estimate_eta_with(&fp, 200, 600, 600, 2, true, 400.0);
         assert!(eta.total_secs > 0.0);
         assert!(!eta.display.is_empty());
+    }
+
+    // ── run_watchdog: shared sequencing (round-5 consolidation) ────────────────
+    //
+    // Extracted from three previously-independent, byte-identical implementations
+    // (`crates/query/src/worker.rs`, `crates/web/src/jobs_exec/watchdog.rs`,
+    // `apps/indexa/src/commands/deep.rs`). This proves the sequencing itself,
+    // dependency-free; each call site is reduced to a thin smoke test confirming it
+    // wires the shared helper up with the right closures (see their own test modules).
+
+    #[tokio::test]
+    async fn run_watchdog_is_a_noop_when_pressure_is_ok() {
+        // Real machine spec (generous `gpu_wired_limit_bytes`) + zero headroom: on any host
+        // with nonzero available RAM, `compute_budget` is positive, so the entry gate resumes
+        // immediately — no report, no unload.
+        let spec = detect_machine();
+        let mut wdog = WatchdogState::new();
+        let mut entered = 0u32;
+        let unload_calls = std::cell::Cell::new(0u32);
+
+        run_watchdog(
+            &mut wdog,
+            &spec,
+            0,
+            |_event| entered += 1,
+            || async { unload_calls.set(unload_calls.get() + 1) },
+        )
+        .await;
+
+        assert_eq!(entered, 0, "no report when pressure never entered");
+        assert_eq!(
+            unload_calls.get(),
+            0,
+            "no unload when pressure never entered"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_watchdog_unloads_once_and_waits_out_the_cap_under_sustained_critical_pressure() {
+        // Deterministically forces every sample to Critical regardless of the real test
+        // machine's memory: `compute_budget` clamps truly-available RAM to
+        // `min(available, gpu_wired_limit_bytes)`, so zeroing this ceiling makes the budget
+        // <= -(headroom/2) (the Critical threshold) on every sample, headroom = 0 included.
+        // `start_paused = true` resolves the capped recovery-wait loop in virtual time.
+        let mut spec = detect_machine();
+        spec.gpu_wired_limit_bytes = 0;
+        let mut wdog = WatchdogState::new();
+
+        let mut entered_pressure: Option<Pressure> = None;
+        let mut still_waiting = 0u32;
+        let mut gave_up = 0u32;
+        let unload_calls = std::cell::Cell::new(0u32);
+
+        run_watchdog(
+            &mut wdog,
+            &spec,
+            0,
+            |event| match event {
+                WatchdogEvent::Entered { pressure, .. } => entered_pressure = Some(pressure),
+                WatchdogEvent::StillWaiting { .. } => still_waiting += 1,
+                WatchdogEvent::GaveUp => gave_up += 1,
+            },
+            || async { unload_calls.set(unload_calls.get() + 1) },
+        )
+        .await;
+
+        assert_eq!(entered_pressure, Some(Pressure::Critical));
+        assert_eq!(
+            unload_calls.get(),
+            1,
+            "unload must fire exactly once on a Critical entry, not once per recovery tick"
+        );
+        // Critical ticks sleep 5 s each, capped at MAX_PAUSE_SECS — so exactly
+        // MAX_PAUSE_SECS / 5 recovery-wait ticks fire before the loop gives up.
+        assert_eq!(still_waiting, (MAX_PAUSE_SECS / 5) as u32);
+        assert_eq!(
+            gave_up, 1,
+            "must give up exactly once, at the MAX_PAUSE_SECS backstop"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_watchdog_entered_sample_matches_the_gate_sample() {
+        // The `Entered` event's `sample` must be the same sample the entry gate itself used
+        // (not a freshly re-sampled one) — callers (e.g. web's PressureInfo) render it as-is.
+        let mut spec = detect_machine();
+        spec.gpu_wired_limit_bytes = 0; // force Critical so the callback actually fires
+        let mut wdog = WatchdogState::new();
+        let gate_sample = wdog.sample();
+
+        let mut seen_available = None;
+        run_watchdog(
+            &mut wdog,
+            &spec,
+            0,
+            |event| {
+                if let WatchdogEvent::Entered { sample, .. } = event {
+                    seen_available = Some(sample.available_bytes);
+                }
+            },
+            || async {},
+        )
+        .await;
+
+        // Sampled a moment apart from `gate_sample` above, but on a quiescent test machine
+        // `available_bytes` should not have moved between the two calls.
+        assert_eq!(seen_available, Some(gate_sample.available_bytes));
     }
 }

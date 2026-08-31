@@ -4,7 +4,7 @@
 
 use crate::jobs::{push, JobEvent, JobHandle, PressureInfo};
 use indexa_core::resource::{
-    assess, pause_step, MachineSpec, PauseAction, Pressure, WatchdogState, MAX_PAUSE_SECS,
+    self, compute_budget, MachineSpec, Pressure, WatchdogEvent, WatchdogState, MAX_PAUSE_SECS,
 };
 use indexa_embed::Embedder;
 use indexa_llm::Describer;
@@ -21,15 +21,19 @@ fn swap_pct(sample: &indexa_core::resource::MemSample) -> u64 {
 
 /// Check memory pressure before an Ollama call.
 ///
-/// If pressure is Throttle or Critical:
+/// A thin wrapper around the shared [`resource::run_watchdog`] sequencing (round-5
+/// consolidation — this file used to duplicate it, byte-for-byte, with
+/// `crates/query/src/worker.rs` and `apps/indexa/src/commands/deep.rs`). If pressure is
+/// Throttle or Critical:
 ///   1. Emits a calm, actionable Warning event so the user can see it in the Jobs UI.
 ///   2. On a **Critical** entry, unloads the resident model(s) once so their wired RAM
 ///      frees — that is what lets the recovery check below trigger (macOS swap is sticky
 ///      and never drains on its own, so we cannot wait for swap to fall).
-///   3. Loops on the recover-aware [`pause_step`] predicate: resumes the moment free RAM
+///   3. Loops on the recover-aware `pause_step` predicate: resumes the moment free RAM
 ///      climbs back above headroom (`compute_budget > 0`) — even while swap stays high —
 ///      or the entry signal clears; otherwise sleeps on the 5 s/2 s cadence up to
-///      [`MAX_PAUSE_SECS`], then proceeds.
+///      [`MAX_PAUSE_SECS`], then proceeds. The 30 s periodic "still waiting" status push is
+///      this wrapper's own cadence, not part of the shared helper.
 ///
 /// `embedder` / `llm` are the handles whose models to unload on a Critical pause; the deep
 /// loop always passes the embedder (and the contextual-retrieval LLM when present), and the
@@ -49,69 +53,62 @@ pub(crate) async fn run_watchdog_check(
     // `unload()` — shared by both traits — is used here.
     llm: Option<&(dyn Describer + Send + Sync)>,
 ) {
-    let sample = wdog.sample();
-    // Gate entry on the SAME recover-aware predicate as resume, not raw `assess()`. macOS swap
-    // is sticky: after the first event `assess()` reports Critical for the rest of the job even
-    // once RAM has recovered. Using `assess()` here would re-enter the pause (warn + unload +
-    // reload the model) on *every* subsequent file. `pause_step(.., 0) == Resume` means "RAM is
-    // fine OR no real signal" → skip. Only when RAM is genuinely low (compute_budget <= 0) do we
-    // fall through and pause.
-    if pause_step(spec, &sample, headroom, 0) == PauseAction::Resume {
-        return;
-    }
-    // RAM is genuinely low. Use `assess()` only to choose the unload gate (Critical vs Throttle).
-    let pressure = assess(&sample, spec, headroom);
-
-    let pct = swap_pct(&sample);
-    push(
-        handle,
-        JobEvent::Warning {
-            stage: stage.to_owned(),
-            item_path: None,
-            message: format!(
-                "Low on memory (swap {pct}%). Easing off and freeing the model to keep your \
-                 machine responsive — this resumes automatically. \
-                 Tip: lower the workload in Settings → Resource Profile."
-            ),
-            // Structured snapshot so the UI can line the warning up with the live RAM gauge
-            // instead of parsing the prose. Every value is already in hand here.
-            pressure: Some(PressureInfo {
-                level: match pressure {
-                    Pressure::Critical => "critical",
-                    _ => "throttle",
-                }
-                .to_owned(),
-                swap_percent: pct,
-                used_bytes: sample.used_bytes,
-                budget_bytes: indexa_core::resource::compute_budget(spec, &sample, headroom),
-                headroom_bytes: headroom,
-            }),
-        },
-    );
-
-    // On a Critical entry, unload the resident model(s) once so their wired pages free and
-    // `compute_budget` can climb back above 0. macOS swap is sticky and never drains on its
-    // own, so gating resume on swap level alone would stall here for the full backstop.
-    if pressure == Pressure::Critical {
-        if let Some(e) = embedder {
-            e.unload().await;
-        }
-        if let Some(l) = llm {
-            l.unload().await;
-        }
-    }
-
-    // Wait until memory actually recovers, capped at resource::MAX_PAUSE_SECS. `pause_step`
-    // re-evaluates a fresh sample each tick: it resumes when free RAM returns above headroom
-    // (recovery) regardless of sticky swap, and escalation (Throttle → Critical) tightens the
-    // cadence immediately.
-    let mut elapsed = 0u64;
+    // Owned by this closure (not threaded into the shared helper) so the shared sequencing in
+    // `resource::run_watchdog` stays agnostic of any particular reporting cadence.
     let mut next_status_at = 30u64;
-    loop {
-        let s = wdog.sample();
-        match pause_step(spec, &s, headroom, elapsed) {
-            PauseAction::Resume => break,
-            PauseAction::Proceed => {
+
+    resource::run_watchdog(
+        wdog,
+        spec,
+        headroom,
+        |event| match event {
+            WatchdogEvent::Entered { pressure, sample } => {
+                let pct = swap_pct(sample);
+                push(
+                    handle,
+                    JobEvent::Warning {
+                        stage: stage.to_owned(),
+                        item_path: None,
+                        message: format!(
+                            "Low on memory (swap {pct}%). Easing off and freeing the model to \
+                             keep your machine responsive — this resumes automatically. \
+                             Tip: lower the workload in Settings → Resource Profile."
+                        ),
+                        // Structured snapshot so the UI can line the warning up with the live
+                        // RAM gauge instead of parsing the prose. Every value is already in
+                        // hand here.
+                        pressure: Some(PressureInfo {
+                            level: match pressure {
+                                Pressure::Critical => "critical",
+                                _ => "throttle",
+                            }
+                            .to_owned(),
+                            swap_percent: pct,
+                            used_bytes: sample.used_bytes,
+                            budget_bytes: compute_budget(spec, sample, headroom),
+                            headroom_bytes: headroom,
+                        }),
+                    },
+                );
+            }
+            WatchdogEvent::StillWaiting { elapsed_secs } => {
+                // Emit a calm follow-up roughly every 30 s so the user isn't left wondering.
+                if elapsed_secs >= next_status_at {
+                    push(
+                        handle,
+                        JobEvent::Warning {
+                            stage: stage.to_owned(),
+                            item_path: None,
+                            message: format!(
+                                "Still easing off while memory recovers … ({elapsed_secs}s)"
+                            ),
+                            pressure: None,
+                        },
+                    );
+                    next_status_at += 30;
+                }
+            }
+            WatchdogEvent::GaveUp => {
                 push(
                     handle,
                     JobEvent::Warning {
@@ -124,27 +121,20 @@ pub(crate) async fn run_watchdog_check(
                         pressure: None,
                     },
                 );
-                break;
             }
-            PauseAction::Sleep(secs) => {
-                // Emit a calm follow-up roughly every 30 s so the user isn't left wondering.
-                if elapsed >= next_status_at {
-                    push(
-                        handle,
-                        JobEvent::Warning {
-                            stage: stage.to_owned(),
-                            item_path: None,
-                            message: format!(
-                                "Still easing off while memory recovers … ({elapsed}s)"
-                            ),
-                            pressure: None,
-                        },
-                    );
-                    next_status_at += 30;
-                }
-                tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
-                elapsed += secs;
+        },
+        || async {
+            // On a Critical entry, unload the resident model(s) once so their wired pages free
+            // and `compute_budget` can climb back above 0. macOS swap is sticky and never
+            // drains on its own, so gating resume on swap level alone would stall here for the
+            // full backstop.
+            if let Some(e) = embedder {
+                e.unload().await;
             }
-        }
-    }
+            if let Some(l) = llm {
+                l.unload().await;
+            }
+        },
+    )
+    .await;
 }
