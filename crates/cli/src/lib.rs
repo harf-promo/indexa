@@ -340,17 +340,22 @@ pub enum Commands {
     ///
     /// Runs each question through the same `retrieve()` the `ask` pipeline uses (in
     /// whichever `--mode`) and scores the ranked hits against the paths you expect: hit@k,
-    /// MRR, recall, nDCG, and citation precision. No LLM synthesis, ever. By default no
-    /// rerank either (`retrieve()` itself never reranks — the LLM/cross-encoder pass runs
-    /// only afterward, in the real `ask` pipeline) and, in sparse mode (the default), no
-    /// embedder — so a plain run needs no Ollama and can gate CI. Pass `--rerank` to opt
-    /// into the ask pipeline's rerank pass too (needs a local LLM or the cross-encoder
-    /// model). Golden file format: docs/how-to/evaluate-retrieval.md.
+    /// MRR, recall, nDCG, and citation precision. No LLM synthesis, ever, unless `--judge`
+    /// opts in. By default no rerank either (`retrieve()` itself never reranks — the
+    /// LLM/cross-encoder pass runs only afterward, in the real `ask` pipeline) and, in
+    /// sparse mode (the default), no embedder — so a plain run needs no Ollama and can gate
+    /// CI. Pass `--rerank` to opt into the ask pipeline's rerank pass too (needs a local LLM
+    /// or the cross-encoder model). Pass `--judge` to additionally run real `ask`-equivalent
+    /// synthesis per question and grade the answer with an LLM (not hermetic — needs a
+    /// reachable model; never enable this in a required CI job). Golden file format:
+    /// docs/how-to/evaluate-retrieval.md.
     #[command(after_help = "Examples:
   indexa eval golden.json
   indexa eval golden.json --mode rrf --top-k 20
   indexa eval golden.json --rerank              # also score the ask pipeline's rerank pass
-  indexa eval golden.json --json --min-hit-rate 0.8   # exit 1 below 80% hit rate")]
+  indexa eval golden.json --json --min-hit-rate 0.8   # exit 1 below 80% hit rate
+  indexa eval golden.json --judge               # also grade synthesized answers via an LLM
+  indexa eval golden.json --judge --judge-model gemma3:12b --min-judge-score 3.5")]
     #[command(display_order = 38)]
     Eval {
         /// Golden-questions JSON file (see docs/how-to/evaluate-retrieval.md).
@@ -395,6 +400,27 @@ pub enum Commands {
         /// past that check, an individual rerank call still fails open on error (same as `ask`).
         #[arg(long)]
         rerank: bool,
+
+        /// Additionally run real synthesis per question (the same `qa::answer_with_ann_history`
+        /// entry point `ask` uses — including `--rerank` when both flags are set) and grade the
+        /// synthesized answer 0-5 with a judge LLM call: does it address the question, and is
+        /// every claim supported by the sources it cited. NOT hermetic (needs a reachable local
+        /// LLM); off by default and safe to leave off any required CI job. A per-question
+        /// synthesis/judge failure is logged and skipped, not fatal to the run.
+        #[arg(long)]
+        judge: bool,
+
+        /// Model the judge LLM call uses (same provider as `[describer]`). Defaults to the
+        /// describer's configured model (the same one synthesis uses) when unset. Requires
+        /// `--judge`.
+        #[arg(long, requires = "judge")]
+        judge_model: Option<String>,
+
+        /// With `--judge`: exit 1 when the mean judge score (0.0-5.0) falls below this. Left
+        /// unset (default) by anyone who hasn't set up a local judge model for CI use — this
+        /// gate is never added to a required workflow by Indexa itself. Requires `--judge`.
+        #[arg(long, requires = "judge")]
+        min_judge_score: Option<f64>,
     },
 
     /// Run several questions and render one document (answers + cited sources + TOC).
@@ -1703,6 +1729,9 @@ mod tests {
                 baseline,
                 max_regression,
                 rerank,
+                judge,
+                judge_model,
+                min_judge_score,
             } => {
                 assert_eq!(golden, "golden.json");
                 assert_eq!(mode, "sparse", "hermetic sparse is the default");
@@ -1716,6 +1745,12 @@ mod tests {
                     !rerank,
                     "--rerank must default to off (additive, no behavior change)"
                 );
+                assert!(
+                    !judge,
+                    "--judge must default to off (hermetic eval stays unchanged)"
+                );
+                assert!(judge_model.is_none());
+                assert!(min_judge_score.is_none());
             }
             _ => panic!("wrong command"),
         }
@@ -1729,6 +1764,59 @@ mod tests {
                 assert!(rerank, "--rerank must thread through to true when passed");
             }
             _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_eval_judge_flags() {
+        let cli = Cli::try_parse_from([
+            "indexa",
+            "eval",
+            "golden.json",
+            "--judge",
+            "--judge-model",
+            "gemma3:12b",
+            "--min-judge-score",
+            "3.5",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Eval {
+                judge,
+                judge_model,
+                min_judge_score,
+                ..
+            } => {
+                assert!(judge);
+                assert_eq!(judge_model.as_deref(), Some("gemma3:12b"));
+                assert!((min_judge_score.unwrap() - 3.5).abs() < 1e-9);
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_min_judge_score_without_judge() {
+        // `requires = "judge"` — a bare `--min-judge-score` with no `--judge` is a clap parse
+        // error, not a silently-ignored flag. `Cli` doesn't derive `Debug`, so match instead of
+        // `.unwrap_err()` (which needs the `Ok` type to be `Debug` too).
+        match Cli::try_parse_from(["indexa", "eval", "golden.json", "--min-judge-score", "2"]) {
+            Err(e) => assert!(e.to_string().contains("judge")),
+            Ok(_) => panic!("--min-judge-score without --judge must be a parse error"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_judge_model_without_judge() {
+        match Cli::try_parse_from([
+            "indexa",
+            "eval",
+            "golden.json",
+            "--judge-model",
+            "gemma3:12b",
+        ]) {
+            Err(e) => assert!(e.to_string().contains("judge")),
+            Ok(_) => panic!("--judge-model without --judge must be a parse error"),
         }
     }
 
