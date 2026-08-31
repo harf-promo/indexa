@@ -304,6 +304,16 @@ pub(crate) async fn api_packs_export(
     let format = q.format.as_deref().unwrap_or("xml");
     let depth = q.depth;
 
+    let mut store = state.store.lock().await;
+    let pack = match store.pack_by_name(&name) {
+        Ok(Some(p)) => p,
+        Ok(None) => return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\"")),
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    };
+    // 404 (resource doesn't exist) takes priority over a 400 format/param validation error —
+    // checked AFTER the pack lookup above so probing a typo'd pack name with
+    // `dry_run=true&format=okf` reports "no such pack", not a param-combination complaint that
+    // implies the pack itself was found.
     if q.dry_run && format == "okf" {
         return err_json(
             StatusCode::BAD_REQUEST,
@@ -311,13 +321,6 @@ pub(crate) async fn api_packs_export(
              anyway — use the CLI `indexa pack export --format okf --out <dir>`)",
         );
     }
-
-    let mut store = state.store.lock().await;
-    let pack = match store.pack_by_name(&name) {
-        Ok(Some(p)) => p,
-        Ok(None) => return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\"")),
-        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
-    };
     // Per-item inclusion mode (v0.78): `items` carries each member's mode/pinned snapshot;
     // `paths` is kept alongside for the `--include-graph` scope below, which is mode-agnostic.
     let items = match store.pack_item_records(&pack.id) {

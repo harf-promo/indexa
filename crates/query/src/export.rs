@@ -296,17 +296,53 @@ pub fn render_pinned_item(path: &str, snapshot: Option<&str>, format: &str) -> S
     }
 }
 
+/// The exact set of marker labels [`redact_secrets`](crate::redact::redact_secrets) can ever
+/// emit — see `redact.rs`'s `PATTERNS` list (`kind` for every non-assignment pattern, plus the
+/// `assignment` pattern's own hardcoded `"secret"` marker text). Kept in sync by hand; a new
+/// pattern kind there needs a matching entry here too, or its marker won't get relabeled.
+const REDACTION_MARKER_KINDS: &[&str] = &[
+    "private-key",
+    "aws-key",
+    "github-token",
+    "slack-token",
+    "google-key",
+    "openai-key",
+    "jwt",
+    "stripe-key",
+    "gitlab-token",
+    "npm-token",
+    "sendgrid-key",
+    "google-oauth",
+    "url-credentials",
+    "secret",
+];
+
 /// Convert `redact_secrets`' typed markers (`[REDACTED-<kind>]` — see `crate::redact`) into the
 /// lowercase, colon-style label pack exports use (`[redacted:<kind>]`). Purely cosmetic and
 /// pack-export-scoped: it runs strictly AFTER `redact_secrets` has already produced its
 /// `(clean, count)` output, so the redaction decision and its count (AGENTS.md's pinned "redact
 /// count" invariant) are completely untouched — this only reformats marker text already present
-/// in the string. `<kind>` is always one of `redact.rs`'s fixed lowercase-kebab pattern labels
-/// (e.g. `aws-key`, `private-key`, `secret`), so a plain literal-prefix replace is enough — no
-/// regex needed, and it can never touch anything that isn't already a marker `redact_secrets`
-/// itself emitted.
+/// in the string.
+///
+/// Scoped to [`REDACTION_MARKER_KINDS`] rather than a blind `"[REDACTED-".replace(..)`: an
+/// earlier version replaced that literal prefix anywhere in the ENTIRE rendered body, so a pack
+/// item whose own source/doc content happened to already contain that substring (e.g.
+/// documentation describing the redaction format itself) got silently rewritten to look like a
+/// genuine redaction — even though `redact_secrets` never touched it. Restricting the match to
+/// `[REDACTED-<a real pattern kind>]` closes that for any made-up suffix (`[REDACTED-my-note]`
+/// no longer matches); it does NOT close the (much narrower, effectively hypothetical) case of
+/// content that happens to contain the exact literal `[REDACTED-secret]` etc. — accepted as an
+/// edge case not worth chasing further without `redact_secrets` itself reporting marker spans.
 pub fn relabel_pack_redaction_markers(s: &str) -> String {
-    s.replace("[REDACTED-", "[redacted:")
+    static MARKER_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        let kinds = REDACTION_MARKER_KINDS.join("|");
+        regex::Regex::new(&format!(r"\[REDACTED-(?:{kinds})\]")).expect("static regex compiles")
+    });
+    MARKER_RE
+        .replace_all(s, |caps: &regex::Captures| {
+            caps[0].replacen("[REDACTED-", "[redacted:", 1)
+        })
+        .into_owned()
 }
 
 /// A rough size/cost estimate for a would-be export, computed WITHOUT writing or delivering
@@ -1020,6 +1056,29 @@ mod tests {
     fn relabel_pack_redaction_markers_is_a_no_op_on_clean_text() {
         let clean = "fn retrieve() -> Result<Vec<Hit>> { hybrid_search() }";
         assert_eq!(relabel_pack_redaction_markers(clean), clean);
+    }
+
+    #[test]
+    fn relabel_pack_redaction_markers_ignores_a_made_up_kind_in_plain_content() {
+        // Regression: an earlier version did a blind `"[REDACTED-".replace(..)` over the whole
+        // body, so a pack item whose own (non-secret) content happened to contain that literal
+        // prefix — e.g. documentation describing the redaction format — got rewritten to look
+        // like a genuine redaction. Only a real `redact.rs` pattern kind should match.
+        let doc = "Our export scrubs secrets and marks them as [REDACTED-my-custom-note] in \
+                    the output.";
+        assert_eq!(
+            relabel_pack_redaction_markers(doc),
+            doc,
+            "a made-up kind is not something redact_secrets could ever have emitted"
+        );
+        // A real marker alongside made-up-looking text still gets relabeled correctly.
+        let mixed = format!("{doc}\ntoken: [REDACTED-secret]");
+        let relabeled = relabel_pack_redaction_markers(&mixed);
+        assert!(
+            relabeled.contains("[REDACTED-my-custom-note]"),
+            "got: {relabeled}"
+        );
+        assert!(relabeled.contains("[redacted:secret]"), "got: {relabeled}");
     }
 
     #[test]

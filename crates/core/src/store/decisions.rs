@@ -51,6 +51,60 @@ fn row_to_decision(r: &rusqlite::Row) -> rusqlite::Result<DecisionRecord> {
     })
 }
 
+/// The insert half of [`Store::record_decision`]/[`Store::supersede_with`], factored out so a
+/// caller that already holds an open `Transaction` — [`Store::record_annotation_decided`] — can
+/// run it as one step of a larger atomic sequence instead of committing its own nested
+/// transaction (rusqlite has no true nested `BEGIN`; composing separately-transactional methods
+/// isn't an option). Same dedup contract as `record_decision`: `Ok(None)` on a sticky-dismissed
+/// duplicate or a racing open row, without inserting.
+fn insert_decision_row(
+    tx: &Transaction,
+    d: &NewDecision,
+    parent_id: Option<i64>,
+) -> Result<Option<i64>> {
+    let dismissed_same_evidence: bool = tx
+        .prepare(
+            "SELECT 1 FROM decisions
+              WHERE decision_type = ?1 AND subject = ?2
+                AND status = 'dismissed' AND evidence_hash = ?3",
+        )?
+        .exists(params![d.decision_type, d.subject, d.evidence_hash])?;
+    if dismissed_same_evidence {
+        return Ok(None);
+    }
+    let inserted = tx.execute(
+        "INSERT INTO decisions
+             (decision_type, subject, params, options, auto_value, confidence,
+              evidence_hash, priority, parent_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(decision_type, subject) WHERE status='open' DO NOTHING",
+        params![
+            d.decision_type,
+            d.subject,
+            d.params.to_string(),
+            d.options.to_string(),
+            d.auto_value,
+            d.confidence.map(|c| c as f64),
+            d.evidence_hash,
+            d.priority,
+            parent_id,
+        ],
+    )?;
+    if inserted == 0 {
+        return Ok(None);
+    }
+    let id = tx.last_insert_rowid();
+    {
+        // OR IGNORE: callers may pass the subject both as subject and in `paths`.
+        let mut stmt =
+            tx.prepare("INSERT OR IGNORE INTO decision_paths (decision_id, path) VALUES (?1, ?2)")?;
+        for p in &d.paths {
+            stmt.execute(params![id, p])?;
+        }
+    }
+    Ok(Some(id))
+}
+
 /// Mark an OPEN row decided and, in the same transaction, stamp its parent's
 /// `superseded_by` (the revision-chain link is created at answer time so the
 /// prior answer stays "latest decided" until the re-ask is actually resolved).
@@ -111,49 +165,9 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let dismissed_same_evidence: bool = tx
-            .prepare(
-                "SELECT 1 FROM decisions
-                  WHERE decision_type = ?1 AND subject = ?2
-                    AND status = 'dismissed' AND evidence_hash = ?3",
-            )?
-            .exists(params![d.decision_type, d.subject, d.evidence_hash])?;
-        if dismissed_same_evidence {
-            return Ok(None);
-        }
-        let inserted = tx.execute(
-            "INSERT INTO decisions
-                 (decision_type, subject, params, options, auto_value, confidence,
-                  evidence_hash, priority, parent_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(decision_type, subject) WHERE status='open' DO NOTHING",
-            params![
-                d.decision_type,
-                d.subject,
-                d.params.to_string(),
-                d.options.to_string(),
-                d.auto_value,
-                d.confidence.map(|c| c as f64),
-                d.evidence_hash,
-                d.priority,
-                parent_id,
-            ],
-        )?;
-        if inserted == 0 {
-            return Ok(None);
-        }
-        let id = tx.last_insert_rowid();
-        {
-            // OR IGNORE: callers may pass the subject both as subject and in `paths`.
-            let mut stmt = tx.prepare(
-                "INSERT OR IGNORE INTO decision_paths (decision_id, path) VALUES (?1, ?2)",
-            )?;
-            for p in &d.paths {
-                stmt.execute(params![id, p])?;
-            }
-        }
+        let id = insert_decision_row(&tx, d, parent_id)?;
         tx.commit()?;
-        Ok(Some(id))
+        Ok(id)
     }
 
     // ── Reads ─────────────────────────────────────────────────────────────────
@@ -495,6 +509,54 @@ impl Store {
             bail!("no decision with id {id}");
         }
         Ok(())
+    }
+
+    /// Atomically record + immediately decide a durable Annotation ledger entry — the whole
+    /// sequence [`crate::decisions::record_annotation`] needs (insert, optional patch_id stamp,
+    /// answer, effects-receipt stamp) in ONE transaction, unlike every other decision type
+    /// (which legitimately record open, then get answered later by a human/agent). Before this
+    /// method existed, `record_annotation` drove `record_decision` + `set_decision_patch_id` +
+    /// `decide_and_apply` as three separate, non-transactional Store calls; a crash or error
+    /// between the insert and the answer step left the row permanently `status='open'` with no
+    /// patch_id/answer — violating this ledger's own documented invariant that an Annotation is
+    /// "never left open for a human to answer". No repair sweep catches that: `unapplied_decided`
+    /// only repairs a row that IS decided but missing its effects stamp, not one that was never
+    /// answered at all.
+    ///
+    /// `effects_json` is the caller-computed effects receipt (for `DecisionType::Annotation`
+    /// this is always the fixed no-op `{"annotation": "recorded"}` — the note text IS the
+    /// artifact, same rationale as `SymbolAmbiguity` — so the caller doesn't need write access
+    /// to run a real projection here). Returns `None` on the same sticky-dismissed/racing-open
+    /// dedup as [`Store::record_decision`], without writing anything.
+    pub fn record_annotation_decided(
+        &mut self,
+        d: NewDecision,
+        patch_id: Option<&str>,
+        chosen: &str,
+        source: &str,
+        effects_json: &serde_json::Value,
+    ) -> Result<Option<i64>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some(id) = insert_decision_row(&tx, &d, None)? else {
+            return Ok(None);
+        };
+        if let Some(pid) = patch_id {
+            tx.execute(
+                "UPDATE decisions SET patch_id = ?2 WHERE id = ?1",
+                params![id, pid],
+            )?;
+        }
+        decide_row(&tx, id, chosen, source)?;
+        tx.execute(
+            "UPDATE decisions
+                SET effects = ?2, effects_applied_at = unixepoch()
+              WHERE id = ?1",
+            params![id, effects_json.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(Some(id))
     }
 
     /// Decided rows whose projection never stamped its receipt — the repair

@@ -290,6 +290,57 @@ fn unapplied_decided_and_mark_effects_applied_roundtrip() {
 }
 
 #[test]
+fn record_annotation_decided_rolls_back_the_whole_sequence_on_a_late_failure() {
+    // Regression for finding #3: before `record_annotation_decided` existed,
+    // `crate::decisions::record_annotation` drove insert / patch_id / answer as three separate,
+    // non-transactional Store calls — a failure between the insert and the answer step left the
+    // row permanently `status='open'` with no answer, violating the ledger's "an Annotation is
+    // never left open" contract (and no repair sweep catches an unanswered row — only a decided
+    // one missing its effects stamp). Simulate a failure at the very LAST step (the
+    // effects-receipt stamp) via a trigger, and confirm nothing survives — not the insert, not
+    // the decide_row update — proving the whole sequence commits or rolls back together.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .conn
+        .execute_batch(
+            "CREATE TRIGGER boom_on_effects_stamp
+               BEFORE UPDATE OF effects_applied_at ON decisions
+               WHEN NEW.subject = 'trigger-boom'
+             BEGIN
+               SELECT RAISE(ABORT, 'simulated crash');
+             END;",
+        )
+        .unwrap();
+
+    let d = new_decision("annotation", "trigger-boom");
+    let result = store.record_annotation_decided(
+        d,
+        Some("deadbeef"),
+        "note",
+        "user",
+        &serde_json::json!({"annotation": "recorded"}),
+    );
+    assert!(
+        result.is_err(),
+        "the simulated failure must propagate, not be swallowed"
+    );
+
+    let count: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM decisions WHERE subject = 'trigger-boom'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "a late failure must roll back the entire sequence (insert included), not leave a \
+         half-written 'open' row behind"
+    );
+}
+
+#[test]
 fn gc_decisions_never_deletes_open_or_live_chain_rows() {
     let mut store = Store::open_in_memory().unwrap();
     // Old open row — never a GC candidate regardless of age.

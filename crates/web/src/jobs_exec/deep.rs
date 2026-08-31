@@ -77,6 +77,43 @@ fn warn_embed_issues(
     }
 }
 
+/// Advance job progress by exactly one file: bumps `done`, updates the rolling throughput
+/// window, and pushes the `Progress` event. Callers MUST only call this once a file's data is
+/// actually persisted — for a synchronously-completed file (already-current skip, hard error,
+/// `summaries-only`, a zero-miss/`AddOutcome::Complete` batcher result) that's right where it
+/// completes; for a file the cross-file [`MissBatcher`] buffered (`AddOutcome::Buffered`), it's
+/// deferred to [`flush_deep_batcher`]'s per-file loop, at the point that file's entries/chunks/
+/// edges are actually written — never at buffer-registration time. Otherwise a crash between
+/// registering a file's misses and the next flush would leave the last-observed progress
+/// overstating what's actually in the database.
+fn record_file_progress(
+    handle: &Arc<JobHandle>,
+    path_str: &str,
+    done: &mut u64,
+    samples: &mut std::collections::VecDeque<(std::time::Instant, u64)>,
+    n_files: u64,
+) {
+    *done += 1;
+    let now = std::time::Instant::now();
+    let cutoff = now - std::time::Duration::from_secs(5);
+    while samples.len() > 1 && samples.front().map(|(t, _)| *t < cutoff).unwrap_or(false) {
+        samples.pop_front();
+    }
+    samples.push_back((now, *done));
+    let (rate, eta) = super::throughput_eta(samples, *done, n_files);
+    push(
+        handle,
+        JobEvent::Progress {
+            current: *done,
+            total: n_files,
+            note: None,
+            current_path: Some(path_str.to_owned()),
+            items_per_sec: rate,
+            eta_secs: eta,
+        },
+    );
+}
+
 /// Build chunk records from a fully-resolved `embeddings` vector and persist one file: entries,
 /// then chunks (unless `skip_embed_work`), then best-effort edges/symbols — each store op
 /// reported via a `Warning` event on failure rather than aborting the job (parity with the old
@@ -217,6 +254,10 @@ async fn persist_completed_file(
 /// gates every batched embed round-trip). Called at `is_full()`, at end-of-run to drain a
 /// final partial batch, and once more on cancellation to finalize already-enriched work rather
 /// than discard it. Returns `(entries_written, chunks_written, hard_errors)` deltas.
+///
+/// Also where a batcher-buffered file's job progress is advanced (`done`/`samples`/the
+/// `Progress` event, via [`record_file_progress`]) — NOT at buffer-registration time — since
+/// this is the point each file's data is actually persisted.
 #[allow(clippy::too_many_arguments)]
 async fn flush_deep_batcher(
     batcher: &mut MissBatcher<PendingFile>,
@@ -227,6 +268,9 @@ async fn flush_deep_batcher(
     headroom: u64,
     ctx_llm: Option<&OllamaLlm>,
     embed_model: &str,
+    done: &mut u64,
+    samples: &mut std::collections::VecDeque<(std::time::Instant, u64)>,
+    n_files: u64,
 ) -> (u64, u64, u64) {
     run_watchdog_check(
         wdog,
@@ -284,6 +328,7 @@ async fn flush_deep_batcher(
         entries_written += e;
         chunks_written += c_;
         hard_errors += h;
+        record_file_progress(handle, &path_str, done, samples, n_files);
     }
     (entries_written, chunks_written, hard_errors)
 }
@@ -466,6 +511,9 @@ pub(crate) async fn run_deep_phase(
                     headroom,
                     ctx_llm.as_ref(),
                     &embed_model,
+                    &mut done,
+                    &mut samples,
+                    n_files,
                 )
                 .await;
             }
@@ -498,7 +546,7 @@ pub(crate) async fn run_deep_phase(
         };
         if is_current {
             skipped += 1;
-            done += 1;
+            record_file_progress(handle, &path_str, &mut done, &mut samples, n_files);
         } else {
             let ep = entry.path.clone();
             let sz = entry.size;
@@ -793,6 +841,7 @@ pub(crate) async fn run_deep_phase(
                     entries_written += e;
                     chunks_written += c;
                     hard_errors += h;
+                    record_file_progress(handle, &path_str, &mut done, &mut samples, n_files);
                 } else {
                     // Load cached embeddings for this file (hash → Vec<f32>). Fail-open.
                     let hash_cache = {
@@ -892,6 +941,27 @@ pub(crate) async fn run_deep_phase(
                         Vec::new()
                     };
 
+                    // Memory watchdog: checked before every file registers its misses with the
+                    // cross-file batcher, not just at flush points (`is_full()`/end-of-run/
+                    // cancellation) — batching the embed round-trips (#367/MissBatcher) must not
+                    // widen the pause cadence: up to `EMBED_BATCH_SIZE` files' worth of parsed
+                    // chunks/edges/LLM-enrichment could otherwise accumulate before a Critical-
+                    // pressure pause is even checked. This restores the original per-file
+                    // cadence; `flush_deep_batcher` checks again right before the actual (and
+                    // possibly much-later) `embed_all` round-trip.
+                    run_watchdog_check(
+                        &mut wdog,
+                        &spec,
+                        headroom,
+                        handle,
+                        "deep",
+                        Some(state.embedder.as_ref()),
+                        ctx_llm
+                            .as_ref()
+                            .map(|l| l as &(dyn Describer + Send + Sync)),
+                    )
+                    .await;
+
                     // Register this file's misses with the cross-file batcher instead of
                     // embedding them here directly (#367) — the batcher accumulates buffered
                     // embed-texts across files so the eventual `embed_all` call runs on a full
@@ -943,7 +1013,18 @@ pub(crate) async fn run_deep_phase(
                             entries_written += e;
                             chunks_written += cw;
                             hard_errors += h;
+                            record_file_progress(
+                                handle,
+                                &path_str,
+                                &mut done,
+                                &mut samples,
+                                n_files,
+                            );
                         }
+                        // Buffered: NOT persisted yet — no progress update here. Deferred to
+                        // `flush_deep_batcher`'s per-file loop, which calls
+                        // `record_file_progress` only once this file's data is actually
+                        // written (see that function's doc comment and finding #6's fix).
                         AddOutcome::Buffered => {}
                     }
                     if batcher.is_full() {
@@ -956,6 +1037,9 @@ pub(crate) async fn run_deep_phase(
                             headroom,
                             ctx_llm.as_ref(),
                             &embed_model,
+                            &mut done,
+                            &mut samples,
+                            n_files,
                         )
                         .await;
                         entries_written += e;
@@ -963,36 +1047,19 @@ pub(crate) async fn run_deep_phase(
                         hard_errors += h;
                     }
                 }
+            } else {
+                // No chunks were extracted for this file at all (e.g. binary/empty) — nothing
+                // to persist, so this is already "done" the moment we know that.
+                record_file_progress(handle, &path_str, &mut done, &mut samples, n_files);
             }
-            done += 1;
         }
-
-        // Update rolling throughput window (evict samples older than 5s).
-        let now = std::time::Instant::now();
-        let cutoff = now - std::time::Duration::from_secs(5);
-        while samples.len() > 1 && samples.front().map(|(t, _)| *t < cutoff).unwrap_or(false) {
-            samples.pop_front();
-        }
-        samples.push_back((now, done));
-
-        let (rate, eta) = super::throughput_eta(&samples, done, n_files);
-
-        push(
-            handle,
-            JobEvent::Progress {
-                current: done,
-                total: n_files,
-                note: None,
-                current_path: Some(path_str),
-                items_per_sec: rate,
-                eta_secs: eta,
-            },
-        );
     }
 
     // End-of-run tail flush: drain whatever partial batch is still buffered (below
     // `is_full()`'s threshold) now that every file has been walked, before the M5 check below
-    // inspects the final `chunks_written`/`entries_written`/`hard_errors` totals.
+    // inspects the final `chunks_written`/`entries_written`/`hard_errors` totals. Each flushed
+    // file's progress is advanced inside `flush_deep_batcher` itself, at the point it's
+    // actually persisted.
     if !batcher.is_empty() {
         let (e, c, h) = flush_deep_batcher(
             &mut batcher,
@@ -1003,6 +1070,9 @@ pub(crate) async fn run_deep_phase(
             headroom,
             ctx_llm.as_ref(),
             &embed_model,
+            &mut done,
+            &mut samples,
+            n_files,
         )
         .await;
         entries_written += e;
@@ -1035,4 +1105,245 @@ pub(crate) async fn run_deep_phase(
     }
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use indexa_core::config::Config;
+    use indexa_core::store::Store;
+    use indexa_embed::Embedder;
+
+    /// Minimal `AppState` for driving `run_deep_phase` directly in a test — same shape as
+    /// `crate::tests::state_with_embedder` (lib.rs), duplicated locally since that helper lives
+    /// in a private `mod tests` this module can't reach.
+    fn build_state(
+        store: Store,
+        machine_spec: MachineSpec,
+        embedder: Arc<dyn Embedder + Send + Sync + 'static>,
+    ) -> AppState {
+        struct StubGenerator;
+        #[async_trait::async_trait]
+        impl indexa_llm::Generator for StubGenerator {
+            async fn generate(&self, _prompt: &str) -> anyhow::Result<String> {
+                Ok("stub".to_owned())
+            }
+        }
+        static TAG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tag = TAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut config_path = std::env::temp_dir();
+        config_path.push(format!(
+            "indexa-deep-test-config-{}-{tag}.toml",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&config_path);
+        let (_tx, telemetry) = tokio::sync::watch::channel(crate::dto::TelemetrySample::default());
+        let mut config = Config::default();
+        // A near-zero headroom (rather than the multi-GB profile default) makes
+        // `compute_budget`'s Ok/Throttle/Critical verdict depend only on `MachineSpec`
+        // (specifically `gpu_wired_limit_bytes`, which each test controls directly) instead of
+        // on how much RAM happens to be free on whatever machine runs the test — a multi-GB
+        // default headroom would risk spuriously entering the (real-time, up to 300s) pause
+        // loop on a memory-constrained CI runner.
+        config.resource.headroom_gb = 0.001;
+        AppState {
+            store: Arc::new(tokio::sync::Mutex::new(store)),
+            embedder,
+            llm: Arc::new(StubGenerator),
+            config: Arc::new(config),
+            jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            db_path: Arc::new(std::path::PathBuf::from(":memory:")),
+            config_path: Arc::new(config_path),
+            log_dir: Arc::new(std::env::temp_dir()),
+            walk_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+            machine_spec: Arc::new(machine_spec),
+            telemetry,
+            ann: Arc::new(tokio::sync::RwLock::new(crate::AnnCache::default())),
+            ann_build_lock: Arc::new(tokio::sync::Mutex::new(())),
+            watch_sessions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    fn write_test_file(
+        dir: &std::path::Path,
+        name: &str,
+        marker: &str,
+    ) -> indexa_core::walker::Entry {
+        let path = dir.join(name);
+        // Long enough, distinct-enough content that the default text parser/chunker (800-word
+        // target chunks) always yields at least one real chunk — this is exercising the deep
+        // loop's batching/progress/watchdog plumbing, not chunking edge cases.
+        let body = format!(
+            "{marker} — {}",
+            "the quick brown fox jumps over the lazy dog. ".repeat(40)
+        );
+        std::fs::write(&path, &body).unwrap();
+        let size = body.len() as u64;
+        indexa_core::walker::Entry {
+            path,
+            kind: EntryKind::File,
+            size,
+            modified: Some(std::time::SystemTime::now()),
+            hint: None,
+            is_binary: false,
+        }
+    }
+
+    fn default_machine_spec() -> MachineSpec {
+        MachineSpec {
+            total_ram_bytes: 8 * 1024 * 1024 * 1024,
+            physical_cores: 4,
+            logical_cores: 8,
+            is_apple_silicon: false,
+            gpu_wired_limit_bytes: 8 * 1024 * 1024 * 1024,
+        }
+    }
+
+    /// Every call marks a shared, ordered log with "EMBED" before delegating to a fixed-dim stub
+    /// embedding — the flush's `embed_all` round-trip is the one thing that can only happen
+    /// after a batcher-buffered file's misses are resolved, so its position in the log relative
+    /// to `Progress` events pins down whether progress fired before or after persistence.
+    struct MarkingEmbedder {
+        handle: Arc<JobHandle>,
+    }
+    #[async_trait::async_trait]
+    impl Embedder for MarkingEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.0; 8])
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            push(
+                &self.handle,
+                JobEvent::Warning {
+                    stage: "test-marker".to_owned(),
+                    item_path: None,
+                    message: "EMBED_CALLED".to_owned(),
+                    pressure: None,
+                },
+            );
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+
+    #[tokio::test]
+    async fn deep_phase_never_reports_progress_before_the_file_is_persisted() {
+        // Regression for finding #6: batching cross-file misses (#367/MissBatcher) must not
+        // move the `Progress` event earlier than the point a file's data is actually written.
+        // With ≥1 file and every chunk a fresh cache-miss (first-time indexing) below
+        // `EMBED_BATCH_SIZE`, every file lands in `AddOutcome::Buffered` and is only persisted
+        // at the end-of-run tail flush — so under the bug, ALL of these files' `Progress`
+        // events would appear in `handle.history` BEFORE the single `EMBED_CALLED` marker
+        // (pushed when the flush's `embed_all` finally runs). Fixed, none should.
+        let dir = tempfile::tempdir().unwrap();
+        let entries = vec![
+            write_test_file(dir.path(), "a.txt", "file-a"),
+            write_test_file(dir.path(), "b.txt", "file-b"),
+            write_test_file(dir.path(), "c.txt", "file-c"),
+        ];
+
+        let path_str = dir.path().to_string_lossy().into_owned();
+        let store = Store::open_in_memory().unwrap();
+        let handle = Arc::new(JobHandle::new("deep", path_str.clone()));
+        let state = build_state(
+            store,
+            default_machine_spec(),
+            Arc::new(MarkingEmbedder {
+                handle: handle.clone(),
+            }),
+        );
+
+        // `Progress` events are diverted to `handle.last_progress` (only the latest survives)
+        // rather than appended to `handle.history` — see `jobs::push`'s doc comment — so the
+        // ordered timeline this test needs has to come from the broadcast channel instead,
+        // subscribed BEFORE the run so every event (including our EMBED_CALLED marker) is
+        // captured in true send order.
+        let mut rx = handle.tx.subscribe();
+
+        let ok = run_deep_phase(&state, &path_str, &entries, &handle).await;
+        assert!(ok, "deep phase should succeed against fresh temp files");
+
+        let mut timeline = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            timeline.push(ev);
+        }
+        let first_embed_idx = timeline
+            .iter()
+            .position(
+                |e| matches!(e, JobEvent::Warning { message, .. } if message == "EMBED_CALLED"),
+            )
+            .expect("embed_batch must have been called at least once");
+        let premature_progress = timeline[..first_embed_idx]
+            .iter()
+            .filter(|e| matches!(e, JobEvent::Progress { .. }))
+            .count();
+        assert_eq!(
+            premature_progress, 0,
+            "no Progress event should fire before the batcher's embed round-trip persists \
+             anything — got {premature_progress} premature Progress event(s) in {timeline:#?}"
+        );
+        let total_progress = timeline
+            .iter()
+            .filter(|e| matches!(e, JobEvent::Progress { .. }))
+            .count();
+        assert_eq!(
+            total_progress,
+            entries.len(),
+            "exactly one Progress event per file expected"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deep_phase_checks_the_watchdog_per_file_not_only_at_batch_flush() {
+        // Regression for finding #2: batching cross-file misses (#367/MissBatcher) must not
+        // widen the watchdog's pause cadence from "before every file's embed work" to "before
+        // every ~EMBED_BATCH_SIZE-file flush". `gpu_wired_limit_bytes: 0` deterministically
+        // forces every pressure sample to Critical (`compute_budget` clamps truly-available RAM
+        // to 0 regardless of the real host), independent of the actual test machine's memory —
+        // so every `run_watchdog_check` call pushes exactly one "Low on memory" entry Warning
+        // before looping into its (here, virtual-time — `start_paused = true`) recovery wait.
+        let dir = tempfile::tempdir().unwrap();
+        let entries = vec![
+            write_test_file(dir.path(), "a.txt", "file-a"),
+            write_test_file(dir.path(), "b.txt", "file-b"),
+        ];
+
+        let path_str = dir.path().to_string_lossy().into_owned();
+        let store = Store::open_in_memory().unwrap();
+        let handle = Arc::new(JobHandle::new("deep", path_str.clone()));
+        let mut spec = default_machine_spec();
+        spec.gpu_wired_limit_bytes = 0;
+        let state = build_state(
+            store,
+            spec,
+            Arc::new(MarkingEmbedder {
+                handle: handle.clone(),
+            }),
+        );
+
+        run_deep_phase(&state, &path_str, &entries, &handle).await;
+
+        let history = handle.history.lock().unwrap().clone();
+        let watchdog_checks = history
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    JobEvent::Warning { message, .. }
+                        if message.contains("Easing off and freeing the model")
+                )
+            })
+            .count();
+        // 2 files (per-file, before each registers its misses) + 1 end-of-run tail flush.
+        // Before the fix this would be 1 (the tail flush only) regardless of file count.
+        assert_eq!(
+            watchdog_checks,
+            entries.len() + 1,
+            "watchdog must be checked once per file plus once per flush, not only per flush: \
+             got {watchdog_checks} checks for {} files",
+            entries.len()
+        );
+    }
 }

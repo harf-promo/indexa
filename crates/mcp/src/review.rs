@@ -339,14 +339,10 @@ impl IndexaMcp {
         if note.trim().is_empty() {
             return Err(mcp_invalid("note text must not be empty"));
         }
-        let anchor = Path::new(&subject)
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| Path::new(".").to_path_buf());
-        let patch = patch_id::compute_patch_id(&anchor, Path::new(&subject));
-
         let mut store = self.store()?;
+        let patch = resolve_patch_id_anchor(&store, &subject)
+            .and_then(|a| patch_id::compute_patch_id(&a, Path::new(&subject)));
+
         let (id, _effects) =
             decisions::record_annotation(&mut store, &subject, &note, patch.as_deref())
                 .map_err(mcp_err)?;
@@ -359,5 +355,92 @@ impl IndexaMcp {
         Ok(ok_text(format!(
             "Recorded ledger entry #{id} for \"{subject}\"{ref_note}:\n{note}"
         )))
+    }
+}
+
+/// The `git -C <anchor> diff … -- subject` directory [`record_decision`] should anchor a
+/// patch-id computation at, or `None` when `subject` isn't a real indexed path at all.
+///
+/// `subject`'s own tool docs explicitly allow a free-form topic key (e.g. `"config"`) with no
+/// path separator — not a path into the index. `Path::parent()` on such a bare subject resolves
+/// to an empty component; naively falling back to `"."` (the MCP server's own cwd, i.e. the repo
+/// root) there would silently anchor the patch-id to whatever unrelated file/dir at the repo
+/// root happens to share the topic key's bare name (e.g. a real `config` file or directory) —
+/// wrong, and worse, indistinguishable from a correct answer. The `"."` fallback is only taken
+/// once `subject` is confirmed to be a REAL indexed entry (so a genuine root-level file subject
+/// like `"README.md"` still gets anchored, exactly as the tool's docs promise); an unresolved
+/// bare topic key gets `None` instead, never a guess.
+fn resolve_patch_id_anchor(
+    store: &indexa_core::store::Store,
+    subject: &str,
+) -> Option<std::path::PathBuf> {
+    match Path::new(subject)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        Some(p) => Some(p.to_path_buf()),
+        None if store.entry_exists(subject).unwrap_or(false) => Some(Path::new(".").to_path_buf()),
+        None => None,
+    }
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::resolve_patch_id_anchor;
+    use indexa_core::store::Store;
+    use indexa_core::walker::{Entry, EntryKind};
+    use std::path::{Path, PathBuf};
+
+    fn store_with_root_file(name: &str) -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[Entry {
+                path: PathBuf::from(name),
+                kind: EntryKind::File,
+                size: 0,
+                modified: None,
+                hint: None,
+                is_binary: false,
+            }])
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn a_real_path_subject_anchors_to_its_parent_without_needing_the_index() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(
+            resolve_patch_id_anchor(&store, "src/foo.rs"),
+            Some(PathBuf::from("src"))
+        );
+    }
+
+    #[test]
+    fn an_unindexed_bare_topic_key_gets_no_anchor_even_when_a_same_named_root_file_exists() {
+        // Regression: this is the exact finding — a topic key like "config" must not silently
+        // anchor to an unrelated root-level path that happens to share its bare name unless
+        // THAT topic key itself resolves to a real indexed entry.
+        let store = store_with_root_file("config");
+        // A DIFFERENT bare subject that is not itself indexed must still get None, even though
+        // the store has an unrelated indexed entry (proving the check is per-subject, not just
+        // "the index is non-empty").
+        assert_eq!(resolve_patch_id_anchor(&store, "not-indexed-topic"), None);
+    }
+
+    #[test]
+    fn a_real_root_level_indexed_file_subject_still_anchors_to_the_repo_root() {
+        // "README.md" (no separator) genuinely IS an indexed path — the tool's docs promise a
+        // patch-id anchor for this case, so "." must still be used, not None.
+        let store = store_with_root_file("README.md");
+        assert_eq!(
+            resolve_patch_id_anchor(&store, "README.md"),
+            Some(Path::new(".").to_path_buf())
+        );
+    }
+
+    #[test]
+    fn a_free_form_topic_key_with_no_matching_index_entry_gets_none() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(resolve_patch_id_anchor(&store, "config"), None);
     }
 }

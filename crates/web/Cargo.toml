@@ -33,5 +33,10 @@ indexa-update = { path = "../update" }
 tower = { version = "0.5", features = ["util"] }
 # Stub Embedder/Generator impls in tests use the same async-trait the traits do.
 async-trait = { workspace = true }
+# `#[tokio::test(start_paused = true)]` — lets the deep-phase watchdog regression test run a
+# forced-Critical memory-pressure pause (which sleeps in real code) at virtual speed instead of
+# waiting out MAX_PAUSE_SECS for real. Dev-only: never reaches the released binary or the
+# desktop app's lockfile (dev-dependency features aren't part of a dependent's build).
+tokio = { workspace = true, features = ["test-util"] }
 rusqlite = { workspace = true }
 tempfile = "3"
