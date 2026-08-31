@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.79.0] — 2026-08-31
+
 ### Added
 
 - **Parser for Claude Code's own session-transcript JSONL format** (`crates/parsers/src/agent_sessions.rs`).
