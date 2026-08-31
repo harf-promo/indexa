@@ -10,7 +10,9 @@
 # exact snippet.
 #
 # This file ships embedded in the binary (`include_str!`, parsed once) — no network
-# fetch. A future version could fetch a remote curated list instead; not built here.
+# fetch by default. `indexa plugin list --refresh` additionally fetches this same file
+# straight off `main` on GitHub, so newly-added entries show up without an `indexa`
+# upgrade; it falls back to the embedded copy on any network/parse error.
 #
 # To add a real entry, open a PR appending a `[[plugin]]` table with:
 #   name         short, unique, kebab-case handle (what `indexa plugin info <name>` matches)

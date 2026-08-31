@@ -12,6 +12,9 @@ anyhow = { workspace = true }
 # Plugin directory (crates/parsers/plugins.toml) parsing/typing.
 serde = { workspace = true }
 toml = { workspace = true }
+# Plugin directory `--refresh`: fetches plugins.toml off `main` on GitHub. rustls only —
+# never native-tls/default-tls (workspace openssl-free-tree invariant).
+reqwest = { workspace = true, default-features = false, features = ["rustls"] }
 # Markdown parsing
 pulldown-cmark = "0.13"
 # Mime type detection

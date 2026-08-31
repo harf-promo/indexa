@@ -1032,11 +1032,17 @@ pub enum PluginAction {
     /// List known third-party parser plugin crates from the curated directory.
     #[command(after_help = "Examples:
   indexa plugin list
-  indexa plugin list --json")]
+  indexa plugin list --json
+  indexa plugin list --refresh")]
     List {
         /// Emit as a JSON array instead of a table.
         #[arg(long)]
         json: bool,
+        /// Fetch the latest curated directory off `main` on GitHub instead of using the
+        /// list embedded in this binary. Falls back to the embedded list on any
+        /// network/parse error — never a hard failure.
+        #[arg(long)]
+        refresh: bool,
     },
     /// Show one plugin's full entry plus copy-pasteable install instructions.
     #[command(after_help = "Examples:

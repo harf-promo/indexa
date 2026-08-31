@@ -2283,6 +2283,7 @@ dependencies = [
  "pdf-extract",
  "pulldown-cmark",
  "quick-xml 0.41.0",
+ "reqwest",
  "ruzstd 0.9.0",
  "serde",
  "serde_json",
