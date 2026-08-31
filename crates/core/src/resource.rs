@@ -1791,13 +1791,26 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn run_watchdog_entered_sample_matches_the_gate_sample() {
-        // The `Entered` event's `sample` must be the same sample the entry gate itself used
-        // (not a freshly re-sampled one) — callers (e.g. web's PressureInfo) render it as-is.
+    async fn run_watchdog_entered_event_reports_the_actual_pressure_sample() {
+        // The `Entered` event's `sample` must be a real, current reading (not a stale
+        // default/placeholder) — callers (e.g. web's PressureInfo) render it as-is.
+        //
+        // This used to assert the `Entered` sample's `available_bytes` was byte-identical
+        // to a separate `wdog.sample()` the test took just before calling `run_watchdog` —
+        // i.e. comparing two independently, live-sampled OS memory readings for exact
+        // equality. That's not a safe assumption: `sample()` queries live OS counters
+        // (`sysinfo`'s `refresh_memory()`) on every call, and two live samples taken a
+        // moment apart CAN legitimately differ (observed for real: this exact assertion
+        // flaked on a Windows CI runner). Whether `run_watchdog` internally reuses one
+        // sample across the entry-gate check and the `Entered` event (rather than
+        // re-sampling) is a property of its implementation, not something a black-box
+        // test can reliably observe via live-value comparison — verify that by reading
+        // `run_watchdog`'s body instead. What a test *can* deterministically assert:
+        // the callback actually fires with a populated, plausible sample on a Critical
+        // entry.
         let mut spec = detect_machine();
         spec.gpu_wired_limit_bytes = 0; // force Critical so the callback actually fires
         let mut wdog = WatchdogState::new();
-        let gate_sample = wdog.sample();
 
         let mut seen_available = None;
         run_watchdog(
@@ -1813,8 +1826,9 @@ mod tests {
         )
         .await;
 
-        // Sampled a moment apart from `gate_sample` above, but on a quiescent test machine
-        // `available_bytes` should not have moved between the two calls.
-        assert_eq!(seen_available, Some(gate_sample.available_bytes));
+        assert!(
+            seen_available.is_some_and(|b| b > 0),
+            "Entered event must report a real, populated sample, got {seen_available:?}"
+        );
     }
 }

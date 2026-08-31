@@ -17,6 +17,19 @@ pub fn http_client(timeout_secs: u64) -> reqwest::Client {
         .expect("building reqwest client (rustls TLS init)")
 }
 
+/// Like [`http_client`], but with a `User-Agent` header — for provider-neutral network
+/// adapters that talk to a public API/CDN identifying themselves as Indexa (GitHub
+/// releases, the remote plugin directory), as opposed to [`http_client`]'s LLM/embed
+/// providers, which don't send one.
+pub fn http_client_with_user_agent(timeout_secs: u64, user_agent: &str) -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(user_agent)
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("building reqwest client (rustls TLS init)")
+}
+
 /// An IP an outbound "fetch a user-supplied URL" request must never reach — the SSRF blocklist:
 /// loopback, private (RFC1918), link-local (incl. the cloud-metadata `169.254.169.254`), CGNAT,
 /// unspecified, broadcast, and multicast — plus the IPv6 equivalents. Keeps a benign-looking URL
@@ -222,6 +235,21 @@ mod tests {
                 "should be allowed: {ok}"
             );
         }
+    }
+
+    #[test]
+    fn http_client_with_user_agent_sets_the_given_header() {
+        let client = http_client_with_user_agent(15, "indexa/9.9.9");
+        // reqwest merges a client's default headers (incl. `user_agent()`) into a
+        // request only at send time (`execute_request`), not when a `RequestBuilder`
+        // is merely `.build()`'t — so there's no way to observe them on an unsent
+        // request. `Client`'s `Debug` impl does print its configured default headers,
+        // so use that as the observable proxy instead of standing up a live listener.
+        let debug = format!("{client:?}");
+        assert!(
+            debug.contains("indexa/9.9.9"),
+            "client Debug output should show the configured User-Agent, got: {debug}"
+        );
     }
 
     #[test]
