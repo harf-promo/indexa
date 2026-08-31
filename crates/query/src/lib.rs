@@ -9,6 +9,7 @@ pub mod predicates;
 pub mod qa;
 pub mod redact;
 pub mod rerank;
+pub mod session_scope;
 pub mod staleness;
 pub mod summarize;
 pub mod worker;

@@ -29,6 +29,13 @@ pub struct SearchParams {
     /// embedder needed), `dense` (vector only, requires embeddings).
     #[serde(default)]
     pub mode: Option<String>,
+    /// Restrict to files stamped with this content-derived category at index time (e.g.
+    /// `"agent-session"` for Claude Code session-transcript content — see `indexa deep`'s
+    /// post-pass tagging). Sharper than filtering by `.jsonl` extension, which matches any
+    /// JSONL file regardless of what actually parsed it. Same effect as a `category:` token in
+    /// `query`; this param wins if both are given.
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -137,7 +144,7 @@ impl IndexaMcp {
     /// Returns matching chunks with their file path, heading, and a text snippet.
     /// Use `scope` to restrict to a subtree. For path-name browsing, prefer `browse_tree`.
     #[tool(
-        description = "Search indexed chunk content by keyword (BM25 + vector hybrid). Returns matching chunks with path, heading, and snippet — richer than path-name search. Each hit shows `#N`, the chunk seq — pass it to `get_chunk_context` to expand that chunk with its neighbors. A result whose on-disk mtime is newer than what's indexed is marked '(stale)'. Optionally scope to a path prefix.",
+        description = "Search indexed chunk content by keyword (BM25 + vector hybrid). Returns matching chunks with path, heading, and snippet — richer than path-name search. Each hit shows `#N`, the chunk seq — pass it to `get_chunk_context` to expand that chunk with its neighbors. A result whose on-disk mtime is newer than what's indexed is marked '(stale)'. Optionally scope to a path prefix, or to a content category via `category` (e.g. `category:\"agent-session\"` to search only Claude Code session-transcript content, sharper than `ext:jsonl`).",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn search(
@@ -149,6 +156,7 @@ impl IndexaMcp {
             limit,
             scope,
             mode,
+            category,
         } = params.0;
         let limit = limit.unwrap_or(20).min(100);
         let mode = parse_hybrid_mode(mode.as_deref())?;
@@ -177,6 +185,13 @@ impl IndexaMcp {
             exts
         });
         let ext_filter = ext_filter.filter(|exts| !exts.is_empty());
+        // `category:` predicate — same precedence as `scope` over `path:` above: an explicit
+        // `category` param always wins over a `category:` token in the query text.
+        let category_filter = category
+            .as_deref()
+            .filter(|c| !c.is_empty())
+            .or_else(|| predicates.as_ref().and_then(|p| p.category.as_deref()))
+            .map(str::to_owned);
 
         // Embed the query for the dense arm. In `dense` mode the embedding IS the search, so a
         // failed embed is a hard error — silently falling through to an empty candidate pool
@@ -208,7 +223,7 @@ impl IndexaMcp {
         // capped at 100 internally (shared with `ask`/web/CLI/eval, so not something to change
         // here), so an ext/type match ranked below 100 in BOTH arms can still be missed. `.min(200)`
         // just keeps `fetch_limit` from exceeding that real ceiling for pointlessly large `limit`s.
-        let fetch_limit = if ext_filter.is_some() {
+        let fetch_limit = if ext_filter.is_some() || category_filter.is_some() {
             limit.saturating_mul(5).min(200)
         } else {
             limit
@@ -232,6 +247,16 @@ impl IndexaMcp {
                 exts.iter()
                     .any(|e| path_lower.ends_with(&format!(".{}", e.to_ascii_lowercase())))
             });
+            hits.truncate(limit);
+        }
+        if let Some(cat) = &category_filter {
+            // Batch-lookup the stored `hint_cat` for the current hit set and keep only the
+            // ones stamped with this category (a row missing entirely, i.e. never categorized,
+            // never matches). Mirrors the `ext_filter` block above exactly, on a store-backed
+            // category instead of a path suffix.
+            let paths: Vec<&str> = hits.iter().map(|h| h.entry_path.as_str()).collect();
+            let cats = store.hint_cats_for(&paths).map_err(mcp_err)?;
+            hits.retain(|h| cats.get(&h.entry_path).is_some_and(|c| c == cat));
             hits.truncate(limit);
         }
 
@@ -813,4 +838,173 @@ fn append_session_turn(
     )
     .unwrap_or_else(|_| "[]".to_owned());
     let _ = store.append_turn(session_id, question, &answer.answer, &sources_json);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use indexa_core::config::Config;
+    use indexa_core::store::ChunkRecord;
+    use indexa_core::walker::{Entry, EntryKind};
+    use indexa_embed::Embedder;
+    use indexa_llm::Generator;
+    use std::sync::Arc;
+
+    struct StubEmbedder;
+    #[async_trait::async_trait]
+    impl Embedder for StubEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.0; 8])
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+    struct StubGenerator;
+    #[async_trait::async_trait]
+    impl Generator for StubGenerator {
+        async fn generate(&self, _prompt: &str) -> anyhow::Result<String> {
+            Ok("stub".to_owned())
+        }
+    }
+
+    fn tool_text(r: CallToolResult) -> String {
+        r.content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Seed two same-extension `.jsonl` files, both containing the same searchable keyword, but
+    /// only one stamped `hint_cat = "agent-session"` — the shape a real
+    /// `session_scope::tag_agent_session_entries` pass produces (an unrelated `.jsonl` data
+    /// file sits right beside a real transcript, both indexed, only one content-classified).
+    fn mcp_with_two_jsonl_files(dbdir: &tempfile::TempDir, config: Config) -> IndexaMcp {
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_entries(&[
+                    Entry {
+                        path: "/p/session.jsonl".into(),
+                        kind: EntryKind::File,
+                        size: 0,
+                        modified: None,
+                        hint: None,
+                        is_binary: false,
+                    },
+                    Entry {
+                        path: "/p/data.jsonl".into(),
+                        kind: EntryKind::File,
+                        size: 0,
+                        modified: None,
+                        hint: None,
+                        is_binary: false,
+                    },
+                ])
+                .unwrap();
+            store
+                .set_entry_category("/p/session.jsonl", "agent-session")
+                .unwrap();
+            store
+                .upsert_chunks(&[
+                    ChunkRecord {
+                        entry_path: "/p/session.jsonl".to_owned(),
+                        seq: 0,
+                        heading: String::new(),
+                        text: "widget retrospective notes".to_owned(),
+                        language: None,
+                        embedding: None,
+                        embed_model: None,
+                        content_hash: None,
+                    },
+                    ChunkRecord {
+                        entry_path: "/p/data.jsonl".to_owned(),
+                        seq: 0,
+                        heading: String::new(),
+                        text: "widget inventory count".to_owned(),
+                        language: None,
+                        embedding: None,
+                        embed_model: None,
+                        content_hash: None,
+                    },
+                ])
+                .unwrap();
+        }
+        IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(config),
+        )
+    }
+
+    #[tokio::test]
+    async fn category_param_excludes_a_same_extension_differently_categorized_file() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_two_jsonl_files(&dbdir, Config::default());
+
+        // Unfiltered: both same-extension .jsonl files match the keyword.
+        let unfiltered = tool_text(
+            mcp.search(Parameters(SearchParams {
+                query: "widget".into(),
+                limit: None,
+                scope: None,
+                mode: None,
+                category: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(unfiltered.contains("session.jsonl"));
+        assert!(unfiltered.contains("data.jsonl"));
+
+        // `category: "agent-session"` keeps only the tagged transcript file — `ext:jsonl` (or
+        // no filter at all) could never make this distinction on its own.
+        let filtered = tool_text(
+            mcp.search(Parameters(SearchParams {
+                query: "widget".into(),
+                limit: None,
+                scope: None,
+                mode: None,
+                category: Some("agent-session".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(filtered.contains("session.jsonl"));
+        assert!(
+            !filtered.contains("data.jsonl"),
+            "category filter must exclude the differently-categorized same-extension file, got: {filtered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn category_predicate_token_has_the_same_filtering_effect_as_the_param() {
+        // `category:agent-session` typed directly in the query text — the predicate-grammar
+        // path (gated behind `[retrieval] query_predicates`) — must filter identically to the
+        // explicit `category` param above.
+        let mut config = Config::default();
+        config.retrieval.query_predicates = true;
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_two_jsonl_files(&dbdir, config);
+
+        let filtered = tool_text(
+            mcp.search(Parameters(SearchParams {
+                query: "category:agent-session widget".into(),
+                limit: None,
+                scope: None,
+                mode: None,
+                category: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(filtered.contains("session.jsonl"));
+        assert!(
+            !filtered.contains("data.jsonl"),
+            "category: predicate must exclude the differently-categorized file, got: {filtered}"
+        );
+    }
 }

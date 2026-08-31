@@ -49,7 +49,39 @@ secret is replaced with a `[REDACTED-<kind>]` marker before it's stored or expor
 same redaction path every other file goes through; nothing transcript-specific was added or
 weakened.
 
-## 4. Ask it something
+## 4. Scope `search` to transcript content only
+
+Once indexed, `indexa deep` re-checks every `.jsonl`/`.ndjson` entry against the same
+content-sniff `accepts_path` uses, and stamps a real transcript's index row with a
+`category: agent-session` tag (fail-open — a `deep` run still succeeds even if this post-pass
+has an issue). The MCP `search` tool can then scope to exactly that content — pass a `category`
+param, or (with `[retrieval] query_predicates = true`, see `docs/config.md`) type a
+`category:agent-session` token right into the query — and nothing else matches:
+
+```json
+{"query": "flaky retry test", "category": "agent-session"}
+```
+
+```
+category:agent-session flaky retry test
+```
+
+This is more precise than the alternatives:
+
+- `path:`/`scope` only works if your transcripts live under their own directory — no good if
+  `~/.claude/projects/` is indexed alongside a project's own code and docs.
+- `ext:jsonl` matches **any** `.jsonl` file, transcript or not — a JSONL data export, log file,
+  or fixture sitting right next to a real transcript would also match.
+- `category:agent-session` matches only entries the content-sniff itself confirmed are a real
+  Claude Code transcript, regardless of where they live or what else shares the `.jsonl`
+  extension.
+
+`category:` is a `search`-only filter, like `ext:`/`type:` — on `ask`, a `category:` token is
+still stripped out of the question text (so it doesn't pollute retrieval as a literal keyword)
+but has no filtering effect there. Scope an `ask` to transcript content with a `search` call
+first, or ask a question specific enough that transcripts are what's relevant.
+
+## 5. Ask it something
 
 ```bash
 indexa ask "did I already investigate the flaky retry test?"

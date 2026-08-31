@@ -14,6 +14,11 @@
 //!   known set name is **not** consumed as a predicate (falls through as plain text), matching
 //!   `ext`/`path`'s safety property for an unrecognized *field* but applied to `type`'s
 //!   unrecognized *values* instead.
+//! - `category:<name>` — restrict to files stamped with this content-derived `hint_cat` at index
+//!   time (e.g. `category:agent-session` for Claude Code transcript content — see
+//!   `indexa_query::session_scope`). Open-ended like `path`/`ext`, not a closed vocabulary: any
+//!   value is accepted and matched verbatim against the stored category, since (unlike `type`'s
+//!   curated extension sets) there's no fixed list of categories to validate against here.
 //!
 //! Only a token whose field is in [`KNOWN_FIELDS`] (and, for `type`, whose value is a known
 //! set name) is consumed. Everything else — plain words, unrecognized `field:value` shapes
@@ -24,7 +29,7 @@
 
 /// Fields this grammar recognizes as predicates. A `field:value` token whose field is NOT
 /// in this list is left as ordinary query text (never silently eaten).
-const KNOWN_FIELDS: &[&str] = &["path", "ext", "type"];
+const KNOWN_FIELDS: &[&str] = &["path", "ext", "type", "category"];
 
 /// Curated named file-type sets (ripgrep's `--type`, narrowed to what's useful for a
 /// code-context tool rather than all ~200 of ripgrep's built-ins). Extend freely — an
@@ -71,9 +76,13 @@ pub struct ParsedQuery {
     /// occurrence wins if given more than once; an unrecognized name never sets this (see
     /// module docs).
     pub type_exts: Option<Vec<String>>,
+    /// `category:<name>` — the last occurrence wins if given more than once. Open-ended like
+    /// `path`/`ext` (see module docs).
+    pub category: Option<String>,
 }
 
-/// Parse `query`, extracting any `path:`/`ext:`/`type:` predicates (see module docs). Splits
+/// Parse `query`, extracting any `path:`/`ext:`/`type:`/`category:` predicates (see module
+/// docs). Splits
 /// on whitespace, so a predicate value cannot itself contain a space (`path:"a b"` is not
 /// supported — quote the whole query at the CLI/tool-call layer if that's ever needed).
 pub fn parse_predicates(query: &str) -> ParsedQuery {
@@ -83,6 +92,7 @@ pub fn parse_predicates(query: &str) -> ParsedQuery {
         match split_predicate(token) {
             Some(("path", value)) => out.path = Some(value.to_owned()),
             Some(("ext", value)) => out.ext = Some(value.trim_start_matches('.').to_owned()),
+            Some(("category", value)) => out.category = Some(value.to_owned()),
             Some(("type", value)) => match type_set_extensions(value) {
                 Some(exts) => out.type_exts = Some(exts),
                 None => remaining.push(token), // unrecognized set name — not a predicate
@@ -213,5 +223,44 @@ mod tests {
         let p = parse_predicates("ext=md hello");
         assert_eq!(p.ext, Some("md".to_owned()));
         assert_eq!(p.text, "hello");
+    }
+
+    #[test]
+    fn extracts_a_category_predicate() {
+        let p = parse_predicates("category:agent-session did I already fix this");
+        assert_eq!(p.category, Some("agent-session".to_owned()));
+        assert_eq!(p.text, "did I already fix this");
+    }
+
+    #[test]
+    fn category_is_open_ended_any_value_accepted() {
+        // Unlike `type`, `category` has no closed vocabulary — any value is consumed as a
+        // predicate, matching `path`/`ext`'s safety property (never a hard-coded allowlist).
+        let p = parse_predicates("category:whatever-i-want x");
+        assert_eq!(p.category, Some("whatever-i-want".to_owned()));
+        assert_eq!(p.text, "x");
+    }
+
+    #[test]
+    fn later_category_predicate_wins_on_repeat() {
+        let p = parse_predicates("category:a category:b x");
+        assert_eq!(p.category, Some("b".to_owned()));
+        assert_eq!(p.text, "x");
+    }
+
+    #[test]
+    fn a_category_colon_with_nothing_after_it_is_not_a_predicate() {
+        let p = parse_predicates("see category: below for details");
+        assert_eq!(p.text, "see category: below for details");
+        assert!(p.category.is_none());
+    }
+
+    #[test]
+    fn category_combines_with_path_and_ext() {
+        let p = parse_predicates("category:agent-session ext:jsonl path:~/.claude auth flow");
+        assert_eq!(p.category, Some("agent-session".to_owned()));
+        assert_eq!(p.ext, Some("jsonl".to_owned()));
+        assert_eq!(p.path, Some("~/.claude".to_owned()));
+        assert_eq!(p.text, "auth flow");
     }
 }
