@@ -571,12 +571,16 @@ pub fn render_okf_bundle(
             model: rec.model.clone(),
             source_hash: rec.source_hash.clone(),
         };
-        // serde_yaml::to_string already opens with its own "---\n" document marker —
-        // prepending another one here produced a duplicate (caught via a real scratch-repo
-        // OKF export, not by the unit tests: they only checked `starts_with("---\n")`, which
-        // a doubled marker also satisfies).
-        let frontmatter = serde_yaml::to_string(&fm).unwrap_or_default();
-        let body = format!("{frontmatter}---\n\n# {title}\n\n{}\n", rec.summary);
+        // serde_yaml 0.8 opened its own output with a "---\n" document marker, so this used
+        // to just prepend the closing "---\n" and rely on serde_yaml for the opener — until
+        // 0.9 (a real transitive-dependency bump, not a hypothetical: see the dependabot PR
+        // that bumped it) dropped that leading marker entirely, leaving concept files with no
+        // opening delimiter at all. Strip whatever serde_yaml did or didn't emit and supply
+        // exactly one "---\n" ourselves so the format is stable across serde_yaml versions
+        // instead of quietly depending on one emitter's undocumented default.
+        let raw_yaml = serde_yaml::to_string(&fm).unwrap_or_default();
+        let yaml_body = raw_yaml.strip_prefix("---\n").unwrap_or(&raw_yaml);
+        let body = format!("---\n{yaml_body}---\n\n# {title}\n\n{}\n", rec.summary);
         index_lines.push(format!("* [{title}]({filename}) - {description}"));
         manifest_items.push(ManifestItem {
             path: rec.path.clone(),
@@ -1498,7 +1502,12 @@ mod tests {
             a_file.1.contains("okf_version: \"0.1\"") || a_file.1.contains("okf_version: '0.1'")
         );
         assert!(a_file.1.contains("source_hash: bbbbbbbbbbbb"));
-        assert!(a_file.1.contains("timestamp: \"2021-01-01T00:01:00Z\""));
+        // serde_yaml quotes an ISO-8601 scalar on 0.8 but emits it bare on 0.9 (both parse
+        // back to the identical string) — tolerate either, same as the okf_version check below.
+        assert!(
+            a_file.1.contains("timestamp: \"2021-01-01T00:01:00Z\"")
+                || a_file.1.contains("timestamp: 2021-01-01T00:01:00Z")
+        );
         assert!(
             !a_file.1.contains("<"),
             "must be pure Markdown, never HTML: {}",

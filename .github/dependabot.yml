@@ -1,3 +1,15 @@
+# Dependabot — tuned to stop the rebase storm documented in the CI-noise audit
+# (78 failures/week, 97% on dependabot/cargo/* branches). Root cause: `main`'s branch
+# protection requires branches to be up to date (`strict: true`), so every push to main
+# makes Dependabot rebase every open PR here, re-running the full 6-job matrix each time.
+# With up to 15 concurrent cargo PRs possible (3 ecosystems x 5 each) and most of this
+# repo's direct cargo deps still pre-1.0 (candle, tokenizers, hf-hub, serde_yaml, ignore,
+# globset, sysinfo, wait-timeout, ...), most "routine" bumps are semver-BREAKING under
+# Cargo's own left-shifted 0.x convention even though they land in Dependabot's "minor"
+# bucket (see the cargo blocks' ignore comment below) — so majors-only gating, the
+# anas-platform pattern this otherwise mirrors, would leave most of the actual noise
+# untouched here. Lower caps + grouping cut concurrent PR count; ignore rules cut how
+# often a rebase-triggering push lands a PR that isn't safe to auto-merge unreviewed.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -5,9 +17,31 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
     labels:
       - dependencies
+    groups:
+      # Everything left after the ignore rule below is a patch bump within an already-
+      # allowed major.minor line — safe to land together in one PR instead of N separate
+      # ones (each of which is its own rebase-storm contributor).
+      cargo-patches:
+        patterns: ["*"]
+        update-types: ["patch"]
+    # Majors are opt-in only — review them deliberately, not on a schedule (same posture
+    # as anas-platform). Dependabot classifies update-types by literal x.y.z position, so
+    # a Cargo 0.8 -> 0.9 bump (a real breaking change by Cargo/Rust convention — see
+    # https://doc.rust-lang.org/cargo/reference/semver.html) is "semver-minor" to
+    # Dependabot, not "semver-major". serde_yaml 0.8->0.9 landing here (PR #485) is exactly
+    # this case: `ignore: semver-major` alone would NOT have caught it. Since this
+    # manifest's own deps are overwhelmingly pre-1.0, semver-minor is ignored too, unlike
+    # the npm-shaped anas-platform template (whose deps are >=1.0, where "minor" really
+    # does mean additive-only). Deliberate, evidence-based divergence — see the PR that
+    # introduced this file's current shape for the CI logs behind it.
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
 
   # apps/indexa-desktop is workspace-excluded (its own Cargo.lock, own dependency graph —
   # see .gitignore / Cargo.toml's `exclude`) so it needs its own dependabot entry; the root
@@ -17,15 +51,40 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
     labels:
       - dependencies
+    groups:
+      cargo-patches:
+        patterns: ["*"]
+        update-types: ["patch"]
+    # Same reasoning as the root cargo block above: this directory's deps are pre-1.0 too,
+    # and a dependency whose version requirement lives in the ROOT Cargo.toml (workspace-
+    # shared, e.g. base64/serde_yaml) being bumped from here edits that root manifest but
+    # only regenerates THIS lockfile — leaving the root Cargo.lock stale and failing
+    # `--locked` fleet-wide (PRs #482, #484). Ignoring semver-minor here doesn't fix that
+    # cross-lockfile gap (a separate, deeper issue — see the PR description), but it does
+    # stop the specific 0.x "minor" bumps that were triggering it.
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
 
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     labels:
       - dependencies
+    groups:
+      # Actions follow real semver in practice (no left-shift convention), so minor/patch
+      # bumps here are the normal safe case — group them, gate only majors below.
+      actions:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
