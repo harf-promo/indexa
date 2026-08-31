@@ -28,6 +28,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transcripts live in their own directory) or `ext:jsonl` (matches any JSONL file regardless of
   what parsed it). See `docs/how-to/index-agent-session-history.md`.
 
+### Fixed
+
+- **`indexa deep` (the CLI) never had a memory-pressure watchdog at all.** #505 fixed the
+  equivalent bug on the web job side (`crates/web/src/jobs_exec/deep.rs`'s
+  `run_watchdog_check`, checked once per file plus once per cross-file `MissBatcher` flush)
+  but explicitly left the CLI side out of scope — a separate, pre-existing gap, confirmed via
+  git history predating even the `MissBatcher` change. `apps/indexa/src/commands/deep.rs` now
+  runs the same two-point cadence via a new `check_deep_watchdog` helper: mirrors
+  `crates/query/src/worker.rs`'s `run_worker` (same `indexa_core::resource::{assess,
+  detect_machine, pause_step, PauseAction, Pressure, WatchdogState}` primitives, unloading the
+  embedder — and the contextual-retrieval LLM when present — once on a Critical entry, then a
+  recovery-aware pause loop capped at `resource::MAX_PAUSE_SECS`) rather than reusing the web
+  job's own `run_watchdog_check`, which is hardwired to a web-only `JobHandle`/`JobEvent` and
+  would have pulled `indexa-web` into `apps/indexa` — the wrong dependency direction. Driven by
+  `eprintln!`, matching this file's existing warning convention, instead of a `JobEvent` push.
+
 ## [0.79.1] — 2026-08-31
 
 ### Fixed
