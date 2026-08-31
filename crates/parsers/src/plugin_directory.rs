@@ -96,16 +96,26 @@ pub fn load() -> Result<Vec<PluginEntry>> {
 }
 
 /// Build the `reqwest::Client` used for [`load_remote`]: rustls-only (the workspace's
-/// openssl-free-tree invariant), the same `User-Agent` convention as `crates/update`'s
-/// GitHub client, a short connect timeout and a modest whole-request timeout — this is a
-/// small text file, not a release binary, so it should fail fast rather than hang.
+/// openssl-free-tree invariant, inherited from `indexa-http-util`'s own feature set),
+/// the same `User-Agent` convention as `crates/update`'s GitHub client, a short connect
+/// timeout (10s, `indexa-http-util`'s fixed default) and a modest whole-request timeout
+/// (15s) — this is a small text file, not a release binary, so it should fail fast
+/// rather than hang.
+///
+/// Stays `Result`-returning for API stability with `cmd_plugin_list`'s fallback wiring
+/// (`apps/indexa/src/commands/plugin.rs`), but — like every other `indexa-http-util`-
+/// backed client in the codebase (`http_client`, `ssrf_guarded_client`, and every
+/// LLM/embed provider adapter) — `build()`'s one documented failure mode (unrecoverable
+/// rustls TLS/OS-trust-store init) now panics via `expect` inside
+/// `http_client_with_user_agent` rather than surfacing as an `Err` here. Narrows, but
+/// doesn't remove, `indexa plugin list --refresh`'s embedded-directory fallback: a
+/// fetch or parse failure still falls back cleanly (`cmd_plugin_list`'s `match` on
+/// [`load_remote`]'s `Result`), only a TLS-init failure at construction time no longer
+/// does.
 pub fn build_remote_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .context("failed to build HTTP client for the remote plugin directory")
+    Ok(indexa_http_util::http_client_with_user_agent(
+        15, USER_AGENT,
+    ))
 }
 
 /// Fetch and parse `plugins.toml` off `main` on GitHub — the same curated list as

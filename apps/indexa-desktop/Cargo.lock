@@ -2840,6 +2840,7 @@ dependencies = [
  "flate2",
  "globset",
  "htmd",
+ "indexa-http-util",
  "kamadak-exif",
  "libc",
  "lzma-rs",
