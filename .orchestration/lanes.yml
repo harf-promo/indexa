@@ -11,29 +11,33 @@ hot_files:
   - USAGE.md                                # tool-count token; owned likewise
   - docs/how-to/live-retrieval-over-mcp.md  # tool-count mention; owned likewise
   - CHANGELOG.md                            # every lane appends its own [Unreleased] bullet, never edits another's
+  - crates/cli/src/lib.rs                   # Eval variant (lane A) + PluginAction::List variant (lane C) — non-adjacent
+  - apps/indexa/src/main.rs                 # Eval arm (A) + Deep arm (B) + Plugin arm (C) — non-adjacent match arms
 
 counters:
   mcp_tool_count: 53
   ui_js_fragment_count: 32
   ui_css_fragment_count: 23
 
-# 2026-08-30 six-lane round: retrieval-batcher-wiring, mcp-ledger-and-drift-tools,
-# graph-layer-clustering-ui, pack-inclusion-modes-and-dryrun,
-# docs-staleness-and-redundancy-audit, invariant-audit-and-small-fixes — all merged,
-# v0.78.0 tagged. Their territory is released; superseded by the round below.
+# 2026-08-30 six-lane round (v0.78.0) and 2026-08-31 round-2 four-lane round (v0.79.0) plus
+# round-3's critique-fix lane, PR #505 (v0.79.1) are ALL merged and released. Their territory
+# below is historical only — kept for reference, not live. Round-2's plugin lane note ("docs/
+# plugins.toml, path may vary") was never corrected: it actually landed at
+# crates/parsers/plugins.toml. Superseded by round-4 below.
 singleton_paths:
-  # 2026-08-31 round-2 (four lanes) — exclusive per-lane territory.
-  - crates/parsers/src/agent_sessions.rs    # agent-session-transcript-parser (new file)
-  - docs/how-to/index-agent-session-history.md  # agent-session-transcript-parser (new file)
-  - crates/query/src/eval.rs                # eval-answer-quality-judge
-  - apps/indexa/src/commands/eval.rs        # eval-answer-quality-judge
-  - docs/how-to/evaluate-retrieval.md       # eval-answer-quality-judge
-  - apps/indexa/src/commands/plugin.rs      # plugin-directory (new file)
-  - docs/plugins.toml                       # plugin-directory (new file, path may vary — see PR)
-  - crates/llm/src/openai_compat.rs         # misc-provider-and-audit-followups (Cerebras wiring, read-mostly)
-  - crates/parsers/src/compressed.rs        # misc-provider-and-audit-followups (zstd multi-frame fix)
-  - apps/indexa/src/commands/update.rs      # misc-provider-and-audit-followups (non-interactive --yes gate)
-  - docs/config.md                          # misc-provider-and-audit-followups (Cerebras provider row)
+  # 2026-08-31 round-4 (four lanes) — exclusive per-lane territory.
+  - apps/indexa/src/commands/eval.rs             # eval-save-run
+  - docs/how-to/evaluate-retrieval.md            # eval-save-run
+  - crates/query/src/session_scope.rs            # agent-session-content-scope (new file)
+  - crates/query/src/predicates.rs               # agent-session-content-scope
+  - crates/core/src/store/entries.rs             # agent-session-content-scope
+  - crates/mcp/src/retrieval.rs                  # agent-session-content-scope
+  - docs/how-to/index-agent-session-history.md   # agent-session-content-scope
+  - crates/parsers/Cargo.toml                    # remote-plugin-registry (NEW reqwest dep)
+  - crates/parsers/src/plugin_directory.rs       # remote-plugin-registry
+  - apps/indexa/src/commands/plugin.rs           # remote-plugin-registry
+  - apps/indexa-desktop/Cargo.lock                # remote-plugin-registry (regenerated+diffed)
+  - apps/indexa/src/commands/deep.rs             # cli-deep-watchdog-fix (whole file)
 
 # release.yml triggers on version tags (v*.*.*), not on merge to main — confirmed by
 # reading the trigger. No merge-triggered deploy exists for this repo.
