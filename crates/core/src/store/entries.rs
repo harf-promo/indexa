@@ -583,29 +583,16 @@ impl Store {
         ))
     }
 
-    // ── Content-based category tagging (agent-session content-scope) ─────────
-
-    /// File entries whose path ends `.jsonl`/`.ndjson` and are not yet tagged `hint_cat =
-    /// category` (`hint_cat` is NULL, or holds some other value). Candidates for a content-based
-    /// re-check — `hint_cat` is a plain, un-migrated string column (see `AGENTS.md`'s invariant
-    /// on it), so this is a query helper, not a schema change. Used by
-    /// `indexa_query::session_scope::tag_agent_session_entries` to find `.jsonl`/`.ndjson` rows
-    /// worth re-checking against the content-sniffed `AgentSessionParser` without re-scanning
-    /// the whole index.
-    pub fn jsonl_like_entries_not_tagged(&self, category: &str) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT path FROM entries \
-             WHERE kind = 'file' \
-               AND (path LIKE '%.jsonl' OR path LIKE '%.ndjson') \
-               AND (hint_cat IS NULL OR hint_cat != ?1)",
-        )?;
-        let rows = stmt.query_map(params![category], |r| r.get(0))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
+    // ── Content-based category tagging (generic, `hint_cat`) ─────────────────
 
     /// Stamp `entries.hint_cat = category` for the exact path. Used to record a content-based
-    /// classification a rescan's coarse extension/MIME hinting can't express on its own (e.g.
-    /// `"agent-session"` for a `.jsonl` transcript confirmed by content-sniffing, not extension).
+    /// classification a rescan's coarse extension/MIME hinting can't express on its own.
+    ///
+    /// NOT used for agent-session transcript tagging (`entries.agent_session` is a genuinely
+    /// separate column for that — see its doc comment in `store::schema`'s base DDL): `hint_cat`
+    /// is unconditionally overwritten by `upsert_entries_with_generation`'s
+    /// `ON CONFLICT DO UPDATE SET hint_cat = excluded.hint_cat` on every rescan/watch-upsert, so
+    /// stamping a content-derived tag in here would get silently reset by the next plain scan.
     pub fn set_entry_category(&mut self, path: &str, category: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE entries SET hint_cat = ?1 WHERE path = ?2",
@@ -615,10 +602,11 @@ impl Store {
     }
 
     /// Batch-lookup `hint_cat` for a set of paths, skipping rows with a NULL category. Powers
-    /// the MCP `search` tool's `category:`/`category` post-hoc hit filter (mirrors the shape of
-    /// the existing `ext_filter` retain-block, applied to a store-backed category instead of a
-    /// path suffix). Chunked under SQLite's bound-variable cap like
-    /// `delete_path_artifacts_exact`, so an arbitrarily large hit set stays safe.
+    /// the MCP `search` tool's `category:`/`category` post-hoc hit filter for any category other
+    /// than `"agent-session"` (mirrors the shape of the existing `ext_filter` retain-block,
+    /// applied to a store-backed category instead of a path suffix). Chunked under SQLite's
+    /// bound-variable cap like `delete_path_artifacts_exact`, so an arbitrarily large hit set
+    /// stays safe.
     pub fn hint_cats_for(
         &self,
         paths: &[&str],
@@ -635,6 +623,64 @@ impl Store {
             for row in rows {
                 let (path, cat) = row?;
                 out.insert(path, cat);
+            }
+        }
+        Ok(out)
+    }
+
+    // ── Agent-session content tagging (dedicated column, NOT hint_cat) ───────
+
+    /// File entries whose path ends `.jsonl`/`.ndjson` and have not yet been content-checked for
+    /// agent-session transcript status (`entries.agent_session IS NULL`). A row that's already
+    /// been checked — whether it matched (`1`) or not (`0`) — is never a candidate again, so a
+    /// rejected non-transcript `.jsonl` file isn't re-parsed and re-rejected on every tagging
+    /// pass. Used by `indexa_query::session_scope::tag_agent_session_entries` to find
+    /// `.jsonl`/`.ndjson` rows worth (re-)checking against the content-sniffed
+    /// `AgentSessionParser` without re-scanning the whole index.
+    pub fn jsonl_like_entries_needing_agent_session_check(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path FROM entries \
+             WHERE kind = 'file' \
+               AND (path LIKE '%.jsonl' OR path LIKE '%.ndjson') \
+               AND agent_session IS NULL",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Stamp `entries.agent_session` for the exact path: `true` once content-sniffing confirms a
+    /// real transcript, `false` once it's confirmed NOT one. Either outcome marks the row
+    /// checked, so `jsonl_like_entries_needing_agent_session_check` never re-offers it — and,
+    /// unlike `hint_cat`, a plain rescan can never clear this back to NULL (see the column's doc
+    /// comment in `store::schema`).
+    pub fn set_agent_session_flag(&mut self, path: &str, is_transcript: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE entries SET agent_session = ?1 WHERE path = ?2",
+            params![is_transcript as i64, path],
+        )?;
+        Ok(())
+    }
+
+    /// Batch-lookup which of `paths` are confirmed agent-session transcripts
+    /// (`agent_session = 1`). The dedicated counterpart to `hint_cats_for`, for the one category
+    /// that lives in its own column — powers the MCP `search` tool's `category:agent-session`
+    /// post-hoc hit filter specifically. Chunked under SQLite's bound-variable cap like
+    /// `hint_cats_for`.
+    pub fn agent_session_tagged_paths(
+        &self,
+        paths: &[&str],
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut out = std::collections::HashSet::new();
+        for batch in paths.chunks(800) {
+            let ph = vec!["?"; batch.len()].join(",");
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT path FROM entries WHERE path IN ({ph}) AND agent_session = 1"
+            ))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(batch.iter()), |r| {
+                r.get::<_, String>(0)
+            })?;
+            for row in rows {
+                out.insert(row?);
             }
         }
         Ok(out)
@@ -806,40 +852,107 @@ mod tests {
         let cats = store.hint_cats_for(&["/p/a.jsonl", "/p/b.jsonl"]).unwrap();
         assert!(cats.is_empty());
 
-        store
-            .set_entry_category("/p/a.jsonl", "agent-session")
-            .unwrap();
+        store.set_entry_category("/p/a.jsonl", "data").unwrap();
 
         let cats = store.hint_cats_for(&["/p/a.jsonl", "/p/b.jsonl"]).unwrap();
-        assert_eq!(
-            cats.get("/p/a.jsonl").map(String::as_str),
-            Some("agent-session")
-        );
+        assert_eq!(cats.get("/p/a.jsonl").map(String::as_str), Some("data"));
         assert!(!cats.contains_key("/p/b.jsonl"));
     }
 
+    // ── Agent-session content tagging (dedicated column) ──────────────────────
+
     #[test]
-    fn jsonl_like_entries_not_tagged_finds_untagged_and_differently_tagged_rows() {
+    fn set_agent_session_flag_and_agent_session_tagged_paths_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&dir.path().join("index.db")).unwrap();
-        seed_file(&mut store, "/p/untagged.jsonl");
-        seed_file(&mut store, "/p/already.jsonl");
+        seed_file(&mut store, "/p/a.jsonl");
+        seed_file(&mut store, "/p/b.jsonl");
+
+        // Not-yet-checked rows are absent from the tagged-paths lookup.
+        let tagged = store
+            .agent_session_tagged_paths(&["/p/a.jsonl", "/p/b.jsonl"])
+            .unwrap();
+        assert!(tagged.is_empty());
+
+        store.set_agent_session_flag("/p/a.jsonl", true).unwrap();
+        store.set_agent_session_flag("/p/b.jsonl", false).unwrap();
+
+        let tagged = store
+            .agent_session_tagged_paths(&["/p/a.jsonl", "/p/b.jsonl"])
+            .unwrap();
+        assert!(tagged.contains("/p/a.jsonl"));
+        assert!(
+            !tagged.contains("/p/b.jsonl"),
+            "a row explicitly checked and rejected (flag = false) must not read back as tagged"
+        );
+    }
+
+    #[test]
+    fn jsonl_like_entries_needing_agent_session_check_finds_only_unchecked_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        seed_file(&mut store, "/p/unchecked.jsonl");
+        seed_file(&mut store, "/p/confirmed.jsonl");
+        seed_file(&mut store, "/p/rejected.jsonl");
         seed_file(&mut store, "/p/other.ndjson");
         seed_file(&mut store, "/p/not-jsonl.json"); // wrong extension — never a candidate
         store
-            .set_entry_category("/p/already.jsonl", "agent-session")
+            .set_agent_session_flag("/p/confirmed.jsonl", true)
+            .unwrap();
+        // Explicitly checked and rejected (flag = false, not NULL) — must NOT be re-offered as a
+        // candidate; this is the fix for the old "candidate query never shrinks for a rejected
+        // file" gap (a `hint_cat != category` check treated a `false`/other-value row the same
+        // as an unchecked one).
+        store
+            .set_agent_session_flag("/p/rejected.jsonl", false)
             .unwrap();
 
         let mut candidates = store
-            .jsonl_like_entries_not_tagged("agent-session")
+            .jsonl_like_entries_needing_agent_session_check()
             .unwrap();
         candidates.sort();
         assert_eq!(
             candidates,
             vec![
                 "/p/other.ndjson".to_string(),
-                "/p/untagged.jsonl".to_string()
+                "/p/unchecked.jsonl".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn upsert_entries_never_clears_an_already_stamped_agent_session_flag() {
+        // Regression for the hint_cat-collision bug: an entries upsert (a plain rescan, or a
+        // filesystem-watch event) must NEVER reset `agent_session` back to NULL, unlike the old
+        // `hint_cat`-based tag which `upsert_entries_with_generation`'s
+        // `ON CONFLICT DO UPDATE SET hint_cat = excluded.hint_cat` clobbered on every such call.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        seed_file(&mut store, "/p/session.jsonl");
+        store
+            .set_agent_session_flag("/p/session.jsonl", true)
+            .unwrap();
+        assert!(store
+            .agent_session_tagged_paths(&["/p/session.jsonl"])
+            .unwrap()
+            .contains("/p/session.jsonl"));
+
+        // Re-upsert the SAME path — a rescan/watch-upsert hitting an existing row, exactly the
+        // `ON CONFLICT DO UPDATE` path that used to clobber `hint_cat`.
+        seed_file(&mut store, "/p/session.jsonl");
+
+        assert!(
+            store
+                .agent_session_tagged_paths(&["/p/session.jsonl"])
+                .unwrap()
+                .contains("/p/session.jsonl"),
+            "a rescan/watch-upsert must not clear the agent-session tag"
+        );
+        // And it must not become a re-check candidate either — the flag is still stamped, not
+        // reset to NULL.
+        assert!(!store
+            .jsonl_like_entries_needing_agent_session_check()
+            .unwrap()
+            .contains(&"/p/session.jsonl".to_string()));
     }
 }

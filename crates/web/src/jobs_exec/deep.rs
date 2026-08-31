@@ -1104,6 +1104,18 @@ pub(crate) async fn run_deep_phase(
         return false;
     }
 
+    // Agent-session content-scope (post-pass, decoupled from the loop above, same as the CLI's
+    // `cmd_deep`): re-check .jsonl/.ndjson entries against the content-sniffed
+    // AgentSessionParser and stamp entries.agent_session so `search`/`ask` can scope to
+    // transcript content via `category:agent-session`. Fail-open — never turn a successful
+    // `deep` job into a failed one.
+    {
+        let mut store = state.store.lock().await;
+        if let Err(e) = indexa_query::session_scope::tag_agent_session_entries(&mut store) {
+            tracing::warn!("agent-session content tagging failed: {e:#}");
+        }
+    }
+
     true
 }
 

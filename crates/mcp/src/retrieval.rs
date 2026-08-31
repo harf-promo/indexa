@@ -239,6 +239,13 @@ impl IndexaMcp {
                 ann.as_deref(),
             )
             .map_err(mcp_err)?;
+        // Apply BOTH post-hoc filters (retain, not truncate) before truncating to `limit` —
+        // `fetch_limit` was widened above specifically so a combined `ext:`+`category` filter
+        // still has the full over-fetched pool to work with. Truncating after `ext_filter`
+        // alone would throw away candidates ranked between `limit` and `fetch_limit` before
+        // `category_filter` ever saw them, so combining `ext:jsonl` with
+        // `category:agent-session` (or any ext+category combination) could silently
+        // under-return even when qualifying content exists further down the fetched pool.
         if let Some(exts) = &ext_filter {
             // Case-insensitive both sides: `ext:RS` must match a stored `.rs` file and
             // `ext:rs` must match a stored `.RS` file.
@@ -247,16 +254,25 @@ impl IndexaMcp {
                 exts.iter()
                     .any(|e| path_lower.ends_with(&format!(".{}", e.to_ascii_lowercase())))
             });
-            hits.truncate(limit);
         }
         if let Some(cat) = &category_filter {
-            // Batch-lookup the stored `hint_cat` for the current hit set and keep only the
-            // ones stamped with this category (a row missing entirely, i.e. never categorized,
-            // never matches). Mirrors the `ext_filter` block above exactly, on a store-backed
-            // category instead of a path suffix.
             let paths: Vec<&str> = hits.iter().map(|h| h.entry_path.as_str()).collect();
-            let cats = store.hint_cats_for(&paths).map_err(mcp_err)?;
-            hits.retain(|h| cats.get(&h.entry_path).is_some_and(|c| c == cat));
+            if cat == indexa_query::session_scope::AGENT_SESSION_CATEGORY {
+                // "agent-session" lives in its own dedicated `entries.agent_session` column, not
+                // `hint_cat` — see `session_scope`'s module doc comment for why (a plain rescan
+                // unconditionally overwrites `hint_cat`, which would silently clear the tag).
+                let tagged = store.agent_session_tagged_paths(&paths).map_err(mcp_err)?;
+                hits.retain(|h| tagged.contains(&h.entry_path));
+            } else {
+                // Batch-lookup the stored `hint_cat` for the current hit set and keep only the
+                // ones stamped with this category (a row missing entirely, i.e. never
+                // categorized, never matches). Mirrors the `ext_filter` block above exactly, on
+                // a store-backed category instead of a path suffix.
+                let cats = store.hint_cats_for(&paths).map_err(mcp_err)?;
+                hits.retain(|h| cats.get(&h.entry_path).is_some_and(|c| c == cat));
+            }
+        }
+        if ext_filter.is_some() || category_filter.is_some() {
             hits.truncate(limit);
         }
 
@@ -877,7 +893,7 @@ mod tests {
     }
 
     /// Seed two same-extension `.jsonl` files, both containing the same searchable keyword, but
-    /// only one stamped `hint_cat = "agent-session"` — the shape a real
+    /// only one flagged `agent_session = 1` — the shape a real
     /// `session_scope::tag_agent_session_entries` pass produces (an unrelated `.jsonl` data
     /// file sits right beside a real transcript, both indexed, only one content-classified).
     fn mcp_with_two_jsonl_files(dbdir: &tempfile::TempDir, config: Config) -> IndexaMcp {
@@ -905,7 +921,7 @@ mod tests {
                 ])
                 .unwrap();
             store
-                .set_entry_category("/p/session.jsonl", "agent-session")
+                .set_agent_session_flag("/p/session.jsonl", true)
                 .unwrap();
             store
                 .upsert_chunks(&[
@@ -1005,6 +1021,98 @@ mod tests {
         assert!(
             !filtered.contains("data.jsonl"),
             "category: predicate must exclude the differently-categorized file, got: {filtered}"
+        );
+    }
+
+    /// Regression: combining an `ext:` predicate with `category` used to truncate to `limit`
+    /// after the `ext_filter` retain but BEFORE `category_filter` ran, so a real match ranked
+    /// below `limit` (but still within the widened `fetch_limit` pool) could be discarded before
+    /// the category filter ever saw it. Rank the untagged file ABOVE the tagged one (more keyword
+    /// hits) with `limit: 1`: the old code would truncate to the untagged top hit first, then the
+    /// category filter would find nothing left to keep, silently reporting "no results" even
+    /// though the tagged match genuinely exists further down the fetched pool.
+    #[tokio::test]
+    async fn combined_ext_and_category_filters_dont_lose_a_lower_ranked_match_to_early_truncation()
+    {
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_entries(&[
+                    Entry {
+                        path: "/p/session.jsonl".into(),
+                        kind: EntryKind::File,
+                        size: 0,
+                        modified: None,
+                        hint: None,
+                        is_binary: false,
+                    },
+                    Entry {
+                        path: "/p/data.jsonl".into(),
+                        kind: EntryKind::File,
+                        size: 0,
+                        modified: None,
+                        hint: None,
+                        is_binary: false,
+                    },
+                ])
+                .unwrap();
+            store
+                .set_agent_session_flag("/p/session.jsonl", true)
+                .unwrap();
+            store
+                .upsert_chunks(&[
+                    // Untagged, but ranks HIGHER on the "widget" keyword (repeated) than the
+                    // tagged transcript below — the shape needed to make the old truncate-before-
+                    // category-filter ordering discard the real match.
+                    ChunkRecord {
+                        entry_path: "/p/data.jsonl".to_owned(),
+                        seq: 0,
+                        heading: String::new(),
+                        text: "widget widget widget widget widget inventory".to_owned(),
+                        language: None,
+                        embedding: None,
+                        embed_model: None,
+                        content_hash: None,
+                    },
+                    ChunkRecord {
+                        entry_path: "/p/session.jsonl".to_owned(),
+                        seq: 0,
+                        heading: String::new(),
+                        text: "widget retrospective notes".to_owned(),
+                        language: None,
+                        embedding: None,
+                        embed_model: None,
+                        content_hash: None,
+                    },
+                ])
+                .unwrap();
+        }
+        let mut config = Config::default();
+        config.retrieval.query_predicates = true;
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(config),
+        );
+
+        let out = tool_text(
+            mcp.search(Parameters(SearchParams {
+                query: "ext:jsonl widget".into(),
+                limit: Some(1),
+                scope: None,
+                mode: Some("sparse".into()),
+                category: Some("agent-session".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            out.contains("session.jsonl"),
+            "the tagged file must survive the combined ext+category filter even though it \
+             ranks below the untagged file and `limit` is 1, got: {out}"
         );
     }
 }

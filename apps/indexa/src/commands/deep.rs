@@ -991,6 +991,18 @@ pub(crate) async fn cmd_deep(
         }
     }
 
+    // Agent-session content-scope (post-pass, decoupled from the per-file loop above): re-check
+    // .jsonl/.ndjson entries against the content-sniffed AgentSessionParser and stamp
+    // entries.agent_session so `search`/`ask` can scope to transcript content via
+    // `category:agent-session` (see docs/how-to/index-agent-session-history.md). Lives HERE
+    // (not duplicated at each CLI call site) so every real `cmd_deep` completion — `indexa deep`
+    // directly, and every command that calls `cmd_deep` internally (`indexa index`,
+    // `indexa notes add`, `indexa pack refresh`) — gets it automatically. Fail-open: never turn
+    // a successful `deep` run into a failed command.
+    if let Err(e) = indexa_query::session_scope::tag_agent_session_entries(&mut store) {
+        tracing::warn!("agent-session content tagging failed: {e:#}");
+    }
+
     println!("\nDeep index done. Run `indexa ask \"<question>\"` to query.");
     Ok(())
 }

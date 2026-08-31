@@ -8,7 +8,7 @@ use anyhow::Result;
 ///
 /// **INVARIANT: bump this whenever the DDL or any migration in `init_schema` changes** — otherwise a
 /// DB stamped at the old value would skip the new migration and silently miss a column/table.
-pub(super) const SCHEMA_VERSION: i64 = 9;
+pub(super) const SCHEMA_VERSION: i64 = 10;
 
 /// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
 /// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
@@ -126,7 +126,22 @@ impl Store {
                 -- holding a full live-path HashSet in memory. Nullable + in the base DDL so fresh
                 -- DBs skip the ALTER migration below; NULL means not yet stamped by a scan (a
                 -- watch upsert, or a row from before this column existed).
-                scan_generation INTEGER
+                scan_generation INTEGER,
+                -- agent_session (v0.81): a genuinely SEPARATE tri-state flag for content-sniffed
+                -- Claude Code session-transcript detection — deliberately NOT folded into
+                -- hint_cat. hint_cat is the technical scan-time classification
+                -- (surface::classify_file_by_extension) and `upsert_entries_with_generation`'s
+                -- `ON CONFLICT DO UPDATE SET hint_cat = excluded.hint_cat` unconditionally
+                -- overwrites it on EVERY rescan/watch-upsert — stamping a content-derived
+                -- agent-session tag into that column meant a plain `indexa scan` after
+                -- `indexa deep` silently reset it back to data until the next tagging pass
+                -- happened to run again. This column is untouched by that upsert (deliberately
+                -- absent from its INSERT/ON CONFLICT column list), so a rescan can never clear
+                -- it. NULL = not yet content-checked; 0 = checked, not a transcript; 1 = checked,
+                -- confirmed a transcript — see `indexa_query::session_scope`. The 0 state also
+                -- lets the tagging pass's candidate query skip already-rejected files instead of
+                -- re-checking them on every call.
+                agent_session INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_entries_parent ON entries(parent_path);
             CREATE INDEX IF NOT EXISTS idx_entries_kind   ON entries(kind);
@@ -536,6 +551,20 @@ impl Store {
         if !has_patch_id {
             self.conn
                 .execute_batch("ALTER TABLE decisions ADD COLUMN patch_id TEXT;")?;
+        }
+
+        // Migration: add entries.agent_session (v0.81) — the tri-state content-sniffed
+        // transcript flag (see the base DDL comment above). Nullable, NO backfill: existing
+        // `.jsonl`/`.ndjson` rows stay NULL (not yet checked) until the next
+        // `session_scope::tag_agent_session_entries` pass content-sniffs them, same as a
+        // freshly-scanned row on a brand-new DB.
+        let has_agent_session: bool = self
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'agent_session'")?
+            .exists([])?;
+        if !has_agent_session {
+            self.conn
+                .execute_batch("ALTER TABLE entries ADD COLUMN agent_session INTEGER;")?;
         }
 
         // Migration: add entries.first_indexed_at (v0.10) — the original discovery

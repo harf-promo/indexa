@@ -374,19 +374,47 @@ async fn run_judge_for_question(
 
 /// `--save-run`: write `json` (the same shape `--json` prints) to `<dir>/eval-<unix>.json` and
 /// return the path written. `dir` is tilde-expanded and created if missing. The filename keys on
-/// `helpers::now_unix()` so repeated runs never collide and sort chronologically.
+/// `helpers::now_unix()`, which sorts chronologically, but two `--save-run` calls completing
+/// within the same wall-clock second (easy for a small/hermetic golden set) would otherwise
+/// collide on an identical name — `std::fs::write` truncates silently, no error. Guard against
+/// that by trying `eval-<unix>-<n>.json` suffixes until an unused name is found, opened with
+/// `create_new` so the existence check and the write are one atomic step (no TOCTOU race against
+/// a concurrent `--save-run`). The unsuffixed name is tried first, so the common (non-colliding)
+/// case keeps the exact `eval-<unix>.json` shape callers/tests already expect.
 fn save_eval_run(dir: &str, payload: &EvalJson<'_>) -> Result<String> {
+    use std::io::Write;
+
     let dir = super::helpers::expand(dir);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating --save-run directory '{dir}'"))?;
-    let path = std::path::Path::new(&dir)
-        .join(format!("eval-{}.json", super::helpers::now_unix()))
-        .to_string_lossy()
-        .into_owned();
     let body = serde_json::to_string_pretty(payload)?;
-    std::fs::write(&path, body)
-        .with_context(|| format!("writing --save-run output to '{path}'"))?;
-    Ok(path)
+    let base = super::helpers::now_unix();
+    for attempt in 0..1000u32 {
+        let filename = if attempt == 0 {
+            format!("eval-{base}.json")
+        } else {
+            format!("eval-{base}-{attempt}.json")
+        };
+        let path = std::path::Path::new(&dir).join(&filename);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                f.write_all(body.as_bytes()).with_context(|| {
+                    format!("writing --save-run output to '{}'", path.display())
+                })?;
+                return Ok(path.to_string_lossy().into_owned());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("writing --save-run output to '{}'", path.display()))
+            }
+        }
+    }
+    bail!("could not find an unused --save-run filename under '{dir}' after 1000 attempts")
 }
 
 /// Char-safe truncation for the table's question column.
@@ -506,6 +534,48 @@ mod tests {
         assert_eq!(parsed["mode"], "sparse");
         assert_eq!(parsed["summary"]["questions"], 1);
         assert_eq!(parsed["questions"][0]["question"], "where is auth handled?");
+    }
+
+    /// Regression for the same-second collision bug: two `--save-run` calls landing in the same
+    /// wall-clock second (the filename's only entropy is `helpers::now_unix()`) used to produce
+    /// an identical `eval-<unix>.json` name, so the second `std::fs::write` silently truncated
+    /// and overwrote the first run with no error. Both saves must now land at distinct paths and
+    /// both must survive on disk with their own content.
+    #[test]
+    fn two_saves_in_the_same_second_do_not_collide() {
+        let dir = tempfile::tempdir().unwrap();
+        let questions = sample_metrics();
+        let summary_a = sample_summary();
+        let mut summary_b = sample_summary();
+        summary_b.questions = 2; // distinguish the two payloads
+        let eval_json_a = EvalJson {
+            mode: "sparse",
+            questions: &questions,
+            summary: &summary_a,
+        };
+        let eval_json_b = EvalJson {
+            mode: "sparse",
+            questions: &questions,
+            summary: &summary_b,
+        };
+
+        let path_a = save_eval_run(dir.path().to_str().unwrap(), &eval_json_a).unwrap();
+        let path_b = save_eval_run(dir.path().to_str().unwrap(), &eval_json_b).unwrap();
+
+        assert_ne!(
+            path_a, path_b,
+            "two --save-run calls must never collide on the same filename"
+        );
+
+        let parsed_a: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path_a).unwrap()).unwrap();
+        let parsed_b: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path_b).unwrap()).unwrap();
+        assert_eq!(parsed_a["summary"]["questions"], 1);
+        assert_eq!(
+            parsed_b["summary"]["questions"], 2,
+            "the first run's file must not have been silently overwritten by the second"
+        );
     }
 
     /// A nonexistent `--save-run` directory is created, not an error — mirrors `finalize_export`

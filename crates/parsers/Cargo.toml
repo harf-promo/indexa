@@ -64,8 +64,9 @@ globset = { workspace = true }
 # dep at the same pinned version: zero new tree entries.
 libc = "0.2"
 # Transparent .zst content indexing — pure-Rust zstd decoder (decode-only, no C toolchain).
-# Already a transitive dep of `object` (above) at this exact version; promoted to a direct dep,
-# zero new tree entries.
+# NOT zero new tree entries: `object` (above) pulls ruzstd 0.8.3 transitively, and this direct
+# dep pins the newer 0.9.0 — `cargo tree -i ruzstd` shows both coexisting. Bumping `object` (or
+# relaxing this pin to match its transitive version) would collapse the tree back to one.
 ruzstd = "0.9.0"
 # Transparent .xz/.lzma content indexing — pure-Rust, decode-only. Genuinely new to the tree.
 lzma-rs = "0.3"
