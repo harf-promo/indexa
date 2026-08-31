@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Parser for Claude Code's own session-transcript JSONL format** (`crates/parsers/src/agent_sessions.rs`).
+  Opt-in only — never auto-discovered, never scanned by default; fires only when a `scan`/`deep`
+  root you point at happens to include a transcript like `~/.claude/projects/<project>/*.jsonl`.
+  `accepts_path` content-sniffs a bounded window of leading lines (never the `.jsonl` extension
+  alone) for one shaped like a real `"type":"user"|"assistant"` turn, so an unrelated JSONL data
+  file is left to the existing generic JSON/text parser. `parse` streams the file line by line
+  (safe on multi-GB transcripts) and extracts only human-readable prose — a user turn's plain
+  string, or an assistant turn's `text` content blocks — skipping `tool_use`/`tool_result`/
+  `thinking` blocks and the session-metadata lines Claude Code interleaves with the conversation.
+  Registered in `Registry::new()` near the other structured-text parsers (`ipynb`/`org`); existing
+  secret redaction applies to extracted turns same as any other indexed file. New guide:
+  [`docs/how-to/index-agent-session-history.md`](docs/how-to/index-agent-session-history.md).
+
 ## [0.78.0] — 2026-08-31
 
 ### Added

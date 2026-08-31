@@ -28,6 +28,7 @@
 //! Custom parsers are inserted **before** the built-in fallbacks, so they take
 //! precedence for any MIME type they claim.
 
+use crate::agent_sessions::AgentSessionParser;
 use crate::archive::ArchiveParser;
 use crate::binary::BinaryParser;
 use crate::code::CodeParser;
@@ -77,6 +78,11 @@ impl Registry {
         Self {
             parsers: vec![
                 Box::new(IpynbParser), // .ipynb (JSON) — by extension, before generic text
+                // Claude Code session-transcript JSONL — content-sniffed only (never by
+                // extension), so it's order-independent w.r.t. the other structured-text
+                // parsers here; placed near ipynb/org as another "structured text, not raw
+                // JSON/text" case. Opt-in: only fires when a scan root happens to contain one.
+                Box::new(AgentSessionParser),
                 Box::new(CodeParser),
                 Box::new(PdfParser),
                 Box::new(EpubParser),
