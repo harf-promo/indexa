@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+Round-4 critique-driven fix pass (`/code-review high` over 1e47cf2..eeb7492's four lanes):
+
+- **Agent-session tagging collided with `hint_cat`, the technical scan-time classification
+  column.** `session_scope::tag_agent_session_entries` used to stamp
+  `entries.hint_cat = "agent-session"`, but `upsert_entries_with_generation`'s
+  `ON CONFLICT DO UPDATE SET hint_cat = excluded.hint_cat` unconditionally overwrites that same
+  column on every rescan/watch-upsert — a plain `indexa scan` (or a filesystem-watch event)
+  after `indexa deep` silently reset a transcript's tag back to `"data"` until the tagging pass
+  happened to run again, making `category:agent-session` search flicker on/off. Added a genuinely
+  separate, additive `entries.agent_session` column (nullable tri-state: `NULL` = not yet
+  checked, `0` = checked/not a transcript, `1` = confirmed transcript) that a rescan's
+  `ON CONFLICT` never touches. `Store::jsonl_like_entries_needing_agent_session_check` /
+  `set_agent_session_flag` / `agent_session_tagged_paths` replace the old `hint_cat`-based
+  helpers; the MCP `search` tool's `category` filter now reads the dedicated column specifically
+  for `"agent-session"` (any other category value still reads `hint_cat`, unchanged). The
+  tri-state design also fixes the candidate query never shrinking for a rejected (non-transcript)
+  `.jsonl` file — a `0`-flagged row is never re-offered as a candidate.
+- **`search`'s `ext:` filter truncated to `limit` before the `category` filter ever ran**,
+  discarding candidates ranked between `limit` and the widened `fetch_limit` before `category`
+  got a chance to see them — combining `ext:jsonl` with `category:agent-session` (or any
+  `ext:`+`category` combination) could silently under-return or report no results even when a
+  qualifying match existed further down the fetched pool. Both post-hoc filters now apply as
+  `retain` before either truncates to `limit`.
+- **`indexa plugin list --refresh` didn't actually fall back to the embedded directory on every
+  failure it claimed to.** The documented "any network or parse error falls back to the embedded
+  list" only wrapped the fetch itself — `build_remote_client()`'s own `Result` was unwrapped with
+  a bare `?` first, so a client-construction failure (e.g. a TLS/OS-trust-store lookup failing in
+  a minimal/headless environment) hard-failed the command instead of falling back. Both error
+  sources now funnel through the same fallback path.
+- **Agent-session tagging was wired into only one of `cmd_deep`'s several call sites.** The
+  tagging post-pass used to run only in `main.rs`'s direct `indexa deep` CLI arm — the documented
+  primary workflow, `indexa index` (scan→deep→summarize), plus `indexa notes add` and
+  `indexa pack refresh`, all call `cmd_deep` directly and never got tagged. Moved the call inside
+  `cmd_deep` itself (end of every real run, fail-open, unchanged from before) so every caller gets
+  it for free. The web UI's independent `crates/web/src/jobs_exec/deep.rs` job now runs the same
+  post-pass at the end of `run_deep_phase`, so the web-only deep-index path is covered too.
+- **`indexa eval --save-run` could silently overwrite a prior run.** Filenames were
+  `eval-<unix-seconds>.json`; two `--save-run` calls completing within the same wall-clock second
+  produced an identical name, and `std::fs::write` truncated the earlier run with no error —
+  contradicting the doc comment's "never collide" claim. Now tries `eval-<unix>-<n>.json`
+  suffixes via `create_new` (atomic, no TOCTOU) until an unused name is found; the common
+  non-colliding case keeps the original `eval-<unix>.json` shape.
+- **`crates/parsers/Cargo.toml`'s `ruzstd` comment was stale.** It claimed promoting `ruzstd` to
+  a direct dependency added "zero new tree entries" — no longer true since the direct pin moved
+  to 0.9.0 while `object` still transitively pulls 0.8.3, so both versions now coexist
+  (`cargo tree -i ruzstd` shows two). Comment-only fix; the version coexistence itself is left as
+  a follow-up (bumping `object`, or relaxing this pin) rather than churned into this fix pass.
+
+Reviewed and judged non-issues or explicitly deferred (see PR description for full reasoning):
+`check_deep_watchdog` being a third hand-copied watchdog implementation, and
+`build_remote_client`'s HTTP-client-construction duplication — both real simplification
+opportunities, deferred as a follow-up rather than risking a same-day consolidation refactor.
+
 ## [0.80.0] — 2026-08-31
 
 ### Added

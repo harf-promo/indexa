@@ -121,7 +121,10 @@ async fn main() -> Result<()> {
             contextual_prefix,
             no_embed,
         } => {
-            let result = commands::cmd_deep(
+            // Agent-session content-scope tagging now runs INSIDE `cmd_deep` itself (at the end
+            // of every real run, fail-open) — see its doc comment — so every caller gets it for
+            // free instead of only this direct CLI arm. Do not re-add a post-pass here.
+            commands::cmd_deep(
                 paths,
                 embed_model,
                 dry_run,
@@ -131,34 +134,7 @@ async fn main() -> Result<()> {
                 no_embed,
                 &cfg,
             )
-            .await;
-            // Agent-session content-scope (post-pass, decoupled from `cmd_deep`'s own loop):
-            // re-check .jsonl/.ndjson entries against the content-sniffed AgentSessionParser and
-            // stamp hint_cat = "agent-session" so `search`/`ask` can scope to transcript content
-            // via `category:agent-session` (see docs/how-to/index-agent-session-history.md).
-            // Fail-open — never turn a successful `deep` run into a failed command.
-            if result.is_ok() && !dry_run {
-                if let Some(data_dir) = config::default_data_dir() {
-                    let db_path = data_dir.join("index.db");
-                    if db_path.exists() {
-                        match indexa_core::store::Store::open(&db_path) {
-                            Ok(mut store) => {
-                                if let Err(e) =
-                                    indexa_query::session_scope::tag_agent_session_entries(
-                                        &mut store,
-                                    )
-                                {
-                                    tracing::warn!("agent-session content tagging failed: {e:#}");
-                                }
-                            }
-                            Err(e) => tracing::warn!(
-                                "agent-session content tagging: failed to open index: {e:#}"
-                            ),
-                        }
-                    }
-                }
-            }
-            result
+            .await
         }
         Commands::Map { depth } => commands::cmd_map(depth).await,
         Commands::Summarize {
