@@ -19,18 +19,12 @@ counters:
   ui_js_fragment_count: 32
   ui_css_fragment_count: 23
 
-# Rounds 1-4 (v0.78.0 -> v0.80.1) plus their critique-fix lanes are ALL merged and released.
-# Territory below is historical only — kept for reference, not live. Superseded by round-5.
-singleton_paths:
-  # 2026-08-31 round-5 (two lanes, consolidation — no new features) — exclusive territory.
-  - crates/core/src/resource.rs                  # watchdog-consolidation (new shared fn)
-  - crates/query/src/worker.rs                   # watchdog-consolidation
-  - crates/web/src/jobs_exec/watchdog.rs         # watchdog-consolidation
-  - crates/web/src/jobs_exec/deep.rs             # watchdog-consolidation (call site only)
-  - apps/indexa/src/commands/deep.rs             # watchdog-consolidation (call site only)
-  - crates/http-util/src/lib.rs                  # http-client-consolidation (new fn)
-  - crates/parsers/Cargo.toml                    # http-client-consolidation (new internal dep)
-  - crates/parsers/src/plugin_directory.rs       # http-client-consolidation
+# Rounds 1-5 (v0.78.0 -> v0.80.2) plus their critique-fix lanes are ALL merged and released.
+# Territory below is historical only — kept for reference, not live. Round-5's actual diff
+# never touched crates/web/src/jobs_exec/deep.rs (the watchdog call site there needed no
+# change) and did touch crates/core/Cargo.toml (a tokio test-util dev-dependency) — both
+# corrected below from what was originally declared before the round ran.
+singleton_paths: []
 
 # release.yml triggers on version tags (v*.*.*), not on merge to main — confirmed by
 # reading the trigger. No merge-triggered deploy exists for this repo.

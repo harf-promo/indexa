@@ -102,20 +102,16 @@ pub fn load() -> Result<Vec<PluginEntry>> {
 /// (15s) — this is a small text file, not a release binary, so it should fail fast
 /// rather than hang.
 ///
-/// Stays `Result`-returning for API stability with `cmd_plugin_list`'s fallback wiring
-/// (`apps/indexa/src/commands/plugin.rs`), but — like every other `indexa-http-util`-
-/// backed client in the codebase (`http_client`, `ssrf_guarded_client`, and every
-/// LLM/embed provider adapter) — `build()`'s one documented failure mode (unrecoverable
-/// rustls TLS/OS-trust-store init) now panics via `expect` inside
-/// `http_client_with_user_agent` rather than surfacing as an `Err` here. Narrows, but
-/// doesn't remove, `indexa plugin list --refresh`'s embedded-directory fallback: a
-/// fetch or parse failure still falls back cleanly (`cmd_plugin_list`'s `match` on
-/// [`load_remote`]'s `Result`), only a TLS-init failure at construction time no longer
-/// does.
+/// Genuinely `Result`-returning: unlike `http_client` (whose LLM/embed callers treat a
+/// TLS-init failure as unrecoverable and panic), `http_client_with_user_agent` itself
+/// returns a `Result` specifically so this caller's fallback contract holds — a TLS/
+/// OS-trust-store init failure here must fall back to the embedded plugin directory via
+/// `cmd_plugin_list`'s `match` (`apps/indexa/src/commands/plugin.rs`), not crash the
+/// process. Both failure modes (client construction here, fetch/parse in
+/// [`load_remote`]) surface as an `Err` and are handled identically by that fallback.
 pub fn build_remote_client() -> Result<reqwest::Client> {
-    Ok(indexa_http_util::http_client_with_user_agent(
-        15, USER_AGENT,
-    ))
+    indexa_http_util::http_client_with_user_agent(15, USER_AGENT)
+        .context("building the HTTP client for the remote plugin directory")
 }
 
 /// Fetch and parse `plugins.toml` off `main` on GitHub — the same curated list as

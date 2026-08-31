@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`indexa plugin list --refresh` silently reintroduced a panic-on-fallback bug a prior
+  release had fixed.** Round 5's http-client-consolidation swapped
+  `plugin_directory::build_remote_client()`'s body to call the new
+  `indexa_http_util::http_client_with_user_agent`, which panics via `.expect(...)` on a
+  client-build failure instead of returning a `Result` — silently making
+  `build_remote_client()`'s own `Result` return type unreachable in the `Err` case, so a
+  TLS/OS-trust-store init failure in a minimal/headless environment now crashed
+  `indexa plugin list --refresh` instead of falling back to the embedded plugin
+  directory, exactly the behavior a prior release explicitly fixed. `http_client_with_user_agent`
+  now returns a `Result` (its only caller, added this same round, needed no other
+  changes) — `http_client` itself (used by every LLM/embed provider adapter, which treat
+  a TLS-init failure as unrecoverable) is deliberately left panicking, unchanged.
+  `.orchestration/lanes.yml`'s round-5 territory notes were also corrected to match what
+  that round's diff actually touched.
+
 ## [0.80.2] — 2026-08-31
 
 ### Changed
