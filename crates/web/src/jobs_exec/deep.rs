@@ -8,13 +8,285 @@ use crate::jobs::{broadcast_only, push, JobEvent, JobHandle};
 use crate::AppState;
 use indexa_core::{
     config::SummaryMode,
-    resource::WatchdogState,
+    resource::{MachineSpec, WatchdogState},
     store::{chunk_content_hash, ChunkRecord, EdgeRecord, SymbolRecord},
     walker::EntryKind,
 };
+use indexa_embed::{AddOutcome, MissBatcher};
 use indexa_llm::{Describer, OllamaLlm};
 use indexa_query::contextual::{build_doc_context, contextual_embed_texts, ContextualEvent};
 use std::sync::Arc;
+
+/// Per-file payload buffered in the cross-file [`MissBatcher`] between registration and the
+/// flush that resolves its cache-miss embeddings — everything [`persist_completed_file`] needs
+/// that isn't already captured in the resolved `embeddings` vector. Closes #367: previously
+/// every file with ≥1 cache-miss chunk issued its own `embed_all` round-trip; batching these
+/// across files cuts a deep job's HTTP round-trips roughly `EMBED_BATCH_SIZE`-fold, without
+/// changing what gets stored (see `crates/embed/src/batcher.rs`'s correctness note).
+struct PendingFile {
+    entry: indexa_core::walker::Entry,
+    path_str: String,
+    chunks: Vec<indexa_parsers::types::Chunk>,
+    chunk_hashes: Vec<String>,
+    edges: Vec<indexa_parsers::types::Edge>,
+}
+
+/// Push the same dim-mismatch / embed-failure warnings the old per-file path pushed, now
+/// driven off a `Completed`'s aggregated counts. `raw_failures` and `dim_mismatch` are tracked
+/// separately by `MissBatcher::scatter`; the old code's `embed_failures` count (computed AFTER
+/// `enforce_embedding_dim` nulled mismatched slots) is exactly their sum, so summing here
+/// reproduces the same pushed messages — including that the failure warning fires
+/// unconditionally (unlike the CLI path, which suppresses it when there's already a dim-
+/// mismatch warning for the same file).
+fn warn_embed_issues(
+    handle: &Arc<JobHandle>,
+    path_str: &str,
+    dim_mismatch: usize,
+    dim_sample: Option<usize>,
+    raw_failures: usize,
+    miss_count: usize,
+    configured_dim: usize,
+) {
+    if dim_mismatch > 0 {
+        push(
+            handle,
+            JobEvent::Warning {
+                stage: "deep".to_owned(),
+                item_path: Some(path_str.to_owned()),
+                message: format!(
+                    "{dim_mismatch} chunk(s) embedded at dim {} ≠ configured {} — stored \
+                     text-only; fix [embedding] model/dim and re-run deep",
+                    dim_sample.unwrap_or(0),
+                    configured_dim
+                ),
+                pressure: None,
+            },
+        );
+    }
+    let embed_failures = raw_failures + dim_mismatch;
+    if embed_failures > 0 {
+        push(
+            handle,
+            JobEvent::Warning {
+                stage: "deep".to_owned(),
+                item_path: Some(path_str.to_owned()),
+                message: format!("{embed_failures}/{miss_count} chunks failed to embed"),
+                pressure: None,
+            },
+        );
+    }
+}
+
+/// Build chunk records from a fully-resolved `embeddings` vector and persist one file: entries,
+/// then chunks (unless `skip_embed_work`), then best-effort edges/symbols — each store op
+/// reported via a `Warning` event on failure rather than aborting the job (parity with the old
+/// per-file error handling). Shared by the summaries-only fast path (embeddings all `None`,
+/// resolved synchronously), a zero-miss `MissBatcher::add_file` completion, and a post-
+/// `scatter` completion. Returns `(entries_written, chunks_written, hard_errors)` deltas for
+/// the caller's running totals.
+#[allow(clippy::too_many_arguments)] // one flat finalize; grouping would just move fields around
+async fn persist_completed_file(
+    state: &AppState,
+    handle: &Arc<JobHandle>,
+    entry: indexa_core::walker::Entry,
+    path_str: &str,
+    chunks: &[indexa_parsers::types::Chunk],
+    chunk_hashes: Vec<String>,
+    edges: &[indexa_parsers::types::Edge],
+    embeddings: Vec<Option<Vec<f32>>>,
+    embed_model: Option<&str>,
+    skip_embed_work: bool,
+) -> (u64, u64, u64) {
+    let mut chunk_records = Vec::with_capacity(chunks.len());
+    for ((chunk, embedding), hash) in chunks.iter().zip(embeddings).zip(chunk_hashes) {
+        chunk_records.push(ChunkRecord {
+            entry_path: path_str.to_owned(),
+            seq: chunk.seq,
+            heading: chunk.heading.clone(),
+            // Redact secrets before storing (embed uses original text); shared choke
+            // point so web deep honors [scan] redact_at_index like the CLI.
+            text: indexa_query::redact::chunk_text_for_store(
+                &chunk.text,
+                state.config.scan.redact_at_index,
+            ),
+            language: chunk.language.clone(),
+            embedding,
+            embed_model: embed_model.map(|m| m.to_owned()),
+            content_hash: Some(hash),
+        });
+    }
+
+    let (mut entries_written, mut chunks_written, mut hard_errors) = (0u64, 0u64, 0u64);
+    let mut store = state.store.lock().await;
+    // The standalone Deep job can run without a preceding scan, so without this the file has
+    // no `entries` row — its chunks would be orphans, silently deleted the next time
+    // `prune_orphans` runs. Always written regardless of mode.
+    match store.upsert_entries(&[entry]) {
+        Ok(()) => entries_written += 1,
+        Err(e) => {
+            push(
+                handle,
+                JobEvent::Warning {
+                    stage: "deep".to_owned(),
+                    item_path: Some(path_str.to_owned()),
+                    message: format!("upsert_entries failed: {e:#}"),
+                    pressure: None,
+                },
+            );
+            hard_errors += 1;
+        }
+    }
+    // `summaries-only` never persists chunk rows — that's the entire ~100× size win;
+    // `summarize_file` re-parses the file itself when no chunks are stored.
+    if !skip_embed_work {
+        match store.upsert_chunks(&chunk_records) {
+            Ok(()) => chunks_written += chunk_records.len() as u64,
+            Err(e) => {
+                push(
+                    handle,
+                    JobEvent::Warning {
+                        stage: "deep".to_owned(),
+                        item_path: Some(path_str.to_owned()),
+                        message: format!("upsert_chunks failed: {e:#}"),
+                        pressure: None,
+                    },
+                );
+                hard_errors += 1;
+            }
+        }
+    }
+    // Persist the file's code-graph edges (imports/defines), keyed on the same entry-path
+    // string as its chunks. Best-effort: a failure only warns.
+    if !edges.is_empty() {
+        let edge_records: Vec<EdgeRecord> = edges
+            .iter()
+            .map(|e| EdgeRecord {
+                from_path: path_str.to_owned(),
+                kind: e.kind.to_owned(),
+                to_ref: e.to.clone(),
+            })
+            .collect();
+        if let Err(e) = store.upsert_edges(&edge_records) {
+            push(
+                handle,
+                JobEvent::Warning {
+                    stage: "deep".to_owned(),
+                    item_path: Some(path_str.to_owned()),
+                    message: format!("upsert_edges failed: {e:#}"),
+                    pressure: None,
+                },
+            );
+        }
+        // Symbols (2.1): kind + line range, extracted alongside `defines` edges.
+        let symbol_records: Vec<SymbolRecord> = edges
+            .iter()
+            .filter(|e| e.kind == "defines")
+            .filter_map(|e| {
+                let (start, end) = e.line_range?;
+                Some(SymbolRecord {
+                    path: path_str.to_owned(),
+                    name: e.to.clone(),
+                    kind: e.symbol_kind.unwrap_or("other").to_owned(),
+                    start_line: start as i64,
+                    end_line: end as i64,
+                })
+            })
+            .collect();
+        if !symbol_records.is_empty() {
+            if let Err(e) = store.upsert_symbols(&symbol_records) {
+                push(
+                    handle,
+                    JobEvent::Warning {
+                        stage: "deep".to_owned(),
+                        item_path: Some(path_str.to_owned()),
+                        message: format!("upsert_symbols failed: {e:#}"),
+                        pressure: None,
+                    },
+                );
+            }
+        }
+    }
+    (entries_written, chunks_written, hard_errors)
+}
+
+/// Flush the batcher: memory-watchdog-gate, then embed every currently-buffered cross-file
+/// miss in one (internally sub-batched) round-trip, scatter results back to owning files, and
+/// persist every file that completes. This is now where the watchdog's "before each Ollama
+/// call" check lives — the actual embed call moved here from the old per-file site, so the
+/// check moves with it (still unloads the embedder/ctx LLM under Critical pressure, still
+/// gates every batched embed round-trip). Called at `is_full()`, at end-of-run to drain a
+/// final partial batch, and once more on cancellation to finalize already-enriched work rather
+/// than discard it. Returns `(entries_written, chunks_written, hard_errors)` deltas.
+#[allow(clippy::too_many_arguments)]
+async fn flush_deep_batcher(
+    batcher: &mut MissBatcher<PendingFile>,
+    state: &AppState,
+    handle: &Arc<JobHandle>,
+    wdog: &mut WatchdogState,
+    spec: &MachineSpec,
+    headroom: u64,
+    ctx_llm: Option<&OllamaLlm>,
+    embed_model: &str,
+) -> (u64, u64, u64) {
+    run_watchdog_check(
+        wdog,
+        spec,
+        headroom,
+        handle,
+        "deep",
+        Some(state.embedder.as_ref()),
+        ctx_llm.map(|l| l as &(dyn Describer + Send + Sync)),
+    )
+    .await;
+
+    let refs = batcher.batch_refs();
+    let results = indexa_embed::embed_all(
+        state.embedder.as_ref(),
+        &refs,
+        indexa_embed::EMBED_BATCH_SIZE,
+    )
+    .await;
+    drop(refs);
+
+    let (mut entries_written, mut chunks_written, mut hard_errors) = (0u64, 0u64, 0u64);
+    for c in batcher.scatter(results) {
+        warn_embed_issues(
+            handle,
+            &c.meta.path_str,
+            c.dim_mismatch,
+            c.dim_sample,
+            c.raw_failures,
+            c.miss_count,
+            state.config.embedding.dim,
+        );
+        let PendingFile {
+            entry,
+            path_str,
+            chunks,
+            chunk_hashes,
+            edges,
+        } = c.meta;
+        // Never `skip_embed_work` here — that path bypasses the batcher entirely and finalizes
+        // inline instead (see `run_deep_phase`).
+        let (e, c_, h) = persist_completed_file(
+            state,
+            handle,
+            entry,
+            &path_str,
+            &chunks,
+            chunk_hashes,
+            &edges,
+            c.embeddings,
+            Some(embed_model),
+            false,
+        )
+        .await;
+        entries_written += e;
+        chunks_written += c_;
+        hard_errors += h;
+    }
+    (entries_written, chunks_written, hard_errors)
+}
 
 /// Standalone deep: walks, deep-indexes, then finalises the job as done.
 pub(crate) async fn run_deep_phase_standalone(
@@ -169,9 +441,34 @@ pub(crate) async fn run_deep_phase(
     }
     let registry = std::sync::Arc::new(registry_inner);
 
+    // Accumulates cache-miss embed-texts across files so `embed_all` runs on full
+    // `EMBED_BATCH_SIZE` batches instead of one file's 1–3 misses at a time (#367). Flushed at
+    // `is_full()` below, at end-of-run, and (to avoid discarding already-paid-for parse/
+    // contextual-LLM enrichment) once more on cancellation. Unused whenever `skip_embed_work`
+    // is set, since that path finalizes inline without embedding at all.
+    let mut batcher: MissBatcher<PendingFile> =
+        MissBatcher::new(state.config.embedding.dim, indexa_embed::EMBED_BATCH_SIZE);
+
     for entry in &files {
-        // Honor cancellation requested via DELETE /api/jobs/:id.
+        // Honor cancellation requested via DELETE /api/jobs/:id. Flush first: files already
+        // buffered here were fully parsed (and, for contextual retrieval, already paid for an
+        // LLM blurb call) — finalizing them rather than discarding keeps that work instead of
+        // wasting it. The job is ending either way, so the flush's written/error counts (unlike
+        // the same call's `is_full()`/tail-flush uses below) have nothing left to feed into.
         if handle.is_cancelled() {
+            if !batcher.is_empty() {
+                let _ = flush_deep_batcher(
+                    &mut batcher,
+                    state,
+                    handle,
+                    &mut wdog,
+                    &spec,
+                    headroom,
+                    ctx_llm.as_ref(),
+                    &embed_model,
+                )
+                .await;
+            }
             finalize_cancelled(handle, done as usize);
             return false;
         }
@@ -476,9 +773,26 @@ pub(crate) async fn run_deep_phase(
 
                 // `summaries-only` never persists the chunk at all, so computing an embedding
                 // for it is wasted work — skip straight to an all-None vector, exactly like the
-                // CLI's `--no-embed` path.
-                let all_embeddings: Vec<Option<Vec<f32>>> = if skip_embed_work {
-                    vec![None; extracted.chunks.len()]
+                // CLI's `--no-embed` path, and finalize inline (this mode never touches the
+                // cross-file batcher). Otherwise, register with it below.
+                if skip_embed_work {
+                    let all_embeddings: Vec<Option<Vec<f32>>> = vec![None; extracted.chunks.len()];
+                    let (e, c, h) = persist_completed_file(
+                        state,
+                        handle,
+                        (**entry).clone(),
+                        &path_str,
+                        &extracted.chunks,
+                        chunk_hashes,
+                        &extracted.edges,
+                        all_embeddings,
+                        None,
+                        true,
+                    )
+                    .await;
+                    entries_written += e;
+                    chunks_written += c;
+                    hard_errors += h;
                 } else {
                     // Load cached embeddings for this file (hash → Vec<f32>). Fail-open.
                     let hash_cache = {
@@ -578,214 +892,75 @@ pub(crate) async fn run_deep_phase(
                         Vec::new()
                     };
 
-                    // Watchdog: pause if memory is tight before the (batched) embeds below. On a
-                    // Critical pause we unload the embedder (and the contextual-retrieval LLM, if
-                    // enabled) so their RAM frees and the recovery check can resume us.
-                    run_watchdog_check(
-                        &mut wdog,
-                        &spec,
-                        headroom,
-                        handle,
-                        "deep",
-                        Some(state.embedder.as_ref()),
-                        ctx_llm
-                            .as_ref()
-                            .map(|l| l as &(dyn Describer + Send + Sync)),
-                    )
-                    .await;
-
-                    // Phase 2 — embed only the cache-miss chunks in batched round-trips.
-                    let miss_refs: Vec<&str> =
-                        miss_embed_texts.iter().map(|s| s.as_str()).collect();
-                    let mut miss_embeddings = if !miss_refs.is_empty() {
-                        indexa_embed::embed_all(
-                            state.embedder.as_ref(),
-                            &miss_refs,
-                            indexa_embed::EMBED_BATCH_SIZE,
-                        )
-                        .await
-                    } else {
-                        Vec::new()
+                    // Register this file's misses with the cross-file batcher instead of
+                    // embedding them here directly (#367) — the batcher accumulates buffered
+                    // embed-texts across files so the eventual `embed_all` call runs on a full
+                    // batch rather than this one file's lone 1–3 misses. `add_file` finalizes a
+                    // zero-miss file (`miss_indices` empty) synchronously and it never touches
+                    // the buffer — this is also why a cache-hit chunk never "enters the
+                    // batcher": only miss embed-texts are ever buffered; `cache_hits`' `Some`
+                    // slots ride along in the `embeddings` vector and are returned untouched.
+                    let miss_texts: Vec<(usize, String)> =
+                        miss_indices.into_iter().zip(miss_embed_texts).collect();
+                    let meta = PendingFile {
+                        entry: (**entry).clone(),
+                        path_str: path_str.clone(),
+                        chunks: extracted.chunks,
+                        chunk_hashes,
+                        edges: extracted.edges,
                     };
-
-                    // Drop any embedding whose dim ≠ the configured `[embedding] dim` (a model/config
-                    // mismatch) — storing it would corrupt dense search. The chunk stays BM25-searchable.
-                    let (dim_mismatch, sample_dim) = indexa_embed::enforce_embedding_dim(
-                        &mut miss_embeddings,
-                        state.config.embedding.dim,
-                    );
-                    if dim_mismatch > 0 {
-                        push(
-                            handle,
-                            JobEvent::Warning {
-                                stage: "deep".to_owned(),
-                                item_path: Some(path_str.clone()),
-                                message: format!(
-                                    "{dim_mismatch} chunk(s) embedded at dim {} ≠ configured {} — stored \
-                                     text-only; fix [embedding] model/dim and re-run deep",
-                                    sample_dim.unwrap_or(0),
-                                    state.config.embedding.dim
-                                ),
-                                pressure: None,
-                            },
-                        );
-                    }
-                    let embed_failures = miss_embeddings.iter().filter(|e| e.is_none()).count();
-                    if embed_failures > 0 {
-                        push(
-                            handle,
-                            JobEvent::Warning {
-                                stage: "deep".to_owned(),
-                                item_path: Some(path_str.clone()),
-                                message: format!(
-                                    "{embed_failures}/{} chunks failed to embed",
-                                    miss_embeddings.len()
-                                ),
-                                pressure: None,
-                            },
-                        );
-                    }
-
-                    // Merge cache hits and fresh embeddings into one aligned vector.
-                    let mut miss_iter = miss_embeddings.into_iter();
-                    let mut merged: Vec<Option<Vec<f32>>> =
-                        Vec::with_capacity(extracted.chunks.len());
-                    for slot in cache_hits.iter_mut().take(extracted.chunks.len()) {
-                        if slot.is_some() {
-                            merged.push(slot.take());
-                        } else {
-                            merged.push(miss_iter.next().unwrap_or(None));
-                        }
-                    }
-                    merged
-                };
-
-                let mut chunk_records = Vec::with_capacity(extracted.chunks.len());
-                for ((chunk, embedding), hash) in extracted
-                    .chunks
-                    .iter()
-                    .zip(all_embeddings)
-                    .zip(chunk_hashes)
-                {
-                    chunk_records.push(ChunkRecord {
-                        entry_path: path_str.clone(),
-                        seq: chunk.seq,
-                        heading: chunk.heading.clone(),
-                        // Redact secrets before storing (embed uses original text); shared choke
-                        // point so web deep honors [scan] redact_at_index like the CLI.
-                        text: indexa_query::redact::chunk_text_for_store(
-                            &chunk.text,
-                            state.config.scan.redact_at_index,
-                        ),
-                        language: chunk.language.clone(),
-                        embedding,
-                        // No model produced a vector when embedding work is skipped → leave NULL.
-                        embed_model: if skip_embed_work {
-                            None
-                        } else {
-                            Some(embed_model.clone())
-                        },
-                        content_hash: Some(hash),
-                    });
-                }
-                let mut store = state.store.lock().await;
-                // The standalone Deep job (this function) can run without a preceding scan, so
-                // without this the file has no `entries` row — its chunks would be orphans:
-                // never summarized (`entries_for_summarization`/`enqueue_subtree` skip
-                // entry-less paths) and silently deleted the next time `prune_orphans` runs
-                // (every `indexa scan`, once ANY entries row exists), wiping the embedding work
-                // this pass just paid for. `upsert_entries` is an idempotent ON-CONFLICT upsert
-                // (matches the CLI `watch`/`cmd_deep` write paths, which already do this). Always
-                // written regardless of mode — `summaries-only` still needs a live entries row so
-                // the file is summarizable, and is the success signal the M5 check below uses
-                // since `chunks_written` stays 0 by design in that mode.
-                match store.upsert_entries(&[(**entry).clone()]) {
-                    Ok(()) => entries_written += 1,
-                    Err(e) => {
-                        push(
-                            handle,
-                            JobEvent::Warning {
-                                stage: "deep".to_owned(),
-                                item_path: Some(path_str.clone()),
-                                message: format!("upsert_entries failed: {e:#}"),
-                                pressure: None,
-                            },
-                        );
-                        hard_errors += 1;
-                    }
-                }
-                // `summaries-only` never persists chunk rows — that's the entire ~100× size win;
-                // `summarize_file` re-parses the file itself (via the default registry) when no
-                // chunks are stored, so nothing downstream needs these in the store.
-                if !skip_embed_work {
-                    match store.upsert_chunks(&chunk_records) {
-                        Ok(()) => chunks_written += chunk_records.len() as u64,
-                        Err(e) => {
-                            push(
+                    match batcher.add_file(cache_hits, miss_texts, meta) {
+                        AddOutcome::Complete(c) => {
+                            warn_embed_issues(
                                 handle,
-                                JobEvent::Warning {
-                                    stage: "deep".to_owned(),
-                                    item_path: Some(path_str.clone()),
-                                    message: format!("upsert_chunks failed: {e:#}"),
-                                    pressure: None,
-                                },
+                                &c.meta.path_str,
+                                c.dim_mismatch,
+                                c.dim_sample,
+                                c.raw_failures,
+                                c.miss_count,
+                                state.config.embedding.dim,
                             );
-                            hard_errors += 1;
+                            let PendingFile {
+                                entry,
+                                path_str,
+                                chunks,
+                                chunk_hashes,
+                                edges,
+                            } = c.meta;
+                            let (e, cw, h) = persist_completed_file(
+                                state,
+                                handle,
+                                entry,
+                                &path_str,
+                                &chunks,
+                                chunk_hashes,
+                                &edges,
+                                c.embeddings,
+                                Some(embed_model.as_str()),
+                                false,
+                            )
+                            .await;
+                            entries_written += e;
+                            chunks_written += cw;
+                            hard_errors += h;
                         }
+                        AddOutcome::Buffered => {}
                     }
-                }
-                // Persist the file's code-graph edges (imports/defines), keyed on the same
-                // entry-path string as its chunks. Best-effort: a failure only warns.
-                if !extracted.edges.is_empty() {
-                    let edge_records: Vec<EdgeRecord> = extracted
-                        .edges
-                        .iter()
-                        .map(|e| EdgeRecord {
-                            from_path: path_str.clone(),
-                            kind: e.kind.to_owned(),
-                            to_ref: e.to.clone(),
-                        })
-                        .collect();
-                    if let Err(e) = store.upsert_edges(&edge_records) {
-                        push(
+                    if batcher.is_full() {
+                        let (e, cw, h) = flush_deep_batcher(
+                            &mut batcher,
+                            state,
                             handle,
-                            JobEvent::Warning {
-                                stage: "deep".to_owned(),
-                                item_path: Some(path_str.clone()),
-                                message: format!("upsert_edges failed: {e:#}"),
-                                pressure: None,
-                            },
-                        );
-                    }
-                }
-                // Symbols (2.1): kind + line range, extracted alongside `defines` edges.
-                // Same call-when-non-empty convention as the edges block above.
-                let symbol_records: Vec<SymbolRecord> = extracted
-                    .edges
-                    .iter()
-                    .filter(|e| e.kind == "defines")
-                    .filter_map(|e| {
-                        let (start, end) = e.line_range?;
-                        Some(SymbolRecord {
-                            path: path_str.clone(),
-                            name: e.to.clone(),
-                            kind: e.symbol_kind.unwrap_or("other").to_owned(),
-                            start_line: start as i64,
-                            end_line: end as i64,
-                        })
-                    })
-                    .collect();
-                if !symbol_records.is_empty() {
-                    if let Err(e) = store.upsert_symbols(&symbol_records) {
-                        push(
-                            handle,
-                            JobEvent::Warning {
-                                stage: "deep".to_owned(),
-                                item_path: Some(path_str.clone()),
-                                message: format!("upsert_symbols failed: {e:#}"),
-                                pressure: None,
-                            },
-                        );
+                            &mut wdog,
+                            &spec,
+                            headroom,
+                            ctx_llm.as_ref(),
+                            &embed_model,
+                        )
+                        .await;
+                        entries_written += e;
+                        chunks_written += cw;
+                        hard_errors += h;
                     }
                 }
             }
@@ -813,6 +988,26 @@ pub(crate) async fn run_deep_phase(
                 eta_secs: eta,
             },
         );
+    }
+
+    // End-of-run tail flush: drain whatever partial batch is still buffered (below
+    // `is_full()`'s threshold) now that every file has been walked, before the M5 check below
+    // inspects the final `chunks_written`/`entries_written`/`hard_errors` totals.
+    if !batcher.is_empty() {
+        let (e, c, h) = flush_deep_batcher(
+            &mut batcher,
+            state,
+            handle,
+            &mut wdog,
+            &spec,
+            headroom,
+            ctx_llm.as_ref(),
+            &embed_model,
+        )
+        .await;
+        entries_written += e;
+        chunks_written += c;
+        hard_errors += h;
     }
 
     // M5: if there were files to process but nothing was written and nothing was
