@@ -13,38 +13,27 @@ hot_files:
   - CHANGELOG.md                            # every lane appends its own [Unreleased] bullet, never edits another's
 
 counters:
-  mcp_tool_count: 51
-  ui_js_fragment_count: 31
-  ui_css_fragment_count: 22
+  mcp_tool_count: 53
+  ui_js_fragment_count: 32
+  ui_css_fragment_count: 23
 
+# 2026-08-30 six-lane round: retrieval-batcher-wiring, mcp-ledger-and-drift-tools,
+# graph-layer-clustering-ui, pack-inclusion-modes-and-dryrun,
+# docs-staleness-and-redundancy-audit, invariant-audit-and-small-fixes — all merged,
+# v0.78.0 tagged. Their territory is released; superseded by the round below.
 singleton_paths:
-  # 2026-08-30 six-lane round — exclusive per-lane territory. See
-  # ~/.claude/plans/i-need-you-to-indexed-bentley.md for the full task briefs.
-  - crates/query/**                         # retrieval-batcher-wiring
-  - crates/embed/**                         # retrieval-batcher-wiring
-  - apps/indexa/src/commands/deep.rs        # retrieval-batcher-wiring
-  - crates/web/src/jobs_exec/deep.rs        # retrieval-batcher-wiring
-  - crates/mcp/src/retrieval.rs             # mcp-ledger-and-drift-tools
-  - crates/mcp/src/graph.rs                 # mcp-ledger-and-drift-tools
-  - crates/mcp/src/curation.rs              # mcp-ledger-and-drift-tools
-  - crates/mcp/src/review.rs                # mcp-ledger-and-drift-tools
-  - crates/mcp/src/insights.rs              # mcp-ledger-and-drift-tools
-  - crates/mcp/src/admin.rs                 # mcp-ledger-and-drift-tools
-  - crates/mcp/src/query_extras.rs          # mcp-ledger-and-drift-tools
-  - crates/mcp/src/resources.rs             # mcp-ledger-and-drift-tools
-  - crates/mcp/src/prompts.rs               # mcp-ledger-and-drift-tools
-  - crates/mcp/golden_tools.txt             # mcp-ledger-and-drift-tools
-  - crates/core/src/decisions/**            # mcp-ledger-and-drift-tools
-  - crates/core/src/summary_drift.rs        # mcp-ledger-and-drift-tools (new file)
-  - crates/web/assets/ui/js/31-graph-layers-cluster.js    # graph-layer-clustering-ui (new file)
-  - crates/web/assets/ui/css/23-graph-layers-cluster.css  # graph-layer-clustering-ui (new file)
-  - crates/mcp/src/packs.rs                 # pack-inclusion-modes-and-dryrun
-  - crates/core/src/store/packs.rs          # pack-inclusion-modes-and-dryrun
-  - crates/web/assets/ui/js/32-pack-inclusion-mode.js     # pack-inclusion-modes-and-dryrun (new file)
-  - docs/**                                 # docs-staleness-and-redundancy-audit (excl. docs/archive/**)
-  - ROADMAP.md                              # docs-staleness-and-redundancy-audit
-  - docs/COMPETITIVE.md                     # docs-staleness-and-redundancy-audit
-  - docs/plans/2026-07-external-sources-features.md       # docs-staleness-and-redundancy-audit
+  # 2026-08-31 round-2 (four lanes) — exclusive per-lane territory.
+  - crates/parsers/src/agent_sessions.rs    # agent-session-transcript-parser (new file)
+  - docs/how-to/index-agent-session-history.md  # agent-session-transcript-parser (new file)
+  - crates/query/src/eval.rs                # eval-answer-quality-judge
+  - apps/indexa/src/commands/eval.rs        # eval-answer-quality-judge
+  - docs/how-to/evaluate-retrieval.md       # eval-answer-quality-judge
+  - apps/indexa/src/commands/plugin.rs      # plugin-directory (new file)
+  - docs/plugins.toml                       # plugin-directory (new file, path may vary — see PR)
+  - crates/llm/src/openai_compat.rs         # misc-provider-and-audit-followups (Cerebras wiring, read-mostly)
+  - crates/parsers/src/compressed.rs        # misc-provider-and-audit-followups (zstd multi-frame fix)
+  - apps/indexa/src/commands/update.rs      # misc-provider-and-audit-followups (non-interactive --yes gate)
+  - docs/config.md                          # misc-provider-and-audit-followups (Cerebras provider row)
 
 # release.yml triggers on version tags (v*.*.*), not on merge to main — confirmed by
 # reading the trigger. No merge-triggered deploy exists for this repo.
