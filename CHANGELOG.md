@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.80.1] — 2026-08-31
+
 ### Fixed
 
 Round-4 critique-driven fix pass (`/code-review high` over 1e47cf2..eeb7492's four lanes):
