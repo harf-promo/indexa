@@ -37,6 +37,13 @@ indexa-mcp = { path = "../../crates/mcp" }
 indexa-update = { path = "../../crates/update" }
 
 [dev-dependencies]
+# The deep-watchdog regression test's stub Embedder impl uses the same async-trait the
+# trait itself does (already in the tree via indexa-embed/indexa-llm et al.).
+async-trait = { workspace = true }
+# `#[tokio::test(start_paused = true)]` — lets the deep-command watchdog regression test run a
+# recovery-wait loop capped at `MAX_PAUSE_SECS` in virtual time instead of real seconds. `full`
+# (the main [dependencies] tokio) deliberately excludes `test-util`, so it's added here.
+tokio = { workspace = true, features = ["test-util"] }
 # Already in the tree (via indexa-update et al.); named directly so the status
 # version-skew test can construct `semver::Version` values for `Skew` variants.
 semver = { workspace = true }
