@@ -1450,6 +1450,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn export_pack_pinned_item_with_signatures_still_honors_the_pin() {
+        // Regression: `signatures: true` used to be checked BEFORE the `pinned` branch, so a
+        // pinned item exported with signatures rendered live `code_chunks_under` (the source
+        // file's CURRENT chunks) instead of its frozen `pinned_snapshot` — silently defeating
+        // the point of pinning. Pin a chunk, then mutate the store's live chunk for the same
+        // path to prove the export reflects the frozen text, not the live one, even with
+        // `signatures: true`.
+        use indexa_core::store::{ChunkRecord, SummaryRecord};
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let id = store.create_pack("proj", None).unwrap();
+            store
+                .add_pack_paths(&id, &["/root/a.rs".to_owned()])
+                .unwrap();
+            store
+                .upsert_summary(&SummaryRecord {
+                    path: "/root/a.rs".to_owned(),
+                    kind: "file".to_owned(),
+                    parent_path: None,
+                    depth: 0,
+                    summary: "s".to_owned(),
+                    summary_l0: None,
+                    embedding: None,
+                    child_count: 0,
+                    byte_size: 0,
+                    model: "t".to_owned(),
+                    source_hash: "h1".to_owned(),
+                    generated_at: 0,
+                })
+                .unwrap();
+            store
+                .upsert_chunks(&[ChunkRecord {
+                    entry_path: "/root/a.rs".to_owned(),
+                    seq: 0,
+                    heading: String::new(),
+                    text: "fn frozen() {}".to_owned(),
+                    language: Some("rust".to_owned()),
+                    embedding: None,
+                    embed_model: None,
+                    content_hash: None,
+                }])
+                .unwrap();
+            // Freeze the snapshot at "fn frozen() {}" …
+            store
+                .set_pack_item_inclusion_mode(&id, "/root/a.rs", "pinned")
+                .unwrap();
+            // … then the source file "changes": its live chunk is replaced.
+            store
+                .upsert_chunks(&[ChunkRecord {
+                    entry_path: "/root/a.rs".to_owned(),
+                    seq: 0,
+                    heading: String::new(),
+                    text: "fn changed_after_pin() {}".to_owned(),
+                    language: Some("rust".to_owned()),
+                    embedding: None,
+                    embed_model: None,
+                    content_hash: None,
+                }])
+                .unwrap();
+        }
+        let mcp = mcp_with_db(&dbdir);
+        let res = mcp
+            .export_pack(Parameters(ExportPackParams {
+                name: "proj".into(),
+                format: None,
+                depth: None,
+                signatures: Some(true),
+                changed_since: None,
+                category: None,
+                include_graph: false,
+                graph_format: None,
+                dry_run: false,
+            }))
+            .await
+            .unwrap();
+        let text = tool_text(res);
+        assert!(
+            text.contains("mode=\"pinned\""),
+            "a pinned item must still render as pinned when signatures is requested: {text}"
+        );
+        assert!(
+            !text.contains("fn changed_after_pin"),
+            "pinned + signatures must never render live post-pin content: {text}"
+        );
+    }
+
+    #[tokio::test]
     async fn export_pack_dry_run_reports_size_and_skips_usage_telemetry() {
         use indexa_core::store::SummaryRecord;
         let dbdir = tempfile::tempdir().unwrap();

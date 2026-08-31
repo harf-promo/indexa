@@ -296,20 +296,27 @@ impl Store {
         })?;
 
         let mut out = String::new();
+        let mut char_count = 0usize;
         let mut truncated = false;
         for row in rows {
             let (path, seq, heading, text) = row?;
-            if out.len() >= PINNED_SNAPSHOT_CHAR_CAP {
+            let row_str = if heading.is_empty() {
+                format!("### {path} [{seq}]\n{text}\n\n")
+            } else {
+                format!("### {path} [{seq}] {heading}\n{text}\n\n")
+            };
+            // Char count (not byte length — PINNED_SNAPSHOT_CHAR_CAP is documented as a
+            // *character* cap, and UTF-8 multi-byte content would otherwise get truncated well
+            // before the true budget). Checked BEFORE appending, against the row's own char
+            // count, so the cap is never exceeded (zero overshoot) rather than only being
+            // noticed one row late.
+            let row_chars = row_str.chars().count();
+            if char_count + row_chars > PINNED_SNAPSHOT_CHAR_CAP {
                 truncated = true;
                 break;
             }
-            if heading.is_empty() {
-                out.push_str(&format!("### {path} [{seq}]\n"));
-            } else {
-                out.push_str(&format!("### {path} [{seq}] {heading}\n"));
-            }
-            out.push_str(&text);
-            out.push_str("\n\n");
+            out.push_str(&row_str);
+            char_count += row_chars;
         }
         if out.is_empty() {
             return Ok(None);

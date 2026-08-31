@@ -569,6 +569,58 @@ fn pinning_a_directory_member_captures_its_whole_indexed_subtree() {
 }
 
 #[test]
+fn pinning_a_pack_item_caps_the_snapshot_in_chars_not_bytes() {
+    // Regression for the byte/char cap mismatch + one-row overshoot: PINNED_SNAPSHOT_CHAR_CAP
+    // (500_000) is documented as a *character* budget, checked prospectively before each row is
+    // appended. Four multi-byte chunks, each 90_000 chars (180_000 bytes), total 360_060 chars
+    // (well under the char cap) but ~720_120 bytes (well over a byte-sized 500_000 cap). The old
+    // byte-length check would have truncated after only 3 rows (~270_045 chars, dropping the
+    // 4th chunk entirely) — far short of the real 500_000-char budget.
+    let mut store = Store::open_in_memory().unwrap();
+    let big = "é".repeat(90_000); // 90_000 chars, 180_000 UTF-8 bytes
+    store
+        .upsert_chunks(&[
+            dummy_chunk("/a.rs", 0, &big),
+            dummy_chunk("/a.rs", 1, &big),
+            dummy_chunk("/a.rs", 2, &big),
+            dummy_chunk("/a.rs", 3, &big),
+        ])
+        .unwrap();
+    let pid = store.create_pack("proj", None).unwrap();
+    store.add_pack_paths(&pid, &["/a.rs".to_owned()]).unwrap();
+
+    store
+        .set_pack_item_inclusion_mode(&pid, "/a.rs", "pinned")
+        .unwrap();
+    let items = store.pack_item_records(&pid).unwrap();
+    let snapshot = items[0].pinned_snapshot.as_deref().unwrap();
+
+    assert!(
+        snapshot.chars().count() <= 500_000,
+        "cap must be honored in chars: got {} chars",
+        snapshot.chars().count()
+    );
+    assert!(
+        snapshot.len() > 500_000,
+        "sanity: this snapshot's byte length must exceed the old byte-sized cap, or the test \
+         doesn't exercise the char/byte distinction"
+    );
+    for seq in 0..4 {
+        assert!(
+            snapshot.contains(&format!("[{seq}]")),
+            "all 4 chunks fit within the 500_000-char budget and must all be present \
+             (a byte-length check would have dropped chunk {seq}): got {} chars",
+            snapshot.chars().count()
+        );
+    }
+    assert!(
+        !snapshot.contains("truncated"),
+        "360_060 total chars fits under the 500_000-char cap — no truncation expected: got {} chars",
+        snapshot.chars().count()
+    );
+}
+
+#[test]
 fn pinning_an_unindexed_item_leaves_snapshot_none() {
     // Pinning is valid even when nothing has been indexed for that path yet — it just
     // captures nothing (rather than erroring), consistent with "pin now, backfill later".

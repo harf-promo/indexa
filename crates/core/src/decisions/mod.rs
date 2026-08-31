@@ -215,6 +215,14 @@ pub fn decide_and_apply(
 ///
 /// Returns the new row's id plus the effects receipt (always a no-op projection — the note
 /// text IS the artifact, same rationale as [`DecisionType::SymbolAmbiguity`]).
+///
+/// The insert, patch_id stamp, answer, and effects-receipt stamp all commit in ONE transaction
+/// via [`Store::record_annotation_decided`] — deliberately NOT the `record_decision` +
+/// `set_decision_patch_id` + [`decide_and_apply`] sequence every other caller uses, since that
+/// sequence is three separate, non-transactional writes: a crash/error between the insert and
+/// the answer step would leave the row permanently `status='open'` with no patch_id/answer,
+/// violating this function's own "never left open" contract (see this module's doc comment on
+/// [`DecisionType::Annotation`]).
 pub fn record_annotation(
     store: &mut Store,
     subject: &str,
@@ -222,25 +230,30 @@ pub fn record_annotation(
     patch_id: Option<&str>,
 ) -> Result<(i64, serde_json::Value)> {
     use crate::store::NewDecision;
+    // The fixed no-op projection every Annotation gets (see `effects::apply_annotation`, not
+    // reachable from here — private to a sibling module) — the note text IS the artifact.
+    let effects = serde_json::json!({ "annotation": "recorded" });
     let id = store
-        .record_decision(NewDecision {
-            decision_type: DecisionType::Annotation.as_str().to_owned(),
-            subject: subject.to_owned(),
-            params: serde_json::json!({ "note": note }),
-            options: serde_json::json!([note]),
-            auto_value: None,
-            confidence: None,
-            evidence_hash: String::new(),
-            priority: 0,
-            paths: vec![subject.to_owned()],
-        })?
+        .record_annotation_decided(
+            NewDecision {
+                decision_type: DecisionType::Annotation.as_str().to_owned(),
+                subject: subject.to_owned(),
+                params: serde_json::json!({ "note": note }),
+                options: serde_json::json!([note]),
+                auto_value: None,
+                confidence: None,
+                evidence_hash: String::new(),
+                priority: 0,
+                paths: vec![subject.to_owned()],
+            },
+            patch_id,
+            note,
+            "user",
+            &effects,
+        )?
         .ok_or_else(|| {
             anyhow!("a ledger entry for \"{subject}\" is already being recorded — try again")
         })?;
-    if let Some(pid) = patch_id {
-        store.set_decision_patch_id(id, pid)?;
-    }
-    let effects = decide_and_apply(store, id, note, "user")?;
     Ok((id, effects))
 }
 

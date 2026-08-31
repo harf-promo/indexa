@@ -236,8 +236,12 @@ fn parse_judge_response(raw: &str) -> Result<JudgeVerdict> {
     for line in raw.lines() {
         let line = line.trim();
         let lower = line.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("score:") {
-            let n_str = rest.trim().trim_end_matches(['.', '/']);
+        if let Some(idx) = lower.find("score:") {
+            // Anywhere-in-line, matching REASON: below — a model that prefaces the score with
+            // "Final score: 4" or similar must parse the same as a bare "SCORE: 4" line.
+            let n_str = line[idx + "score:".len()..]
+                .trim()
+                .trim_end_matches(['.', '/']);
             if let Ok(n) = n_str.trim().parse::<i64>() {
                 score = Some(n.clamp(0, 5) as u8);
             }
@@ -982,6 +986,17 @@ mod tests {
         .unwrap();
         assert_eq!(v.score, 3);
         assert_eq!(v.reason, "partially addresses the question.");
+    }
+
+    #[test]
+    fn parse_judge_response_tolerates_a_same_line_preamble_before_score() {
+        // Regression: REASON: was already tolerant of a same-line preamble (`.find`), but
+        // SCORE: required `strip_prefix` at the start of the line — inconsistent, and a model
+        // that writes "Final score: 4" instead of a bare "SCORE: 4" line used to fail to parse
+        // at all (no score found).
+        let v = parse_judge_response("Final score: 4\nREASON: solid citation coverage.").unwrap();
+        assert_eq!(v.score, 4);
+        assert_eq!(v.reason, "solid citation coverage.");
     }
 
     #[test]

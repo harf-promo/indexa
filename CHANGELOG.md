@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+A critique-driven fix round over the two prior lane batches (base `88a8d7c..3b3f176`). Each
+finding was independently re-verified against current code before being fixed.
+
+- **`export_pack`: a pinned pack item ignored its pin when `signatures: true`.** In
+  `export_pack_body`'s per-item loop, the `signatures` branch was checked (and rendered live
+  `code_chunks_under`) BEFORE the `pinned` branch — so a pinned item exported with
+  `signatures: true` silently reflected the live, post-pin source instead of its frozen
+  snapshot, defeating the point of pinning. The `pinned` check now runs first and always wins:
+  a pinned item's export is the frozen snapshot regardless of `signatures`, since a frozen
+  snapshot has no live chunk records to extract signatures from anyway.
+- **Deep-index memory watchdog only ran once per ~64-file batch, not per file** (web job only —
+  the CLI's `deep` command never had a watchdog check at all, confirmed via git history predating
+  the MissBatcher PR; that's a separate, pre-existing gap, not a regression from this round, so
+  it was left alone here). `run_watchdog_check` now also runs before every file registers its
+  misses with the cross-file batcher, restoring the original per-file pause cadence
+  (`flush_deep_batcher` still checks again right before the actual `embed_all` round-trip).
+- **`record_annotation` (the MCP `record_decision` tool's ledger write) wasn't atomic.** Insert,
+  patch-id stamp, and answer were three separate, non-transactional `Store` calls; a crash
+  between the insert and the answer left the row permanently `status='open'` with no answer,
+  violating the ledger's own "an Annotation is never left open" invariant, with no repair sweep
+  to catch it (`unapplied_decided` only repairs a *decided* row missing its effects stamp). New
+  `Store::record_annotation_decided` runs the whole sequence in one transaction.
+- **`capture_l2_snapshot`'s pinned-snapshot cap was byte-scoped, not char-scoped, and could
+  overshoot by up to one row.** `PINNED_SNAPSHOT_CHAR_CAP` is documented as a character budget,
+  but the check compared UTF-8 byte length, truncating non-ASCII content well before the real
+  budget; the check also ran before appending each row rather than checking the row's own size
+  first, letting the final snapshot overshoot the cap by up to one full row. Now tracks an
+  incremental char count and checks prospectively before appending each row, so the cap is
+  honored exactly (in characters, zero overshoot).
+- **`indexa eval --judge`'s response parser tolerated a same-line preamble before `REASON:` but
+  not before `SCORE:`.** A judge response like `"Final score: 4\nREASON: ..."` failed to parse
+  at all. `SCORE:` now uses the same anywhere-in-line match as `REASON:`.
+- **`record_decision`'s patch-id anchor fell back to the MCP server's cwd for free-form
+  topic-key subjects.** A bare subject with no path separator (the tool's docs explicitly allow
+  topic keys like `"config"`) fell back to anchoring the `git diff`/`patch-id` computation at
+  `"."` — silently, incorrectly anchoring to whatever unrelated file/dir at the repo root happens
+  to share the topic key's bare name. The `"."` fallback is now only taken once the subject is
+  confirmed to be a real indexed entry (so a genuine root-level file subject like `"README.md"`
+  still gets anchored); an unresolved bare topic key gets no patch-id at all.
+- **`api_packs_export`: `dry_run=true&format=okf` on a nonexistent pack returned 400, not 404.**
+  The format/param validation check ran before the pack-existence lookup. Reordered so a missing
+  resource (404) takes priority over a param-combination complaint.
+- **Deep-index job progress could report a file as done before it was actually persisted.**
+  `done`/the `Progress` event fired as soon as a file's cache-miss chunks were registered with
+  the cross-file batcher, before that file's entries/chunks/edges were actually written (deferred
+  to the next flush) — a crash between the two would leave the last-observed progress overstating
+  what's actually in the database. Progress now advances only once a file's data is actually
+  persisted: inline for a synchronously-completed file (already-current skip, `summaries-only`, a
+  zero-miss batcher result), or from inside `flush_deep_batcher`'s per-file loop for a file the
+  batcher buffered.
+
+### Judged non-issues (no change)
+
+- **`relabel_pack_redaction_markers`'s unscoped `"[REDACTED-".replace(..)`.** A pack item whose
+  own content happens to contain that literal substring (e.g. documentation describing the
+  redaction format) could get relabeled even though `redact_secrets` never touched it. A fully
+  precise fix needs `redact_secrets` itself to report marker spans, which would widen a function
+  this codebase treats as sensitive (AGENTS.md pins its "redact count"). Instead scoped the
+  relabel to a regex matching `[REDACTED-<a real redact.rs pattern kind>]` — closes the common
+  case (a made-up suffix like `[REDACTED-my-note]` no longer matches) while leaving the narrow,
+  effectively hypothetical case of content containing the exact literal `[REDACTED-secret]` (etc.)
+  as an accepted edge case.
+- **(10, optional) Extracting the ~150-200 duplicated lines between `crates/web/src/jobs_exec/deep.rs`
+  and `apps/indexa/src/commands/deep.rs`** was left for a separate PR — worth doing, but risks
+  ballooning this fix round's diff; noted here as a follow-up opportunity rather than attempted
+  under time pressure.
+
 ## [0.79.0] — 2026-08-31
 
 ### Added

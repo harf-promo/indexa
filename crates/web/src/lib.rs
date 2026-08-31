@@ -1560,6 +1560,22 @@ mod tests {
         assert_eq!(json["items_exported"], 1);
     }
 
+    #[tokio::test]
+    async fn api_packs_export_dry_run_okf_on_a_missing_pack_reports_404_not_400() {
+        // Regression: the "dry_run unsupported with format=okf" 400 check used to run BEFORE
+        // the pack-existence lookup, so probing a typo'd pack name with that combination
+        // returned 400 instead of 404 — a resource that doesn't exist takes priority over a
+        // param-combination complaint that implies the pack itself was found.
+        let store = Store::open_in_memory().unwrap();
+        let app = build_router(state_with(store), 7620);
+        let (status, json) = get_json(
+            app,
+            "/api/packs/does-not-exist/export?format=okf&dry_run=true",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "got: {json}");
+    }
+
     /// A dedicated temp directory per test tag (mirrors `temp_db_path`'s style) — real files
     /// are needed here since `stale_pack_paths` stats the live disk, unlike the in-memory DB.
     fn temp_fixture_dir(tag: &str) -> PathBuf {

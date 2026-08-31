@@ -509,6 +509,25 @@ pub(crate) fn export_pack_body(
     let mut exported = 0usize;
     for item in &items {
         let root_path = &item.path;
+        // Per-item inclusion mode (v0.78): "pinned" renders the frozen L2 snapshot verbatim,
+        // bypassing the live summaries tree, the relational slice, AND `signatures` entirely — a
+        // pinned item deliberately no longer tracks anything live (--changed-since/category
+        // filter, and code-signature extraction, all require re-deriving from the live chunk
+        // store, which is exactly what pinning is meant to freeze against). This check MUST run
+        // before the `signatures` branch below: a pinned item's whole point is a frozen,
+        // reproducible snapshot, so it must never silently fall through to live content just
+        // because `signatures: true` was requested. "reference" (and any legacy row, which
+        // defaults to it) is the unchanged pre-existing behavior.
+        if item.inclusion_mode == "pinned" {
+            buf.push_str(&render_pinned_item(
+                root_path,
+                item.pinned_snapshot.as_deref(),
+                format,
+            ));
+            buf.push('\n');
+            exported += 1;
+            continue;
+        }
         if signatures {
             let mut chunks = store.code_chunks_under(root_path, 0).map_err(mcp_err)?;
             if let Some(a) = &allow {
@@ -518,21 +537,6 @@ pub(crate) fn export_pack_body(
                 continue;
             }
             buf.push_str(&render_signatures(&chunks, format, true));
-            buf.push('\n');
-            exported += 1;
-            continue;
-        }
-        // Per-item inclusion mode (v0.78): "pinned" renders the frozen L2 snapshot verbatim,
-        // bypassing the live summaries tree and the relational slice entirely (a pinned item
-        // deliberately no longer tracks the live file metadata --changed-since/category filter
-        // on). "reference" (and any legacy row, which defaults to it) is the unchanged
-        // pre-existing behavior.
-        if item.inclusion_mode == "pinned" {
-            buf.push_str(&render_pinned_item(
-                root_path,
-                item.pinned_snapshot.as_deref(),
-                format,
-            ));
             buf.push('\n');
             exported += 1;
             continue;
