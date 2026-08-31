@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at compile time. `--refresh` fetches the same file straight off `main` on GitHub instead,
   so newly-added community plugins show up without an `indexa` upgrade; any network or
   parse error falls back to the embedded list rather than failing the command outright.
+- **Content-based scoping for agent-session transcripts.** `indexa deep` now finishes with a
+  fail-open post-pass (`indexa_query::session_scope::tag_agent_session_entries`) that re-checks
+  every `.jsonl`/`.ndjson` entry against the content-sniffed `AgentSessionParser` and stamps a
+  real transcript with `hint_cat = "agent-session"`. The MCP `search` tool gained a `category`
+  param (and a matching open-ended `category:` predicate, e.g. `category:agent-session`) so a
+  query can scope to transcript content precisely — sharper than `path:`/`scope` (only works if
+  transcripts live in their own directory) or `ext:jsonl` (matches any JSONL file regardless of
+  what parsed it). See `docs/how-to/index-agent-session-history.md`.
 
 ### Fixed
 

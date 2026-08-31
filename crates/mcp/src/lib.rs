@@ -654,6 +654,7 @@ mod tests {
                 limit: None,
                 scope: None,
                 mode: Some("dnese".into()),
+                category: None,
             }))
             .await
             .unwrap_err();
@@ -1219,6 +1220,7 @@ mod tests {
                 limit: None,
                 scope: None,
                 mode: Some("dense".into()),
+                category: None,
             }))
             .await
             .unwrap_err();
@@ -1249,6 +1251,7 @@ mod tests {
                 limit: None,
                 scope: None,
                 mode: None, // default rrf
+                category: None,
             }))
             .await;
         assert!(
@@ -2814,6 +2817,7 @@ mod tests {
                 limit: None,
                 scope: None,
                 mode: Some("sparse".into()),
+                category: None,
             }))
             .await
             .unwrap(),
@@ -2876,6 +2880,7 @@ mod tests {
                 limit: None,
                 scope: None,
                 mode: Some("sparse".into()),
+                category: None,
             }))
             .await
             .unwrap(),
@@ -2935,6 +2940,7 @@ mod tests {
                 limit: None,
                 scope: None,
                 mode: Some("sparse".into()),
+                category: None,
             }))
             .await
             .unwrap(),
@@ -2985,6 +2991,7 @@ mod tests {
                 limit: None,
                 scope: None,
                 mode: Some("sparse".into()),
+                category: None,
             }))
             .await
             .unwrap(),
@@ -3059,6 +3066,7 @@ mod tests {
                 limit: Some(1),
                 scope: None,
                 mode: Some("sparse".into()),
+                category: None,
             }))
             .await
             .unwrap(),
@@ -3114,6 +3122,7 @@ mod tests {
                 limit: None,
                 scope: None,
                 mode: Some("sparse".into()),
+                category: None,
             }))
             .await
             .unwrap(),
@@ -3129,6 +3138,7 @@ mod tests {
                 limit: None,
                 scope: None,
                 mode: Some("sparse".into()),
+                category: None,
             }))
             .await
             .unwrap(),

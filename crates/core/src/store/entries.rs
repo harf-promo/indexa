@@ -583,6 +583,63 @@ impl Store {
         ))
     }
 
+    // ── Content-based category tagging (agent-session content-scope) ─────────
+
+    /// File entries whose path ends `.jsonl`/`.ndjson` and are not yet tagged `hint_cat =
+    /// category` (`hint_cat` is NULL, or holds some other value). Candidates for a content-based
+    /// re-check — `hint_cat` is a plain, un-migrated string column (see `AGENTS.md`'s invariant
+    /// on it), so this is a query helper, not a schema change. Used by
+    /// `indexa_query::session_scope::tag_agent_session_entries` to find `.jsonl`/`.ndjson` rows
+    /// worth re-checking against the content-sniffed `AgentSessionParser` without re-scanning
+    /// the whole index.
+    pub fn jsonl_like_entries_not_tagged(&self, category: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path FROM entries \
+             WHERE kind = 'file' \
+               AND (path LIKE '%.jsonl' OR path LIKE '%.ndjson') \
+               AND (hint_cat IS NULL OR hint_cat != ?1)",
+        )?;
+        let rows = stmt.query_map(params![category], |r| r.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Stamp `entries.hint_cat = category` for the exact path. Used to record a content-based
+    /// classification a rescan's coarse extension/MIME hinting can't express on its own (e.g.
+    /// `"agent-session"` for a `.jsonl` transcript confirmed by content-sniffing, not extension).
+    pub fn set_entry_category(&mut self, path: &str, category: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE entries SET hint_cat = ?1 WHERE path = ?2",
+            params![category, path],
+        )?;
+        Ok(())
+    }
+
+    /// Batch-lookup `hint_cat` for a set of paths, skipping rows with a NULL category. Powers
+    /// the MCP `search` tool's `category:`/`category` post-hoc hit filter (mirrors the shape of
+    /// the existing `ext_filter` retain-block, applied to a store-backed category instead of a
+    /// path suffix). Chunked under SQLite's bound-variable cap like
+    /// `delete_path_artifacts_exact`, so an arbitrarily large hit set stays safe.
+    pub fn hint_cats_for(
+        &self,
+        paths: &[&str],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        let mut out = std::collections::HashMap::new();
+        for batch in paths.chunks(800) {
+            let ph = vec!["?"; batch.len()].join(",");
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT path, hint_cat FROM entries WHERE path IN ({ph}) AND hint_cat IS NOT NULL"
+            ))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(batch.iter()), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (path, cat) = row?;
+                out.insert(path, cat);
+            }
+        }
+        Ok(out)
+    }
+
     /// Whole-index coverage aggregates for the `status --deep` health report.
     /// One SELECT of scalar subqueries — no per-row work in Rust. Chunk and
     /// summary counts join back to `entries` so orphan rows left by a removed
@@ -718,5 +775,71 @@ mod tests {
         } else {
             candidate == lit
         }
+    }
+
+    // ── Content-based category tagging ──────────────────────────────────────
+
+    use super::super::Store;
+    use crate::walker::{Entry, EntryKind};
+
+    fn seed_file(store: &mut Store, path: &str) {
+        store
+            .upsert_entries(&[Entry {
+                path: path.into(),
+                kind: EntryKind::File,
+                size: 0,
+                modified: None,
+                hint: None,
+                is_binary: false,
+            }])
+            .unwrap();
+    }
+
+    #[test]
+    fn set_entry_category_and_hint_cats_for_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        seed_file(&mut store, "/p/a.jsonl");
+        seed_file(&mut store, "/p/b.jsonl");
+
+        // Untagged rows are absent from a batch lookup, not present with a NULL/empty value.
+        let cats = store.hint_cats_for(&["/p/a.jsonl", "/p/b.jsonl"]).unwrap();
+        assert!(cats.is_empty());
+
+        store
+            .set_entry_category("/p/a.jsonl", "agent-session")
+            .unwrap();
+
+        let cats = store.hint_cats_for(&["/p/a.jsonl", "/p/b.jsonl"]).unwrap();
+        assert_eq!(
+            cats.get("/p/a.jsonl").map(String::as_str),
+            Some("agent-session")
+        );
+        assert!(!cats.contains_key("/p/b.jsonl"));
+    }
+
+    #[test]
+    fn jsonl_like_entries_not_tagged_finds_untagged_and_differently_tagged_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
+        seed_file(&mut store, "/p/untagged.jsonl");
+        seed_file(&mut store, "/p/already.jsonl");
+        seed_file(&mut store, "/p/other.ndjson");
+        seed_file(&mut store, "/p/not-jsonl.json"); // wrong extension — never a candidate
+        store
+            .set_entry_category("/p/already.jsonl", "agent-session")
+            .unwrap();
+
+        let mut candidates = store
+            .jsonl_like_entries_not_tagged("agent-session")
+            .unwrap();
+        candidates.sort();
+        assert_eq!(
+            candidates,
+            vec![
+                "/p/other.ndjson".to_string(),
+                "/p/untagged.jsonl".to_string()
+            ]
+        );
     }
 }
