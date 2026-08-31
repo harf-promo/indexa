@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.80.2] — 2026-08-31
+
 ### Changed
 
 - **Consolidated the three independent memory-pressure watchdog implementations** —
@@ -35,6 +37,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   untouched** — self-update downloads and atomically replaces the running binary, and a
   change there deserves its own focused review pass rather than riding along in a
   consolidation diff.
+
+### Fixed
+
+- **A flaky `resource::run_watchdog` regression test** compared the `Entered` event's
+  memory sample against a *separately*, independently-live-sampled `wdog.sample()` the
+  test took just before calling `run_watchdog`, asserting the two `available_bytes`
+  readings were byte-identical. Two live OS memory samples taken a moment apart can
+  legitimately differ — this flaked for real on a Windows CI runner. Replaced the
+  cross-sample equality assertion with what's actually deterministic: the callback
+  fires with a real, populated sample on a Critical entry.
 
 ## [0.80.1] — 2026-08-31
 
