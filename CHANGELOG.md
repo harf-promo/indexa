@@ -22,6 +22,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   secret redaction applies to extracted turns same as any other indexed file. New guide:
   [`docs/how-to/index-agent-session-history.md`](docs/how-to/index-agent-session-history.md).
 
+- **Plugin directory: `indexa plugin list` / `indexa plugin info <name>`.** Discovery and
+  distribution for third-party parser crates, on top of the compile-time Plugin SDK
+  (`indexa_parsers::registry::Registry`, unchanged). A small, human-curated list of known
+  third-party parser crates now ships embedded in the binary
+  (`crates/parsers/plugins.toml`, parsed via a new `indexa_parsers::plugin_directory`
+  module — `include_str!`, no network fetch). `indexa plugin list` prints a
+  name/crate/handles table (`--json` for scripting); `indexa plugin info <name>` prints
+  the full entry plus copy-pasteable instructions — the `Cargo.toml` dependency line and
+  the `Registry::register` snippet adapted to that plugin's parser type, sourced from
+  `registry.rs`'s own "Plugin SDK" doc comment. The registry stays compile-time-only: this
+  is a discovery/documentation layer, not a runtime installer — no dynamic/WASM plugin
+  loading was added. Seeded with one clearly-marked template entry
+  (`example-plugin`), not a real published crate. See
+  [CONTRIBUTING.md](CONTRIBUTING.md#authoring-a-third-party-parser-plugin) for the
+  authoring guide.
+
 ## [0.78.0] — 2026-08-31
 
 ### Added

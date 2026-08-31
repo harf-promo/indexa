@@ -1,0 +1,38 @@
+# Indexa plugin directory — a small, human-curated list of known third-party parser
+# crates that extend `indexa_parsers::registry::Registry` at compile time.
+#
+# This is DISCOVERY data only, not an install manifest: Indexa's parser "SDK" is a
+# compile-time Rust extension point (see `crates/parsers/src/registry.rs`'s "Plugin
+# SDK" doc comment) — there is no dynamic/runtime plugin loading. Using an entry below
+# means depending on that crate from your OWN custom binary and calling
+# `Registry::register` yourself; it never mutates the stock `indexa` binary. Run
+# `indexa plugin list` / `indexa plugin info <name>` to browse this file and get the
+# exact snippet.
+#
+# This file ships embedded in the binary (`include_str!`, parsed once) — no network
+# fetch. A future version could fetch a remote curated list instead; not built here.
+#
+# To add a real entry, open a PR appending a `[[plugin]]` table with:
+#   name         short, unique, kebab-case handle (what `indexa plugin info <name>` matches)
+#   crate_name   the crate's name on crates.io
+#   parser_type  the Rust type implementing `Parser` that callers should `Box::new(...)`
+#   description  one sentence: what it parses
+#   extensions   file extensions it handles, no leading dot (e.g. ["mydata"]) — use this
+#                and/or mime_types; at least one of the two should be non-empty
+#   mime_types   MIME types it handles, when extensions aren't the natural fit
+#   repo         source repository URL
+#
+# Entries are curated by maintainers for now (accuracy, license sanity, upkeep) — this
+# is not an open/unmoderated registry.
+
+# ---------------------------------------------------------------------------------
+# TEMPLATE ENTRY — not a real published crate. Shows the shape; replace every field
+# with a real crate's details when adding one, or delete this block entirely.
+[[plugin]]
+name = "example-plugin"
+crate_name = "indexa-parser-example"
+parser_type = "ExampleParser"
+description = "TEMPLATE — replace with a real crate's one-sentence description."
+extensions = ["xyz"]
+mime_types = []
+repo = "https://github.com/your-org/indexa-parser-example"

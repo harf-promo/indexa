@@ -20,6 +20,7 @@ mod mcp_install;
 mod multimodal;
 mod notes;
 mod pack;
+mod plugin;
 mod prune;
 mod related;
 mod report;
@@ -66,6 +67,7 @@ pub(crate) use pack::{
     cmd_pack_import, cmd_pack_list, cmd_pack_refresh, cmd_pack_remove, cmd_pack_rename,
     cmd_pack_show,
 };
+pub(crate) use plugin::{cmd_plugin_info, cmd_plugin_list};
 pub(crate) use prune::cmd_prune;
 pub(crate) use related::cmd_related;
 pub(crate) use report::cmd_report;
