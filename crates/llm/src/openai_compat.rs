@@ -10,6 +10,12 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_MODEL: &str = "gpt-4o-mini";
 pub const OPENAI_BASE: &str = "https://api.openai.com";
 
+/// Cerebras Inference's OpenAI-compatible chat-completions base URL
+/// (see <https://cerebras.ai/inference>, `/v1/chat/completions`). Opt-in, throughput-bound
+/// background jobs only (Q&A synthesis, per-chunk contextual-retrieval enrichment at index
+/// time) — local-first stays the default provider; see `docs/config.md`'s provider table.
+pub const CEREBRAS_BASE: &str = "https://api.cerebras.ai";
+
 pub struct OpenAICompatLlm {
     base_url: String,
     model: String,
@@ -61,6 +67,19 @@ impl OpenAICompatLlm {
     /// Create for a local llama.cpp server (no API key needed).
     pub fn local_llamacpp(base_url: impl Into<String>, model: impl Into<String>) -> Self {
         Self::new(base_url, model, "")
+    }
+
+    /// Create using `CEREBRAS_API_KEY` for Cerebras Inference's OpenAI-compatible endpoint.
+    /// Falls back to `config_key` when the env var is absent (e.g. key saved via web Settings).
+    pub fn from_cerebras_env_or_config(
+        model: impl Into<String>,
+        config_key: Option<&str>,
+    ) -> Result<Self> {
+        let api_key = std::env::var("CEREBRAS_API_KEY")
+            .ok()
+            .or_else(|| config_key.map(|s| s.to_string()))
+            .context("CEREBRAS_API_KEY not set — required for Cerebras LLM")?;
+        Ok(Self::new(CEREBRAS_BASE, model, api_key))
     }
 
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
@@ -181,6 +200,27 @@ mod tests {
             parsed.choices.into_iter().next().unwrap().message.content,
             Some("hello".to_owned())
         );
+    }
+
+    #[test]
+    fn cerebras_constructor_errors_without_api_key() {
+        // Clear any accidental env var for the test.
+        std::env::remove_var("CEREBRAS_API_KEY");
+        let result = OpenAICompatLlm::from_cerebras_env_or_config("llama-3.3-70b", None);
+        assert!(result.is_err());
+        // `.err().unwrap()` (not `.unwrap_err()`) on purpose: `OpenAICompatLlm` doesn't impl
+        // Debug, which `unwrap_err()` would require on the Ok type.
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("CEREBRAS_API_KEY"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn cerebras_constructor_falls_back_to_config_key() {
+        std::env::remove_var("CEREBRAS_API_KEY");
+        let llm = OpenAICompatLlm::from_cerebras_env_or_config("llama-3.3-70b", Some("csk-test"))
+            .unwrap();
+        assert_eq!(llm.api_key, "csk-test");
+        assert_eq!(llm.base_url, CEREBRAS_BASE);
     }
 
     #[tokio::test]

@@ -233,7 +233,7 @@ pub struct ModelsConfig {
 
 /// Optional cloud-provider API keys stored in config.toml.
 /// These are used as fallback when the corresponding environment variables
-/// (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`) are not set.
+/// (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `CEREBRAS_API_KEY`) are not set.
 /// Keys are stored at rest — ensure config.toml has 0600 permissions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -241,6 +241,9 @@ pub struct ApiKeysConfig {
     pub openai: Option<String>,
     pub anthropic: Option<String>,
     pub google: Option<String>,
+    /// Cerebras Inference (opt-in, throughput-bound background jobs only — see
+    /// `docs/config.md`'s provider table). Fallback for `CEREBRAS_API_KEY`.
+    pub cerebras: Option<String>,
 }
 
 impl ApiKeysConfig {
@@ -249,7 +252,7 @@ impl ApiKeysConfig {
     /// blank `[api_keys]` section (the common case) returns `false`, so permission checks
     /// that gate on this never warn/tighten a config with nothing worth protecting.
     pub fn has_any(&self) -> bool {
-        [&self.openai, &self.anthropic, &self.google]
+        [&self.openai, &self.anthropic, &self.google, &self.cerebras]
             .into_iter()
             .any(|k| k.as_deref().is_some_and(|s| !s.is_empty()))
     }

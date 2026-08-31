@@ -38,6 +38,11 @@ pub(crate) async fn cmd_update(check_only: bool, yes: bool, pin: Option<String>)
     print_whats_new(&info.current, target_ver).await;
 
     // ── Confirm ───────────────────────────────────────────────────────────────
+    // Self-replacing the running binary is uniquely high-consequence (unlike, say, deleting a
+    // weight override or auto-creating a pack, both easily reversible) — a non-interactive
+    // session (cron, CI, a wrapper script) without `--yes` must refuse rather than silently
+    // download and replace the binary with no confirmation of any kind. Mirrors
+    // `helpers.rs::check_huge_root_guard`'s interactive-prompt/non-interactive-bail split.
     if !yes {
         use std::io::IsTerminal as _;
         if std::io::stdin().is_terminal() {
@@ -50,6 +55,13 @@ pub(crate) async fn cmd_update(check_only: bool, yes: bool, pin: Option<String>)
                 println!("Aborted.");
                 return Ok(());
             }
+        } else {
+            anyhow::bail!(
+                "Refusing to self-update (v{} → v{}) in a non-interactive session without \
+                 confirmation. Re-run with --yes to confirm.",
+                info.current,
+                target_ver
+            );
         }
     }
 
