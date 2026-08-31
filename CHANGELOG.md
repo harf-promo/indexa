@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Test coverage for the shared sequencing itself now lives once, dependency-free, in
   `crates/core/src/resource.rs`; each of the three call sites keeps only a thin smoke test
   confirming it wires the shared helper's closures correctly.
+- **`crates/parsers::plugin_directory`'s remote-fetch client now goes through
+  `crates/http-util`** instead of hand-rolling its own `reqwest::Client::builder()`.
+  `indexa-http-util` gained `http_client_with_user_agent(timeout_secs, user_agent)` —
+  the same shared builder as `http_client`, plus a `User-Agent` header, for the
+  provider-neutral adapters (GitHub releases, the remote plugin directory) that need to
+  identify themselves, as opposed to `http_client`'s LLM/embed callers, which don't send
+  one. `build_remote_client()` now calls it with the same 15s request / 10s connect
+  timeouts and `User-Agent` string as before — behavior is unchanged, only the
+  construction is deduped. `crates/update::build_client` was deliberately **left
+  untouched** — self-update downloads and atomically replaces the running binary, and a
+  change there deserves its own focused review pass rather than riding along in a
+  consolidation diff.
 
 ## [0.80.1] — 2026-08-31
 

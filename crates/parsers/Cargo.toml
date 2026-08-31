@@ -15,6 +15,9 @@ toml = { workspace = true }
 # Plugin directory `--refresh`: fetches plugins.toml off `main` on GitHub. rustls only —
 # never native-tls/default-tls (workspace openssl-free-tree invariant).
 reqwest = { workspace = true, default-features = false, features = ["rustls"] }
+# Shared reqwest client construction (build_remote_client) — same client the plugin
+# directory's remote fetch used to hand-roll, now deduped via crates/http-util.
+indexa-http-util = { path = "../http-util" }
 # Markdown parsing
 pulldown-cmark = "0.13"
 # Mime type detection
