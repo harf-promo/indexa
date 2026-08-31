@@ -3,10 +3,16 @@
 **Goal:** regression-test retrieval with a golden-questions file, so a change to chunking,
 parsing, ranking, or reranking can't silently make `ask`/`search` worse. `indexa eval` runs each
 question through the same retrieval the `ask` pipeline uses and scores the ranked hits — **no LLM
-synthesis, ever**. By default reranking is excluded too (eval stays LLM-free and hermetic, so
-rerank-enabled configs diverge by exactly that step), and in sparse mode (the default) no embedder
-is needed either. Pass `--rerank` to also route retrieval through the SAME rerank pass `ask` uses
-(needs a local LLM, or the cross-encoder model when `[retrieval] rerank_backend = "cross-encoder"`).
+synthesis, ever, by default**. By default reranking is excluded too (eval stays LLM-free and
+hermetic, so rerank-enabled configs diverge by exactly that step), and in sparse mode (the
+default) no embedder is needed either. Pass `--rerank` to also route retrieval through the SAME
+rerank pass `ask` uses (needs a local LLM, or the cross-encoder model when
+`[retrieval] rerank_backend = "cross-encoder"`).
+
+Everything above scores *ranking* — which chunks came back. Pass `--judge` to additionally grade
+the *answer text* a real `ask` would synthesize from them; see [`--judge` mode](#--judge-mode-grade-the-synthesized-answer)
+below. `--judge` is the one thing in this command that isn't hermetic — never add it to a
+required/blocking CI job (see that section).
 
 ## The golden file
 
@@ -116,3 +122,82 @@ miss.
 need a real index built with embeddings (`indexa deep` without `--no-embed`) — the hermetic CI gate
 deliberately can't run either; see `.github/workflows/dense-eval.yml` (`workflow_dispatch`) for the
 one that can.
+
+## `--judge` mode: grade the synthesized answer
+
+Everything above is a *ranking* metric — it tells you whether the right chunks came back, and in
+what order. It says nothing about the ANSWER text a real `ask` would produce from them: a retrieval
+that hits every expected file can still be synthesized into an answer that misreads a source,
+hedges into vagueness, or states something none of the cited chunks actually support. `--judge`
+grades that:
+
+```bash
+indexa eval golden.json --judge
+indexa eval golden.json --judge --judge-model gemma3:12b   # grade with a different model than synthesis
+indexa eval golden.json --judge --min-judge-score 3.5      # exit 1 if the mean judge score is below 3.5
+```
+
+For each question, `--judge` runs the SAME synthesis entry point `ask` uses
+(`qa::answer_with_ann_history` — respecting `--rerank` when both flags are set), then sends the
+question, the sources the answer cited, and the answer text to a judge LLM with a fixed rubric:
+
+1. Does the answer directly address the question?
+2. Is every factual claim in the answer supported by the cited sources (no invented facts, no
+   unsupported claims)?
+
+The judge responds with a 0-5 score and a one-sentence reason. Per-question output gains a line:
+
+```
+hit  rank      rr   prec    rec  ndcg  question
+  ✓     1   1.000   1.00   1.00  1.00  where is auth handled?
+      judge 4/5 — Correctly names the session module; doesn't mention the token refresh path.
+
+1 questions · hit rate 1.00 · MRR 1.000 · recall 1.00 · nDCG 1.00 · precision 1.00 · mode sparse · judge 4.00/5 (1/1 graded)
+```
+
+**What's different from the ranking metrics**: hit@k/MRR/recall/nDCG/precision are pure,
+deterministic functions of the retrieved path list — same input, same score, every run.
+`mean_judge_score` is an LLM's own judgment call on prose it also had to read; it isn't calibrated,
+and given the same input it can vary run to run (temperature, model, prompt phrasing). Treat it as
+a directional signal for "did this change make answers worse," not a precise number to chase to the
+hundredth.
+
+**Cost — NOT hermetic.** Unlike everything above, `--judge` makes two real model calls per question
+(one to synthesize the answer, one to grade it) — it needs a reachable local LLM (or whichever
+`[describer]` provider is configured) and, in `rrf`/`dense` mode, an embedder too. It is never added
+to a required/blocking CI job by Indexa itself — the hermetic `retrieval eval (self-golden,
+hermetic)` job never passes `--judge`, and `fixtures/self-golden.json` carries no
+`expect_answer_hint` fields. Set it up as your own optional CI job (or a local pre-release check)
+once you've picked a judge model you're willing to pay the latency/cost for on every run.
+
+A synthesis or judge-parse failure for one question is logged to stderr and just leaves that
+question's `judge` field absent — it does not abort the run. `--min-judge-score` treats "every
+question failed to get a verdict" as a failing run too (a gate that can't measure must fail, not
+silently pass), the same way a missing/empty index already fails the whole command.
+
+### The `expect_answer_hint` field (optional)
+
+A golden question can optionally carry a short human-written note on what a correct answer should
+mention — the judge includes it in the rubric prompt when present:
+
+```json
+{
+  "question": "how does RRF fusion combine sparse and dense scores?",
+  "expect_paths": ["crates/query/src/qa/retrieve.rs"],
+  "expect_answer_hint": "should mention the rrf_k rank constant and that scores are summed, not averaged"
+}
+```
+
+This field is entirely optional and backward compatible — an existing golden file (or one written
+without `--judge` in mind, like `fixtures/self-golden.json`) needs no changes; the judge grades
+purely on question + sources + answer when it's absent.
+
+### `mean_judge_score` / `judged_questions` in `--json` output and baselines
+
+With `--judge`, the `summary` object gains two fields: `mean_judge_score` (the mean 0-5 score
+across questions that got a verdict) and `judged_questions` (how many did). Both are `Option` —
+absent from `--json` output on a plain run, and `null`/missing when loading an OLD baseline file
+saved before this feature existed, so `--baseline` comparisons against pre-`--judge` snapshots keep
+working unchanged. (Note `compare_to_baseline`/`--max-regression` does not currently compare
+`mean_judge_score` — it stays a `--min-judge-score` absolute-floor-only gate, like `--min-hit-rate`
+was before baselines existed.)

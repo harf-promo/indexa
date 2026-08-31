@@ -16,13 +16,27 @@
 //! retrieval-affecting changes (chunking, parsing, ranking, optionally reranking)
 //! within that scope — see `docs/methodology.md` for the A/B recipe that covers
 //! dense-mode retrieval.
+//!
+//! **`--judge` (opt-in, not hermetic)**: everything above scores *ranking* — which chunks
+//! came back, and where — but says nothing about the ANSWER text a real `ask` would
+//! synthesize from them. [`judge_answer`] grades that: given the question, the sources an
+//! actual synthesis call cited, and the synthesized answer text, one judge LLM call scores
+//! 0-5 against a fixed rubric (does the answer address the question; is every claim
+//! supported by the sources) and returns a one-sentence rationale. This is deliberately a
+//! SEPARATE, later-composed concern from ranking scoring — `judge_answer` takes plain
+//! `question`/`sources`/`answer` strings, not a `Store` or `QaConfig`, so it has no opinion
+//! on how the answer was produced. The CLI (`indexa eval --judge`) is what wires it to a
+//! real synthesis call (`qa::answer_with_ann_history`, the same entry point `ask` uses) per
+//! question. A judge verdict is purely additive on [`QuestionMetrics`]/[`EvalSummary`] (both
+//! `Option`, `#[serde(default)]` on the summary fields) — a plain run's output, and an old
+//! saved baseline's deserialization, are unaffected.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use indexa_core::store::Store;
 use indexa_llm::Generator;
 use serde::{Deserialize, Serialize};
 
-use crate::qa::{retrieve, QaConfig};
+use crate::qa::{retrieve, QaConfig, SourceCitation};
 use crate::rerank::apply_configured_rerank;
 
 /// One golden question: a query plus the file paths a correct retrieval must surface.
@@ -34,6 +48,12 @@ pub struct EvalQuestion {
     /// Per-question cutoff; falls back to the run-level top-k when unset.
     #[serde(default)]
     pub k: Option<usize>,
+    /// Optional human-written note on what a correct answer should mention, e.g. "must name
+    /// the RRF fusion step and cite qa.rs". Included in the `--judge` rubric prompt when
+    /// present; the judge grades purely on question+sources+answer when absent. Backward
+    /// compatible: existing golden files (and `fixtures/self-golden.json`) need no changes.
+    #[serde(default)]
+    pub expect_answer_hint: Option<String>,
 }
 
 /// The golden file root: `{"questions": [...]}`.
@@ -67,6 +87,25 @@ pub struct QuestionMetrics {
     /// the top-k, normalized so 1.0 = the relevant hits packed at the top ranks.
     /// Catches rank demotions (expected hit slides from #1 to #6) that hit@k cannot.
     pub ndcg: f64,
+    /// LLM-judge verdict on the synthesized answer (`indexa eval --judge`). `None` in default
+    /// (ranking-only) mode, and `None` for a question whose synthesis or judge call failed —
+    /// a judge failure is a per-question miss, not fatal to the whole run. `skip_serializing_if`
+    /// keeps a plain (non-`--judge`) run's `--json` output byte-identical to before this field
+    /// existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge: Option<JudgeVerdict>,
+}
+
+/// One LLM-judge verdict: how well a synthesized answer addresses the question and how well
+/// every claim in it is supported by the sources it cited. **Not calibrated** — like
+/// `assess_confidence`'s retrieval-shape confidence, this is a heuristic single-model judgment,
+/// not a probability. See [`judge_answer`].
+#[derive(Debug, Clone, Serialize)]
+pub struct JudgeVerdict {
+    /// 0 (fails the rubric) – 5 (fully addresses the question, every claim supported).
+    pub score: u8,
+    /// The judge's one-sentence rationale, taken verbatim from its response.
+    pub reason: String,
 }
 
 /// Aggregate over all questions in a run. `Deserialize` so a saved `--json` run can be
@@ -83,6 +122,18 @@ pub struct EvalSummary {
     pub mean_recall: f64,
     /// Mean nDCG@k across questions.
     pub mean_ndcg: f64,
+    /// Mean [`JudgeVerdict::score`] (0-5) across questions that got a verdict
+    /// (`indexa eval --judge`). `None` when judge mode wasn't used, or when every judge call in
+    /// the run failed. `Option` + `#[serde(default)]` so an OLD saved baseline JSON (written
+    /// before this field existed) still deserializes into the current `EvalSummary` — it just
+    /// loads as `None`, exactly as a non-`--judge` run would.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean_judge_score: Option<f64>,
+    /// How many questions actually got a judge verdict (≤ `questions`; a synthesis or judge
+    /// parse failure drops a question from this count without failing the run). `None` under
+    /// the same conditions as `mean_judge_score`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judged_questions: Option<usize>,
 }
 
 /// Run retrieval for one golden question and score the ranking. `query_vec` is
@@ -126,6 +177,101 @@ pub async fn evaluate_question_reranked(
     };
     let ranked: Vec<&str> = hits.iter().map(|h| h.entry_path.as_str()).collect();
     Ok(score_ranking(&q.question, k, &ranked, &q.expect_paths))
+}
+
+/// Build the rubric prompt sent to the judge LLM for one synthesized answer. Split out from
+/// [`judge_answer`] so the prompt shape is testable without a fake `Generator`. `hint` is
+/// `EvalQuestion::expect_answer_hint`, included only when present (see the module doc).
+fn build_judge_prompt(
+    question: &str,
+    sources: &[SourceCitation],
+    answer: &str,
+    hint: Option<&str>,
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str(
+        "You are grading an AI assistant's answer against the sources it was given. Score it \
+         strictly on two things:\n\
+         1. Does the answer directly address the question?\n\
+         2. Is every factual claim in the answer supported by the sources below — no invented \
+         facts, no unsupported claims?\n\n\
+         Respond in EXACTLY this two-line format, nothing else:\n\
+         SCORE: <integer 0-5>\n\
+         REASON: <one sentence>\n\n",
+    );
+    prompt.push_str("Question: ");
+    prompt.push_str(question);
+    prompt.push('\n');
+    if let Some(h) = hint {
+        prompt.push_str("A correct answer should mention: ");
+        prompt.push_str(h);
+        prompt.push('\n');
+    }
+    prompt.push_str("\nSources:\n");
+    if sources.is_empty() {
+        prompt.push_str("(none retrieved)\n");
+    }
+    for (i, s) in sources.iter().enumerate() {
+        let loc = if s.heading.is_empty() {
+            s.path.clone()
+        } else {
+            format!("{} — {}", s.path, s.heading)
+        };
+        prompt.push_str(&format!("[{}] {}\n{}\n\n", i + 1, loc, s.snippet));
+    }
+    prompt.push_str("Answer to grade:\n");
+    prompt.push_str(answer);
+    prompt.push('\n');
+    prompt
+}
+
+/// Parse the judge LLM's response into a [`JudgeVerdict`]. Tolerant of a `Score:`/`score:`
+/// casing mismatch and a stray preamble line (models don't always obey "nothing else" — same
+/// fail-open posture as [`crate::rerank::LlmReranker`]'s ranking parse); clamps an
+/// out-of-rubric score (a model that says "6" or "-1") into `0..=5` rather than failing the
+/// whole question over it. Errors only when no `SCORE:` line parses at all.
+fn parse_judge_response(raw: &str) -> Result<JudgeVerdict> {
+    let mut score: Option<u8> = None;
+    let mut reason = String::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        let lower = line.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("score:") {
+            let n_str = rest.trim().trim_end_matches(['.', '/']);
+            if let Ok(n) = n_str.trim().parse::<i64>() {
+                score = Some(n.clamp(0, 5) as u8);
+            }
+        } else if let Some(idx) = lower.find("reason:") {
+            reason = line[idx + "reason:".len()..].trim().to_owned();
+        }
+    }
+    let score =
+        score.ok_or_else(|| anyhow::anyhow!("judge response had no parseable SCORE: line"))?;
+    if reason.is_empty() {
+        reason = "(no reason given)".to_owned();
+    }
+    Ok(JudgeVerdict { score, reason })
+}
+
+/// Grade one synthesized answer against the rubric via a single judge-LLM call. Pure w.r.t.
+/// how the answer was produced — takes plain strings (question/sources/answer), not a `Store`
+/// or `QaConfig`, so it composes with whatever synthesis path a caller used (the CLI wires it
+/// to `qa::answer_with_ann_history`, the same entry point `ask` uses). Fails on a network/parse
+/// error; the CLI's per-question loop treats that as a miss for this one question, not a fatal
+/// error for the whole `--judge` run.
+pub async fn judge_answer(
+    judge_llm: &dyn Generator,
+    question: &str,
+    sources: &[SourceCitation],
+    answer: &str,
+    hint: Option<&str>,
+) -> Result<JudgeVerdict> {
+    let prompt = build_judge_prompt(question, sources, answer, hint);
+    let raw = judge_llm
+        .generate(&prompt)
+        .await
+        .context("judge LLM call failed")?;
+    parse_judge_response(&raw).with_context(|| format!("unparseable judge response: {raw:?}"))
 }
 
 /// True if stored path `p` satisfies expected path `e`.
@@ -200,13 +346,29 @@ pub fn score_ranking(
         },
         recall,
         ndcg,
+        judge: None,
     }
 }
 
 /// Aggregate per-question metrics into the run summary (all 0.0 for an empty run;
 /// the CLI rejects empty golden files before getting here).
+///
+/// `mean_judge_score`/`judged_questions` are derived purely from whichever `per_question`
+/// entries happen to carry a `judge` verdict — the caller doesn't tell `aggregate` whether
+/// `--judge` was requested, it just reads what's there. Both stay `None` when no entry has a
+/// verdict (the default, non-`--judge` case, and a `--judge` run where every judge call failed).
 pub fn aggregate(per_question: &[QuestionMetrics]) -> EvalSummary {
     let n = per_question.len();
+    let judge_scores: Vec<f64> = per_question
+        .iter()
+        .filter_map(|m| m.judge.as_ref().map(|j| f64::from(j.score)))
+        .collect();
+    let (mean_judge_score, judged_questions) = if judge_scores.is_empty() {
+        (None, None)
+    } else {
+        let jn = judge_scores.len();
+        (Some(judge_scores.iter().sum::<f64>() / jn as f64), Some(jn))
+    };
     if n == 0 {
         return EvalSummary {
             questions: 0,
@@ -215,6 +377,8 @@ pub fn aggregate(per_question: &[QuestionMetrics]) -> EvalSummary {
             mean_precision: 0.0,
             mean_recall: 0.0,
             mean_ndcg: 0.0,
+            mean_judge_score,
+            judged_questions,
         };
     }
     let nf = n as f64;
@@ -225,6 +389,8 @@ pub fn aggregate(per_question: &[QuestionMetrics]) -> EvalSummary {
         mean_precision: per_question.iter().map(|m| m.precision).sum::<f64>() / nf,
         mean_recall: per_question.iter().map(|m| m.recall).sum::<f64>() / nf,
         mean_ndcg: per_question.iter().map(|m| m.ndcg).sum::<f64>() / nf,
+        mean_judge_score,
+        judged_questions,
     }
 }
 
@@ -445,6 +611,8 @@ mod tests {
             mean_precision: 0.50,
             mean_recall: 0.70,
             mean_ndcg: 0.85,
+            mean_judge_score: None,
+            judged_questions: None,
         };
         // hit_rate drops 0.10, MRR improves, the rest unchanged.
         let cur = EvalSummary {
@@ -474,6 +642,8 @@ mod tests {
             mean_precision: 0.4,
             mean_recall: 0.97,
             mean_ndcg: 0.9736251154055859,
+            mean_judge_score: None,
+            judged_questions: None,
         };
         let cur = EvalSummary {
             mean_ndcg: base.mean_ndcg - 1e-15,
@@ -538,6 +708,7 @@ mod tests {
             question: "sqlite".to_owned(),
             expect_paths: owned(&["/code/db.rs"]),
             k: None,
+            expect_answer_hint: None,
         };
         let m = evaluate_question(&store, &q, &cfg, None).unwrap();
         assert!(m.hit);
@@ -551,6 +722,7 @@ mod tests {
             question: "authentication".to_owned(),
             expect_paths: owned(&["/code/auth.rs", "/docs/auth.md"]),
             k: None,
+            expect_answer_hint: None,
         };
         let m = evaluate_question(&store, &q, &cfg, None).unwrap();
         assert!(m.hit);
@@ -563,6 +735,7 @@ mod tests {
             question: "sqlite".to_owned(),
             expect_paths: owned(&["/docs/auth.md"]),
             k: None,
+            expect_answer_hint: None,
         };
         let m = evaluate_question(&store, &q, &cfg, None).unwrap();
         assert!(!m.hit);
@@ -574,6 +747,7 @@ mod tests {
             question: "zebra".to_owned(),
             expect_paths: owned(&["/code/db.rs"]),
             k: None,
+            expect_answer_hint: None,
         };
         let m = evaluate_question(&store, &q, &cfg, None).unwrap();
         assert!(!m.hit);
@@ -593,6 +767,7 @@ mod tests {
             question: "kumquat".to_owned(),
             expect_paths: owned(&["/a.md", "/b.md"]),
             k: Some(1),
+            expect_answer_hint: None,
         };
         let m = evaluate_question(&store, &q, &cfg, None).unwrap();
         assert_eq!(m.k, 1);
@@ -628,6 +803,7 @@ mod tests {
             question: "widget".to_owned(),
             expect_paths: owned(&["/low.md"]),
             k: None,
+            expect_answer_hint: None,
         };
 
         let baseline = evaluate_question(&store, &q, &sparse_cfg(), None).unwrap();
@@ -668,6 +844,7 @@ mod tests {
             question: "widget".to_owned(),
             expect_paths: owned(&["/low.md"]),
             k: None,
+            expect_answer_hint: None,
         };
 
         let mut no_rerank_cfg = sparse_cfg();
@@ -749,6 +926,216 @@ mod tests {
             summary.hit_rate >= 0.5,
             "dense hit_rate {:.3} below floor 0.5 — retrieval regression?",
             summary.hit_rate
+        );
+    }
+
+    // ── `--judge` mode: prompt construction, response parsing, aggregation ─────
+
+    fn src(path: &str, heading: &str, snippet: &str) -> SourceCitation {
+        SourceCitation {
+            path: path.to_owned(),
+            heading: heading.to_owned(),
+            snippet: snippet.to_owned(),
+        }
+    }
+
+    #[test]
+    fn build_judge_prompt_includes_hint_only_when_present() {
+        let sources = [src("/a.rs", "", "some snippet")];
+        let without = build_judge_prompt("q?", &sources, "answer text", None);
+        assert!(!without.contains("should mention"));
+
+        let with = build_judge_prompt("q?", &sources, "answer text", Some("mention RRF"));
+        assert!(with.contains("should mention: mention RRF"));
+    }
+
+    #[test]
+    fn build_judge_prompt_includes_question_sources_and_answer() {
+        let sources = [src("/code/auth.rs", "Login", "auth flow details")];
+        let prompt = build_judge_prompt("how does login work?", &sources, "It uses tokens.", None);
+        assert!(prompt.contains("how does login work?"));
+        assert!(prompt.contains("/code/auth.rs — Login"));
+        assert!(prompt.contains("auth flow details"));
+        assert!(prompt.contains("It uses tokens."));
+    }
+
+    #[test]
+    fn build_judge_prompt_marks_empty_sources() {
+        let prompt = build_judge_prompt("q?", &[], "answer", None);
+        assert!(prompt.contains("(none retrieved)"));
+    }
+
+    #[test]
+    fn parse_judge_response_reads_score_and_reason() {
+        let v = parse_judge_response("SCORE: 4\nREASON: Mostly supported, one minor gap.").unwrap();
+        assert_eq!(v.score, 4);
+        assert_eq!(v.reason, "Mostly supported, one minor gap.");
+    }
+
+    #[test]
+    fn parse_judge_response_tolerates_lowercase_and_preamble() {
+        // Real models don't always obey "nothing else" — a stray preamble line must not break
+        // parsing, and lowercase `score:`/`reason:` must still be recognized.
+        let v = parse_judge_response(
+            "Sure, here is my grading:\nscore: 3\nreason: partially addresses the question.",
+        )
+        .unwrap();
+        assert_eq!(v.score, 3);
+        assert_eq!(v.reason, "partially addresses the question.");
+    }
+
+    #[test]
+    fn parse_judge_response_clamps_out_of_range_score() {
+        assert_eq!(
+            parse_judge_response("SCORE: 9\nREASON: overclaimed.")
+                .unwrap()
+                .score,
+            5
+        );
+        assert_eq!(
+            parse_judge_response("SCORE: -3\nREASON: way off.")
+                .unwrap()
+                .score,
+            0
+        );
+    }
+
+    #[test]
+    fn parse_judge_response_missing_score_is_an_error() {
+        assert!(parse_judge_response("REASON: no score given here.").is_err());
+    }
+
+    #[test]
+    fn parse_judge_response_missing_reason_falls_back() {
+        let v = parse_judge_response("SCORE: 2").unwrap();
+        assert_eq!(v.score, 2);
+        assert_eq!(v.reason, "(no reason given)");
+    }
+
+    /// A fake `Generator` that always returns a fixed, well-formed judge verdict — proves
+    /// `judge_answer` wires the prompt → LLM call → parse pipeline end to end.
+    struct FixedVerdictLlm(&'static str);
+    #[async_trait::async_trait]
+    impl indexa_llm::Generator for FixedVerdictLlm {
+        async fn generate(&self, _prompt: &str) -> Result<String> {
+            Ok(self.0.to_owned())
+        }
+    }
+
+    #[tokio::test]
+    async fn judge_answer_end_to_end_with_fake_llm() {
+        let llm = FixedVerdictLlm("SCORE: 5\nREASON: Fully supported by the cited source.");
+        let sources = [src("/docs/api.md", "", "the API returns JSON")];
+        let v = judge_answer(
+            &llm,
+            "what format does the API return?",
+            &sources,
+            "JSON.",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(v.score, 5);
+        assert_eq!(v.reason, "Fully supported by the cited source.");
+    }
+
+    /// A fake `Generator` that returns garbage — proves a judge parse failure surfaces as an
+    /// `Err` (the CLI's per-question loop turns that into a skipped verdict, not a fatal error).
+    struct GarbageLlm;
+    #[async_trait::async_trait]
+    impl indexa_llm::Generator for GarbageLlm {
+        async fn generate(&self, _prompt: &str) -> Result<String> {
+            Ok("I refuse to grade this.".to_owned())
+        }
+    }
+
+    #[tokio::test]
+    async fn judge_answer_propagates_unparseable_response_as_error() {
+        let err = judge_answer(&GarbageLlm, "q?", &[], "answer", None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unparseable judge response"));
+    }
+
+    #[test]
+    fn aggregate_computes_mean_judge_score_only_from_present_verdicts() {
+        let mut per = [
+            score_ranking("q1", 10, &["/a.md"], &owned(&["/a.md"])),
+            score_ranking("q2", 10, &["/b.md"], &owned(&["/b.md"])),
+            score_ranking("q3", 10, &["/c.md"], &owned(&["/c.md"])),
+        ];
+        // q1 and q3 got graded (4, 2); q2's synthesis/judge call failed and stayed `None`.
+        per[0].judge = Some(JudgeVerdict {
+            score: 4,
+            reason: "ok".to_owned(),
+        });
+        per[2].judge = Some(JudgeVerdict {
+            score: 2,
+            reason: "weak".to_owned(),
+        });
+        let s = aggregate(&per);
+        assert_eq!(s.judged_questions, Some(2));
+        assert!((s.mean_judge_score.unwrap() - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregate_leaves_judge_fields_none_without_judge_mode() {
+        // The default (non-`--judge`) path: no entry carries a verdict, so both fields stay
+        // `None` — this is what keeps a plain run's `--json` output unchanged.
+        let per = [score_ranking("q1", 10, &["/a.md"], &owned(&["/a.md"]))];
+        let s = aggregate(&per);
+        assert!(s.mean_judge_score.is_none());
+        assert!(s.judged_questions.is_none());
+    }
+
+    #[test]
+    fn eval_summary_without_judge_fields_deserializes_with_none() {
+        // An OLD saved baseline (written before this field existed) must still deserialize into
+        // the CURRENT EvalSummary — the whole point of `#[serde(default)]` on the new fields.
+        let old_json = r#"{
+            "questions": 5,
+            "hit_rate": 0.8,
+            "mrr": 0.7,
+            "mean_precision": 0.5,
+            "mean_recall": 0.6,
+            "mean_ndcg": 0.75
+        }"#;
+        let s: EvalSummary = serde_json::from_str(old_json).unwrap();
+        assert_eq!(s.questions, 5);
+        assert!(s.mean_judge_score.is_none());
+        assert!(s.judged_questions.is_none());
+
+        // And it still compares against a current summary fine.
+        let current = aggregate(&[score_ranking("q1", 10, &["/a.md"], &owned(&["/a.md"]))]);
+        let deltas = compare_to_baseline(&current, &s, 1.0);
+        assert_eq!(
+            deltas.len(),
+            5,
+            "judge score is not part of the baseline delta set"
+        );
+    }
+
+    #[test]
+    fn eval_question_without_hint_field_still_parses() {
+        // Backward compatibility for the golden schema: a question with no `expect_answer_hint`
+        // (every existing golden file, including fixtures/self-golden.json) still parses, with
+        // the field defaulting to `None`.
+        let set: GoldenSet = serde_json::from_str(
+            r#"{"questions": [{"question": "q", "expect_paths": ["/a.rs"]}]}"#,
+        )
+        .unwrap();
+        assert!(set.questions[0].expect_answer_hint.is_none());
+    }
+
+    #[test]
+    fn eval_question_with_hint_field_parses() {
+        let set: GoldenSet = serde_json::from_str(
+            r#"{"questions": [{"question": "q", "expect_paths": ["/a.rs"], "expect_answer_hint": "must mention foo"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            set.questions[0].expect_answer_hint.as_deref(),
+            Some("must mention foo")
         );
     }
 }

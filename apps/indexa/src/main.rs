@@ -255,6 +255,9 @@ async fn main() -> Result<()> {
             baseline,
             max_regression,
             rerank,
+            judge,
+            judge_model,
+            min_judge_score,
         } => {
             commands::cmd_eval(
                 golden,
@@ -266,6 +269,9 @@ async fn main() -> Result<()> {
                 baseline,
                 max_regression,
                 rerank,
+                judge,
+                judge_model,
+                min_judge_score,
                 &cfg,
             )
             .await

@@ -38,6 +38,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [CONTRIBUTING.md](CONTRIBUTING.md#authoring-a-third-party-parser-plugin) for the
   authoring guide.
 
+- **`indexa eval --judge`: LLM-judge grading of the synthesized answer, not just retrieval
+  ranking.** `indexa eval` has always scored *ranking* (hit@k/MRR/recall/nDCG/precision) with no
+  LLM synthesis, ever — deliberately, so the hermetic CI gate stays LLM-free. `--judge` is a new,
+  fully opt-in mode that additionally runs the real `ask` synthesis entry point
+  (`qa::answer_with_ann_history`, respecting `--rerank`) per question and grades the answer 0-5
+  with a judge LLM call against a fixed rubric (does it address the question; is every claim
+  supported by the sources it cited). `--judge-model` points grading at a different model than
+  synthesis (defaults to the same `[describer]` model); `--min-judge-score` can fail the run on a
+  low mean score, the same way `--min-hit-rate` already does for ranking.
+  - **Default behavior is unchanged.** `--judge` defaults to off; the hermetic
+    `retrieval eval (self-golden, hermetic)` CI job never passes it and needs no code changes —
+    zero LLM calls, same as before.
+  - **Backward-compatible schema addition.** A golden question may now optionally carry
+    `expect_answer_hint: Option<String>` — a short note on what a correct answer should mention,
+    included in the judge prompt when present. Existing golden files (including
+    `fixtures/self-golden.json`) need no changes; the field defaults to absent and the judge
+    grades purely on question+sources+answer without it.
+  - **Backward-compatible summary addition.** `EvalSummary` gains `mean_judge_score: Option<f64>`
+    and `judged_questions: Option<usize>`, both `#[serde(default)]` — an old saved `--baseline`
+    JSON (written before this field existed) still deserializes into the current `EvalSummary` and
+    compares correctly; both stay `None` on any run that didn't use `--judge`.
+  - A per-question synthesis or judge-parse failure is logged and skipped, not fatal to the run.
+  - See `docs/how-to/evaluate-retrieval.md`'s new "`--judge` mode" section for the full rubric,
+    sample output, and cost/non-hermetic caveats.
+
 ## [0.78.0] — 2026-08-31
 
 ### Added

@@ -14,8 +14,9 @@ pub mod summarize;
 pub mod worker;
 
 pub use eval::{
-    aggregate, compare_to_baseline, evaluate_question, evaluate_question_reranked, score_ranking,
-    EvalQuestion, EvalSummary, GoldenSet, MetricDelta, QuestionMetrics,
+    aggregate, compare_to_baseline, evaluate_question, evaluate_question_reranked, judge_answer,
+    score_ranking, EvalQuestion, EvalSummary, GoldenSet, JudgeVerdict, MetricDelta,
+    QuestionMetrics,
 };
 pub use export::{
     approx_tokens, build_export_filter, build_tree, dry_run_report, prune_tree,

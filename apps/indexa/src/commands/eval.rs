@@ -2,8 +2,9 @@ use anyhow::{bail, Context, Result};
 use indexa_core::config::{Config, HybridMode};
 use indexa_core::store::Store;
 use indexa_query::{
-    aggregate, compare_to_baseline, evaluate_question, evaluate_question_reranked, EvalSummary,
-    GoldenSet, QaConfig, QuestionMetrics,
+    aggregate, answer_with_ann_history, compare_to_baseline, evaluate_question,
+    evaluate_question_reranked, judge_answer, EvalQuestion, EvalSummary, GoldenSet, QaConfig,
+    QuestionMetrics,
 };
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +33,12 @@ struct BaselineFile {
 /// ranking unless both `--mode rrf`/`dense` (for MMR) and `--rerank` are set.
 /// Exits 1 when the aggregate hit rate falls below `--min-hit-rate`, or (with `--baseline`)
 /// when any aggregate metric regresses by more than `--max-regression`.
+///
+/// `--judge` (opt-in, NOT hermetic) additionally runs real synthesis per question — the same
+/// `qa::answer_with_ann_history` entry point `ask` uses, respecting `--rerank` — and grades the
+/// synthesized answer with a judge LLM call ([`judge_answer`]). A per-question synthesis/judge
+/// failure is logged to stderr and leaves that question's `judge` field `None`; it never aborts
+/// the run. `--min-judge-score` can additionally fail the run on a low mean judge score.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn cmd_eval(
     golden: String,
@@ -43,6 +50,9 @@ pub(crate) async fn cmd_eval(
     baseline: Option<String>,
     max_regression: f64,
     rerank: bool,
+    judge: bool,
+    judge_model: Option<String>,
+    min_judge_score: Option<f64>,
     cfg: &Config,
 ) -> Result<()> {
     if !(0.0..=1.0).contains(&min_hit_rate) {
@@ -50,6 +60,11 @@ pub(crate) async fn cmd_eval(
     }
     if max_regression < 0.0 {
         bail!("--max-regression must be >= 0.0 (got {max_regression})");
+    }
+    if let Some(min_judge) = min_judge_score {
+        if !(0.0..=5.0).contains(&min_judge) {
+            bail!("--min-judge-score must be between 0.0 and 5.0 (got {min_judge})");
+        }
     }
     let hybrid_mode = match mode.as_str() {
         "sparse" => HybridMode::Sparse,
@@ -107,17 +122,35 @@ pub(crate) async fn cmd_eval(
         ..QaConfig::default()
     };
 
-    // `--rerank` needs a reachable local model exactly like `ask` does. A gate that can't
-    // measure must fail, not silently pass (see the index checks above) — so when Ollama is
-    // the configured provider and it's unreachable, this is a hard error rather than letting
-    // `apply_rerank`'s fail-open behavior quietly score an un-reranked run as reranked.
-    if rerank {
+    // `--rerank`/`--judge` need a reachable local model exactly like `ask` does. A gate that
+    // can't measure must fail, not silently pass (see the index checks above) — so when Ollama
+    // is the configured provider and it's unreachable, this is a hard error rather than letting
+    // `apply_rerank`'s fail-open behavior quietly score an un-reranked run as reranked (or a
+    // `--judge` run silently produce zero verdicts). Note this only checks the DESCRIBER's
+    // configured model is pulled — a `--judge-model` naming a different model isn't covered,
+    // same limitation `--rerank`'s cross-encoder backend already has.
+    if rerank || judge {
         preflight_ollama(cfg).await?;
     }
     let llm = if rerank {
         Some(build_llm(cfg, None)?)
     } else {
         None
+    };
+
+    // `--judge` synthesizes a real answer per question (the exact `ask` entry point,
+    // `answer_with_ann_history`) before grading it, so it needs its own LLM + embedder — built
+    // once, reused across questions. `judge_llm` defaults to the same model as synthesis when
+    // `--judge-model` is unset (one model both answers and grades); it's a separate instance so
+    // `--judge-model` can point grading at a stronger/cheaper model without touching synthesis.
+    let (synth_llm, judge_llm, judge_embedder) = if judge {
+        (
+            Some(build_llm(cfg, None)?),
+            Some(build_llm(cfg, judge_model.as_deref())?),
+            Some(build_embedder(cfg, None)?),
+        )
+    } else {
+        (None, None, None)
     };
 
     // Embed every question up front (rrf/dense only) so the retrieval loop below is
@@ -135,12 +168,23 @@ pub(crate) async fn cmd_eval(
 
     let mut per_question = Vec::with_capacity(questions.len());
     for (q, vec) in questions.iter().zip(&query_vecs) {
-        let metrics = match &llm {
+        let mut metrics = match &llm {
             Some(llm) => {
                 evaluate_question_reranked(&store, q, &qa_cfg, vec.as_deref(), llm.as_ref()).await?
             }
             None => evaluate_question(&store, q, &qa_cfg, vec.as_deref())?,
         };
+        if judge {
+            metrics.judge = run_judge_for_question(
+                &db_path,
+                judge_embedder.as_ref().unwrap().as_ref(),
+                synth_llm.as_ref().unwrap().as_ref(),
+                judge_llm.as_ref().unwrap().as_ref(),
+                q,
+                &qa_cfg,
+            )
+            .await;
+        }
         per_question.push(metrics);
     }
     let summary = aggregate(&per_question);
@@ -171,17 +215,35 @@ pub(crate) async fn cmd_eval(
                 m.ndcg,
                 truncate(&m.question, 60),
             );
+            // Judge line, printed only when `--judge` produced a verdict for this question —
+            // the ranking table above stays byte-identical to a plain (non-`--judge`) run.
+            if let Some(j) = &m.judge {
+                println!("      judge {}/5 — {}", j.score, j.reason);
+            }
         }
         println!();
+        // `judge_line` is empty in the default (non-`--judge`) case, so this summary line stays
+        // byte-identical to a plain run's output.
+        let judge_line = match summary.mean_judge_score {
+            Some(mean) => format!(
+                " · judge {:.2}/5 ({}/{} graded)",
+                mean,
+                summary.judged_questions.unwrap_or(0),
+                summary.questions
+            ),
+            None if judge => " · judge: no verdicts (every synthesis/judge call failed)".to_owned(),
+            None => String::new(),
+        };
         println!(
-            "{} questions · hit rate {:.2} · MRR {:.3} · recall {:.2} · nDCG {:.3} · precision {:.2} · mode {}",
+            "{} questions · hit rate {:.2} · MRR {:.3} · recall {:.2} · nDCG {:.3} · precision {:.2} · mode {}{}",
             summary.questions,
             summary.hit_rate,
             summary.mrr,
             summary.mean_recall,
             summary.mean_ndcg,
             summary.mean_precision,
-            mode
+            mode,
+            judge_line
         );
     }
 
@@ -231,10 +293,70 @@ pub(crate) async fn cmd_eval(
     if regressed {
         fail = true;
     }
+    // A gate that can't measure must fail, not silently pass (same posture as the index checks
+    // above): if every synthesis/judge call in the run failed, `mean_judge_score` is `None` —
+    // that counts as failing `--min-judge-score`, not as passing it by default.
+    if let Some(min_judge) = min_judge_score {
+        match summary.mean_judge_score {
+            Some(mean) if mean < min_judge => {
+                eprintln!(
+                    "eval: mean judge score {mean:.2} below --min-judge-score {min_judge:.2}"
+                );
+                fail = true;
+            }
+            None => {
+                eprintln!(
+                    "eval: --min-judge-score set but no question got a judge verdict \
+                     (every synthesis/judge call failed)"
+                );
+                fail = true;
+            }
+            Some(_) => {}
+        }
+    }
     if fail {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Grade one question end to end for `--judge`: run real synthesis (the same
+/// `answer_with_ann_history` entry point `ask` uses, respecting `qa_cfg.rerank`), then grade the
+/// answer with the judge LLM. Fails open — any synthesis or judge error is logged to stderr and
+/// returns `None`, so one bad question never aborts the whole `--judge` run.
+async fn run_judge_for_question(
+    db_path: &std::path::Path,
+    embedder: &dyn indexa_embed::Embedder,
+    synth_llm: &dyn indexa_llm::Generator,
+    judge_llm: &dyn indexa_llm::Generator,
+    q: &EvalQuestion,
+    qa_cfg: &QaConfig,
+) -> Option<indexa_query::JudgeVerdict> {
+    let answer =
+        match answer_with_ann_history(db_path, embedder, synth_llm, &q.question, qa_cfg, None, &[])
+            .await
+        {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("eval: --judge synthesis failed for {:?}: {e:#}", q.question);
+                return None;
+            }
+        };
+    match judge_answer(
+        judge_llm,
+        &q.question,
+        &answer.sources,
+        &answer.answer,
+        q.expect_answer_hint.as_deref(),
+    )
+    .await
+    {
+        Ok(verdict) => Some(verdict),
+        Err(e) => {
+            eprintln!("eval: --judge grading failed for {:?}: {e:#}", q.question);
+            None
+        }
+    }
 }
 
 /// Char-safe truncation for the table's question column.
