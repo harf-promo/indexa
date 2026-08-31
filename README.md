@@ -64,7 +64,7 @@ That last line is real and per-answer: Indexa served a ~0.5 KB ranked slice inst
 27 KB of source files it drew on. The savings pitch below isn't a slogan — every `ask` prints
 the figure for *that* answer (and `--json` returns it).
 
-Or open the web workspace (`indexa serve`) — the **Map** lands on an interactive, force-directed knowledge graph of your codebase: each dot is a file, sized by how many other files depend on it; solid lines are confident call edges, dashed lines are approximate name matches (Indexa labels what it isn't sure of). Click a hub to focus it, then expand its neighbors.
+Or open the web workspace (`indexa serve`) — the **Map** lands on an interactive, force-directed knowledge graph of your codebase: each dot is a file, sized by how many other files depend on it; solid lines are confident call edges, dashed lines are approximate name matches (Indexa labels what it isn't sure of). Click a hub to focus it, then expand its neighbors. An opt-in **Architecture layers** overlay colors nodes by inferred layer (API / Service / Data / UI / Utility) alongside the existing Communities tint.
 
 ![Indexa's web workspace — an interactive knowledge graph of the codebase, files sized by centrality](docs/assets/web-graph.png)
 
@@ -238,7 +238,7 @@ Defaults: `nomic-embed-text` (embeddings) · `gemma3:4b` (file context) · `gemm
 - **Mobile companion** — browse your index from a phone on the same network. The read-only API is already LAN-ready (`indexa serve --host 0.0.0.0`); a native client is next.
 - **Plugin marketplace** — the parser SDK is shipped (`indexa_parsers::Registry`); next is discovery and distribution of third-party parsers.
 
-Recently shipped: **agentic `ask`** (multi-hop plan→search→refine), **PageRank centrality** (hub files in the code graph), **signature graph visualization**, **universal macOS desktop build**, **Importance weighting**, **Insights** (duplicates / stale / weekly diff), **video captioning**, **Plugin SDK**, **LAN serve**.
+Recently shipped: **Context Pack inclusion modes** (`reference`/`pinned`) with export `--dry-run` and typed redaction labels, **Map Architecture-layers overlay**, **durable decision-ledger notes** (`record_decision`) and **summarize-pass drift** reporting, cross-file embed batching, **agentic `ask`** (multi-hop plan→search→refine), **PageRank centrality** (hub files in the code graph), **signature graph visualization**, **universal macOS desktop build**, **Importance weighting**, **Insights** (duplicates / stale / weekly diff), **video captioning**, **Plugin SDK**, **LAN serve**.
 
 Ideas and votes in [Discussions](../../discussions/categories/ideas). Full detail in [ROADMAP.md](ROADMAP.md).
 

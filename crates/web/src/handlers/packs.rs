@@ -62,7 +62,7 @@ pub(crate) struct ExportQuery {
     #[serde(default)]
     include_graph: bool,
     /// With `include_graph=true`: `text` (per-format list, default) or `mermaid` (a fenced
-    /// ```mermaid flowchart block).
+    /// Mermaid flowchart block).
     graph_format: Option<String>,
     /// Preview only (v0.78): report the estimated token/byte cost as JSON instead of the
     /// rendered body, and record no "exported" pack event. Not supported with `format=okf`

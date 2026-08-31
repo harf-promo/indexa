@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.78.0] — 2026-08-31
+
 ### Added
 
 - **Context Packs: per-item inclusion mode, `--dry-run`, and typed redaction labels.** Three
