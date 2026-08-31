@@ -258,6 +258,7 @@ async fn main() -> Result<()> {
             judge,
             judge_model,
             min_judge_score,
+            save_run,
         } => {
             commands::cmd_eval(
                 golden,
@@ -272,6 +273,7 @@ async fn main() -> Result<()> {
                 judge,
                 judge_model,
                 min_judge_score,
+                save_run,
                 &cfg,
             )
             .await

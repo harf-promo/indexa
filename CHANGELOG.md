@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`indexa eval golden.json --save-run <dir>`** — writes the run's `{mode, questions, summary}`
+  payload (the same shape `--json` prints) to `<dir>/eval-<unix>.json`, creating `<dir>` if
+  needed, and prints the path written. A first-class alternative to manually redirecting `--json`
+  output into a baseline file (`--baseline`'s doc comment used to be the only guidance); works
+  standalone and composes with `--baseline`/`--rerank`/`--judge`.
+
 ## [0.79.1] — 2026-08-31
 
 ### Fixed
