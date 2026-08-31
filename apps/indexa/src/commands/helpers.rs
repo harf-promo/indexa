@@ -344,6 +344,7 @@ pub(crate) fn build_llm(
         &cfg.describer.base_url,
         cfg.api_keys.openai.as_deref(),
         cfg.api_keys.anthropic.as_deref(),
+        cfg.api_keys.cerebras.as_deref(),
         Some(keep_alive),
         cfg.describer.num_ctx,
     )

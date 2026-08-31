@@ -55,13 +55,14 @@ base_url = "http://localhost:11434"  # provider API base URL (optional — env v
 ## API keys
 
 Optional cloud-provider API keys, persisted directly in `config.toml` as a fallback for the
-`embedding`/`describer` `provider = "openai" | "anthropic" | "google"` settings above.
+`embedding`/`describer` `provider = "openai" | "anthropic" | "google" | "cerebras"` settings above.
 
 ```toml
 [api_keys]
 # openai    = "sk-..."   # fallback for OPENAI_API_KEY
 # anthropic = "sk-..."   # fallback for ANTHROPIC_API_KEY
 # google    = "..."      # fallback for GOOGLE_API_KEY
+# cerebras  = "csk-..."  # fallback for CEREBRAS_API_KEY
 ```
 
 > Unset by default — nothing is stored unless you set it here. The environment variable always
@@ -336,6 +337,7 @@ blowout on memory-constrained machines. Raise it only with matching headroom in 
 | `anthropic` | Requires `ANTHROPIC_API_KEY`. Recommended: `claude-haiku-4-5-20251001`. |
 | `llamacpp` | llama.cpp in OpenAI-compat mode. Set `base_url` or `OPENAI_BASE_URL`. |
 | `claude-code` | Runs on your **Claude Pro/Max subscription** via the local `claude` CLI (`claude_bin`) — no API key, no per-token billing. See [Use your Claude Pro/Max subscription](../USAGE.md#use-your-claude-promax-subscription-no-api-key). |
+| `cerebras` | [Cerebras Inference](https://cerebras.ai/inference) — OpenAI-compatible, very high tokens/sec. Requires `CEREBRAS_API_KEY`. **Opt-in, for throughput-bound background jobs only** (`indexa ask` Q&A synthesis, per-chunk `contextual_retrieval` enrichment at index time) — local-first (`ollama`) stays the default; reach for this when a large one-off job would otherwise take hours on local hardware. Generator only, same as `openai`/`anthropic` — no `Describer` support, so `indexa summarize`/`worker` still need `ollama` or `claude-code`. |
 
 ---
 

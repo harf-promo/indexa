@@ -7,6 +7,11 @@
 //! - `llamacpp` — llama.cpp HTTP server (OpenAI-compatible `/v1/chat/completions`)
 //! - `claude-code` — the user's Claude Pro/Max **subscription**, via the local
 //!   `claude` CLI in headless print mode (no API key, no token billing)
+//! - `cerebras` — Cerebras Inference (requires `CEREBRAS_API_KEY`); opt-in,
+//!   throughput-bound background jobs only (Q&A synthesis, per-chunk contextual-retrieval
+//!   enrichment at index time) — local-first stays the default. Generator only — no
+//!   `Describer` support (same as `openai`/`anthropic`), so `indexa summarize`/`worker`
+//!   still need `ollama` or `claude-code`. See `docs/config.md`'s provider table.
 
 pub mod anthropic;
 pub mod claude_code;
@@ -131,15 +136,19 @@ pub trait Describer: Send + Sync {
 
 /// Build a `Generator` from config values, optionally setting `keep_alive` on Ollama adapters.
 ///
-/// `openai_key` / `anthropic_key` are used as fallbacks when the corresponding
-/// environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) are not set.
-/// Pass `None` to require the env var.
+/// `openai_key` / `anthropic_key` / `cerebras_key` are used as fallbacks when the
+/// corresponding environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+/// `CEREBRAS_API_KEY`) are not set. Pass `None` to require the env var.
+// One factory that fans config fields out to the right provider constructor; grouping these
+// into a struct would just move the same fields around without improving clarity.
+#[allow(clippy::too_many_arguments)]
 pub fn from_config_with_keep_alive(
     provider: &str,
     model: &str,
     base_url: &str,
     openai_key: Option<&str>,
     anthropic_key: Option<&str>,
+    cerebras_key: Option<&str>,
     keep_alive: Option<i64>,
     num_ctx: u32,
 ) -> anyhow::Result<Box<dyn Generator + Send + Sync>> {
@@ -170,6 +179,14 @@ pub fn from_config_with_keep_alive(
             model,
         ))),
         "claude-code" => Ok(Box::new(ClaudeCodeLlm::single(model, None))),
+        // Opt-in, throughput-bound background jobs only (Q&A synthesis, per-chunk
+        // contextual-retrieval enrichment at index time) — local-first stays the default
+        // provider. Same "same client, different endpoint" shape as `llamacpp` above, just
+        // with an API key like `openai`. See docs/config.md.
+        "cerebras" => Ok(Box::new(OpenAICompatLlm::from_cerebras_env_or_config(
+            model,
+            cerebras_key,
+        )?)),
         other => anyhow::bail!("unknown LLM provider: {other}"),
     }
 }

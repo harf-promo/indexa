@@ -63,6 +63,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - See `docs/how-to/evaluate-retrieval.md`'s new "`--judge` mode" section for the full rubric,
     sample output, and cost/non-hermetic caveats.
 
+- **Cerebras as an opt-in LLM provider.** `[describer] provider = "cerebras"` (or
+  `[api_keys] cerebras`/`CEREBRAS_API_KEY`) routes text generation through [Cerebras
+  Inference](https://cerebras.ai/inference)'s OpenAI-compatible endpoint — very high tokens/sec,
+  for throughput-bound background jobs (`indexa ask` Q&A synthesis, per-chunk
+  `contextual_retrieval` enrichment at index time), not a replacement for the local-first
+  `ollama` default. Reuses the existing `OpenAICompatLlm` client (same "same client, different
+  endpoint" shape as the `llamacpp` provider) — no new HTTP adapter. Generator only, same as
+  `openai`/`anthropic` — no `Describer` support, so `indexa summarize`/`worker` still need
+  `ollama` or `claude-code`. See `docs/config.md`'s Describer provider table.
+
+### Fixed
+
+- **`crates/parsers/src/compressed.rs`: zstd codec only decoded the first frame of a
+  multi-frame `.zst` file.** `ruzstd::decoding::StreamingDecoder` decodes a single frame per
+  instance by design; a concatenated multi-frame stream (`zstd --long` multi-frame output, or
+  `cat a.zst b.zst`) silently lost every frame after the first. Now recreates the decoder per
+  frame, handles `SkipFrame` by seeking past it, and tracks the `MAX_ZIP_ENTRY_BYTES` bomb-guard
+  cap CUMULATIVELY across frames (not reset per decoder instance) — closing the gap flagged in
+  `docs/reviews/2026-08-30-invariant-audit.md`.
+- **`indexa update` silently self-updated with no confirmation in a non-interactive session.**
+  `cmd_update` now `bail!`s (matching `helpers.rs::check_huge_root_guard`'s
+  interactive-prompt/non-interactive-bail pattern) when stdin isn't a terminal and `--yes`
+  wasn't passed, instead of skipping the confirmation entirely and proceeding to download and
+  replace the running binary. Self-replacing the running binary is uniquely high-consequence
+  (unlike `weight.rs`'s delete or `pack.rs --auto`'s create, both easily reversible), so it gets
+  a stricter rule than those two — deliberately does NOT change `weight.rs`/`pack.rs`'s existing
+  non-interactive-accept convention; that remains a separate decision per the audit report.
+
 ## [0.78.0] — 2026-08-31
 
 ### Added

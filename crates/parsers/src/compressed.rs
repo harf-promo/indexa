@@ -108,11 +108,7 @@ impl CompressedParser {
                     .with_context(|| format!("decompressing {}", path.display()))?;
             }
             Codec::Zstd => {
-                let decoder = ruzstd::decoding::StreamingDecoder::new(file)
-                    .with_context(|| format!("initializing zstd decoder for {}", path.display()))?;
-                decoder
-                    .take(MAX_ZIP_ENTRY_BYTES + 1)
-                    .read_to_end(&mut buf)
+                decode_zstd_frames(file, MAX_ZIP_ENTRY_BYTES, &mut buf)
                     .with_context(|| format!("decompressing {}", path.display()))?;
             }
             Codec::Brotli => {
@@ -153,6 +149,78 @@ impl CompressedParser {
         }
         Ok(buf)
     }
+}
+
+/// Decode every frame of a (possibly multi-frame, possibly containing skippable frames) zstd
+/// stream into `out`, bomb-guarded at `cap` bytes ACROSS ALL FRAMES COMBINED.
+///
+/// `ruzstd::decoding::StreamingDecoder`'s own doc comment states the caveat: it "expects the
+/// underlying stream to only contain a single frame... To decode all the frames... the calling
+/// code needs to recreate the instance of the decoder and handle `SkipFrame` errors by skipping
+/// forward" (<https://github.com/KillingSpark/zstd-rs/issues/57>). A concatenated multi-frame
+/// `.zst` (`zstd --long` multi-frame output, or `cat a.zst b.zst`) otherwise silently loses
+/// every frame after the first.
+///
+/// A naive per-frame `.take(cap + 1)` (i.e. just recreating the decoder in a loop with no other
+/// change) would let a multi-frame bomb sail past the intended cap — each frame would get its
+/// OWN `cap + 1` budget instead of sharing one. This tracks bytes produced across frames and
+/// stops pulling more as soon as the running total would exceed `cap`, leaving the final
+/// over-cap check in `decompress` (shared by every codec) to reject it exactly as it already
+/// does for a single oversized frame.
+///
+/// `file`'s OS-level cursor is what tracks frame boundaries here: reading through `&file`
+/// (which shares the cursor with `file` itself — `impl Read for &File` performs positioned
+/// reads against the same open file description) advances it past whatever was just consumed,
+/// so the next loop iteration naturally starts where the last one left off; a `SkipFrame` seeks
+/// the cursor forward by its declared length instead of decoding anything.
+fn decode_zstd_frames(mut file: std::fs::File, cap: u64, out: &mut Vec<u8>) -> Result<()> {
+    use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
+    use ruzstd::decoding::StreamingDecoder;
+
+    // Defensive belt-and-suspenders against a maliciously crafted stream of many tiny/empty
+    // frames: each successful iteration below strictly advances `file`'s cursor (a real frame
+    // consumes at least its header, a skip-frame consumes its 8-byte header plus its declared
+    // length), so a finite file can't loop forever regardless — but a stream engineered with,
+    // say, a million empty frames would still mean a million iterations of real work without
+    // ever tripping the byte-cap below. Bail out past a generous ceiling instead of trusting
+    // that reasoning to hold for every future edge case.
+    const MAX_FRAMES: usize = 1_000_000;
+
+    for _ in 0..MAX_FRAMES {
+        if out.len() as u64 > cap {
+            // Already over budget from a prior frame — stop pulling more. `decompress`'s
+            // shared post-match check (`buf.len() as u64 > MAX_ZIP_ENTRY_BYTES`) is what
+            // actually rejects this; returning here just avoids doing unbounded extra work.
+            return Ok(());
+        }
+        match StreamingDecoder::new(&file) {
+            Ok(decoder) => {
+                // Cap this frame's read to whatever budget remains across ALL frames so far,
+                // not a fresh `cap + 1` per frame.
+                let remaining = (cap + 1).saturating_sub(out.len() as u64);
+                decoder
+                    .take(remaining)
+                    .read_to_end(out)
+                    .context("reading a zstd frame")?;
+            }
+            Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame {
+                length,
+                ..
+            })) => {
+                file.seek(SeekFrom::Current(length as i64))
+                    .context("seeking past a zstd skippable frame")?;
+            }
+            Err(FrameDecoderError::ReadFrameHeaderError(
+                ReadFrameHeaderError::MagicNumberReadError(e),
+            )) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                // Clean end of the (possibly multi-frame) stream: no more bytes available to
+                // start another frame with.
+                return Ok(());
+            }
+            Err(e) => bail!("zstd frame decode error: {e}"),
+        }
+    }
+    bail!("zstd stream has more than {MAX_FRAMES} frames — refusing to keep decoding")
 }
 
 /// Decode an XZ "multi-byte integer" (VLI): little-endian base-128 varint, high bit of each
@@ -471,6 +539,56 @@ mod tests {
         assert!(
             full_text.contains("SECOND-MEMBER-MARKER"),
             "second gzip member must ALSO be indexed, not silently dropped: {full_text:?}"
+        );
+    }
+
+    /// Regression test: `ruzstd::decoding::StreamingDecoder` only decodes a single frame per
+    /// instance (its own doc comment says as much — see `decode_zstd_frames`'s doc), so a
+    /// concatenated multi-frame `.zst` (`zstd --long` multi-frame output, or `cat a.zst b.zst`)
+    /// used to silently lose every frame after the first. Both members must now be indexed.
+    #[test]
+    fn parse_decodes_every_frame_of_a_multi_frame_zstd_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("combined.log.zst");
+        let mut combined = zstd_bytes(b"FIRST-FRAME-MARKER line one\n");
+        combined.extend(zstd_bytes(b"SECOND-FRAME-MARKER line two\n"));
+        std::fs::write(&path, &combined).unwrap();
+
+        let extracted = CompressedParser.parse(&path).unwrap();
+        let full_text: String = extracted
+            .chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            full_text.contains("FIRST-FRAME-MARKER"),
+            "first zstd frame must still be indexed: {full_text:?}"
+        );
+        assert!(
+            full_text.contains("SECOND-FRAME-MARKER"),
+            "second zstd frame must ALSO be indexed, not silently dropped: {full_text:?}"
+        );
+    }
+
+    /// The bomb-guard cap must hold ACROSS frames, not reset per frame: two frames each
+    /// individually under the cap, but whose combined decompressed size exceeds it, must still
+    /// be rejected — proving the fix tracks cumulative bytes rather than giving each recreated
+    /// `StreamingDecoder` instance its own fresh `cap + 1` budget.
+    #[test]
+    fn parse_rejects_a_multi_frame_zstd_bomb_whose_combined_size_exceeds_the_cap() {
+        let half = vec![b'a'; (MAX_ZIP_ENTRY_BYTES / 2 + 1024) as usize];
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bomb.txt.zst");
+        let mut combined = zstd_bytes(&half);
+        combined.extend(zstd_bytes(&half));
+        std::fs::write(&path, &combined).unwrap();
+
+        let result = CompressedParser.parse(&path);
+        assert!(
+            result.is_err(),
+            "combined multi-frame size over the cap must be rejected even though each \
+             individual frame is under it"
         );
     }
 
