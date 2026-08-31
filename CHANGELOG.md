@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Consolidated the three independent memory-pressure watchdog implementations** —
+  `crates/query/src/worker.rs`'s inline block, `crates/web/src/jobs_exec/watchdog.rs::run_watchdog_check`,
+  and `apps/indexa/src/commands/deep.rs::check_deep_watchdog` (whose own doc comment already said
+  it "mirrors" `worker.rs`'s logic) — into one shared `indexa_core::resource::run_watchdog`.
+  Pure extract-function refactor, no algorithmic change: same recover-aware entry gate, same
+  Critical-only unload gate, same capped recovery-wait loop. `indexa_core` stays
+  network/model-agnostic — `run_watchdog` takes an `on_report` closure (a `WatchdogEvent` the
+  caller renders however it likes: `tracing::warn!`, a `JobEvent::Warning` push, `eprintln!`) and
+  an `unload` closure (each call site's own `Embedder`/`Describer` handles), so no
+  `indexa_embed`/`indexa_llm`/`JobHandle` type entered `indexa_core`. The web wrapper keeps
+  owning its 30-second periodic-status-push cadence itself, not threaded into the shared helper.
+  Test coverage for the shared sequencing itself now lives once, dependency-free, in
+  `crates/core/src/resource.rs`; each of the three call sites keeps only a thin smoke test
+  confirming it wires the shared helper's closures correctly.
+
 ## [0.80.1] — 2026-08-31
 
 ### Fixed
