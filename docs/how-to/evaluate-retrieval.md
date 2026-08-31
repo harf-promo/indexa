@@ -59,17 +59,27 @@ indexa eval golden.json --rerank                 # also score ask's rerank pass 
 chunker, reranker, ranking tweak) proves it didn't regress:
 
 ```bash
-indexa eval golden.json --json > baseline.json        # snapshot the current quality
+indexa eval golden.json --save-run ~/indexa-eval-runs   # snapshot the current quality, dated
 # … make your retrieval change, rebuild …
-indexa eval golden.json --baseline baseline.json                    # print per-metric deltas
-indexa eval golden.json --baseline baseline.json --max-regression 0.02   # exit 1 if any metric drops > 0.02
+indexa eval golden.json --baseline ~/indexa-eval-runs/eval-1735689600.json
+indexa eval golden.json --baseline ~/indexa-eval-runs/eval-1735689600.json --max-regression 0.02
 ```
+
+`--save-run <dir>` is the recommended way to produce a `--baseline` file: it writes this run's
+`{mode, questions, summary}` payload (the same shape `--json` prints) to `<dir>/eval-<unix>.json`,
+creating `<dir>` if needed, and prints the path it wrote. It's a first-class replacement for
+manually redirecting `--json` output (`indexa eval golden.json --json > baseline.json` still works
+and needs no extra flags, but `--save-run` gives every run its own timestamped file instead of one
+you have to remember to rename before the next snapshot) — and it works standalone, so you don't
+also need to pass `--json`. It composes with `--baseline`, `--rerank`, and `--judge` in the same
+run: pass `--save-run` and `--baseline` together to both check against an old baseline *and* record
+today's run as tomorrow's.
 
 `--baseline` prints a `vs baseline:` line with the signed delta for every aggregate metric; with
 `--max-regression <d>` (default `0.0` = no drop allowed) it exits 1 if hit_rate, MRR, recall, nDCG,
 or precision falls more than `d` below the baseline. The baseline file is either a full
-`indexa eval --json` output or a bare summary object. (Sub-noise jitter from the JSON round-trip is
-ignored — only real drops count.)
+`indexa eval --json` output (including one written by `--save-run`) or a bare summary object.
+(Sub-noise jitter from the JSON round-trip is ignored — only real drops count.)
 
 ## The metrics
 
