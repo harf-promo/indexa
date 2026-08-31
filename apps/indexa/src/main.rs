@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
 use indexa_cli::{
-    Cli, Commands, InsightsAction, McpAction, NoteAction, PackAction, ReviewAction, SavedAction,
-    SnapshotAction, WeightAction,
+    Cli, Commands, InsightsAction, McpAction, NoteAction, PackAction, PluginAction, ReviewAction,
+    SavedAction, SnapshotAction, WeightAction,
 };
 use indexa_core::config;
 use tracing_subscriber::prelude::*;
@@ -466,6 +466,10 @@ async fn main() -> Result<()> {
         }
         Commands::Update { check, yes, pin } => commands::cmd_update(check, yes, pin).await,
         Commands::Completion { shell } => commands::cmd_completion(shell),
+        Commands::Plugin { action } => match action {
+            PluginAction::List { json } => commands::cmd_plugin_list(json).await,
+            PluginAction::Info { name } => commands::cmd_plugin_info(name).await,
+        },
     };
 
     // On failure, print the error plus where to look next — the log file and `indexa doctor`

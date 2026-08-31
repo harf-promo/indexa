@@ -32,7 +32,7 @@ Core      index · ask · search · export · serve · status\n  \
 Manage    pack · weight · classify · saved · rm · prune · review\n  \
 Analyze   insights · graph · related · report · map · describe · fingerprint · snapshot · eval\n  \
 Pipeline  scan · deep · summarize · worker · watch   (the stages behind `index`)\n  \
-System    doctor · mcp · completion · update"
+System    doctor · mcp · completion · update · plugin"
 )]
 pub struct Cli {
     /// Path to config file (default: platform config dir / config.toml).
@@ -971,6 +971,44 @@ pub enum Commands {
         /// Target shell: bash, zsh, fish, powershell, or elvish.
         #[arg(value_enum)]
         shell: clap_complete::Shell,
+    },
+
+    /// Discover third-party parser plugins and get instructions to wire one in.
+    ///
+    /// Indexa's parser "Plugin SDK" is a compile-time Rust extension point (see
+    /// `crates/parsers/src/registry.rs`'s "Plugin SDK" doc comment): a third party
+    /// implements the `Parser` trait and calls `Registry::register` inside their OWN
+    /// custom binary. This command only helps you find a known plugin crate and copy
+    /// the exact snippet — it never installs anything into the running `indexa` binary.
+    #[command(after_help = "Examples:
+  indexa plugin list
+  indexa plugin list --json
+  indexa plugin info example-plugin")]
+    #[command(display_order = 53)]
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+}
+
+/// Sub-commands for `indexa plugin`.
+#[derive(clap::Subcommand, Debug)]
+pub enum PluginAction {
+    /// List known third-party parser plugin crates from the curated directory.
+    #[command(after_help = "Examples:
+  indexa plugin list
+  indexa plugin list --json")]
+    List {
+        /// Emit as a JSON array instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one plugin's full entry plus copy-pasteable install instructions.
+    #[command(after_help = "Examples:
+  indexa plugin info example-plugin")]
+    Info {
+        /// Plugin name, from `indexa plugin list`.
+        name: String,
     },
 }
 

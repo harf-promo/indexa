@@ -122,6 +122,64 @@ Full DCO text: https://developercertificate.org/
 2. Register it in `crates/parsers/src/registry.rs`.
 3. Add a test with a sample file in `crates/parsers/tests/fixtures/`.
 
+This section is for parsers that ship **in** the `indexa` binary itself. If you're
+publishing your own parser as a separate crate for other people to use, see the next
+section instead.
+
+---
+
+## Authoring a third-party parser plugin
+
+Indexa's parser "Plugin SDK" is a **compile-time** Rust extension point — there is no
+dynamic/runtime plugin loading (no `dlopen`, no WASM). A third-party parser is a crate
+that implements `indexa_parsers::types::Parser` and is registered into
+`indexa_parsers::registry::Registry` from **your own custom binary** that depends on
+`indexa_parsers` as a library. It never modifies the stock `indexa` binary.
+
+1. **Implement `Parser`.** In your own crate:
+
+   ```rust
+   use indexa_parsers::registry::Registry;
+   use indexa_parsers::types::{Extracted, Parser};
+
+   struct MyParser;
+   impl Parser for MyParser {
+       fn accepts_mime(&self, mime: &str) -> bool { mime == "application/x-mything" }
+       fn parse(&self, path: &std::path::Path) -> anyhow::Result<Extracted> {
+           // ... read the file and return chunks ...
+           Ok(Extracted { source: path.to_path_buf(), mime: "application/x-mything".into(),
+               chunks: vec![], edges: vec![] })
+       }
+   }
+   ```
+
+   The full contract (including `accepts_path`, chunking, and precedence rules) is in
+   `crates/parsers/src/registry.rs`'s "Plugin SDK" doc comment — read that first.
+
+2. **Register it in your own binary**, before parsing:
+
+   ```rust
+   let mut reg = Registry::new();
+   reg.register(Box::new(MyParser));
+   let extracted = reg.parse(path)?;
+   ```
+
+3. **Publish the crate** to crates.io (or a git repo) under your own name/license.
+
+4. **List it in the plugin directory** so others can find it: open a PR appending a
+   `[[plugin]]` table to `crates/parsers/plugins.toml` with `name`, `crate_name`,
+   `parser_type` (the type callers should `Box::new(...)`), `description`,
+   `extensions`/`mime_types`, and `repo`. See the comment header in that file for the
+   exact shape. Once merged, `indexa plugin list` and `indexa plugin info <name>` (see
+   `apps/indexa/src/commands/plugin.rs`) surface it, including the ready-to-paste
+   dependency line and registration snippet for your specific crate. Entries are
+   curated by maintainers (accuracy, license sanity, upkeep) rather than an open,
+   unmoderated registry.
+
+   The directory ships embedded in the `indexa` binary and is read with no network
+   call — a future version may additionally fetch a remote curated list, but that's
+   not built yet.
+
 ---
 
 ## Adding an MCP tool
