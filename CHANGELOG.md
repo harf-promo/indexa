@@ -7,8 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.80.3] — 2026-09-01
+
 ### Fixed
 
+- **`pack export --format okf` silently lost its opening YAML frontmatter delimiter on
+  `serde_yaml` 0.9.** `render_okf_bundle` relied on `serde_yaml::to_string()` opening its
+  output with a `"---\n"` document marker — true on 0.8 (the pinned version), dropped on
+  0.9 (what dependabot's `serde_yaml` bump moves to), so every OKF concept file lost its
+  frontmatter delimiter under 0.9. Now strips whatever leading marker (if any) the
+  installed `serde_yaml` version emits and always supplies exactly one itself, so the
+  format no longer depends on one emitter version's undocumented default. Also widened
+  an OKF test's ISO-8601 timestamp assertion to tolerate 0.9's unquoted scalar style
+  (both parse to the identical string).
+- **`.github/dependabot.yml` retuned to stop a CI-noise "rebase storm"** (78 failures/week,
+  97% on `dependabot/cargo/*` branches, traced to three distinct failure modes — the
+  serde_yaml bug above, plus root/desktop lockfile cross-staleness on both root-scoped and
+  desktop-scoped bumps, an existing gap AGENTS.md already documents). Groups same-severity
+  updates into one PR instead of many separate rebase-storm contributors, caps open PR
+  counts, and gates out both `semver-major` and `semver-minor` cargo bumps (deliberately
+  broader than a literal `semver-major`-only convention — several of the actual problem
+  bumps, e.g. `serde_yaml` 0.8→0.9, are `semver-minor` by Cargo's left-shifted pre-1.0
+  semver convention, not `semver-major`).
 - **`indexa plugin list --refresh` silently reintroduced a panic-on-fallback bug a prior
   release had fixed.** Round 5's http-client-consolidation swapped
   `plugin_directory::build_remote_client()`'s body to call the new
