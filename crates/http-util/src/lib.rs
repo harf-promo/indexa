@@ -21,13 +21,21 @@ pub fn http_client(timeout_secs: u64) -> reqwest::Client {
 /// adapters that talk to a public API/CDN identifying themselves as Indexa (GitHub
 /// releases, the remote plugin directory), as opposed to [`http_client`]'s LLM/embed
 /// providers, which don't send one.
-pub fn http_client_with_user_agent(timeout_secs: u64, user_agent: &str) -> reqwest::Client {
+///
+/// Unlike `http_client`, this returns a `Result` rather than panicking on a build
+/// failure: its current caller (the remote plugin directory fetch) is an explicitly
+/// best-effort, falls-back-to-a-local-copy operation — a rustls TLS-init failure in a
+/// minimal/headless environment must be a recoverable `Err`, not a process-crashing
+/// panic, so the caller's existing fallback-to-embedded-list path actually triggers.
+pub fn http_client_with_user_agent(
+    timeout_secs: u64,
+    user_agent: &str,
+) -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(user_agent)
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()
-        .expect("building reqwest client (rustls TLS init)")
 }
 
 /// An IP an outbound "fetch a user-supplied URL" request must never reach — the SSRF blocklist:
@@ -239,7 +247,7 @@ mod tests {
 
     #[test]
     fn http_client_with_user_agent_sets_the_given_header() {
-        let client = http_client_with_user_agent(15, "indexa/9.9.9");
+        let client = http_client_with_user_agent(15, "indexa/9.9.9").expect("build client");
         // reqwest merges a client's default headers (incl. `user_agent()`) into a
         // request only at send time (`execute_request`), not when a `RequestBuilder`
         // is merely `.build()`'t — so there's no way to observe them on an unsent
