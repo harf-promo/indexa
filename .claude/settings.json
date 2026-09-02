@@ -44,7 +44,10 @@
       "Bash(lsof -i :7620*)",
       "Bash(lsof -i :7621*)",
       "Bash(ps aux | grep*indexa*)",
-      "Bash(kill *)"
+      "Bash(kill *)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr checks:*)",
+      "Bash(gh run view:*)"
     ]
   },
   "enabledPlugins": {

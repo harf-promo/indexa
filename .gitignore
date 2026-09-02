@@ -12,6 +12,9 @@ Cargo.lock
 !/Cargo.lock
 !/apps/indexa-desktop/Cargo.lock
 
+# Orca
+.orca/
+
 # IDE
 .idea/
 .vscode/
