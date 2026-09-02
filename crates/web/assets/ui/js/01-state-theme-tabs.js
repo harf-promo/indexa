@@ -50,7 +50,13 @@ const THEME_ICON_SUN = '<svg class="ui-ico" viewBox="0 0 24 24" fill="none" stro
   const saved = localStorage.getItem('indexa_theme') || 'dark';
   document.documentElement.setAttribute('data-theme', saved);
   const btn = document.getElementById('theme-toggle');
-  if (btn) btn.innerHTML = saved === 'light' ? THEME_ICON_SUN : THEME_ICON_MOON;
+  if (btn) {
+    btn.innerHTML = saved === 'light' ? THEME_ICON_SUN : THEME_ICON_MOON;
+    // Reflect the initial state to assistive tech too — previously aria-pressed was only set on
+    // the first toggle, so a screen reader saw no pressed state on load.
+    btn.setAttribute('aria-pressed', saved === 'light' ? 'true' : 'false');
+    btn.setAttribute('aria-label', saved === 'light' ? 'Switch to dark theme' : 'Switch to light theme');
+  }
 })();
 
 function toggleTheme() {
