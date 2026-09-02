@@ -77,4 +77,4 @@ lzma-rs = "0.3"
 # present transitively via Tauri in apps/indexa-desktop's separate Cargo.lock at this exact
 # version — 8.0.3 is a known-broken release (compile error in enc/combined_alloc.rs), which is
 # why the desktop app itself pins the exact patch.
-brotli = "=8.0.2"
+brotli = "=8.0.4"
