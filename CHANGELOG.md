@@ -54,6 +54,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is what `BASIS_ANSWER_TEXT`'s own doc comment already said it was for. `record_usage` takes
   the basis as a required parameter (not a defaulted one), and a structural test rejects any
   future call to the untagged store method anywhere in the crate.
+- **`indexa plugin list` no longer advertises a crate that doesn't exist.** The shipped plugin
+  directory (`crates/parsers/plugins.toml`) contained exactly one `[[plugin]]` entry — a
+  template, `example-plugin` / `indexa-parser-example`, whose description literally read
+  *"TEMPLATE — replace with a real crate's one-sentence description."* Nothing filtered it, so
+  `plugin list` printed it in the same table a real plugin would appear in and reported
+  "1 plugin(s)", and `indexa plugin info example-plugin` handed back a copy-pasteable
+  `Cargo.toml` line for a crate that has never been published. The directory now ships empty,
+  with the entry shape documented in the file's own comments, so the correct — and already
+  written — empty-state message is reachable: *"No third-party parser plugins listed yet…"*.
+  The CLI help's `indexa plugin info example-plugin` example became `indexa plugin info <name>`.
+  A new `embedded_directory_has_no_placeholder_entries` test keeps a template from being
+  re-committed, and `find` gained a `find_in` seam so its case-insensitive matching is tested
+  against a synthetic list instead of whatever the shipped directory happens to hold.
 
 ## [0.80.3] — 2026-09-01
 

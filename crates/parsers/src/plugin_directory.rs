@@ -132,11 +132,18 @@ pub async fn load_remote(client: &reqwest::Client) -> Result<Vec<PluginEntry>> {
     parse_directory_toml(&raw).context("parsing the remote plugin directory")
 }
 
+/// Find one entry by name, case-insensitive, in an already-loaded list. Split out from
+/// [`find`] so the matching rule is testable without depending on what the shipped
+/// directory happens to contain — it ships empty (see `plugins.toml`).
+fn find_in(entries: Vec<PluginEntry>, name: &str) -> Option<PluginEntry> {
+    entries
+        .into_iter()
+        .find(|p| p.name.eq_ignore_ascii_case(name))
+}
+
 /// Find one entry by name, case-insensitive.
 pub fn find(name: &str) -> Result<Option<PluginEntry>> {
-    Ok(load()?
-        .into_iter()
-        .find(|p| p.name.eq_ignore_ascii_case(name)))
+    Ok(find_in(load()?, name))
 }
 
 #[cfg(test)]
@@ -147,16 +154,47 @@ mod tests {
     fn embedded_directory_parses() {
         // The shipped plugins.toml must always parse — a curator typo here would
         // otherwise only surface at `indexa plugin list` runtime, not at build/test time.
-        let entries = load().expect("plugins.toml must parse");
-        // The seeded template entry (or a real one, once added) should be present.
-        assert!(!entries.is_empty());
+        // It may legitimately be EMPTY (it currently is); emptiness is a curation state,
+        // not a parse failure, and `cmd_plugin_list` has a dedicated empty-state message.
+        load().expect("plugins.toml must parse");
+    }
+
+    #[test]
+    fn embedded_directory_has_no_placeholder_entries() {
+        // The directory used to ship a fake `example-plugin` entry whose description
+        // literally read "TEMPLATE — replace with a real crate's…". `indexa plugin list`
+        // printed it as though it were a real, installable crate and reported
+        // "1 plugin(s)". Every entry here must name a crate a user can actually depend on.
+        for p in load().expect("plugins.toml must parse") {
+            let d = p.description.to_ascii_uppercase();
+            assert!(
+                !d.contains("TEMPLATE") && !d.contains("PLACEHOLDER"),
+                "plugins.toml entry {:?} is a placeholder, not a real crate",
+                p.name
+            );
+            assert!(
+                !p.crate_name.ends_with("-example") && !p.name.contains("example"),
+                "plugins.toml entry {:?} looks like the template block; \
+                 document the shape in comments instead of shipping a fake entry",
+                p.name
+            );
+        }
     }
 
     #[test]
     fn find_is_case_insensitive() {
-        let entries = load().unwrap();
-        let name = entries[0].name.to_ascii_uppercase();
-        assert!(find(&name).unwrap().is_some());
+        // Uses a synthetic list rather than the embedded one, which ships empty.
+        let entries = vec![PluginEntry {
+            name: "pcap".into(),
+            crate_name: "indexa-parser-pcap".into(),
+            parser_type: "PcapParser".into(),
+            description: "d".into(),
+            extensions: vec!["pcap".into()],
+            mime_types: vec![],
+            repo: "https://example.com".into(),
+        }];
+        assert!(find_in(entries.clone(), "PCAP").is_some());
+        assert!(find_in(entries, "nope").is_none());
     }
 
     #[test]

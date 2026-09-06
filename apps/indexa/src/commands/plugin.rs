@@ -150,8 +150,15 @@ mod tests {
         // failure (the embedded directory), never a hard error from `--refresh`.
         let plugins =
             resolve_refreshed_plugins(Err(anyhow::anyhow!("connection refused"))).unwrap();
-        // The embedded plugins.toml always has at least the template entry.
-        assert!(!plugins.is_empty());
+        // Assert it returned *the embedded list*, whatever that list currently holds — the
+        // directory legitimately ships empty, so a `!is_empty()` check would assert curation
+        // state rather than the fallback behavior actually under test.
+        let embedded = plugin_directory::load().unwrap();
+        assert_eq!(plugins.len(), embedded.len());
+        assert!(plugins
+            .iter()
+            .zip(&embedded)
+            .all(|(a, b)| a.name == b.name && a.crate_name == b.crate_name));
     }
 
     #[test]
@@ -168,6 +175,6 @@ mod tests {
             "failed to build HTTP client for the remote plugin directory: TLS backend init failed"
         );
         let plugins = resolve_refreshed_plugins(Err(client_build_err)).unwrap();
-        assert!(!plugins.is_empty());
+        assert_eq!(plugins.len(), plugin_directory::load().unwrap().len());
     }
 }
