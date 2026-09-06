@@ -203,7 +203,7 @@ pub(crate) async fn cmd_ask(
     let agentic = agentic_flag || max_steps_flag.is_some() || cfg.retrieval.agentic;
     let max_steps = max_steps_flag.unwrap_or(cfg.retrieval.agentic_max_steps);
 
-    let mut qa_cfg = QaConfig::from_retrieval(&cfg.retrieval);
+    let mut qa_cfg = QaConfig::from_config(cfg);
     if let Some(k) = top_k_flag {
         qa_cfg.top_k = k;
     }

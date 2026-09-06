@@ -20,6 +20,7 @@ mod agentic;
 mod cluster;
 mod confidence;
 mod explain;
+mod memory_block;
 mod mmr;
 mod retrieve;
 mod rewrite;
@@ -161,6 +162,9 @@ pub struct QaConfig {
     /// sub-flag so clustering can be used without the added latency. Mirrors
     /// `[retrieval] graphrag_summarize`.
     pub graphrag_summarize: bool,
+    /// Durable-memory settings (`[memory]`). Off by default: with `retrieval = false` the
+    /// packed prompt is byte-identical to a build without the feature.
+    pub memory: indexa_core::config::MemoryConfig,
 }
 
 impl Default for QaConfig {
@@ -188,17 +192,26 @@ impl Default for QaConfig {
             graphrag_max_clusters: 4,
             graphrag_cluster_sim: 0.55,
             graphrag_summarize: false,
+            memory: indexa_core::config::MemoryConfig::default(),
         }
     }
 }
 
 impl QaConfig {
-    /// Build a `QaConfig` from `[retrieval]` config — the single place that maps every field the
-    /// config owns (with its name remaps: `mode`←`hybrid`, `use_recency_weight`←`recency_boost`,
-    /// `max_steps`←`agentic_max_steps`). A new `[retrieval]` knob is threaded to ask/search/explain
-    /// in ONE spot, so those surfaces can't silently diverge (e.g. MCP `ask` vs `explain_retrieval`).
+    /// Build a `QaConfig` from the whole [`Config`](indexa_core::config::Config) — the single
+    /// place that maps every field the config owns (with its name remaps: `mode`←`hybrid`,
+    /// `use_recency_weight`←`recency_boost`, `max_steps`←`agentic_max_steps`). A new knob is
+    /// threaded to ask/search/explain in ONE spot, so those surfaces can't silently diverge
+    /// (e.g. MCP `ask` vs `explain_retrieval`).
+    ///
+    /// Takes the whole config rather than just `[retrieval]` because the Q&A pipeline now also
+    /// reads `[memory]`; a `from_retrieval(&r)` signature would have forced every surface to
+    /// remember a second call, which is exactly the divergence this constructor exists to
+    /// prevent.
+    ///
     /// `scope` starts `None`; callers apply per-request overrides (top_k, mode, rerank, scope, …).
-    pub fn from_retrieval(r: &indexa_core::config::RetrievalConfig) -> Self {
+    pub fn from_config(c: &indexa_core::config::Config) -> Self {
+        let r = &c.retrieval;
         Self {
             top_k: r.top_k,
             context_budget: r.context_budget,
@@ -222,6 +235,7 @@ impl QaConfig {
             graphrag_max_clusters: r.graphrag_max_clusters,
             graphrag_cluster_sim: r.graphrag_cluster_sim,
             graphrag_summarize: r.graphrag_summarize,
+            memory: c.memory.clone(),
         }
     }
 }

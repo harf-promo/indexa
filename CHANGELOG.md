@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Recorded memories can be offered to `ask` — opt-in, `[memory] retrieval = false` by default.**
+  When enabled, live claims are rendered as a labelled `RECORDED MEMORY` block ahead of the
+  numbered excerpts, each line carrying its kind, confidence, whether it was ever checked, and
+  where it came from, under a header telling the model these are *not* retrieved file content and
+  must never be cited. They are **never fused into the citation list** — that separation is the
+  whole point, because a trust boundary cannot be drawn around a claim that has already been
+  given a citation number next to real source. Claims that failed verification, were retired, or
+  whose validity window has closed are never offered at any setting; `inferred` and `hypothesis`
+  are excluded by default, since feeding a model its own unverified guesses back as context is
+  how a memory system compounds its own mistakes.
+  The block's byte budget comes **out of** `[retrieval] context_budget` before the project
+  overview is sized, so enabling it trades source bytes for claim bytes rather than growing the
+  prompt. `retrieve()` — the ranking path — is not touched at all, so the retrieval eval gate is
+  unaffected by construction; confirmed empirically by running `indexa eval` over
+  `fixtures/self-golden.json` with claims seeded in the store and the flag off then on, which
+  produced identical hit rate, MRR, recall, nDCG and precision (1.00 / 0.838 / 0.96 / 0.835 /
+  0.34), and by diffing a real `ask --no-synthesize` slice, where the block appears above the
+  excerpts and `[1]`/`[2]`/`[3]` stay unshifted.
+  `QaConfig::from_retrieval` became `QaConfig::from_config` and now takes the whole `Config`: the
+  Q&A pipeline reads `[memory]` as well as `[retrieval]`, and a second constructor call would
+  have been exactly the per-surface divergence that one-constructor rule exists to prevent.
+
+### Added
+
 - **`indexa memory` — record and query durable claims.** The operator surface over the memory
   store: `add` · `list` · `show` · `search` · `verify` · `supersede` · `retire` · `expire` ·
   `decay` · `reflect` · `adopt-annotations`.

@@ -401,12 +401,28 @@ async fn retrieve_and_rerank(
         // for just the root one-liner. Always subtracted FROM the chunk budget, never added.
         // Gated on `search_query`, matching `want_clusters` above — the rewritten query is
         // what retrieval actually searched for, so intent detection should see the same text.
-        let overview_budget = if is_broad_intent(&search_query) {
-            cfg.context_budget * 35 / 100
+        // The memory block's share comes off the top, BEFORE the overview is sized — so
+        // enabling `[memory] retrieval` trades source bytes for claim bytes rather than growing
+        // the prompt. (`pack_context_clustered` counts both against the same chunk budget, so
+        // the total is capped either way; taking the share here is what makes the trade
+        // explicit rather than incidental.) Zero when memory is off, which is the default.
+        let memory_budget = if cfg.memory.retrieval {
+            cfg.context_budget * cfg.memory.budget_pct / 100
         } else {
-            300
+            0
+        };
+        let remaining = cfg.context_budget.saturating_sub(memory_budget);
+        let overview_budget = if is_broad_intent(&search_query) {
+            remaining * 35 / 100
+        } else {
+            300.min(remaining)
         };
         let overview = build_project_overview(&store, &hits, cfg.scope.as_deref(), overview_budget);
+        // Appended to the overview rather than passed separately: both are background context
+        // that `pack_context_clustered` prepends uncited, so threading a second parameter
+        // through every packer call site would add a signature without adding a distinction.
+        // Empty string when memory is off ⇒ `overview` is byte-identical to before.
+        let overview = append_memory_block(&store, cfg, &hits, &overview, memory_budget);
         let emb_map = if want_clusters && hits.len() >= 2 {
             let ids: Vec<i64> = hits.iter().map(|h| h.chunk_id).collect();
             store.embeddings_for_chunks(&ids).unwrap_or_default()
@@ -444,6 +460,35 @@ async fn retrieve_and_rerank(
         Vec::new()
     };
     Ok((hits, overview, clusters))
+}
+
+/// Append the `RECORDED MEMORY` block to a project-overview string, separated by a blank line.
+///
+/// Returns `overview` unchanged when the block is empty — which it always is with `[memory]
+/// retrieval = false`, the default. That identity is what
+/// `prompt_is_byte_identical_with_memory_off` pins.
+pub(crate) fn append_memory_block(
+    store: &Store,
+    cfg: &QaConfig,
+    hits: &[SearchHit],
+    overview: &str,
+    budget: usize,
+) -> String {
+    let block = super::memory_block::build_memory_block(store, &cfg.memory, hits, budget);
+    if block.is_empty() {
+        return overview.to_owned();
+    }
+    if overview.is_empty() {
+        return block;
+    }
+    let mut out = String::with_capacity(overview.len() + block.len() + 2);
+    out.push_str(overview);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(&block);
+    out
 }
 
 /// Optionally fill each multi-member cluster's `summary` with a one-line theme via a bounded local

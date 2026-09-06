@@ -240,13 +240,23 @@ async fn agentic_retrieve(
     // Build project overview from the merged pool — same logic as retrieve_and_rerank.
     // Open a fresh Store; the borrow is dropped before returning so the future stays Send.
     let overview = {
-        let overview_budget = if is_broad_intent(question) {
-            cfg.context_budget * 35 / 100
+        // Same budget split as the one-shot path: the memory block's share comes off the top
+        // before the overview is sized, so the two surfaces cannot drift on what a prompt
+        // contains. Zero when `[memory] retrieval` is off, which is the default.
+        let memory_budget = if cfg.memory.retrieval {
+            cfg.context_budget * cfg.memory.budget_pct / 100
         } else {
-            300
+            0
+        };
+        let remaining = cfg.context_budget.saturating_sub(memory_budget);
+        let overview_budget = if is_broad_intent(question) {
+            remaining * 35 / 100
+        } else {
+            300.min(remaining)
         };
         let store = Store::open(db_path)?;
-        build_project_overview(&store, &pool, cfg.scope.as_deref(), overview_budget)
+        let overview = build_project_overview(&store, &pool, cfg.scope.as_deref(), overview_budget);
+        super::synthesize::append_memory_block(&store, cfg, &pool, &overview, memory_budget)
     };
 
     // Optional cross-encoder rerank of the merged pool, same call shape as the one-shot
