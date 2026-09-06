@@ -176,20 +176,31 @@ Query your desktop context store from your phone.
 Open the platform to third-party extensions.
 
 - Stable plugin API for custom parsers, AI adapters, and insight modules
-- Plugin manifest format and discovery
-- First-party plugin: browser history indexer (opt-in)
+- Plugin manifest format and discovery (`indexa plugin list` / `plugin info`, with
+  `--refresh` to fetch the curated directory off `main` rather than the embedded copy)
+
+*Considered, not built: a first-party browser-history indexer.* It was listed here as shipped
+for a while and never was — no code ever backed it. The plugin SDK is a **compile-time** Rust
+extension point (you depend on a parser crate from your own binary and call
+`Registry::register`), so a first-party plugin would ship as a separate crate, not inside the
+stock `indexa` binary. The directory currently lists no third-party crates.
 
 ---
 
-## Local multimodal understanding  *(headline differentiator)*
+## Local multimodal understanding  *(shipped — v0.16.0; headline differentiator)*
 
-Today Indexa stores **metadata** for images, audio, and video (EXIF, ffprobe). This milestone makes their
-**content** searchable — fully offline, via local vision/audio models. Competing graph/RAG tools that
-"understand" media call a cloud API; Indexa does it on your machine.
+Indexa used to store only **metadata** for images, audio, and video (EXIF, ffprobe). Their
+**content** is now searchable — fully offline, via local vision/audio models. Competing graph/RAG
+tools that "understand" media call a cloud API; Indexa does it on your machine. Every part of this
+is opt-in and off by default; `indexa multimodal` reports what's configured and what's missing.
 
-- **Images** — caption with a local vision model (Ollama); the caption becomes a searchable chunk
-- **Audio** — local transcription → searchable chunks
-- **Video** — sample frames → caption; optional transcript *(captioning shipped — v0.16.0)*
+- **Images** *(shipped)* — caption with a local Ollama vision model (`[parsers.image] caption`,
+  defaults to `gemma3`); the caption becomes a searchable chunk
+- **Audio** *(shipped)* — local transcription → searchable chunks (`[parsers.audio] transcribe`,
+  via a whisper.cpp-style CLI you install; nothing is auto-downloaded)
+- **Video** *(frame captioning shipped)* — sample frames with ffmpeg → caption
+  (`[parsers.video] caption`). A separate audio-track transcript for video is still not built:
+  extract the audio track first and index that.
 - Opt-in per region; goes through the same parse → embed → store pipeline and the resource watchdog
 - Default vision/audio models follow the project's model policy (non-Chinese defaults; user-configurable)
 
