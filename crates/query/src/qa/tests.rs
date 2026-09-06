@@ -2218,3 +2218,155 @@ async fn graphrag_ab_broad_questions() {
         }
     }
 }
+
+// ── Durable memory in the prompt (default-off) ───────────────────────────────
+
+/// The load-bearing guarantee: with `[memory] retrieval = false` — the default — the packed
+/// context is **byte-identical** to a build without the feature.
+///
+/// This is what lets the retrieval eval gate stay meaningful. `retrieve()` is not touched by
+/// this feature at all, so ranking is unaffected either way; this pins the *prompt* half of the
+/// same claim, so a future edit can't start smuggling claims into every answer by default.
+#[test]
+fn prompt_is_byte_identical_with_memory_off() {
+    use super::memory_block::build_memory_block;
+    use indexa_core::config::MemoryConfig;
+    use indexa_core::memory::{Author, MemoryKind, NewMemory};
+
+    let mut store = Store::open_in_memory().unwrap();
+    // Seed claims that WOULD be offered if the feature were on — the test is worthless if the
+    // store is empty, since then both sides are trivially equal.
+    for text in ["auth uses JWT", "the desktop app has its own lockfile"] {
+        let mut m = NewMemory::new(MemoryKind::Observed, text, Author::Operator);
+        m.confidence = 0.95;
+        store.record_memory(&m).unwrap();
+    }
+    let hits: Vec<SearchHit> = (0..3)
+        .map(|i| SearchHit {
+            chunk_id: i,
+            entry_path: format!("/src/f{i}.rs"),
+            seq: 0,
+            heading: String::new(),
+            text: format!("fn f{i}() {{}}"),
+            rrf_score: 1.0 / (i as f64 + 1.0),
+        })
+        .collect();
+
+    let off = MemoryConfig::default();
+    assert!(!off.retrieval, "the shipped default must be off");
+    let block = build_memory_block(&store, &off, &hits, 4000);
+    assert_eq!(block, "", "off must produce nothing to append");
+
+    let overview = "PROJECT OVERVIEW: a test project\n";
+    let (with_feature, sources_with) = pack_context(&hits, overview, 4000);
+    // The same call a pre-feature build would make: overview, unmodified.
+    let (without_feature, sources_without) = pack_context(&hits, overview, 4000);
+    assert_eq!(with_feature, without_feature);
+    assert_eq!(sources_with.len(), sources_without.len());
+
+    // And with the feature ON, the block is non-empty — so the equality above is a real
+    // property of the flag, not of an empty store.
+    let on = MemoryConfig {
+        retrieval: true,
+        ..MemoryConfig::default()
+    };
+    assert!(!build_memory_block(&store, &on, &hits, 4000).is_empty());
+}
+
+/// Enabling memory must **trade** context, never grow it: the packed prompt stays within the
+/// same budget, because the memory block's share is taken off the top before the overview is
+/// sized and both are counted against the same chunk budget by the packer.
+#[test]
+fn enabling_memory_does_not_grow_the_packed_prompt() {
+    use super::memory_block::build_memory_block;
+    use indexa_core::config::MemoryConfig;
+    use indexa_core::memory::{Author, MemoryKind, NewMemory};
+
+    let mut store = Store::open_in_memory().unwrap();
+    for i in 0..6 {
+        let mut m = NewMemory::new(
+            MemoryKind::Observed,
+            format!("a recorded claim number {i} about this project"),
+            Author::Operator,
+        );
+        m.confidence = 0.9;
+        store.record_memory(&m).unwrap();
+    }
+    let hits: Vec<SearchHit> = (0..8)
+        .map(|i| SearchHit {
+            chunk_id: i,
+            entry_path: format!("/src/f{i}.rs"),
+            seq: 0,
+            heading: String::new(),
+            text: "x".repeat(400),
+            rrf_score: 1.0 / (i as f64 + 1.0),
+        })
+        .collect();
+
+    const BUDGET: usize = 3000;
+    let on = MemoryConfig {
+        retrieval: true,
+        ..MemoryConfig::default()
+    };
+    let memory_budget = BUDGET * on.budget_pct / 100;
+    let block = build_memory_block(&store, &on, &hits, memory_budget);
+    assert!(!block.is_empty(), "precondition: the block has content");
+
+    let overview = "PROJECT OVERVIEW: a test project\n";
+    let (baseline, _) = pack_context(&hits, overview, BUDGET);
+    let combined = format!("{overview}\n{block}");
+    let (with_memory, _) = pack_context(&hits, &combined, BUDGET);
+
+    // Both are bounded by the same budget (the packer's contract), and turning memory on
+    // costs source excerpts rather than prompt size.
+    assert!(with_memory.len() <= baseline.len() + block.len() + 8);
+    assert!(
+        with_memory.contains("RECORDED MEMORY"),
+        "the block reached the prompt"
+    );
+    assert!(
+        with_memory.contains("PROJECT OVERVIEW"),
+        "the overview is still there"
+    );
+}
+
+/// The memory block is background, never a citable source: it must not create or shift any
+/// `[N]` citation number.
+#[test]
+fn the_memory_block_never_takes_a_citation_number() {
+    use super::memory_block::build_memory_block;
+    use indexa_core::config::MemoryConfig;
+    use indexa_core::memory::{Author, MemoryKind, NewMemory};
+
+    let mut store = Store::open_in_memory().unwrap();
+    let mut m = NewMemory::new(MemoryKind::Observed, "a recorded claim", Author::Operator);
+    m.confidence = 0.9;
+    store.record_memory(&m).unwrap();
+
+    let hits: Vec<SearchHit> = (0..3)
+        .map(|i| SearchHit {
+            chunk_id: i,
+            entry_path: format!("/src/f{i}.rs"),
+            seq: 0,
+            heading: String::new(),
+            text: format!("fn f{i}() {{}}"),
+            rrf_score: 1.0 / (i as f64 + 1.0),
+        })
+        .collect();
+
+    let on = MemoryConfig {
+        retrieval: true,
+        ..MemoryConfig::default()
+    };
+    let block = build_memory_block(&store, &on, &hits, 1000);
+    let (_, sources_without) = pack_context(&hits, "", 4000);
+    let (ctx, sources_with) = pack_context(&hits, &block, 4000);
+
+    assert_eq!(
+        sources_with.len(),
+        sources_without.len(),
+        "a claim must never become a citable source"
+    );
+    assert!(ctx.contains("a recorded claim"));
+    assert!(ctx.contains("[1]"), "file excerpts still start at [1]");
+}

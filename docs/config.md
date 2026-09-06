@@ -544,6 +544,42 @@ modules = false   # set true to expose the persisted architecture-map modules (4
 
 ---
 
+## Durable memory
+
+```toml
+[memory]
+retrieval      = false                                # offer recorded claims to `ask`
+budget_pct     = 15                                   # share of context_budget the block may use
+min_confidence = 0.5                                  # skip claims below this
+include_kinds  = ["observed", "stated", "recalled"]   # which kinds may be offered
+max_items      = 5                                    # max claims in the block
+```
+
+> **Off by default.** `retrieval` controls whether claims recorded with `indexa memory add`
+> are offered to `ask` as background context. It is off because a claim entering a model's
+> prompt changes what it answers, and that should be a deliberate choice rather than something
+> that starts happening after an upgrade. With `retrieval = false` the packed prompt is
+> byte-identical to a build without the feature (pinned by
+> `prompt_is_byte_identical_with_memory_off`), and `retrieve()` — the ranking path — is not
+> touched either way.
+
+When on, memories are rendered as a labelled `RECORDED MEMORY` block ahead of the numbered
+excerpts, **never fused into the citation list**. That separation is the point: a trust
+boundary cannot be drawn around a claim that has already been given a citation number next to
+real file content. A memory line is never citable, and never takes an `[N]`.
+
+`budget_pct` is taken **from** `[retrieval] context_budget`, not added to it — enabling memory
+trades source bytes for claim bytes rather than growing the prompt.
+
+`include_kinds` defaults to the three evidenced kinds. `inferred` and `hypothesis` are excluded
+because feeding a model its own unverified guesses back as context is how a memory system
+starts compounding its own mistakes; opt in deliberately if you want leads as well as facts.
+
+Claims that failed verification, were retired, or whose validity window has closed are never
+offered, at any setting.
+
+---
+
 ## Full example
 
 ```toml

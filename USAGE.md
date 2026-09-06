@@ -150,6 +150,44 @@ Global flag (all commands): `--config <PATH>` overrides the default config locat
 | `classify` | `--paths`, `--category <cat>` | Suggest a semantic category (work/personal/archive/media/code/system) per folder. |
 | `report [questions…]` | `--saved NAME`, `--format <md\|xml>`, `--output FILE` | Run several `ask` questions and render one cited document (TOC + answers + sources). |
 | `insights <largest\|languages\|duplicates\|stale\|diff>` | `--json`, `--threshold`, `--days` | Analytical reports computed directly from the index — no AI calls. |
+| `memory <add\|list\|show\|search\|verify\|supersede\|retire\|expire\|decay\|reflect\|adopt-annotations>` | `--kind`, `--subject`, `--confidence`, `--source`, `--verify-cmd`, `--json` | Durable typed claims kept across sessions — see §4.1. |
+
+### 4.1 Memory — claims, not content
+
+The index holds what your files *say*. Memory holds what you or an agent have *concluded* —
+kept across sessions, with a source and an expiry.
+
+```bash
+indexa memory add "auth uses JWT, not sessions" --kind observed \
+  --subject src/auth.rs --source src/auth.rs --confidence 0.9
+indexa memory list
+indexa memory verify 1          # did the source change underneath the claim?
+indexa memory reflect           # contradictions, and sources that moved on
+```
+
+Every claim carries a **kind**, and the kind is the point — it stops "the suite passes on
+aarch64" and "I think that's why the test is flaky" from being read as the same sort of thing:
+
+| Kind | Means |
+|---|---|
+| `observed` | Witnessed in code, a test run, a file, or a tool's output. |
+| `stated` | Asserted by you or a project doc — authoritative, but unchecked. |
+| `inferred` | Reasoned out. The first thing to age when nothing confirms it. |
+| `recalled` | Carried forward from an earlier session or transcript. |
+| `hypothesis` | A guess worth writing down, never to be presented as fact. |
+
+Three rules worth knowing:
+
+- **An agent's claim is capped at 0.75 confidence.** Only you, or a passing verification, lifts
+  a claim above that. `--as-agent` opts into the cap from the CLI; the MCP surface is capped
+  always.
+- **`--verify-cmd` is stored and printed, never run** — except by `indexa memory verify --run`,
+  which you invoke by name. Memories are portable, so a claim from someone else's exported pack
+  is untrusted input.
+- **`decay` never deletes, and only ages unverified `inferred`/`hypothesis`.** An observation
+  doesn't become less true because time passed. It runs when you run it — never on a schedule.
+
+Nothing here reaches retrieval yet: `ask` does not read memories in this release.
 
 > **Why both `report` and `insights`?** They answer different questions with different engines.
 > `report` is a multi-question **ask** digest — retrieval + LLM synthesis rendered as one citable document (an onboarding / design-doc generator).

@@ -541,7 +541,7 @@ impl IndexaMcp {
         let question = predicates.as_ref().map_or(question, |p| p.text.clone());
         let predicate_path = predicates.and_then(|p| p.path);
         // Config-derived defaults from `[retrieval]`, then per-request overrides.
-        let mut cfg = QaConfig::from_retrieval(&self.config.retrieval);
+        let mut cfg = QaConfig::from_config(&self.config);
         if let Some(k) = top_k {
             cfg.top_k = k.min(100);
         }

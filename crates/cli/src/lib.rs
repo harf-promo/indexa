@@ -240,6 +240,28 @@ pub enum Commands {
         auto_reindex: bool,
     },
 
+    /// Record and query durable memory — typed claims with a source, a confidence and an
+    /// expiry, kept across sessions.
+    #[command(after_help = "Examples:
+  indexa memory add \"the web UI has no bundler\" --kind observed --subject crates/web/src/lib.rs
+  indexa memory add \"the flake is a timing race\" --kind hypothesis --tag flaky
+  indexa memory list --kind observed
+  indexa memory search \"bundler\"
+  indexa memory verify 12 --run
+  indexa memory decay --older-than 90d --dry-run
+
+Kinds, most to least trusted:
+  observed    witnessed in code, a test run, a file or a tool's output
+  stated      asserted by you or by a project doc — authoritative, unchecked
+  inferred    reasoned out; the first thing to age when nothing confirms it
+  recalled    carried forward from an earlier session or transcript
+  hypothesis  a guess worth writing down, never to be presented as fact")]
+    #[command(display_order = 21)]
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
+
     /// Manage Context Packs — named, cross-directory context bundles.
     ///
     /// A Context Pack is a curated set of paths that form one topic ("Auth",
@@ -1050,6 +1072,147 @@ pub enum PluginAction {
     Info {
         /// Plugin name, from `indexa plugin list`.
         name: String,
+    },
+}
+
+/// Sub-commands for `indexa memory`.
+#[derive(clap::Subcommand, Debug)]
+pub enum MemoryAction {
+    /// Record a claim.
+    Add {
+        /// The claim itself, in plain language.
+        text: String,
+        /// How the claim is known: observed | stated | inferred | recalled | hypothesis.
+        /// Defaults to `stated` — you typed it, so it is an assertion, not an observation.
+        #[arg(long, short, default_value = "stated")]
+        kind: String,
+        /// What the claim is about: a path, a symbol, or a free-form topic key.
+        #[arg(long, short)]
+        subject: Option<String>,
+        /// Confidence, 0.0-1.0 (default 0.5). Only an operator may exceed 0.75.
+        #[arg(long, short)]
+        confidence: Option<f32>,
+        /// File the claim was drawn from. Its content is hashed now, so `verify` can later
+        /// tell whether the source has changed underneath the claim.
+        #[arg(long)]
+        source: Option<String>,
+        /// Command that re-checks this claim. Stored and printed; run only by
+        /// `indexa memory verify --run`, never automatically.
+        #[arg(long = "verify-cmd")]
+        verify_cmd: Option<String>,
+        /// Tag (repeatable).
+        #[arg(long, short)]
+        tag: Vec<String>,
+        /// Additional path this claim is relevant to (repeatable).
+        #[arg(long)]
+        path: Vec<String>,
+        /// Record as an agent would — capped at 0.75 confidence. Default is operator.
+        #[arg(long)]
+        as_agent: bool,
+        /// Print the new memory as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List active memories, most trusted first.
+    List {
+        /// Only this kind (repeatable).
+        #[arg(long, short)]
+        kind: Vec<String>,
+        /// Minimum confidence.
+        #[arg(long, default_value = "0.0")]
+        min_confidence: f32,
+        /// Maximum rows (default 50).
+        #[arg(long, short, default_value = "50")]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one memory in full, including its provenance and revision chain.
+    Show {
+        /// Memory id.
+        id: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Full-text search across claims and tags.
+    Search {
+        /// Words to look for.
+        query: String,
+        #[arg(long, short, default_value = "20")]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Re-check a claim: compare its source hash, and optionally run its verify command.
+    Verify {
+        /// Memory id.
+        id: i64,
+        /// Actually execute the stored verify command. Without this the command is only
+        /// printed — a memory can arrive from someone else's exported pack, so its command
+        /// string is untrusted input and is never run unless you ask for it by name.
+        #[arg(long)]
+        run: bool,
+        /// Seconds to allow the verify command (default 300).
+        #[arg(long, default_value = "300")]
+        timeout: u64,
+    },
+    /// Replace a claim with a corrected one, keeping the old row and the link between them.
+    Supersede {
+        /// The memory being replaced.
+        id: i64,
+        /// The corrected claim.
+        text: String,
+        #[arg(long, short)]
+        kind: Option<String>,
+        #[arg(long, short)]
+        confidence: Option<f32>,
+    },
+    /// Retire a memory: stop retrieving it, keep the record.
+    Retire {
+        /// Memory id.
+        id: i64,
+    },
+    /// Close a claim's validity window — it was true, and now is not.
+    Expire {
+        /// Memory id.
+        id: i64,
+        /// When it stopped being true (Unix seconds). Defaults to now.
+        #[arg(long)]
+        at: Option<i64>,
+    },
+    /// Conservatively age unverified inference and hypothesis.
+    ///
+    /// Operator-invoked only — Indexa never decays memory on its own. Only `inferred` and
+    /// `hypothesis` rows that were never verified are eligible; confidence is lowered to a
+    /// floor and the row is marked `aged`. Nothing is ever deleted.
+    Decay {
+        /// Only rows older than this (e.g. `90d`, `12h`). Default 90d.
+        #[arg(long = "older-than", default_value = "90d")]
+        older_than: String,
+        /// Multiply confidence by this (default 0.5).
+        #[arg(long, default_value = "0.5")]
+        factor: f32,
+        /// Report what would change without changing it.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Report contradictions and claims whose source has moved on.
+    ///
+    /// Never resolves anything on its own: a genuine conflict between two claims is a
+    /// judgment call, and silently picking one is how a memory store starts lying.
+    Reflect {
+        #[arg(long)]
+        json: bool,
+    },
+    /// One-shot import of existing `record_decision` ledger annotations as memories.
+    ///
+    /// Idempotent — an annotation already adopted is skipped. The ledger rows are never
+    /// modified.
+    #[command(name = "adopt-annotations")]
+    AdoptAnnotations {
+        /// Report what would be imported without importing it.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

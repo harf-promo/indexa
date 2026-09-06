@@ -7,7 +7,7 @@ use axum::{
     },
     Json,
 };
-use indexa_core::config::RetrievalConfig;
+use indexa_core::config::{Config, RetrievalConfig};
 use indexa_core::store::{AnnIndex, Store};
 use indexa_query::{AnswerChunk, AnswerImpact, PriorTurn, QaConfig};
 use std::convert::Infallible;
@@ -26,15 +26,15 @@ use crate::AppState;
 /// means "whole index", so it's filtered out (an empty prefix would otherwise match nothing
 /// meaningful and only adds a no-op LIKE).
 fn qa_config(state: &AppState, body: &AskRequest) -> QaConfig {
-    qa_config_from(&state.config.retrieval, body.scope.as_deref(), body.top_k)
+    qa_config_from(&state.config, body.scope.as_deref(), body.top_k)
 }
 
-/// Pure field mapping from the server's [`RetrievalConfig`] + the request scope to a
-/// [`QaConfig`]. Split out of [`qa_config`] (which only adds the `AppState` lookup) so the
-/// mapping and the scope normalization are unit-testable without building a full `AppState`.
+/// Pure field mapping from the server's [`Config`] + the request scope to a [`QaConfig`].
+/// Split out of [`qa_config`] (which only adds the `AppState` lookup) so the mapping and the
+/// scope normalization are unit-testable without building a full `AppState`.
 /// `top_k` overrides the server's retrieval breadth (capped at 100); `None` ⇒ the config default.
-fn qa_config_from(r: &RetrievalConfig, scope: Option<&str>, top_k: Option<usize>) -> QaConfig {
-    let mut cfg = QaConfig::from_retrieval(r);
+fn qa_config_from(c: &Config, scope: Option<&str>, top_k: Option<usize>) -> QaConfig {
+    let mut cfg = QaConfig::from_config(c);
     if let Some(k) = top_k {
         cfg.top_k = k.min(100);
     }
@@ -584,6 +584,7 @@ fn into_ask_confidence(c: Option<&indexa_query::ConfidenceReport>) -> Option<Ask
 #[cfg(test)]
 mod tests {
     use super::{agentic_from, qa_config_from};
+    use indexa_core::config::Config;
     use indexa_core::config::RetrievalConfig;
 
     #[test]
@@ -621,9 +622,41 @@ mod tests {
         assert!(!agentic_from(&off, None), "None ⇒ server default (off)");
     }
 
+    /// Wrap a `RetrievalConfig` in an otherwise-default `Config` — `qa_config_from` maps the
+    /// whole config now, because the Q&A pipeline also reads `[memory]`.
+    fn cfg_with(retrieval: RetrievalConfig) -> Config {
+        Config {
+            retrieval,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn qa_config_carries_the_memory_settings_and_they_default_off() {
+        // The web surface must not be the one that silently enables claims in prompts: this
+        // pins that the server's `[memory]` block reaches QaConfig, and that its default is off.
+        let cfg = qa_config_from(&Config::default(), None, None);
+        assert!(!cfg.memory.retrieval, "memory retrieval defaults to off");
+
+        let on = Config {
+            memory: indexa_core::config::MemoryConfig {
+                retrieval: true,
+                max_items: 3,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let cfg = qa_config_from(&on, None, None);
+        assert!(
+            cfg.memory.retrieval,
+            "an enabled server setting reaches QaConfig"
+        );
+        assert_eq!(cfg.memory.max_items, 3);
+    }
+
     #[test]
     fn qa_config_blank_scope_becomes_none() {
-        let r = RetrievalConfig::default();
+        let r = cfg_with(RetrievalConfig::default());
         // Empty string and whitespace both mean "whole index" → no scope filter.
         assert!(qa_config_from(&r, None, None).scope.is_none());
         assert!(qa_config_from(&r, Some(""), None).scope.is_none());
@@ -639,14 +672,14 @@ mod tests {
 
     #[test]
     fn qa_config_carries_server_retrieval_settings() {
-        let r = RetrievalConfig {
+        let r = cfg_with(RetrievalConfig {
             top_k: 17,
             context_budget: 1234,
             recency_boost: true,  // maps to QaConfig.use_recency_weight
             agentic_max_steps: 4, // maps to QaConfig.max_steps
             mmr_lambda: 0.25,
             ..Default::default()
-        };
+        });
         let cfg = qa_config_from(&r, None, None);
         assert_eq!(cfg.top_k, 17);
         assert_eq!(cfg.context_budget, 1234);
@@ -660,10 +693,10 @@ mod tests {
 
     #[test]
     fn qa_config_top_k_override_caps_and_falls_back() {
-        let r = RetrievalConfig {
+        let r = cfg_with(RetrievalConfig {
             top_k: 8,
             ..Default::default()
-        };
+        });
         // None ⇒ server default.
         assert_eq!(qa_config_from(&r, None, None).top_k, 8);
         // Explicit override wins.

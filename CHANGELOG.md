@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Recorded memories can be offered to `ask` — opt-in, `[memory] retrieval = false` by default.**
+  When enabled, live claims are rendered as a labelled `RECORDED MEMORY` block ahead of the
+  numbered excerpts, each line carrying its kind, confidence, whether it was ever checked, and
+  where it came from, under a header telling the model these are *not* retrieved file content and
+  must never be cited. They are **never fused into the citation list** — that separation is the
+  whole point, because a trust boundary cannot be drawn around a claim that has already been
+  given a citation number next to real source. Claims that failed verification, were retired, or
+  whose validity window has closed are never offered at any setting; `inferred` and `hypothesis`
+  are excluded by default, since feeding a model its own unverified guesses back as context is
+  how a memory system compounds its own mistakes.
+  The block's byte budget comes **out of** `[retrieval] context_budget` before the project
+  overview is sized, so enabling it trades source bytes for claim bytes rather than growing the
+  prompt. `retrieve()` — the ranking path — is not touched at all, so the retrieval eval gate is
+  unaffected by construction; confirmed empirically by running `indexa eval` over
+  `fixtures/self-golden.json` with claims seeded in the store and the flag off then on, which
+  produced identical hit rate, MRR, recall, nDCG and precision (1.00 / 0.838 / 0.96 / 0.835 /
+  0.34), and by diffing a real `ask --no-synthesize` slice, where the block appears above the
+  excerpts and `[1]`/`[2]`/`[3]` stay unshifted.
+  `QaConfig::from_retrieval` became `QaConfig::from_config` and now takes the whole `Config`: the
+  Q&A pipeline reads `[memory]` as well as `[retrieval]`, and a second constructor call would
+  have been exactly the per-surface divergence that one-constructor rule exists to prevent.
+
+### Added
+
+- **`indexa memory` — record and query durable claims.** The operator surface over the memory
+  store: `add` · `list` · `show` · `search` · `verify` · `supersede` · `retire` · `expire` ·
+  `decay` · `reflect` · `adopt-annotations`.
+  `verify` re-hashes a claim's source file and compares it against the hash taken when the claim
+  was made — unchanged marks it verified, changed marks it failed and drops it from retrieval
+  with a `supersede` hint, and a *missing* source is explicitly **not** a failure, because a
+  claim about a deleted file ("we removed X because Y") is often the most valuable thing in the
+  store. `supersede` re-hashes the source at replacement time rather than inheriting a stale
+  hash, so the corrected claim is immediately verifiable. `reflect` reports two things and
+  resolves neither: subjects carrying both a trusted and a speculative claim, and claims whose
+  source file has moved on — which of two conflicting claims is right is a judgment call, and
+  silently picking one is how a memory store starts lying. `adopt-annotations` is a one-shot,
+  idempotent import of existing `record_decision` ledger annotations, recorded at 0.6 confidence
+  so adopting one doesn't launder an unchecked agent note into a confident claim; the ledger
+  rows are never modified.
+  The CLI defaults to **operator** authorship, so a claim you type may carry full confidence;
+  `--as-agent` opts into the 0.75 ceiling, and the write path *says* when it clamped rather than
+  quietly lowering the number. `--verify-cmd` is stored and printed but only ever executed by
+  `memory verify --run`, bounded by a timeout — a memory can arrive from an imported pack, so
+  its command string is untrusted input. `decay` is operator-invoked, ages only unverified
+  `inferred`/`hypothesis`, and never deletes.
+  `ask` does not read memories in this release — retrieval integration is separate and ships
+  default-off.
+
+### Added
+
+- **Typed durable memory — the storage layer.** Indexa can now hold *claims*, not just indexed
+  content: a new `memories` table plus `crate::memory`'s domain types. Every memory carries a
+  **kind** (`observed` · `stated` · `inferred` · `recalled` · `hypothesis`), a confidence, the
+  source path and the SHA-256 of that source at the time the claim was made, an optional command
+  that re-checks it, a verification status, free-form tags, a revision chain, and a **bitemporal**
+  validity window — `valid_from`/`valid_to` record when the *claim* was true, separately from
+  `created_at`/`updated_at`, which record when Indexa was told. The taxonomy is the point: it
+  stops "the suite passes on aarch64" and "I think this is why the test is flaky" from being
+  retrieved as though they were the same sort of claim.
+  This PR ships storage only — no CLI, MCP or web surface yet, and nothing reads memories into
+  retrieval.
+  Four contracts are enforced in code and pinned by tests: **decay** touches only *unverified*
+  `inferred`/`hypothesis` rows, lowers confidence to a floor and marks them `aged`, **never
+  deletes**, and never runs on a schedule; an **agent-authored** memory is capped at 0.75
+  confidence (only a human or a passing verification lifts a claim above that), and the write
+  path reports the clamp rather than applying it silently; `verify_cmd` is **stored and printed,
+  never executed** by this layer or the MCP surface — memories are meant to travel in Context
+  Packs, so an index that shelled out stored strings on read would turn "import a colleague's
+  pack" into remote code execution; and memories are **not orphan-pruned**, because a note
+  explaining why a file was removed is at its most valuable exactly when that file is gone.
+  Deliberately a separate table from the Decision Ledger rather than a new `decision_type` —
+  the ledger's schema is structurally a Q&A (one open row per subject, a crash-safe projection
+  contract, GC of resolved rows, a candidate list), and an agent that learned "memory lives in
+  the ledger" would start *answering* memories as if they were open questions.
+  `SCHEMA_VERSION` 10 → 11; existing databases migrate in place on the next open.
+
 ### Fixed
 
 - **Four stale or unbacked product claims in the docs, and a guard so one of them can't recur.**
@@ -26,7 +104,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `competitive_snapshot_stamp_tracks_the_workspace_minor_version` asserts that stamp matches the
   workspace version at minor precision — a patch release won't force a competitive re-read, but a
   minor bump means features shipped and the page is worth re-checking.
-
 ### Fixed
 
 - **Two web handlers no longer stall the entire local server while they run.** The web server

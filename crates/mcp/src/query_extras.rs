@@ -78,7 +78,7 @@ impl IndexaMcp {
         } = params.0;
         // Same config-derived defaults as MCP `ask` (via the shared constructor), so
         // `explain_retrieval` can't drift from what `ask` actually runs.
-        let mut cfg = QaConfig::from_retrieval(&self.config.retrieval);
+        let mut cfg = QaConfig::from_config(&self.config);
         if let Some(m) = mode.as_deref() {
             cfg.mode = parse_hybrid_mode(Some(m))?;
         }

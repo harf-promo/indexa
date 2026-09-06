@@ -39,7 +39,7 @@ pub(crate) async fn cmd_report(
 
     let embedder = build_embedder(cfg, None)?;
     let llm = build_llm(cfg, None)?;
-    let qa_cfg = QaConfig::from_retrieval(&cfg.retrieval);
+    let qa_cfg = QaConfig::from_config(cfg);
 
     let mut answers: Vec<Answer> = Vec::with_capacity(qs.len());
     for (i, q) in qs.iter().enumerate() {

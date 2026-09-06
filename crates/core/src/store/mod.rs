@@ -13,6 +13,7 @@
 //! - [`packs`] — Context Pack CRUD (v0.9).
 //! - [`weights`] — importance weight CRUD + search boost (v0.8).
 //! - [`insights`] — duplicate/stale/diff analysis (v0.10).
+//! - [`memories`] — typed durable memory (see `crate::memory` for the domain types).
 //! - [`usage`] — token-savings telemetry (v0.23; the counterfactual definition lives there).
 //! - [`symbols`] — code symbol (kind + line range) writes and queries (2.1).
 //! - [`note_anchors`] — note-to-code anchor writes and queries (2.6).
@@ -35,6 +36,7 @@ mod dir_apps;
 mod edges;
 mod entries;
 mod insights;
+mod memories;
 mod modules;
 mod note_anchors;
 mod pack_edges;
@@ -68,6 +70,7 @@ pub use edges::{
 };
 pub use entries::CoverageEntry;
 pub use insights::{DuplicateCluster, LanguageStat, LargestEntry, StaleEntry, WeeklyDiff};
+pub use memories::{AdoptableAnnotation, MemoryCounts};
 pub use modules::{cluster_with_directory_priors, ComputedModule, GraphModule};
 pub use note_anchors::NoteAnchor;
 pub use prune::OrphanCounts;

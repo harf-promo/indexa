@@ -25,6 +25,10 @@ serde_json = { workspace = true }
 shellexpand = "3"
 sha2 = { workspace = true }
 htmd = { workspace = true }
+# Bounds a `memory verify --run` subprocess so a hung verify command can't wedge the CLI.
+# Already in the tree (crates/parsers' preprocessor hook uses it) — no new crate enters the
+# dependency graph, only a new edge to it.
+wait-timeout = { workspace = true }
 indexa-http-util = { path = "../../crates/http-util" }
 indexa-cli = { path = "../../crates/cli" }
 indexa-core = { path = "../../crates/core" }

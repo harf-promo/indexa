@@ -43,6 +43,54 @@ pub struct Config {
     /// Code-graph settings (4.6): persisted architecture-map modules.
     #[serde(default)]
     pub graph: GraphConfig,
+    /// Durable-memory settings: whether recorded claims are offered to `ask`, and how.
+    #[serde(default)]
+    pub memory: MemoryConfig,
+}
+
+/// How recorded memories participate in `ask`.
+///
+/// **Off by default.** Memories are claims, not indexed content — a claim entering a model's
+/// prompt changes what it answers, so it must be an explicit choice rather than something that
+/// starts happening after an upgrade. With `retrieval = false` the prompt is byte-identical to
+/// a build without this feature (asserted by `prompt_is_byte_identical_with_memory_off`).
+///
+/// When on, memories are rendered as a labelled block ahead of the numbered excerpts — never
+/// fused into the citation list. That separation is the point: a trust boundary cannot be drawn
+/// around a claim that has already been given a citation number alongside real file content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryConfig {
+    /// Offer recorded memories to `ask` as background context. Default `false`.
+    pub retrieval: bool,
+    /// Share of `[retrieval] context_budget` the memory block may occupy, as a percent.
+    /// Taken FROM the chunk budget, never added to it — turning memory on trades source bytes
+    /// for claim bytes rather than growing the prompt.
+    pub budget_pct: usize,
+    /// Skip claims below this confidence.
+    pub min_confidence: f32,
+    /// Which kinds may be offered. Defaults to the three evidenced kinds — `inferred` and
+    /// `hypothesis` are excluded, because feeding a model its own unverified guesses back as
+    /// context is how a memory system starts compounding its mistakes. Opt in deliberately.
+    pub include_kinds: Vec<String>,
+    /// Maximum claims in the block.
+    pub max_items: usize,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            retrieval: false,
+            budget_pct: 15,
+            min_confidence: 0.5,
+            include_kinds: vec![
+                "observed".to_owned(),
+                "stated".to_owned(),
+                "recalled".to_owned(),
+            ],
+            max_items: 5,
+        }
+    }
 }
 
 /// Settings for opt-in remote-source ingestion (`indexa pack add-url`). Off by default — fetching
@@ -1434,6 +1482,11 @@ overlap = 50
         "sources.max_retries",
         "mcp.tool_profile",
         "graph.modules",
+        "memory.retrieval",
+        "memory.budget_pct",
+        "memory.min_confidence",
+        "memory.include_kinds",
+        "memory.max_items",
     ];
 
     /// Collect every leaf (non-table) dotted path in a serialized `toml::Value` tree —

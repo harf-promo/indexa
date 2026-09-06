@@ -8,7 +8,7 @@ use anyhow::Result;
 ///
 /// **INVARIANT: bump this whenever the DDL or any migration in `init_schema` changes** — otherwise a
 /// DB stamped at the old value would skip the new migration and silently miss a column/table.
-pub(super) const SCHEMA_VERSION: i64 = 10;
+pub(super) const SCHEMA_VERSION: i64 = 11;
 
 /// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
 /// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
@@ -520,6 +520,72 @@ impl Store {
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_decision_paths_path ON decision_paths(path);
 
+            -- Typed durable memory (see `crate::memory` for why this is NOT the decisions
+            -- table). Every enum-shaped column — kind, author, verify_status, status — is
+            -- validated in Rust with NO DB CHECK, following the same house rule the `surface`
+            -- column states outright: widening a CHECK costs a copy-table migration, and this
+            -- taxonomy is the most likely thing here to grow a sixth value.
+            --
+            -- Bitemporal: valid_from/valid_to are when the CLAIM was true; created_at/updated_at
+            -- are when Indexa was told. A claim that stopped being true is closed with valid_to
+            -- rather than deleted, so a question about what we believed last month stays answerable.
+            --
+            -- Unlike chunks/summaries, memory rows are NOT orphan-pruned when their entry goes
+            -- away: a note saying why a file was deleted is the normal case, and losing it the moment
+            -- that file goes would make the store useless for exactly the question it exists to answer.
+            -- Deliberately absent from prune.rs's orphan_rows_for.
+            CREATE TABLE IF NOT EXISTS memories (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind               TEXT NOT NULL,
+                text               TEXT NOT NULL,
+                text_sha256        TEXT NOT NULL,
+                subject            TEXT NOT NULL DEFAULT '',
+                confidence         REAL NOT NULL DEFAULT 0.5,
+                author             TEXT NOT NULL DEFAULT 'agent',
+                source_path        TEXT,
+                source_sha256      TEXT,
+                patch_id           TEXT,
+                source_decision_id INTEGER REFERENCES decisions(id),
+                verify_cmd         TEXT,
+                verify_status      TEXT NOT NULL DEFAULT 'unverified',
+                verified_at        INTEGER,
+                tags               TEXT NOT NULL DEFAULT '[]',
+                status             TEXT NOT NULL DEFAULT 'active',
+                parent_id          INTEGER REFERENCES memories(id),
+                superseded_by      INTEGER REFERENCES memories(id),
+                valid_from         INTEGER NOT NULL DEFAULT (unixepoch()),
+                valid_to           INTEGER,
+                created_at         INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_at         INTEGER NOT NULL DEFAULT (unixepoch()),
+                embedding          BLOB,
+                embed_model        TEXT
+            );
+            -- Dedup among ACTIVE rows only: re-recording the same claim returns the existing
+            -- id, but a retired row must not block re-learning something later.
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_dedup
+                ON memories(text_sha256) WHERE status='active';
+            CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(subject);
+            CREATE INDEX IF NOT EXISTS idx_memories_rank
+                ON memories(status, confidence DESC);
+            CREATE INDEX IF NOT EXISTS idx_memories_verify
+                ON memories(verify_status) WHERE status='active';
+
+            -- Paths a memory is relevant to, beyond its own subject — the join that surfaces
+            -- memories for the files a question is actually about.
+            CREATE TABLE IF NOT EXISTS memory_paths (
+                memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+                path      TEXT NOT NULL,
+                PRIMARY KEY (memory_id, path)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_memory_paths_path ON memory_paths(path);
+
+            -- Plain (non-external-content) FTS5, mirroring chunks_fts: the same manual-sync
+            -- discipline already used there, so there is one pattern in this codebase rather
+            -- than two. memory_id is stored as an unindexed column for the join back.
+            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                text, tags, memory_id UNINDEXED
+            );
+
             -- Insights (v0.10): first_indexed_at is populated separately via migration.
             ",
         )?;
@@ -864,7 +930,10 @@ impl Store {
         // answer is standing user intent; vanished subjects are expired by the sweep,
         // not deleted — see store::decisions. `ask_sessions`/`conversation_turns` are
         // exempt too: a conversation is standing user state, not entry-keyed — see
-        // store::sessions.)
+        // store::sessions. `memories`/`memory_paths` are exempt for the strongest reason of
+        // the four: a memory explaining why a file was removed is at its most valuable
+        // exactly when that file is gone — see store::memories, and the regression test
+        // `deleting_an_entry_does_not_delete_its_memories`.)
 
         // Stamp the schema version LAST — only after all DDL + migrations succeeded — so a future
         // open can take the fast path above. A failure before here leaves user_version unchanged,
