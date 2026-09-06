@@ -28,6 +28,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holds the shared lock for the duration of both requests and asserts each still answers (pre-fix
   both block until the 5s timeout), and `all_coverage_entries_grouped_join_matches_the_correlated_form`
   compares the new query against the old one row-for-row on a seeded index.
+- **`indexa watch` no longer degrades search silently.** When the embedder was unreachable
+  mid-watch, `embedder.embed(...).await.ok()` threw the error away and stored the chunk with no
+  vector — so that file quietly dropped out of dense retrieval, findable only by BM25, with no
+  log line anywhere. The web server's identical code path
+  (`crates/web/src/handlers/watch.rs`) has warned on this for a while, with the comment *"a
+  silently-unembedded chunk degrades search invisibly"*; the CLI path had diverged. Failing open
+  is unchanged and correct — the chunk is still stored — but each failure now warns with the path
+  and chunk index, and the per-file `re-indexed:` line reports how many chunks went in without
+  embeddings and what to do about it. Two `Store::open` failures in the same loop were also
+  swallowed by a bare `if let Ok(...)` with no `else`: a locked, corrupted or permission-denied
+  index dropped that file's update (or deletion) on the floor with no signal at all; both now
+  warn and say explicitly that the change was not indexed. The embed loop moved into a
+  `build_chunk_records` seam — the absence of which is why the two implementations diverged —
+  covered by three new tests.
 
 ## [0.80.3] — 2026-09-01
 
