@@ -15,7 +15,7 @@ hot_files:
   - apps/indexa/src/main.rs                 # Eval arm (A) + Deep arm (B) + Plugin arm (C) — non-adjacent match arms
 
 counters:
-  mcp_tool_count: 53
+  mcp_tool_count: 56
   ui_js_fragment_count: 32
   ui_css_fragment_count: 23
 

@@ -20,6 +20,7 @@ mod admin;
 mod curation;
 mod graph;
 mod insights;
+mod memory;
 mod packs;
 mod prompts;
 mod query_extras;
@@ -127,6 +128,9 @@ const CORE_TOOL_NAMES: &[&str] = &[
     "export_pack",
     "add_note",
     "list_open_decisions",
+    // An agent on the core profile still needs to know what it already worked out — without
+    // this, a constrained toolset silently forgets everything between sessions.
+    "memory_search",
 ];
 
 /// The Indexa MCP server handler. Holds only `Send + Sync` state. Each tool opens
@@ -328,6 +332,7 @@ impl IndexaMcp {
             + Self::router_insights()
             + Self::router_admin()
             + Self::router_query_extras()
+            + Self::router_memory()
     }
 
     /// 3.2 — the router that actually serves THIS instance's requests: the full router with
@@ -395,6 +400,9 @@ fn core_instructions() -> String {
          to paste into any AI tool; `add_note` writes something you learned back into a pack. \
          Decision review: `list_open_decisions` — questions Indexa needs a human judgment on; \
          relay them to your user and answer on their behalf. \
+         Durable memory: `memory_search` — claims you or the user recorded in earlier sessions, \
+         each with a kind and a confidence; check it before re-deriving something you may \
+         already have worked out. \
          Resources (`indexa://overview`, `indexa://packs`, `indexa://pack/{{name}}`, \
 `indexa://summary/{{path}}`) and Prompts (`onboarding-overview`, `explain-file`, \
 `pack-context`) expose the same index data for browsing/attachment. \
@@ -1977,6 +1985,10 @@ mod tests {
             "set_weight",
             "delete_weight",
             "record_decision",
+            // Both keep every row: `memory_record` is additive and dedups, and
+            // `memory_update`'s supersede/retire retire rather than delete.
+            "memory_record",
+            "memory_update",
         ]
         .into_iter()
         .collect();
@@ -2023,18 +2035,18 @@ mod tests {
                 );
             }
         }
-        // Sanity: the three buckets partition the full 53-tool surface with no overlap and
+        // Sanity: the three buckets partition the full tool surface with no overlap and
         // nothing left over.
         let total = IndexaMcp::tool_router().list_all().len();
         assert_eq!(
             destructive.len() + safe_mutating.len(),
-            14,
-            "expected exactly 14 mutating tools (6 destructive + 8 safe)"
+            16,
+            "expected exactly 16 mutating tools (6 destructive + 10 safe)"
         );
         assert_eq!(
             total - destructive.len() - safe_mutating.len(),
-            39,
-            "expected exactly 39 read-only tools"
+            40,
+            "expected exactly 40 read-only tools"
         );
     }
 

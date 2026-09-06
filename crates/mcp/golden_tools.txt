@@ -35,6 +35,9 @@ list_packs
 list_saved_queries
 list_supported_formats
 list_weights
+memory_record
+memory_search
+memory_update
 project_overview
 prune
 query_config

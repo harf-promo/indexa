@@ -228,6 +228,22 @@ impl fmt::Display for MemoryStatus {
     }
 }
 
+/// SHA-256 of a source file's current content, as recorded on a memory's `source_sha256`.
+///
+/// `None` when the file cannot be read — which is **not** an error condition: a claim about a
+/// file that has since been deleted is often the most valuable thing in the store, so the
+/// caller records the claim without a hash rather than refusing it.
+///
+/// Lives here because three surfaces need exactly this — `memory add`, `memory supersede`, and
+/// the MCP `memory_record` tool — and an inlined copy in each is how the two `watch`
+/// implementations drifted apart.
+pub fn source_hash(path: &std::path::Path) -> Option<String> {
+    use sha2::Digest as _;
+    std::fs::read(path)
+        .ok()
+        .map(|b| crate::store::hex_digest(sha2::Sha256::digest(&b)))
+}
+
 /// A memory as stored.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemoryRecord {
