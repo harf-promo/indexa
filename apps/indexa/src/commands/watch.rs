@@ -9,6 +9,57 @@ use indexa_core::{
 
 use super::helpers::{build_embedder, index_db_path, resolve_roots};
 
+/// Embed one file's parsed chunks into [`ChunkRecord`]s, returning the records plus how many
+/// of them ended up WITHOUT a vector.
+///
+/// Split out of the watch closure for two reasons. It is the seam that makes the
+/// embed-failure path testable at all (the closure it came from needs a live notify
+/// debouncer), and its absence is why this path silently diverged from the web server's
+/// equivalent in `crates/web/src/handlers/watch.rs`, which has warned on the same failure
+/// for a while. Failing open is deliberate and unchanged — an unembedded chunk is still
+/// stored and still findable by BM25 — but it must not be *silent*: without a vector that
+/// file drops out of dense retrieval entirely, and nothing anywhere said so.
+async fn build_chunk_records(
+    embedder: &(dyn indexa_embed::Embedder + Send + Sync),
+    extracted: &indexa_parsers::types::Extracted,
+    path: &std::path::Path,
+    embed_model: &str,
+    redact_at_index: bool,
+) -> (Vec<ChunkRecord>, usize) {
+    let mut records = Vec::with_capacity(extracted.chunks.len());
+    let mut degraded = 0usize;
+    for chunk in &extracted.chunks {
+        let embedding = match embedder.embed(&chunk.text).await {
+            Ok(e) => Some(e),
+            Err(e) => {
+                degraded += 1;
+                // Mirrors the web watcher's warning verbatim in intent: the chunk is still
+                // stored (searchable via BM25), but without a vector it won't match dense
+                // retrieval. Surface it — a silently-unembedded chunk degrades search
+                // invisibly.
+                tracing::warn!(
+                    path = %path.display(),
+                    seq = chunk.seq,
+                    error = %e,
+                    "watch: embedding failed; chunk stored without a vector"
+                );
+                None
+            }
+        };
+        records.push(ChunkRecord {
+            entry_path: path.to_string_lossy().into_owned(),
+            seq: chunk.seq,
+            heading: chunk.heading.clone(),
+            text: indexa_query::redact::chunk_text_for_store(&chunk.text, redact_at_index),
+            language: chunk.language.clone(),
+            embedding,
+            embed_model: Some(embed_model.to_owned()),
+            content_hash: Some(chunk_content_hash(&chunk.text)),
+        });
+    }
+    (records, degraded)
+}
+
 pub(crate) async fn cmd_watch(
     paths: Vec<String>,
     embed_model_flag: Option<String>,
@@ -73,7 +124,18 @@ pub(crate) async fn cmd_watch(
 
             match event.kind {
                 ChangeKind::Remove => {
-                    if let Ok(mut store) = Store::open(&db_path_clone) {
+                    let mut store = match Store::open(&db_path_clone) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                error = %e,
+                                "watch: could not open the index; this deletion was NOT applied"
+                            );
+                            return;
+                        }
+                    };
+                    {
                         let path_str = path.to_string_lossy().into_owned();
                         // Full removal — `delete_chunks_for` left the file's summary, queue,
                         // and entry rows behind, so search/browse kept returning a file that
@@ -117,28 +179,30 @@ pub(crate) async fn cmd_watch(
                         return;
                     }
 
-                    let chunk_records: Vec<ChunkRecord> = rt.block_on(async {
-                        let mut records = Vec::with_capacity(extracted.chunks.len());
-                        for chunk in &extracted.chunks {
-                            let embedding = embedder.embed(&chunk.text).await.ok();
-                            records.push(ChunkRecord {
-                                entry_path: path.to_string_lossy().into_owned(),
-                                seq: chunk.seq,
-                                heading: chunk.heading.clone(),
-                                text: indexa_query::redact::chunk_text_for_store(
-                                    &chunk.text,
-                                    redact_at_index,
-                                ),
-                                language: chunk.language.clone(),
-                                embedding,
-                                embed_model: Some(embed_model.clone()),
-                                content_hash: Some(chunk_content_hash(&chunk.text)),
-                            });
-                        }
-                        records
-                    });
+                    let (chunk_records, degraded) = rt.block_on(build_chunk_records(
+                        embedder.as_ref(),
+                        &extracted,
+                        path,
+                        &embed_model,
+                        redact_at_index,
+                    ));
 
-                    if let Ok(mut store) = Store::open(&db_path_clone) {
+                    let mut store = match Store::open(&db_path_clone) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            // Previously an `if let Ok(...)` with no `else`: a locked,
+                            // corrupted or permission-denied index silently dropped this
+                            // file's update on the floor, with no log, no retry and nothing
+                            // for the user to notice.
+                            tracing::warn!(
+                                path = %path.display(),
+                                error = %e,
+                                "watch: could not open the index; this change was NOT indexed"
+                            );
+                            return;
+                        }
+                    };
+                    {
                         // A newly-created file has no `entries` row (only `scan` writes those), so
                         // without this its chunks are orphans: never summarized (mark_for_resummary
                         // skips entry-less paths) and wiped by the next `prune`. upsert_entries is an
@@ -181,11 +245,24 @@ pub(crate) async fn cmd_watch(
                                     tracing::warn!("failed to re-queue roll-up for {dir_str}: {e}");
                                 }
                             }
-                            println!(
-                                "  re-indexed: {} ({} chunks, summary re-queued)",
-                                path.display(),
-                                chunk_records.len()
-                            );
+                            // The degraded count is reported per file rather than as a
+                            // session total: `run_watch_loop` blocks until the process is
+                            // signalled, so a "totals on shutdown" line would never print.
+                            if degraded > 0 {
+                                println!(
+                                    "  re-indexed: {} ({} chunks, {degraded} without embeddings \
+                                     — keyword-only until the embedder is reachable and you \
+                                     re-run `indexa deep`; summary re-queued)",
+                                    path.display(),
+                                    chunk_records.len()
+                                );
+                            } else {
+                                println!(
+                                    "  re-indexed: {} ({} chunks, summary re-queued)",
+                                    path.display(),
+                                    chunk_records.len()
+                                );
+                            }
                         }
                     }
                 }
@@ -195,4 +272,116 @@ pub(crate) async fn cmd_watch(
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use indexa_parsers::types::{Chunk, Extracted};
+
+    /// Embeds nothing, ever — stands in for an Ollama that is down, unreachable, or has had
+    /// the model pulled out from under it, which is precisely when a watch quietly stops
+    /// producing vectors.
+    struct FailingEmbedder;
+
+    #[async_trait::async_trait]
+    impl indexa_embed::Embedder for FailingEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            anyhow::bail!("connection refused")
+        }
+        fn dim(&self) -> usize {
+            3
+        }
+    }
+
+    struct OkEmbedder;
+
+    #[async_trait::async_trait]
+    impl indexa_embed::Embedder for OkEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.1, 0.2, 0.3])
+        }
+        fn dim(&self) -> usize {
+            3
+        }
+    }
+
+    fn extracted(n: usize) -> Extracted {
+        Extracted {
+            source: std::path::PathBuf::from("/r/a.rs"),
+            mime: "text/x-rust".to_owned(),
+            chunks: (0..n)
+                .map(|seq| Chunk {
+                    source: std::path::PathBuf::from("/r/a.rs"),
+                    seq,
+                    heading: String::new(),
+                    text: format!("chunk {seq}"),
+                    language: Some("rust".to_owned()),
+                })
+                .collect(),
+            edges: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn embed_failures_are_counted_and_the_chunk_is_still_stored() {
+        // Failing open is the correct behavior and must not change: the chunk is still
+        // stored so BM25 can find it. What changed is that the failure is no longer
+        // invisible — `degraded` is what the caller reports, and a `tracing::warn!` fires
+        // per chunk. Before this, `.await.ok()` threw the error away entirely and the file
+        // silently dropped out of dense retrieval.
+        let (records, degraded) = build_chunk_records(
+            &FailingEmbedder,
+            &extracted(3),
+            std::path::Path::new("/r/a.rs"),
+            "test-model",
+            false,
+        )
+        .await;
+        assert_eq!(records.len(), 3, "every chunk is still stored");
+        assert_eq!(degraded, 3, "every chunk is reported as unembedded");
+        assert!(
+            records.iter().all(|r| r.embedding.is_none()),
+            "a failed embed must store no vector, not a bogus one"
+        );
+        assert!(
+            records.iter().all(|r| r.content_hash.is_some()),
+            "the content hash is independent of embedding success"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_successful_embed_reports_zero_degraded() {
+        let (records, degraded) = build_chunk_records(
+            &OkEmbedder,
+            &extracted(2),
+            std::path::Path::new("/r/a.rs"),
+            "test-model",
+            false,
+        )
+        .await;
+        assert_eq!(records.len(), 2);
+        assert_eq!(degraded, 0);
+        assert!(records.iter().all(|r| r.embedding.is_some()));
+        assert_eq!(records[1].seq, 1, "chunk order is preserved");
+    }
+
+    #[tokio::test]
+    async fn redaction_is_applied_to_stored_text_when_enabled() {
+        let mut ex = extracted(1);
+        ex.chunks[0].text = "aws_key = AKIAIOSFODNN7EXAMPLE".to_owned();
+        let (records, _) = build_chunk_records(
+            &OkEmbedder,
+            &ex,
+            std::path::Path::new("/r/a.rs"),
+            "test-model",
+            true,
+        )
+        .await;
+        assert!(
+            !records[0].text.contains("AKIAIOSFODNN7EXAMPLE"),
+            "redact_at_index must scrub before the record is stored: {}",
+            records[0].text
+        );
+    }
 }
