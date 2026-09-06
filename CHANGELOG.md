@@ -164,6 +164,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A new `embedded_directory_has_no_placeholder_entries` test keeps a template from being
   re-committed, and `find` gained a `find_in` seam so its case-insensitive matching is tested
   against a synthetic list instead of whatever the shipped directory happens to hold.
+- **A config file holding API keys that can't be locked down now says so.** `config::load`
+  re-tightens a hand-authored `config.toml` to `0600` when `[api_keys]` is populated (a text
+  editor leaves it at the umask default, commonly `0644`), and that re-tighten was written as
+  `let _ = std::fs::set_permissions(...)`. Failing open is right — a permissions error must
+  never block startup — but the error was *discarded*, so on a read-only filesystem, a
+  differently-owned file, or a restrictive mount, a file containing live API keys stayed
+  readable beyond its owner and nothing anywhere reported it. It now warns with the path and
+  the underlying error (never a key value, per the keys-never-logged invariant) and points at
+  `indexa doctor`, whose existing `config_permission_line` reports the residual mode. The
+  policy moved into a `tighten_key_file_perms` helper so both outcomes are testable — including
+  the failure branch, which is exercised against a `/proc` path whose chmod always fails for an
+  unprivileged process.
 
 ## [0.80.3] — 2026-09-01
 
