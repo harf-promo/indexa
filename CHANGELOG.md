@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two web handlers no longer stall the entire local server while they run.** The web server
+  shares one `Arc<Mutex<Store>>`, and `GET /api/packs/{name}/export` held it across a freshness
+  stat sweep over every pack member *plus* a per-item `build_tree` + render loop, while
+  `GET /api/map/treemap` held it across `all_coverage_entries()` — a full walk of every indexed
+  entry. For as long as either ran, every other request on `:7620` (the health check, SSE
+  polling, the Activity drawer, the sidebar) was blocked on that one mutex; on a large index or
+  a large pack that is seconds, not milliseconds. Both now run on a fresh, short-lived
+  connection inside `spawn_blocking`, which is the discipline `handlers/graph.rs` and
+  `handlers/insights_handler.rs` already used — the pack-export handler's own comment had
+  conceded the point ("accepted rather than restructuring this handler more broadly"). The
+  rendering itself is unchanged; it moved wholesale into a synchronous `export_pack_response`.
+  Separately, `all_coverage_entries` traded its per-row correlated
+  `(SELECT COUNT(*) FROM chunks WHERE entry_path = e.path)` — one lookup for *every* `entries`
+  row, on a query the Map tab issues on every load — for a single grouped `LEFT JOIN` covered by
+  `idx_chunks_path`; output is row-for-row identical (a file with no chunks read `0` before and
+  `COALESCE`s to `0` now). Regression tests: `pack_export_and_treemap_do_not_need_the_shared_store_mutex`
+  holds the shared lock for the duration of both requests and asserts each still answers (pre-fix
+  both block until the 5s timeout), and `all_coverage_entries_grouped_join_matches_the_correlated_form`
+  compares the new query against the old one row-for-row on a seeded index.
+
 ## [0.80.3] — 2026-09-01
 
 ### Fixed
