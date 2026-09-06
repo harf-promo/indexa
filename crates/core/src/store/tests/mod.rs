@@ -15,6 +15,7 @@ mod entry_cleanup;
 mod graph;
 mod incremental;
 mod insights;
+mod memories;
 mod modules;
 mod note_anchors;
 mod packs;

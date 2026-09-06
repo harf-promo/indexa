@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Typed durable memory — the storage layer.** Indexa can now hold *claims*, not just indexed
+  content: a new `memories` table plus `crate::memory`'s domain types. Every memory carries a
+  **kind** (`observed` · `stated` · `inferred` · `recalled` · `hypothesis`), a confidence, the
+  source path and the SHA-256 of that source at the time the claim was made, an optional command
+  that re-checks it, a verification status, free-form tags, a revision chain, and a **bitemporal**
+  validity window — `valid_from`/`valid_to` record when the *claim* was true, separately from
+  `created_at`/`updated_at`, which record when Indexa was told. The taxonomy is the point: it
+  stops "the suite passes on aarch64" and "I think this is why the test is flaky" from being
+  retrieved as though they were the same sort of claim.
+  This PR ships storage only — no CLI, MCP or web surface yet, and nothing reads memories into
+  retrieval.
+  Four contracts are enforced in code and pinned by tests: **decay** touches only *unverified*
+  `inferred`/`hypothesis` rows, lowers confidence to a floor and marks them `aged`, **never
+  deletes**, and never runs on a schedule; an **agent-authored** memory is capped at 0.75
+  confidence (only a human or a passing verification lifts a claim above that), and the write
+  path reports the clamp rather than applying it silently; `verify_cmd` is **stored and printed,
+  never executed** by this layer or the MCP surface — memories are meant to travel in Context
+  Packs, so an index that shelled out stored strings on read would turn "import a colleague's
+  pack" into remote code execution; and memories are **not orphan-pruned**, because a note
+  explaining why a file was removed is at its most valuable exactly when that file is gone.
+  Deliberately a separate table from the Decision Ledger rather than a new `decision_type` —
+  the ledger's schema is structurally a Q&A (one open row per subject, a crash-safe projection
+  contract, GC of resolved rows, a candidate list), and an agent that learned "memory lives in
+  the ledger" would start *answering* memories as if they were open questions.
+  `SCHEMA_VERSION` 10 → 11; existing databases migrate in place on the next open.
+
 ### Fixed
 
 - **Four stale or unbacked product claims in the docs, and a guard so one of them can't recur.**
