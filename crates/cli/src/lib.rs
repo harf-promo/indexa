@@ -1018,7 +1018,7 @@ pub enum Commands {
     #[command(after_help = "Examples:
   indexa plugin list
   indexa plugin list --json
-  indexa plugin info example-plugin")]
+  indexa plugin info <name>")]
     #[command(display_order = 53)]
     Plugin {
         #[command(subcommand)]
@@ -1046,7 +1046,7 @@ pub enum PluginAction {
     },
     /// Show one plugin's full entry plus copy-pasteable install instructions.
     #[command(after_help = "Examples:
-  indexa plugin info example-plugin")]
+  indexa plugin info <name>")]
     Info {
         /// Plugin name, from `indexa plugin list`.
         name: String,
