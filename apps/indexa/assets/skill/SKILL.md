@@ -63,6 +63,25 @@ symbol names, likely duplicates, stale-looking directories). If one is relevant 
 doing, relay it to the user or use `answer_decision` with your best judgment — don't leave it
 open if you already have the context to resolve it.
 
+## Note vs decision vs memory — three write-backs, three jobs
+
+Indexa has three ways to persist something you learned. Picking the wrong one buries it.
+
+| You want to... | Use | Why |
+|---|---|---|
+| Save a page of prose for later reading | `add_note` | Writes a Markdown file that flows through normal indexing. Searchable **only after a re-index** — not immediately. |
+| Pin a judgment call about a specific change | `record_decision` | Lands in the Decision Ledger with a `patch_id`, so it survives a rebase or squash. Shows up in the user's Review inbox. |
+| Record a durable *claim* — a fact, a constraint, a lead | memory (CLI: `indexa memory add`) | Typed, with a confidence, a source hash and an expiry. Queryable immediately, and it ages honestly. |
+
+A memory carries its **kind**, and that is what keeps it useful:
+`observed` (you saw it) · `stated` (you were told) · `inferred` (you worked it out) ·
+`recalled` (from an earlier session) · `hypothesis` (a guess). Be honest about which — an
+`inferred` claim you label `observed` is how a memory store starts confidently repeating your
+own guesses back to you. Anything you author is capped at 0.75 confidence for exactly that
+reason; only the user, or a passing verification, lifts a claim above it.
+
+*(No MCP tools for memory in this release — the CLI is the surface for now.)*
+
 ## Predicate grammar in search (if enabled)
 
 `search`/`ask` accept inline predicates in the free-text query — `path:src/auth`,

@@ -70,7 +70,7 @@ pub use edges::{
 };
 pub use entries::CoverageEntry;
 pub use insights::{DuplicateCluster, LanguageStat, LargestEntry, StaleEntry, WeeklyDiff};
-pub use memories::MemoryCounts;
+pub use memories::{AdoptableAnnotation, MemoryCounts};
 pub use modules::{cluster_with_directory_priors, ComputedModule, GraphModule};
 pub use note_anchors::NoteAnchor;
 pub use prune::OrphanCounts;

@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`indexa memory` — record and query durable claims.** The operator surface over the memory
+  store: `add` · `list` · `show` · `search` · `verify` · `supersede` · `retire` · `expire` ·
+  `decay` · `reflect` · `adopt-annotations`.
+  `verify` re-hashes a claim's source file and compares it against the hash taken when the claim
+  was made — unchanged marks it verified, changed marks it failed and drops it from retrieval
+  with a `supersede` hint, and a *missing* source is explicitly **not** a failure, because a
+  claim about a deleted file ("we removed X because Y") is often the most valuable thing in the
+  store. `supersede` re-hashes the source at replacement time rather than inheriting a stale
+  hash, so the corrected claim is immediately verifiable. `reflect` reports two things and
+  resolves neither: subjects carrying both a trusted and a speculative claim, and claims whose
+  source file has moved on — which of two conflicting claims is right is a judgment call, and
+  silently picking one is how a memory store starts lying. `adopt-annotations` is a one-shot,
+  idempotent import of existing `record_decision` ledger annotations, recorded at 0.6 confidence
+  so adopting one doesn't launder an unchecked agent note into a confident claim; the ledger
+  rows are never modified.
+  The CLI defaults to **operator** authorship, so a claim you type may carry full confidence;
+  `--as-agent` opts into the 0.75 ceiling, and the write path *says* when it clamped rather than
+  quietly lowering the number. `--verify-cmd` is stored and printed but only ever executed by
+  `memory verify --run`, bounded by a timeout — a memory can arrive from an imported pack, so
+  its command string is untrusted input. `decay` is operator-invoked, ages only unverified
+  `inferred`/`hypothesis`, and never deletes.
+  `ask` does not read memories in this release — retrieval integration is separate and ships
+  default-off.
+
+### Added
+
 - **Typed durable memory — the storage layer.** Indexa can now hold *claims*, not just indexed
   content: a new `memories` table plus `crate::memory`'s domain types. Every memory carries a
   **kind** (`observed` · `stated` · `inferred` · `recalled` · `hypothesis`), a confidence, the
@@ -54,7 +80,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `competitive_snapshot_stamp_tracks_the_workspace_minor_version` asserts that stamp matches the
   workspace version at minor precision — a patch release won't force a competitive re-read, but a
   minor bump means features shipped and the page is worth re-checking.
-
 ### Fixed
 
 - **Two web handlers no longer stall the entire local server while they run.** The web server

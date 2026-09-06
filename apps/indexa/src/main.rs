@@ -148,6 +148,7 @@ async fn main() -> Result<()> {
             concurrency,
             auto_reindex,
         } => commands::cmd_worker(concurrency, auto_reindex, &cfg).await,
+        Commands::Memory { action } => commands::cmd_memory(action).await,
         Commands::Pack { action } => match action {
             PackAction::Create {
                 name,

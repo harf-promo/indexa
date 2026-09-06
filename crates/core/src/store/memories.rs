@@ -39,6 +39,16 @@ fn qualified_cols(alias: &str) -> String {
         .join(", ")
 }
 
+/// One Decision Ledger annotation, in the shape the memory bridge needs it.
+#[derive(Debug, Clone)]
+pub struct AdoptableAnnotation {
+    pub decision_id: i64,
+    pub subject: String,
+    /// The annotation's answer text — its `chosen` value.
+    pub text: String,
+    pub patch_id: Option<String>,
+}
+
 /// A row's counts, for `indexa memory list` headers and `get_stats`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MemoryCounts {
@@ -325,6 +335,35 @@ impl Store {
             params![valid_to, id],
         )?;
         Ok(n > 0)
+    }
+
+    /// Decision Ledger `annotation` rows, for the one-shot `indexa memory adopt-annotations`
+    /// bridge.
+    ///
+    /// Lives here rather than in `decisions.rs` because it exists solely for the memory
+    /// layer's benefit — the ledger has no use for it, and the ledger rows are read-only to
+    /// this module. An annotation's answer text is its `chosen` value; rows without one are
+    /// skipped rather than adopted as an empty claim.
+    pub fn annotation_decisions(&self) -> Result<Vec<AdoptableAnnotation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, subject, COALESCE(chosen, ''), patch_id
+               FROM decisions
+              WHERE decision_type = 'annotation' AND status = 'decided'
+              ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(AdoptableAnnotation {
+                decision_id: r.get(0)?,
+                subject: r.get(1)?,
+                text: r.get(2)?,
+                patch_id: r.get(3)?,
+            })
+        })?;
+        Ok(rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|a| !a.text.trim().is_empty())
+            .collect())
     }
 
     pub fn memory_counts(&self) -> Result<MemoryCounts> {

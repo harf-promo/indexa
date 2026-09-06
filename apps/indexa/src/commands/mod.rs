@@ -17,6 +17,7 @@ mod inspect;
 mod map;
 mod mcp;
 mod mcp_install;
+mod memory;
 mod multimodal;
 mod notes;
 mod pack;
@@ -60,6 +61,7 @@ pub(crate) use inspect::cmd_inspect;
 pub(crate) use map::cmd_map;
 pub(crate) use mcp::cmd_mcp;
 pub(crate) use mcp_install::cmd_mcp_install;
+pub(crate) use memory::cmd_memory;
 pub(crate) use multimodal::cmd_multimodal;
 pub(crate) use notes::cmd_note_add;
 pub(crate) use pack::{
