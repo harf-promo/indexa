@@ -1004,7 +1004,8 @@ Kinds, most to least trusted:
         #[arg(long)]
         check: bool,
 
-        /// Skip the interactive confirmation prompt.
+        /// Confirm the update without prompting. Required in a non-interactive session
+        /// (cron, CI, a piped wrapper), which refuses rather than self-updating unasked.
         #[arg(short = 'y', long)]
         yes: bool,
 
@@ -1235,7 +1236,8 @@ pub enum PackAction {
         /// Falls back to keyword search when embeddings are unavailable.
         #[arg(long, short)]
         auto: bool,
-        /// Skip the confirmation prompt when using --auto.
+        /// Accept the suggested paths without prompting. Required with --auto in a
+        /// non-interactive session, which refuses rather than adding them unasked.
         #[arg(long, short)]
         yes: bool,
         /// Number of paths to suggest when using --auto (default: 20).
@@ -1455,7 +1457,8 @@ pub enum WeightAction {
         /// Consider files modified within this many days.
         #[arg(long, default_value = "30")]
         days: i64,
-        /// Skip confirmation prompt.
+        /// Apply the weights without prompting. Required in a non-interactive session,
+        /// which refuses rather than changing search ranking unasked.
         #[arg(long, short)]
         yes: bool,
     },

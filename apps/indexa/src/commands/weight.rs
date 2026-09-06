@@ -167,19 +167,19 @@ pub(crate) async fn cmd_weight_apply(days: i64, yes: bool) -> Result<()> {
     for (path, w) in &suggestions {
         println!("  {:.2}  {path}", w);
     }
-    if !yes {
-        use std::io::IsTerminal as _;
-        if std::io::stdin().is_terminal() {
-            print!("\nApply these {} weights? [y/N] ", suggestions.len());
-            use std::io::Write as _;
-            let _ = std::io::stdout().flush();
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-            if input.trim().to_lowercase() != "y" {
-                println!("Aborted.");
-                return Ok(());
-            }
-        }
+    let confirmed = super::helpers::confirm_or_bail(
+        &format!("Apply these {} weights?", suggestions.len()),
+        false,
+        yes,
+        &format!(
+            "Refusing to apply {} recency weight(s) in a non-interactive session. These \
+             change search ranking; re-run with --yes to confirm.",
+            suggestions.len()
+        ),
+    )?;
+    if !confirmed {
+        println!("Aborted.");
+        return Ok(());
     }
     for (path, w) in &suggestions {
         // Determine kind.
