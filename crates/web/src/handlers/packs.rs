@@ -283,10 +283,41 @@ pub(crate) async fn api_packs_items_set_mode(
     }
 }
 
+/// `GET /api/packs/:name/export` — render a pack as XML/Markdown/JSON.
+///
+/// Rendering is a long synchronous span: a freshness stat sweep over every member, then a
+/// per-item `build_tree` + render loop. This used to run with `state.store` locked for the
+/// whole time, which stalled EVERY other API request (health checks, SSE polling, the
+/// Activity drawer) until the export finished. It now runs on a fresh, short-lived
+/// connection inside `spawn_blocking`, matching `handlers/graph.rs` and
+/// `handlers/insights_handler.rs`. The rendering itself is unchanged — it moved wholesale
+/// into [`export_pack_response`].
 pub(crate) async fn api_packs_export(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(q): Query<ExportQuery>,
+) -> Response {
+    let db_path = state.db_path.clone();
+    tokio::task::spawn_blocking(move || match indexa_core::store::Store::open(&db_path) {
+        Ok(mut store) => export_pack_response(&mut store, &name, &q),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    })
+    .await
+    .unwrap_or_else(|e| {
+        err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("pack-export task panicked: {e}"),
+        )
+    })
+}
+
+/// The whole of the pack-export rendering, extracted verbatim from [`api_packs_export`] so it
+/// can run inside `spawn_blocking` against its own connection. Synchronous by construction —
+/// there is no `.await` anywhere in here, which is what makes the move safe.
+fn export_pack_response(
+    store: &mut indexa_core::store::Store,
+    name: &str,
+    q: &ExportQuery,
 ) -> Response {
     use indexa_query::{
         build_export_filter, build_tree, dry_run_report, prune_tree,
@@ -304,8 +335,7 @@ pub(crate) async fn api_packs_export(
     let format = q.format.as_deref().unwrap_or("xml");
     let depth = q.depth;
 
-    let mut store = state.store.lock().await;
-    let pack = match store.pack_by_name(&name) {
+    let pack = match store.pack_by_name(name) {
         Ok(Some(p)) => p,
         Ok(None) => return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\"")),
         Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
@@ -337,7 +367,7 @@ pub(crate) async fn api_packs_export(
 
     // Relational slice (v0.60): same filters as CLI `pack export`, shared via build_export_filter.
     let allow = match build_export_filter(
-        &store,
+        store,
         q.changed_since.as_deref(),
         q.category.as_deref(),
         now_secs,
@@ -352,12 +382,11 @@ pub(crate) async fn api_packs_export(
         // Freshness (G2b): same best-effort stat check the CLI/MCP export surfaces use (a stat
         // error must not fail an export that worked before) — confined to the XML path so
         // md/json exports (no wrapping header to hang the attribute off) don't pay the sweep.
-        // Note: this holds `state.store` locked for the duration of the stat sweep (no `.await`
-        // inside, so it's correct, just a bigger critical section than the query work already
-        // under this lock) — accepted rather than restructuring this handler more broadly.
+        // This whole function runs inside `spawn_blocking` on its own connection, so the sweep
+        // no longer blocks other requests.
         let stale_count = store.stale_pack_paths(&pack.id).unwrap_or_default().len();
         buf.push_str("<context pack=\"");
-        buf.push_str(&indexa_core::text::xml_escape_attr(&name));
+        buf.push_str(&indexa_core::text::xml_escape_attr(name));
         buf.push_str("\" generated=\"");
         buf.push_str(&now);
         buf.push_str("\" stale_files=\"");
@@ -383,7 +412,7 @@ pub(crate) async fn api_packs_export(
             exported += 1;
             continue;
         }
-        let tree = match build_tree(&store, root_path, depth) {
+        let tree = match build_tree(store, root_path, depth) {
             Ok(Some(t)) => t,
             Ok(None) => continue,
             Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),

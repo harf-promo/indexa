@@ -891,6 +891,20 @@ mod tests {
         state_with_embedder(store, db_path, Arc::new(StubEmbedder))
     }
 
+    /// An `AppState` whose store lives in a real temp FILE rather than `:memory:`.
+    ///
+    /// Required by every handler that opens its OWN connection through `state.db_path`
+    /// instead of taking the shared mutex (`handlers/graph.rs`, `handlers/insights_handler.rs`,
+    /// and — since the store-lock fix — `api_packs_export` / `api_map_treemap`). With
+    /// `:memory:` each `Store::open` creates a brand-new EMPTY database, so such a handler
+    /// would never see what the test seeded.
+    fn state_with_file_db(tag: &str, seed: impl FnOnce(&mut Store)) -> AppState {
+        let path = temp_db_path(tag);
+        let mut store = Store::open(&path).expect("temp db opens");
+        seed(&mut store);
+        state_with_db(store, path)
+    }
+
     /// Same as `state_with_db`, but with a caller-supplied embedder — the seam
     /// `api_packs_search_does_not_hold_store_lock_across_embed` needs to inject a
     /// `GatedEmbedder` whose `embed()` blocks until signaled, without touching `StubEmbedder`
@@ -1424,29 +1438,29 @@ mod tests {
         // marker to the pack-only `[redacted:<kind>]` style (display-only, applied after
         // redact_secrets — see `relabel_pack_redaction_markers`), so the marker checked below
         // is that style, not the shared `[REDACTED-<kind>]` one `redact_secrets` itself emits.
-        let mut store = Store::open_in_memory().unwrap();
-        store
-            .upsert_summary(&indexa_core::store::SummaryRecord {
-                path: "/r/creds.txt".into(),
-                kind: "file".into(),
-                parent_path: Some("/r".into()),
-                depth: 2,
-                summary: "deploy config: aws_key = AKIAIOSFODNN7EXAMPLE".into(),
-                summary_l0: None,
-                embedding: None,
-                child_count: 0,
-                byte_size: 10,
-                model: "test".into(),
-                source_hash: "H1".into(),
-                generated_at: 1,
-            })
-            .unwrap();
-        let pack_id = store.create_pack("secrets", None).unwrap();
-        store
-            .add_pack_paths(&pack_id, &["/r/creds.txt".to_owned()])
-            .unwrap();
-
-        let app = build_router(state_with(store), 7620);
+        let state = state_with_file_db("export-redacts", |store| {
+            store
+                .upsert_summary(&indexa_core::store::SummaryRecord {
+                    path: "/r/creds.txt".into(),
+                    kind: "file".into(),
+                    parent_path: Some("/r".into()),
+                    depth: 2,
+                    summary: "deploy config: aws_key = AKIAIOSFODNN7EXAMPLE".into(),
+                    summary_l0: None,
+                    embedding: None,
+                    child_count: 0,
+                    byte_size: 10,
+                    model: "test".into(),
+                    source_hash: "H1".into(),
+                    generated_at: 1,
+                })
+                .unwrap();
+            let pack_id = store.create_pack("secrets", None).unwrap();
+            store
+                .add_pack_paths(&pack_id, &["/r/creds.txt".to_owned()])
+                .unwrap();
+        });
+        let app = build_router(state, 7620);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -1530,29 +1544,29 @@ mod tests {
 
     #[tokio::test]
     async fn api_packs_export_dry_run_reports_size_and_writes_no_exported_event() {
-        let mut store = Store::open_in_memory().unwrap();
-        store
-            .upsert_summary(&indexa_core::store::SummaryRecord {
-                path: "/r/a.rs".into(),
-                kind: "file".into(),
-                parent_path: Some("/r".into()),
-                depth: 1,
-                summary: "a summary".into(),
-                summary_l0: None,
-                embedding: None,
-                child_count: 0,
-                byte_size: 10,
-                model: "test".into(),
-                source_hash: "H1".into(),
-                generated_at: 1,
-            })
-            .unwrap();
-        let pack_id = store.create_pack("dry", None).unwrap();
-        store
-            .add_pack_paths(&pack_id, &["/r/a.rs".to_owned()])
-            .unwrap();
-
-        let app = build_router(state_with(store), 7620);
+        let state = state_with_file_db("export-dry", |store| {
+            store
+                .upsert_summary(&indexa_core::store::SummaryRecord {
+                    path: "/r/a.rs".into(),
+                    kind: "file".into(),
+                    parent_path: Some("/r".into()),
+                    depth: 1,
+                    summary: "a summary".into(),
+                    summary_l0: None,
+                    embedding: None,
+                    child_count: 0,
+                    byte_size: 10,
+                    model: "test".into(),
+                    source_hash: "H1".into(),
+                    generated_at: 1,
+                })
+                .unwrap();
+            let pack_id = store.create_pack("dry", None).unwrap();
+            store
+                .add_pack_paths(&pack_id, &["/r/a.rs".to_owned()])
+                .unwrap();
+        });
+        let app = build_router(state, 7620);
         let (status, json) = get_json(app, "/api/packs/dry/export?format=xml&dry_run=true").await;
         assert_eq!(status, StatusCode::OK);
         assert!(json["approx_tokens"].as_u64().unwrap() > 0, "got: {json}");
@@ -1566,8 +1580,7 @@ mod tests {
         // the pack-existence lookup, so probing a typo'd pack name with that combination
         // returned 400 instead of 404 — a resource that doesn't exist takes priority over a
         // param-combination complaint that implies the pack itself was found.
-        let store = Store::open_in_memory().unwrap();
-        let app = build_router(state_with(store), 7620);
+        let app = build_router(state_with_file_db("export-okf-404", |_| {}), 7620);
         let (status, json) = get_json(
             app,
             "/api/packs/does-not-exist/export?format=okf&dry_run=true",
@@ -1597,47 +1610,47 @@ mod tests {
         std::fs::write(&file, b"fn foo() {}").unwrap();
         let file_s = file.to_string_lossy().to_string();
 
-        let mut store = Store::open_in_memory().unwrap();
-        // The web export route builds its tree from summaries (not chunks — unlike CLI/MCP's
-        // `--signatures`), so a summary is required for `exported > 0`.
-        store
-            .upsert_summary(&indexa_core::store::SummaryRecord {
-                path: file_s.clone(),
-                kind: "file".into(),
-                parent_path: Some(dir.to_string_lossy().into_owned()),
-                depth: 2,
-                summary: "a test file".into(),
-                summary_l0: None,
-                embedding: None,
-                child_count: 0,
-                byte_size: 10,
-                model: "test".into(),
-                source_hash: "H1".into(),
-                generated_at: 1,
-            })
-            .unwrap();
-        store
-            .upsert_chunks(&[ChunkRecord {
-                embedding: Some(vec![0.1, 0.2, 0.3]),
-                embed_model: Some("test".to_owned()),
-                language: Some("rust".to_owned()),
-                ..chunk(&file_s, 0, "fn foo() {}")
-            }])
-            .unwrap();
-        // Pin indexed_at to the epoch — long before the file's real mtime — so it reads stale.
-        store
-            .db_connection()
-            .execute(
-                "UPDATE chunks SET indexed_at = 1 WHERE entry_path = ?1",
-                rusqlite::params![file_s],
-            )
-            .unwrap();
-        let pack_id = store.create_pack("code", None).unwrap();
-        store
-            .add_pack_paths(&pack_id, std::slice::from_ref(&file_s))
-            .unwrap();
-
-        let app = build_router(state_with(store), 7620);
+        let state = state_with_file_db("export-stale", |store| {
+            // The web export route builds its tree from summaries (not chunks — unlike CLI/MCP's
+            // `--signatures`), so a summary is required for `exported > 0`.
+            store
+                .upsert_summary(&indexa_core::store::SummaryRecord {
+                    path: file_s.clone(),
+                    kind: "file".into(),
+                    parent_path: Some(dir.to_string_lossy().into_owned()),
+                    depth: 2,
+                    summary: "a test file".into(),
+                    summary_l0: None,
+                    embedding: None,
+                    child_count: 0,
+                    byte_size: 10,
+                    model: "test".into(),
+                    source_hash: "H1".into(),
+                    generated_at: 1,
+                })
+                .unwrap();
+            store
+                .upsert_chunks(&[ChunkRecord {
+                    embedding: Some(vec![0.1, 0.2, 0.3]),
+                    embed_model: Some("test".to_owned()),
+                    language: Some("rust".to_owned()),
+                    ..chunk(&file_s, 0, "fn foo() {}")
+                }])
+                .unwrap();
+            // Pin indexed_at to the epoch — long before the file's real mtime — so it reads stale.
+            store
+                .db_connection()
+                .execute(
+                    "UPDATE chunks SET indexed_at = 1 WHERE entry_path = ?1",
+                    rusqlite::params![file_s],
+                )
+                .unwrap();
+            let pack_id = store.create_pack("code", None).unwrap();
+            store
+                .add_pack_paths(&pack_id, std::slice::from_ref(&file_s))
+                .unwrap();
+        });
+        let app = build_router(state, 7620);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -1849,6 +1862,110 @@ mod tests {
             .expect("search request should complete once embed() unblocks")
             .unwrap();
         assert_eq!(search_resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn pack_export_and_treemap_do_not_need_the_shared_store_mutex() {
+        // Regression guard for the two heaviest read handlers. `api_packs_export` held
+        // `state.store` locked across a freshness stat sweep AND a per-item build_tree +
+        // render loop (its own comment conceded the point); `api_map_treemap` held it across
+        // `all_coverage_entries`, a full walk of every indexed entry. While either ran, EVERY
+        // other request on the local server — health checks, SSE polling, the Activity drawer
+        // — was stuck waiting on that one mutex.
+        //
+        // Proved deterministically, with no elapsed-time assertion: the test itself holds the
+        // shared lock for the whole request and asserts both routes still answer. Pre-fix both
+        // block until the 5s timeout and fail; post-fix they run on their own connection.
+        let state = state_with_file_db("nolock", |store| {
+            store
+                .upsert_summary(&indexa_core::store::SummaryRecord {
+                    path: "/r/a.rs".into(),
+                    kind: "file".into(),
+                    parent_path: Some("/r".into()),
+                    depth: 1,
+                    summary: "a summary".into(),
+                    summary_l0: None,
+                    embedding: None,
+                    child_count: 0,
+                    byte_size: 10,
+                    model: "test".into(),
+                    source_hash: "H1".into(),
+                    generated_at: 1,
+                })
+                .unwrap();
+            let pack_id = store.create_pack("held", None).unwrap();
+            store
+                .add_pack_paths(&pack_id, &["/r/a.rs".to_owned()])
+                .unwrap();
+        });
+        let app = build_router(state.clone(), 7620);
+
+        // Hold the shared mutex for the duration of both requests.
+        let _guard = state.store.lock().await;
+
+        for uri in ["/api/packs/held/export?format=md", "/api/map/treemap"] {
+            let resp = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                app.clone()
+                    .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap()),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                panic!("{uri} blocked on the shared store mutex — it must open its own connection")
+            })
+            .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn treemap_reports_per_file_chunk_counts() {
+        // Covers `all_coverage_entries`' grouped-JOIN chunk count end-to-end through the
+        // route (the query it replaced used a per-row correlated subquery). A file with two
+        // chunks must size larger than one with none.
+        let state = state_with_file_db("treemap", |store| {
+            store
+                .upsert_entries(&[
+                    indexa_core::walker::Entry {
+                        path: "/r".into(),
+                        kind: indexa_core::walker::EntryKind::Dir,
+                        size: 0,
+                        modified: None,
+                        hint: None,
+                        is_binary: false,
+                    },
+                    indexa_core::walker::Entry {
+                        path: "/r/a.rs".into(),
+                        kind: indexa_core::walker::EntryKind::File,
+                        size: 10,
+                        modified: None,
+                        hint: None,
+                        is_binary: false,
+                    },
+                    indexa_core::walker::Entry {
+                        path: "/r/b.rs".into(),
+                        kind: indexa_core::walker::EntryKind::File,
+                        size: 10,
+                        modified: None,
+                        hint: None,
+                        is_binary: false,
+                    },
+                ])
+                .unwrap();
+            store
+                .upsert_chunks(&[chunk("/r/a.rs", 0, "one"), chunk("/r/a.rs", 1, "two")])
+                .unwrap();
+        });
+        let app = build_router(state, 7620);
+        let (status, json) = get_json(app, "/api/map/treemap").await;
+        assert_eq!(status, StatusCode::OK, "got: {json}");
+        // The builder rolls files up into their directory node, so assert on the propagated
+        // subtree chunk count: 2 (both from a.rs; b.rs has none). A regression that lost the
+        // per-file chunk count would report 0 here.
+        let root = &json.as_array().unwrap()[0];
+        assert_eq!(root["path"], "/", "got: {json}");
+        assert_eq!(root["size"], 2, "subtree chunk count, got: {json}");
+        assert_eq!(root["file_count"], 2, "got: {json}");
     }
 
     // ── WS8 additions: ask scope/agentic/empty, export empty/depth, stats summaries,

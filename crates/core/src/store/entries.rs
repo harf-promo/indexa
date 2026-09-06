@@ -509,18 +509,22 @@ impl Store {
     ///   (the treemap builder propagates chunk counts up the tree).
     /// - `queue_state`: the entry's own row in `summary_queue` (`None` when absent).
     ///
-    /// Capped at 500,000 rows. The correlated chunk subquery is acceptable at typical
-    /// index sizes (thousands of files, each resolved in microseconds).
+    /// Capped at 500,000 rows. Chunk counts come from ONE grouped scan of `chunks`
+    /// (`idx_chunks_path` covers the `GROUP BY`) joined in, not a per-row correlated
+    /// subquery: the correlated form ran one lookup for every `entries` row, so the cost
+    /// grew with the file count on a query the Map tab issues on every load — and it ran
+    /// while the web server held its shared store mutex. Row-for-row identical output: a
+    /// file with no chunks correlated to `0` and now `COALESCE`s to `0`.
     pub fn all_coverage_entries(&self) -> Result<Vec<CoverageEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT e.path,
                     COALESCE(e.parent_path, '') AS parent,
                     e.kind,
-                    CASE WHEN e.kind = 'file' THEN
-                      (SELECT COUNT(*) FROM chunks WHERE entry_path = e.path)
-                    ELSE 0 END AS chunk_count,
+                    CASE WHEN e.kind = 'file' THEN COALESCE(cc.n, 0) ELSE 0 END AS chunk_count,
                     sq.state
              FROM entries e
+             LEFT JOIN (SELECT entry_path, COUNT(*) AS n FROM chunks GROUP BY entry_path) cc
+                    ON cc.entry_path = e.path
              LEFT JOIN summary_queue sq ON sq.path = e.path
              LIMIT 500000",
         )?;

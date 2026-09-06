@@ -552,3 +552,78 @@ fn scan_generation_migration_adds_column_to_pre_d5_db() {
     );
     assert_eq!(store.entry_count().unwrap(), 1);
 }
+
+/// `all_coverage_entries` swapped a per-row correlated `COUNT(*)` for one grouped
+/// `LEFT JOIN`. The rewrite must be row-for-row identical, including the two cases the
+/// correlated form handled implicitly: a file with no chunks (correlated → 0, join →
+/// NULL → `COALESCE` → 0) and a directory (never counted at all, even if some row
+/// somehow shared its path).
+#[test]
+fn all_coverage_entries_grouped_join_matches_the_correlated_form() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[
+            dummy_entry("/r", EntryKind::Dir, 0),
+            dummy_entry("/r/two.rs", EntryKind::File, 20),
+            dummy_entry("/r/none.rs", EntryKind::File, 10),
+        ])
+        .unwrap();
+    store
+        .upsert_chunks(&[
+            dummy_chunk("/r/two.rs", 0, "a"),
+            dummy_chunk("/r/two.rs", 1, "b"),
+        ])
+        .unwrap();
+    store
+        .enqueue_summary_items(&[("/r/two.rs".to_owned(), "file".to_owned(), 1)])
+        .unwrap();
+
+    // Reference: the exact query this method used before the rewrite.
+    let reference: Vec<(String, String, bool, u64, Option<String>)> = {
+        let mut stmt = store
+            .db_connection()
+            .prepare(
+                "SELECT e.path,
+                        COALESCE(e.parent_path, '') AS parent,
+                        e.kind,
+                        CASE WHEN e.kind = 'file' THEN
+                          (SELECT COUNT(*) FROM chunks WHERE entry_path = e.path)
+                        ELSE 0 END AS chunk_count,
+                        sq.state
+                 FROM entries e
+                 LEFT JOIN summary_queue sq ON sq.path = e.path
+                 LIMIT 500000",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)? == "dir",
+                    r.get::<_, i64>(3)? as u64,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    };
+
+    let mut got = store.all_coverage_entries().unwrap();
+    let mut want = reference;
+    got.sort();
+    want.sort();
+    assert_eq!(got, want, "grouped JOIN must match the correlated subquery");
+
+    // And spot-check the two edge cases directly, so a future rewrite of BOTH queries
+    // can't make this test vacuously true.
+    let by_path: std::collections::HashMap<_, _> = got.iter().map(|r| (r.0.as_str(), r)).collect();
+    assert_eq!(by_path["/r/two.rs"].3, 2, "file with two chunks");
+    assert_eq!(by_path["/r/none.rs"].3, 0, "file with no chunks reads 0");
+    assert_eq!(
+        by_path["/r"].3, 0,
+        "a directory never carries a chunk count"
+    );
+    assert_eq!(by_path["/r/two.rs"].4.as_deref(), Some("pending"));
+    assert_eq!(by_path["/r/none.rs"].4, None);
+}

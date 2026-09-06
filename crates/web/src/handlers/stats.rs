@@ -158,9 +158,23 @@ pub(crate) async fn api_search(
 }
 
 /// Build and return the context-coverage treemap (sized by chunk count, colored by coverage).
+///
+/// `all_coverage_entries` walks every indexed entry and joins per-file chunk counts, so on a
+/// large index it is one of the heaviest reads the server does. Run it on a fresh, short-lived
+/// connection inside `spawn_blocking` rather than under the shared store mutex — holding that
+/// mutex across this scan blocked every other API request (health checks, SSE polling, the
+/// Activity drawer) for its whole duration. Same discipline as `handlers/graph.rs` and
+/// `handlers/insights_handler.rs`.
 pub(crate) async fn api_map_treemap(State(state): State<AppState>) -> Response {
-    let store = state.store.lock().await;
-    match store.all_coverage_entries() {
+    let db_path = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let store = indexa_core::store::Store::open(&db_path)?;
+        store.all_coverage_entries()
+    })
+    .await
+    .unwrap_or_else(|e| Err(anyhow::anyhow!("coverage-treemap task panicked: {e}")));
+
+    match result {
         Ok(entries) => Json(build_coverage_treemap(entries, 4, 30)).into_response(),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
