@@ -3,6 +3,7 @@
 pub mod agent_sessions;
 pub mod archive;
 pub mod binary;
+pub mod boundaries;
 pub mod code;
 pub mod compressed;
 pub mod email;

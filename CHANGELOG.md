@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cross-language boundary scanner (`crates/parsers/src/boundaries.rs`).** Finds the two halves
+  of a language boundary so a call graph no longer stops exactly where the interesting questions
+  start: HTTP routes (`@app.post`, `.route(...)`, `app.get`, `HandleFunc`, `@PostMapping`,
+  `[HttpGet]`) and their `fetch`/`axios`/`requests`/`WebSocket` callers, plus `#[wasm_bindgen]`
+  and `extern "C"` exports and the JS imports that consume them. Path parameters normalize
+  across five syntaxes — `{id}`, `<int:id>`, `:id`, `${id}`, `*` all collapse to the same key —
+  and FFI names fold case and underscores, because wasm-bindgen renames `snake_case` to
+  `camelCase` and matching literally reports every export as uncalled *and* every caller as
+  calling nothing.
+  Works on raw text rather than the AST, deliberately: a boundary **is** a string, and only the
+  literal tells you which endpoint a handler answers.
+  Three rules it will not break, each pinned by a test: a captured string that is not a path (a
+  CSS selector, a MIME type, an event name) is **rejected** rather than stored as a key nothing
+  can ever join; an unstated method is **never** coerced to GET, because a `fetch` whose options
+  object is built elsewhere genuinely does not say; and every display path uses the spelling the
+  source wrote, never the folded matching key — a filter that cannot find its own output is
+  worse than no filter.
+  This ships the scanner only: no storage, no CLI, no MCP tool, nothing wired into indexing.
+  Adds a `regex` dependency edge to `crates/parsers` (already workspace-pinned and in the tree,
+  so no new crate); `apps/indexa-desktop/Cargo.lock` updated by exactly that one edge, with no
+  version float.
+
+### Added
+
 - **Recorded memories can be offered to `ask` — opt-in, `[memory] retrieval = false` by default.**
   When enabled, live claims are rendered as a labelled `RECORDED MEMORY` block ahead of the
   numbered excerpts, each line carrying its kind, confidence, whether it was ever checked, and

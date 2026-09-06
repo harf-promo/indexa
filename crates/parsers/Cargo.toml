@@ -18,6 +18,10 @@ reqwest = { workspace = true, default-features = false, features = ["rustls"] }
 # Shared reqwest client construction (build_remote_client) — same client the plugin
 # directory's remote fetch used to hand-roll, now deduped via crates/http-util.
 indexa-http-util = { path = "../http-util" }
+# Cross-language boundary scanning (HTTP routes ↔ their callers, FFI exports ↔ importers).
+# A boundary is a STRING, so it is matched on raw text rather than the AST. `regex` is already
+# workspace-pinned and in the tree (crates/query uses it), so this adds an edge, not a crate.
+regex = { workspace = true }
 # Markdown parsing
 pulldown-cmark = "0.13"
 # Mime type detection
