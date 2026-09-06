@@ -15,7 +15,8 @@ use crate::qa::Answer;
 /// constants (not an enum) because the value crosses into the core store layer as plain text.
 ///
 /// The full rendered tool response (MCP `search`/`get_summary`/`get_chunk_context`/`ask`/`read_file`
-/// — recorded by the MCP crate, not this one; listed here so the tag is defined in one place).
+/// plus `export_pack`/`search_pack` — recorded by the MCP crate, not this one; listed here so the
+/// tag is defined in one place).
 pub const BASIS_RENDERED_RESPONSE: &str = "rendered_response";
 /// The answer text plus its delivered citations (web + CLI `ask`; see [`record_ask_impact`] /
 /// [`served_bytes`]).

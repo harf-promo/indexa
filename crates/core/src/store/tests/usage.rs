@@ -206,9 +206,10 @@ fn usage_by_basis_separates_surfaces_and_groups_untagged_as_unspecified() {
     // tag and `usage_by_basis` splits the otherwise-blended weekly aggregate.
     let mut store = Store::open_in_memory().unwrap();
 
-    // MCP-style rendered-response rows (recorded here only to exercise the store API —
-    // the actual MCP call sites still call the untagged `record_tool_usage` until that
-    // half of the accounting work lands).
+    // MCP-style rendered-response rows. Since the MCP crate's `record_usage` was switched
+    // to `record_tool_usage_with_basis`, this is the basis its call sites actually write —
+    // this is no longer a store-API-only shape. `indexa-mcp`'s
+    // `mcp_usage_rows_are_tagged_with_a_basis` covers the call sites themselves.
     store
         .record_tool_usage_with_basis("mcp", "search", 100, 4_000, None, "rendered_response")
         .unwrap();
