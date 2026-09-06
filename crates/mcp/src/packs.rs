@@ -222,7 +222,13 @@ impl IndexaMcp {
         } else {
             0
         };
-        record_usage(&mut store, "export_pack", buf.len(), counterfactual);
+        record_usage(
+            &mut store,
+            "export_pack",
+            buf.len(),
+            counterfactual,
+            indexa_query::impact::BASIS_RENDERED_RESPONSE,
+        );
         Ok(ok_text(buf))
     }
 
@@ -397,7 +403,13 @@ impl IndexaMcp {
         // the matched files whole. Best-effort; a lookup failure records a zero counterfactual.
         let paths: Vec<&str> = hits.iter().map(|h| h.entry_path.as_str()).collect();
         let counterfactual = store.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
-        record_usage(&mut store, "search_pack", out.len(), counterfactual);
+        record_usage(
+            &mut store,
+            "search_pack",
+            out.len(),
+            counterfactual,
+            indexa_query::impact::BASIS_RENDERED_RESPONSE,
+        );
         Ok(ok_text(out))
     }
 }

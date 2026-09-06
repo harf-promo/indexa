@@ -318,7 +318,13 @@ impl IndexaMcp {
 
         let paths: Vec<&str> = hits.iter().map(|h| h.entry_path.as_str()).collect();
         let counterfactual = store.counterfactual_bytes_for_paths(&paths).unwrap_or(0);
-        record_usage(&mut store, "search", out.len(), counterfactual);
+        record_usage(
+            &mut store,
+            "search",
+            out.len(),
+            counterfactual,
+            indexa_query::impact::BASIS_RENDERED_RESPONSE,
+        );
 
         Ok(ok_text(out))
     }
@@ -402,7 +408,13 @@ impl IndexaMcp {
         }
 
         let counterfactual = store.counterfactual_bytes_for_paths(&[&path]).unwrap_or(0);
-        record_usage(&mut store, "get_summary", out.len(), counterfactual);
+        record_usage(
+            &mut store,
+            "get_summary",
+            out.len(),
+            counterfactual,
+            indexa_query::impact::BASIS_RENDERED_RESPONSE,
+        );
 
         Ok(ok_text(out))
     }
@@ -478,7 +490,13 @@ impl IndexaMcp {
         // Served = bytes returned; counterfactual = the file's full on-disk size
         // (same basis as read_file — see store::usage for the honest definition).
         let counterfactual = store.counterfactual_bytes_for_paths(&[&path]).unwrap_or(0);
-        record_usage(&mut store, "get_chunk_context", out.len(), counterfactual);
+        record_usage(
+            &mut store,
+            "get_chunk_context",
+            out.len(),
+            counterfactual,
+            indexa_query::impact::BASIS_RENDERED_RESPONSE,
+        );
 
         Ok(ok_text(out))
     }
@@ -575,7 +593,13 @@ impl IndexaMcp {
             };
             {
                 let mut store = self.store()?;
-                record_usage(&mut store, "ask_catalog", bytes, counterfactual);
+                record_usage(
+                    &mut store,
+                    "ask_catalog",
+                    bytes,
+                    counterfactual,
+                    indexa_query::impact::BASIS_ANSWER_TEXT,
+                );
             }
             return Ok(ok_text(answer.answer));
         }
@@ -740,7 +764,13 @@ impl IndexaMcp {
                     }
                 }
             }
-            record_usage(&mut store, "ask", out.len(), counterfactual);
+            record_usage(
+                &mut store,
+                "ask",
+                out.len(),
+                counterfactual,
+                indexa_query::impact::BASIS_RENDERED_RESPONSE,
+            );
             // Persist the turn (best-effort; never fails the answer). Only for synthesized
             // answers — a retrieval-only slice is not an answer, so storing it as one would
             // poison the conversation history the follow-up rewrite reads.
@@ -797,7 +827,13 @@ impl IndexaMcp {
         }
 
         // Counterfactual = the file's full on-disk size (vs. the served window).
-        record_usage(&mut store, tool, body.len(), bytes.len() as u64);
+        record_usage(
+            &mut store,
+            tool,
+            body.len(),
+            bytes.len() as u64,
+            indexa_query::impact::BASIS_RENDERED_RESPONSE,
+        );
 
         Ok(ok_text(body))
     }

@@ -169,12 +169,30 @@ fn ok_text(s: impl Into<String>) -> CallToolResult {
 
 /// Best-effort token-savings telemetry — a recording failure must never fail
 /// the user's call, so this swallows errors at debug level instead of `?`.
-fn record_usage(store: &mut Store, tool: &str, bytes_served: usize, bytes_counterfactual: u64) {
+///
+/// `basis` is a `BASIS_*` constant from [`indexa_query::impact`] describing what
+/// `bytes_served` actually measured. It is a required parameter, not a default: every MCP
+/// row used to be written through the untagged `record_tool_usage`, so the whole MCP surface
+/// — the majority of rows on a real index — aggregated as `unspecified` and
+/// `indexa status` / `/api/impact` could not reconcile their per-basis split. A test in this
+/// crate asserts that no call to the untagged store method remains anywhere in this crate.
+fn record_usage(
+    store: &mut Store,
+    tool: &str,
+    bytes_served: usize,
+    bytes_counterfactual: u64,
+    basis: &str,
+) {
     // MCP calls aren't session-scoped for the savings ledger (the ledger is web-session
     // driven); pass None so these still record into the weekly aggregate.
-    if let Err(e) =
-        store.record_tool_usage("mcp", tool, bytes_served as u64, bytes_counterfactual, None)
-    {
+    if let Err(e) = store.record_tool_usage_with_basis(
+        "mcp",
+        tool,
+        bytes_served as u64,
+        bytes_counterfactual,
+        None,
+        basis,
+    ) {
         tracing::debug!("usage telemetry skipped ({tool}): {e:#}");
     }
 }
@@ -742,6 +760,114 @@ mod tests {
              truncated to just the top-level message), got: {}",
             err.message
         );
+    }
+
+    /// Every `tool_usage` row the MCP surface writes must carry a `served_basis`.
+    ///
+    /// `record_usage` used to delegate to the untagged `record_tool_usage`, so the whole MCP
+    /// surface — the majority of rows on a real index — aggregated as `"unspecified"` and the
+    /// per-basis split on `indexa status` / `/api/impact` could not be reconciled. This calls a
+    /// real tool through the real recording path and asserts nothing lands untagged.
+    #[tokio::test]
+    async fn mcp_usage_rows_are_tagged_with_a_basis() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_entries(&[Entry {
+                    path: "/r/auth.rs".into(),
+                    kind: EntryKind::File,
+                    size: 42,
+                    modified: None,
+                    hint: None,
+                    is_binary: false,
+                }])
+                .unwrap();
+            store
+                .upsert_chunks(&[indexa_core::store::ChunkRecord {
+                    entry_path: "/r/auth.rs".to_owned(),
+                    seq: 0,
+                    heading: String::new(),
+                    text: "fn authenticate(user: &str) -> bool { true }".to_owned(),
+                    language: Some("rust".to_owned()),
+                    embedding: None,
+                    embed_model: None,
+                    content_hash: None,
+                }])
+                .unwrap();
+            assert_eq!(
+                store
+                    .usage_by_basis(indexa_core::store::USAGE_WEEK_SECS)
+                    .unwrap()
+                    .len(),
+                0,
+                "precondition: no usage recorded yet"
+            );
+        }
+
+        let mcp = IndexaMcp::new(
+            dbpath.clone(),
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+        mcp.search(Parameters(crate::retrieval::SearchParams {
+            query: "authenticate".to_owned(),
+            limit: Some(5),
+            scope: None,
+            mode: Some("sparse".to_owned()),
+            category: None,
+        }))
+        .await
+        .expect("search succeeds");
+
+        let store = Store::open(&dbpath).unwrap();
+        let by_basis = store
+            .usage_by_basis(indexa_core::store::USAGE_WEEK_SECS)
+            .unwrap();
+        assert!(!by_basis.is_empty(), "the search must have recorded usage");
+        assert!(
+            !by_basis.iter().any(|(b, _)| b == "unspecified"),
+            "every MCP usage row must carry a served_basis, got: {by_basis:?}"
+        );
+        assert!(
+            by_basis.iter().any(|(b, _)| b == "rendered_response"),
+            "search serves a rendered tool response, got: {by_basis:?}"
+        );
+    }
+
+    /// Structural guard, in the same spirit as the web crate's
+    /// `every_ui_fragment_on_disk_is_wired_into_the_concat_list`: a new tool that reaches for
+    /// the untagged `record_tool_usage` would silently reintroduce `"unspecified"` rows, and
+    /// no behavioral test would notice until someone read the impact report. `record_usage`
+    /// now takes `basis` as a required parameter, so the only way back is calling the store
+    /// method directly — which this rejects.
+    #[test]
+    fn no_bare_record_tool_usage_call_remains_in_this_crate() {
+        for (name, src) in [
+            ("lib.rs", include_str!("lib.rs")),
+            ("retrieval.rs", include_str!("retrieval.rs")),
+            ("packs.rs", include_str!("packs.rs")),
+            ("admin.rs", include_str!("admin.rs")),
+            ("curation.rs", include_str!("curation.rs")),
+            ("graph.rs", include_str!("graph.rs")),
+            ("insights.rs", include_str!("insights.rs")),
+            ("query_extras.rs", include_str!("query_extras.rs")),
+            ("review.rs", include_str!("review.rs")),
+        ] {
+            // Assembled with `concat!` so the needle never appears as one contiguous
+            // literal in this file — `include_str!("lib.rs")` pulls in this very test, and a
+            // verbatim literal would make the guard fail on itself. The needle keeps the
+            // trailing `(` so it matches only the untagged delegating method:
+            // `record_tool_usage_with_basis(` does not contain it.
+            let needle = concat!("record_tool_usage", "(");
+            assert!(
+                !src.contains(needle),
+                "{name} calls the untagged `record_tool_usage` — use `record_usage(.., basis)` \
+                 with a BASIS_* constant from indexa_query::impact instead"
+            );
+        }
     }
 
     #[tokio::test]

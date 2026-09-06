@@ -42,6 +42,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warn and say explicitly that the change was not indexed. The embed loop moved into a
   `build_chunk_records` seam — the absence of which is why the two implementations diverged —
   covered by three new tests.
+- **The "tokens saved" per-basis split finally covers the MCP surface.** `tool_usage` rows carry
+  a `served_basis` tag saying what `bytes_served` actually measured, because surfaces count
+  differently — but `crates/mcp`'s `record_usage` still delegated to the untagged
+  `record_tool_usage`, so **every** MCP row aggregated as `unspecified`. On a real index that is
+  the majority of rows, which made the per-basis split on `indexa status` and `/api/impact`
+  unreconcilable and left "show the math" unable to explain itself. CHANGELOG has carried this
+  as a deferred follow-up since the `served_basis` column landed. All eight MCP recording sites
+  now tag their row: `search`, `get_summary`, `get_chunk_context`, `ask`, `read_file`,
+  `export_pack` and `search_pack` as `rendered_response`; `ask_catalog` as `answer_text`, which
+  is what `BASIS_ANSWER_TEXT`'s own doc comment already said it was for. `record_usage` takes
+  the basis as a required parameter (not a defaulted one), and a structural test rejects any
+  future call to the untagged store method anywhere in the crate.
 
 ## [0.80.3] — 2026-09-01
 
