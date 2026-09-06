@@ -2,8 +2,14 @@
 
 Where Indexa sits, who's nearby, and what makes it defensible. Honest, with the gaps named.
 
-> **Snapshot updated 2026-08-30 (v0.77.0).** Competitor capabilities drift; for what Indexa has
-> shipped since this date, [CHANGELOG.md](../CHANGELOG.md) is canonical, not this file.
+> **Snapshot updated 2026-09-06 (v0.80.3).** Competitor capabilities drift; for what Indexa has
+> shipped since this date, [CHANGELOG.md](../CHANGELOG.md) is canonical, not this file. Shipped
+> since the previous (v0.77.0) snapshot and not re-analyzed below: agent-session transcript
+> indexing with `category:agent-session` scoping, the plugin directory and `plugin list
+> --refresh`, `indexa eval --judge` and `--save-run`, Cerebras as an opt-in provider, Context
+> Pack per-item inclusion modes with `--dry-run` and typed redaction labels, and durable
+> patch-id-anchored `record_decision` ledger annotations. None of them changes a competitor
+> comparison on this page.
 
 ## The one-line position
 

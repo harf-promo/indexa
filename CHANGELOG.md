@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Four stale or unbacked product claims in the docs, and a guard so one of them can't recur.**
+  `ROADMAP.md`'s v0.13 milestone — marked `(shipped — v0.15.0)` — listed *"First-party plugin:
+  browser history indexer (opt-in)"*, which no code has ever backed (`grep -ri
+  'browser.history\|BrowserHistory'` finds nothing). It's now recorded as considered-not-built,
+  with the reason: the plugin SDK is a compile-time Rust extension point, so a first-party plugin
+  would ship as a separate crate rather than inside the stock binary. `README.md` listed the
+  remote plugin directory under *What's coming* although `plugin list --refresh` had already
+  shipped in 0.80.0. `ROADMAP.md`'s "Local multimodal understanding" section carried no
+  `(shipped)` marker at all despite image captioning, audio transcription and video-frame
+  captioning all being implemented and config-gated — it now marks each of the three
+  individually, and states plainly that a video *audio-track transcript* is the one part still
+  not built. `docs/COMPETITIVE.md` was stamped v0.77.0 against a v0.80.3 tree, three minor
+  releases of shipped features behind, while telling the reader that stamp is what bounds its
+  accuracy; it's restamped and names what shipped in between. New test
+  `competitive_snapshot_stamp_tracks_the_workspace_minor_version` asserts that stamp matches the
+  workspace version at minor precision — a patch release won't force a competitive re-read, but a
+  minor bump means features shipped and the page is worth re-checking.
+
+### Fixed
+
 - **Two web handlers no longer stall the entire local server while they run.** The web server
   shares one `Arc<Mutex<Store>>`, and `GET /api/packs/{name}/export` held it across a freshness
   stat sweep over every pack member *plus* a per-item `build_tree` + render loop, while
