@@ -72,24 +72,17 @@ pub(crate) async fn cmd_pack_create(
     }
 
     // ── Confirm ───────────────────────────────────────────────────────────────
-    let confirmed = if yes {
-        true
-    } else {
-        use std::io::IsTerminal as _;
-        if std::io::stdin().is_terminal() {
-            print!(
-                "\nAdd all {} paths to pack \"{name}\"? [Y/n] ",
-                candidates.len()
-            );
-            use std::io::Write as _;
-            let _ = std::io::stdout().flush();
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-            input.trim().is_empty() || input.trim().to_lowercase() == "y"
-        } else {
-            true // non-interactive: accept
-        }
-    };
+    let confirmed = super::helpers::confirm_or_bail(
+        &format!("Add all {} paths to pack \"{name}\"?", candidates.len()),
+        true,
+        yes,
+        &format!(
+            "Refusing to auto-populate pack \"{name}\" with {} suggested path(s) in a \
+             non-interactive session. Re-run with --yes to accept them, or add paths \
+             explicitly with `indexa pack add \"{name}\" <paths…>`.",
+            candidates.len()
+        ),
+    )?;
 
     if !confirmed {
         println!("Skipped. Add manually with: indexa pack add \"{name}\" <paths…>");

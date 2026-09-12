@@ -96,6 +96,25 @@ impl IndexaMcp {
         {
             out.push('\n');
             out.push_str(&line);
+            // Per-basis reconciliation: `bytes_served` measures different things across
+            // surfaces (this MCP server records the full rendered response; web/CLI `ask`
+            // record answer+citations), so the aggregate above blends them. Mirrors
+            // `indexa status`'s convention (apps/indexa/src/commands/status.rs) — only
+            // show the split once more than one basis actually contributed, otherwise
+            // the aggregate line already tells the whole story.
+            if let Ok(by_basis) = store.usage_by_basis(indexa_core::store::USAGE_WEEK_SECS) {
+                if by_basis.len() > 1 {
+                    out.push_str("\nBy served basis:");
+                    for (basis, u) in &by_basis {
+                        let saved = u.bytes_counterfactual.saturating_sub(u.bytes_served) / 4;
+                        out.push_str(&format!(
+                            "\n  {basis}: {} call{} · ~{saved} tokens saved",
+                            u.calls,
+                            if u.calls == 1 { "" } else { "s" },
+                        ));
+                    }
+                }
+            }
         }
         Ok(ok_text(out))
     }
@@ -350,6 +369,13 @@ impl IndexaMcp {
 #[cfg(test)]
 mod tests {
     use super::indexa_exe;
+    use crate::IndexaMcp;
+    use indexa_core::config::Config;
+    use indexa_core::store::Store;
+    use indexa_embed::Embedder;
+    use indexa_llm::Generator;
+    use rmcp::model::CallToolResult;
+    use std::sync::Arc;
 
     /// `trigger_index` / `add_note` must spawn the server's OWN binary, not a bare `"indexa"`
     /// PATH lookup. Assert the resolver returns a concrete, absolute, existing path.
@@ -368,6 +394,82 @@ mod tests {
             exe.as_os_str(),
             "indexa",
             "must not regress to the bare command name"
+        );
+    }
+
+    struct StubEmbedder;
+    #[async_trait::async_trait]
+    impl Embedder for StubEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.0; 8])
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+    struct StubGenerator;
+    #[async_trait::async_trait]
+    impl Generator for StubGenerator {
+        async fn generate(&self, _prompt: &str) -> anyhow::Result<String> {
+            Ok("stub".to_owned())
+        }
+    }
+
+    fn tool_text(r: CallToolResult) -> String {
+        r.content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// `get_stats` must reconcile bases the same way `indexa status` does: silent when
+    /// only one basis contributed (the aggregate savings line already says it all), and
+    /// a per-basis breakdown once more than one basis is present — using
+    /// [`indexa_core::store::Store::usage_by_basis`], not a fresh aggregation.
+    #[tokio::test]
+    async fn get_stats_shows_by_basis_split_only_when_more_than_one_basis_present() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .record_tool_usage_with_basis(
+                    "mcp",
+                    "search",
+                    100,
+                    1_000,
+                    None,
+                    "rendered_response",
+                )
+                .unwrap();
+        }
+        let mcp = IndexaMcp::new(
+            dbpath.clone(),
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+        let stats = tool_text(mcp.get_stats().await.unwrap());
+        assert!(
+            !stats.contains("By served basis"),
+            "a single basis must not trigger the split, got: {stats}"
+        );
+
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .record_tool_usage_with_basis("web", "ask", 50, 500, None, "answer_and_citations")
+                .unwrap();
+        }
+        let stats = tool_text(mcp.get_stats().await.unwrap());
+        assert!(
+            stats.contains("By served basis"),
+            "two distinct bases must trigger the split, got: {stats}"
+        );
+        assert!(
+            stats.contains("rendered_response") && stats.contains("answer_and_citations"),
+            "the split must name both contributing bases, got: {stats}"
         );
     }
 }
