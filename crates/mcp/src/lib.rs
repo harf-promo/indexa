@@ -438,7 +438,7 @@ impl ServerHandler for IndexaMcp {
 
     // ── Resources (read-only index artifacts) ──────────────────────────────────
     // Hand-written (resources have no router macro); the inner methods live in
-    // `resources.rs`. Tools stay the source of truth for the 53-tool golden list —
+    // `resources.rs`. Tools stay the source of truth for the 56-tool golden list —
     // resources/prompts are a separate protocol surface and don't affect it.
 
     async fn list_resources(
@@ -1950,20 +1950,27 @@ mod tests {
     /// behind explicit confirmation) — locks the three-way split so a new tool can't silently
     /// ship unannotated or misclassified.
     ///
-    /// `dismiss_decision` and `ignore_classification` are destructive rather than "safe
-    /// mutating" by a consistent rule applied to every one of the 13 mutating tools: is there
-    /// another exposed tool that undoes this one's effect? `delete_weight` is undone by
+    /// `dismiss_decision`, `ignore_classification` and `memory_update` are destructive rather
+    /// than "safe mutating" by a consistent rule applied to every one of the 16 mutating tools:
+    /// is there another exposed tool that undoes this one's effect? `delete_weight` is undone by
     /// `set_weight`; `confirm_classification` is undone by re-calling itself (even over an
     /// `ignore_classification` tombstone — the store's upsert carries no guard). Neither
     /// `dismiss_decision` nor `ignore_classification` has any such undo path through MCP (there is
     /// no `un-ignore`/`un-dismiss` tool, and `decide_and_apply`'s ledger-level `revert_decision`
     /// is CLI/web-only, never exposed here) — so both are sticky, hard-to-reverse state changes,
-    /// same bucket as `prune`/`delete_pack`/`remove_pack_paths`. `trigger_index` stays "safe
-    /// mutating" despite spawning `indexa index` (which can delete derived rows for files that
-    /// vanished from disk within its scope): `add_note` spawns the exact same `indexa index` call
-    /// on its notes directory and the task's own spec calls `add_note` non-destructive, so
-    /// spawning that reconciliation pass can't be what makes a tool destructive — only real user
-    /// data loss (not derived-artifact GC for already-gone files) earns the destructive hint here.
+    /// same bucket as `prune`/`delete_pack`/`remove_pack_paths`. `memory_update`'s `retire`
+    /// action joins them for the same reason: there is no `memory_unretire` tool, and
+    /// re-recording the same text with `memory_record` creates a fresh agent/unverified claim
+    /// rather than restoring the retired row's id, verification status and provenance — keeping
+    /// the row (rather than deleting it) is not the bar this policy uses. `memory_update`'s other
+    /// action, `supersede`, is itself reversible (it keeps the original row and links it), but
+    /// the tool carries one annotation for both actions, so the irreversible one governs.
+    /// `trigger_index` stays "safe mutating" despite spawning `indexa index` (which can delete
+    /// derived rows for files that vanished from disk within its scope): `add_note` spawns the
+    /// exact same `indexa index` call on its notes directory and the task's own spec calls
+    /// `add_note` non-destructive, so spawning that reconciliation pass can't be what makes a
+    /// tool destructive — only real user data loss (not derived-artifact GC for already-gone
+    /// files, and not a state a currently-exposed tool can undo) earns the destructive hint here.
     #[test]
     fn tools_carry_read_only_or_destructive_annotations() {
         let destructive: std::collections::HashSet<&str> = [
@@ -1973,6 +1980,9 @@ mod tests {
             "ignore_classification",
             "answer_decision",
             "dismiss_decision",
+            // `retire` has no MCP-exposed undo (see the doc comment above); `memory_update`
+            // carries one annotation for both its actions, so the irreversible one governs.
+            "memory_update",
         ]
         .into_iter()
         .collect();
@@ -1985,10 +1995,8 @@ mod tests {
             "set_weight",
             "delete_weight",
             "record_decision",
-            // Both keep every row: `memory_record` is additive and dedups, and
-            // `memory_update`'s supersede/retire retire rather than delete.
+            // Additive and dedups; never retires or otherwise loses a claim.
             "memory_record",
-            "memory_update",
         ]
         .into_iter()
         .collect();
@@ -2041,7 +2049,7 @@ mod tests {
         assert_eq!(
             destructive.len() + safe_mutating.len(),
             16,
-            "expected exactly 16 mutating tools (6 destructive + 10 safe)"
+            "expected exactly 16 mutating tools (7 destructive + 9 safe)"
         );
         assert_eq!(
             total - destructive.len() - safe_mutating.len(),
@@ -2070,8 +2078,53 @@ mod tests {
         counts
     }
 
+    /// Extract every "mcp_tool_count: <N>" YAML-style counter claim — the form
+    /// `.orchestration/lanes.yml` and `docs/agents/verification.md` use, distinct from either doc
+    /// prose form above.
+    fn yaml_tool_counts_in(text: &str) -> Vec<usize> {
+        let needle = "mcp_tool_count:";
+        let mut counts = Vec::new();
+        let mut i = 0;
+        while let Some(pos) = text[i..].find(needle) {
+            let abs = i + pos + needle.len();
+            let digits: String = text[abs..]
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if !digits.is_empty() {
+                counts.push(digits.parse().unwrap());
+            }
+            i = abs;
+        }
+        counts
+    }
+
+    /// Extract every "<N>-tool" hyphenated count claim (digits immediately preceding the
+    /// literal "-tool") — the form the golden-list comment above `list_resources` uses.
+    fn hyphenated_tool_counts_in(text: &str) -> Vec<usize> {
+        let bytes = text.as_bytes();
+        let mut counts = Vec::new();
+        let mut i = 0;
+        while let Some(pos) = text[i..].find("-tool") {
+            let abs = i + pos;
+            let mut start = abs;
+            while start > 0 && bytes[start - 1].is_ascii_digit() {
+                start -= 1;
+            }
+            if start < abs {
+                counts.push(text[start..abs].parse().unwrap());
+            }
+            i = abs + "-tool".len();
+        }
+        counts
+    }
+
     /// The "N tools" claims in the docs must equal the real tool count — this is
-    /// the guard that retires the "docs said 29, code had 33" drift class.
+    /// the guard that retires the "docs said 29, code had 33" drift class. Three forms of the
+    /// same claim exist across the repo (prose "N tools", YAML `mcp_tool_count: N`, and the
+    /// hyphenated "N-tool golden list" source comment); each is scanned in the form its
+    /// document actually uses, not coerced into one shared regex.
     #[test]
     fn doc_tool_count_matches_code() {
         let real = IndexaMcp::tool_router().list_all().len();
@@ -2081,6 +2134,7 @@ mod tests {
             "AGENTS.md",
             "USAGE.md",
             "docs/how-to/live-retrieval-over-mcp.md",
+            "docs/agents/operations.md",
         ] {
             let text = std::fs::read_to_string(repo.join(rel)).unwrap();
             let counts = tool_counts_in(&text);
@@ -2094,6 +2148,38 @@ mod tests {
                     "{rel} claims {c} MCP tools but the code defines {real} — update the doc"
                 );
             }
+        }
+
+        for rel in ["docs/agents/verification.md", ".orchestration/lanes.yml"] {
+            let text = std::fs::read_to_string(repo.join(rel)).unwrap();
+            let counts = yaml_tool_counts_in(&text);
+            assert!(
+                !counts.is_empty(),
+                "{rel}: expected an 'mcp_tool_count: N' claim (wording changed?)"
+            );
+            for c in counts {
+                assert_eq!(
+                    c, real,
+                    "{rel} claims mcp_tool_count {c} but the code defines {real} — update it"
+                );
+            }
+        }
+
+        // This file's own golden-list comment, above `list_resources` — `include_str!`'s its
+        // own source (the same self-include trick `memory.rs` uses) so a hand-edit there is
+        // caught the same way a stale doc claim is.
+        let this_src = include_str!("lib.rs");
+        let hyphen_counts = hyphenated_tool_counts_in(this_src);
+        assert!(
+            !hyphen_counts.is_empty(),
+            "lib.rs: expected an 'N-tool golden list' claim (wording changed?)"
+        );
+        for c in hyphen_counts {
+            assert_eq!(
+                c, real,
+                "lib.rs's golden-list comment claims {c} tools but the code defines {real} — \
+                 update the comment"
+            );
         }
     }
 

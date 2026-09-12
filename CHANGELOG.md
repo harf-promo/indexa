@@ -21,8 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the module's own docs explain why it doesn't.
   `memory_search` joins `CORE_TOOL_NAMES`: an agent on the constrained profile still needs to
   know what it already worked out, or a bounded toolset silently forgets everything between
-  sessions. Both writes are annotated non-destructive, correctly — `memory_record` is additive
-  and dedups, and `memory_update`'s supersede/retire keep every row.
+  sessions. `memory_record` is annotated non-destructive — it is additive and dedups, and never
+  loses a claim. `memory_update` is annotated **destructive**: `supersede` keeps the original row
+  and links it, but `retire` has no exposed undo (no `memory_unretire` tool, and re-recording the
+  same text creates a fresh agent/unverified claim rather than restoring the retired row), and one
+  annotation covers both actions, so the irreversible one governs. `memory_search` also composes
+  its `query`/`paths`/`kinds`/`min_confidence` filters together instead of `paths` silently
+  overriding `query`.
   The tool descriptions do real work: they tell an agent to pick `kind` honestly ("mislabelling
   an inference as an observation is how a memory store starts repeating your guesses back as
   facts") and to supersede a claim the moment it learns one was wrong, since a stale claim left

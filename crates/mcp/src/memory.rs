@@ -86,6 +86,12 @@ pub struct MemoryUpdateParams {
     pub text: Option<String>,
 }
 
+/// How many candidate rows `memory_search` pulls from a narrowing store lookup (`paths` and/or
+/// `query`) before applying `kinds`/`min_confidence` and cutting down to the caller's requested
+/// `limit`. Large enough that no realistic memory store pre-truncates a match away before those
+/// filters run; a real index's active-memory count is nowhere near this.
+const CANDIDATE_LIMIT: usize = 10_000;
+
 fn parse_kind(s: &str) -> Result<MemoryKind, ErrorData> {
     MemoryKind::parse(s).ok_or_else(|| {
         let all = MemoryKind::ALL
@@ -193,18 +199,63 @@ claims about specific files, `query` to search the text, or neither to list the 
             .iter()
             .map(|k| parse_kind(k))
             .collect::<Result<Vec<_>, _>>()?;
+        let query = p.query.as_deref().filter(|q| !q.trim().is_empty());
         let store = self.store()?;
 
-        let mut rows = if !p.paths.is_empty() {
-            store.memories_for_paths(&p.paths, limit).map_err(mcp_err)?
-        } else if let Some(q) = p.query.as_deref().filter(|q| !q.trim().is_empty()) {
-            store.search_memories(q, limit).map_err(mcp_err)?
+        // `query`, `paths`, `kinds` and `min_confidence` are filters meant to compose, not
+        // alternate modes — an agent asking for `paths=[…], kinds=[…]` expects every clause to
+        // apply, not for `paths` to silently win and `query`/`kinds`/`min_confidence` to be
+        // ignored or applied too late to matter. When either `paths` or `query` narrows the
+        // search, fetch candidates up to CANDIDATE_LIMIT (well past the caller's requested
+        // `limit`), intersect `paths` and `query` when both are given, then apply
+        // `kinds`/`min_confidence` and only THEN cut down to `limit` — truncating to `limit`
+        // first (the previous behavior) can silently drop a match that exists but didn't happen
+        // to be among the first `limit` unfiltered rows. `active_memories` (neither `paths` nor
+        // `query` given) already composes `kinds`/`min_confidence` before its own trust-rank
+        // ordering and is left as-is here.
+        let mut rows = if !p.paths.is_empty() || query.is_some() {
+            let mut candidates = if !p.paths.is_empty() {
+                store
+                    .memories_for_paths(&p.paths, CANDIDATE_LIMIT)
+                    .map_err(mcp_err)?
+            } else {
+                // `query.is_some()` per the outer condition, since `p.paths` is empty here.
+                store
+                    .search_memories(query.expect("query is Some"), CANDIDATE_LIMIT)
+                    .map_err(mcp_err)?
+            };
+            if !p.paths.is_empty() {
+                if let Some(q) = query {
+                    let matched: std::collections::HashSet<i64> = store
+                        .search_memories(q, CANDIDATE_LIMIT)
+                        .map_err(mcp_err)?
+                        .into_iter()
+                        .map(|m| m.id)
+                        .collect();
+                    candidates.retain(|m| matched.contains(&m.id));
+                }
+            }
+            if !kinds.is_empty() {
+                candidates.retain(|m| kinds.contains(&m.kind));
+            }
+            candidates.retain(|m| m.confidence >= min_conf);
+            // Most-trusted first, matching the response text's promise; a stable sort keeps
+            // each source query's own tiebreak (bm25 rank, path-match confidence order, …).
+            candidates.sort_by(|a, b| {
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            candidates.truncate(limit);
+            candidates
         } else {
             let filter = (!kinds.is_empty()).then_some(kinds.as_slice());
             store
                 .active_memories(filter, min_conf, limit)
                 .map_err(mcp_err)?
         };
+        // A defensive no-op for the `active_memories` branch (which already applies both), and
+        // the actual composition step for the `paths`/`query` branch above.
         if !kinds.is_empty() {
             rows.retain(|m| kinds.contains(&m.kind));
         }
@@ -232,9 +283,16 @@ belief stays readable; `retire` stops it being offered without deleting it. Use 
 you learn a recorded claim was wrong — leaving a stale claim in place is worse than never \
 having recorded it. Verification is not available to you: only the user can mark a claim \
 verified.",
-        // Not destructive: `supersede` keeps the original and links it, `retire` keeps the
-        // row. Nothing this tool can do removes a claim from the store.
-        annotations(read_only_hint = false, destructive_hint = false)
+        // Destructive, per the annotation policy in lib.rs's
+        // `tools_carry_read_only_or_destructive_annotations`: is there another exposed tool that
+        // undoes this one's effect? `supersede` keeps the original row and links it, but `retire`
+        // has no MCP-exposed undo — there is no `unretire` tool, and re-recording the same text
+        // creates a fresh agent/unverified claim rather than restoring the retired row's id,
+        // verification status and provenance. Neither row is ever deleted, but that is not the
+        // bar this policy uses; a tool that can put a claim into a state nothing else here can
+        // reverse is destructive even though it keeps every row, same as `dismiss_decision` and
+        // `ignore_classification`.
+        annotations(read_only_hint = false, destructive_hint = true)
     )]
     pub(crate) async fn memory_update(
         &self,
@@ -292,6 +350,146 @@ verified.",
 mod tests {
     use super::*;
     use indexa_core::store::Store;
+
+    // ── MCP-handler tests (real IndexaMcp against a temp on-disk index) ──
+
+    struct StubEmbedder;
+    #[async_trait::async_trait]
+    impl indexa_embed::Embedder for StubEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.0; 8])
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+    struct StubGenerator;
+    #[async_trait::async_trait]
+    impl indexa_llm::Generator for StubGenerator {
+        async fn generate(&self, _prompt: &str) -> anyhow::Result<String> {
+            Ok("stub".to_owned())
+        }
+    }
+
+    /// An `IndexaMcp` over a fresh temp-file index, seeded by `seed` before the handle is
+    /// constructed (mirrors `lib.rs`'s `mcp_with_db`, plus the seed hook these tests need).
+    fn mcp_with_db(dbdir: &tempfile::TempDir, seed: impl FnOnce(&mut Store)) -> IndexaMcp {
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            seed(&mut store);
+        }
+        IndexaMcp::new(
+            dbpath,
+            std::sync::Arc::new(StubEmbedder),
+            std::sync::Arc::new(StubGenerator),
+            std::sync::Arc::new(indexa_core::config::Config::default()),
+        )
+    }
+
+    /// Concatenate a `CallToolResult`'s text content blocks (mirrors `lib.rs`'s `tool_text`).
+    fn text_of(r: CallToolResult) -> String {
+        r.content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The exact fixture from the #538 review: an observed claim at higher confidence and an
+    /// inferred claim at lower confidence, both about `/x`. `paths=[/x], kinds=[inferred],
+    /// limit=1` must return the inferred claim. The previous composition fetched only `limit`
+    /// (1) path-matched row — ordered by confidence, so the observed claim filled that one
+    /// slot — then filtered by `kinds` afterward, dropping it and reporting "No matching
+    /// memories" despite the inferred claim genuinely existing.
+    #[tokio::test]
+    async fn memory_search_composes_paths_kinds_and_limit_instead_of_dropping_a_match() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir, |store| {
+            let mut observed = NewMemory::new(
+                MemoryKind::Observed,
+                "/x uses LRU eviction",
+                Author::Operator,
+            );
+            observed.subject = "/x".into();
+            observed.confidence = 0.75;
+            store.record_memory(&observed).unwrap();
+
+            let mut inferred = NewMemory::new(
+                MemoryKind::Inferred,
+                "/x might leak file handles",
+                Author::Operator,
+            );
+            inferred.subject = "/x".into();
+            inferred.confidence = 0.50;
+            store.record_memory(&inferred).unwrap();
+        });
+
+        let out = text_of(
+            mcp.memory_search(Parameters(MemorySearchParams {
+                query: None,
+                paths: vec!["/x".into()],
+                kinds: vec!["inferred".into()],
+                min_confidence: None,
+                limit: Some(1),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            out.contains("might leak"),
+            "the inferred claim about /x must be returned, got: {out}"
+        );
+        assert!(
+            !out.contains("No matching memories"),
+            "a real match exists and must not be reported as none, got: {out}"
+        );
+    }
+
+    /// `paths` and `query` are filters meant to compose (an AND), not alternate modes where
+    /// `paths` silently wins. Two claims are both about `/x`; only one mentions "LRU". Asking
+    /// for `paths=[/x]` AND `query="LRU"` must return only the matching one.
+    #[tokio::test]
+    async fn memory_search_intersects_query_and_paths_instead_of_ignoring_the_query() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir, |store| {
+            let mut cache = NewMemory::new(
+                MemoryKind::Observed,
+                "the /x cache uses LRU eviction",
+                Author::Operator,
+            );
+            cache.subject = "/x".into();
+            store.record_memory(&cache).unwrap();
+
+            let mut unrelated = NewMemory::new(
+                MemoryKind::Observed,
+                "the /x handler retries on timeout",
+                Author::Operator,
+            );
+            unrelated.subject = "/x".into();
+            store.record_memory(&unrelated).unwrap();
+        });
+
+        let out = text_of(
+            mcp.memory_search(Parameters(MemorySearchParams {
+                query: Some("LRU".into()),
+                paths: vec!["/x".into()],
+                kinds: vec![],
+                min_confidence: None,
+                limit: Some(20),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            out.contains("LRU eviction"),
+            "the LRU claim about /x must be returned, got: {out}"
+        );
+        assert!(
+            !out.contains("retries on timeout"),
+            "the non-matching /x claim must be excluded once `query` narrows it, got: {out}"
+        );
+    }
 
     /// The confidence ceiling exists because the agent writing a claim is usually the one that
     /// later reads its own number back as though it were independent evidence. It must be
