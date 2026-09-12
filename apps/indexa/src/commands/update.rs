@@ -38,31 +38,25 @@ pub(crate) async fn cmd_update(check_only: bool, yes: bool, pin: Option<String>)
     print_whats_new(&info.current, target_ver).await;
 
     // ── Confirm ───────────────────────────────────────────────────────────────
-    // Self-replacing the running binary is uniquely high-consequence (unlike, say, deleting a
-    // weight override or auto-creating a pack, both easily reversible) — a non-interactive
-    // session (cron, CI, a wrapper script) without `--yes` must refuse rather than silently
-    // download and replace the binary with no confirmation of any kind. Mirrors
-    // `helpers.rs::check_huge_root_guard`'s interactive-prompt/non-interactive-bail split.
-    if !yes {
-        use std::io::IsTerminal as _;
-        if std::io::stdin().is_terminal() {
-            print!("\n  Update v{} → v{}? [y/N] ", info.current, target_ver);
-            use std::io::Write as _;
-            let _ = std::io::stdout().flush();
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-            if input.trim().to_lowercase() != "y" {
-                println!("Aborted.");
-                return Ok(());
-            }
-        } else {
-            anyhow::bail!(
-                "Refusing to self-update (v{} → v{}) in a non-interactive session without \
-                 confirmation. Re-run with --yes to confirm.",
-                info.current,
-                target_ver
-            );
-        }
+    // Self-replacing the running binary is the highest-consequence thing this CLI does, so it
+    // was the first command to refuse in a non-interactive session (cron, CI, a wrapper
+    // script) without `--yes` rather than silently download and replace the binary. That rule
+    // now lives in `helpers.rs::confirm_or_bail` and is shared with `weight apply` and
+    // `pack create --auto`, which used to skip the prompt and proceed — so there is one
+    // policy here, not three hand-rolled copies that can drift apart again.
+    let confirmed = super::helpers::confirm_or_bail(
+        &format!("  Update v{} → v{}?", info.current, target_ver),
+        false,
+        yes,
+        &format!(
+            "Refusing to self-update (v{} → v{}) in a non-interactive session without \
+             confirmation. Re-run with --yes to confirm.",
+            info.current, target_ver
+        ),
+    )?;
+    if !confirmed {
+        println!("Aborted.");
+        return Ok(());
     }
 
     // ── Apply ─────────────────────────────────────────────────────────────────

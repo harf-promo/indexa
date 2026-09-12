@@ -137,6 +137,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contract, GC of resolved rows, a candidate list), and an agent that learned "memory lives in
   the ledger" would start *answering* memories as if they were open questions.
   `SCHEMA_VERSION` 10 → 11; existing databases migrate in place on the next open.
+### Changed
+
+- **`indexa weight apply` and `indexa pack create --auto` now require `--yes` in a
+  non-interactive session** instead of silently proceeding. Both prompted on a terminal but
+  treated "no terminal" as a *yes* — `pack.rs` said so outright with a `// non-interactive:
+  accept` comment — so a cron job, CI step, or piped wrapper applied recency weights (which
+  change search ranking) or auto-populated a pack with semantically-guessed paths, with no
+  confirmation of any kind and nothing in the output to distinguish that from a human agreeing.
+  `indexa update` already refused in this situation, because self-replacing the running binary
+  made the stakes obvious first. All three now share one `helpers::confirm_or_bail` — `--yes`
+  proceeds, a terminal prompts, no terminal without `--yes` refuses with a message naming what
+  it refused and how to proceed — so a fourth command cannot diverge again.
+  **This is a breaking change for existing non-interactive callers of those two commands**;
+  the fix is to pass `--yes`, which now means what its help text says. The `--yes` help on all
+  three commands was reworded to state the requirement rather than describe it as merely
+  "skipping a prompt".
 
 ### Fixed
 
