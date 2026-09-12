@@ -130,9 +130,7 @@ fn add(
         // Hash the source NOW, so `verify` can later tell whether the file moved on beneath
         // the claim. A missing file is not an error — the claim may be about something that
         // was deleted, which is exactly when it is most worth keeping.
-        m.source_sha256 = std::fs::read(&src)
-            .ok()
-            .map(|b| indexa_core::store::hex_digest(<sha2::Sha256 as sha2::Digest>::digest(&b)));
+        m.source_sha256 = indexa_core::memory::source_hash(std::path::Path::new(&src));
         m.source_path = Some(src);
     }
 
@@ -318,11 +316,10 @@ fn verify(store: &mut Store, id: i64, run: bool, timeout_secs: u64) -> Result<()
     };
     println!("Memory #{id} [{}]\n  {}\n", m.kind, m.text);
 
-    let current = m.source_path.as_ref().and_then(|p| {
-        std::fs::read(p)
-            .ok()
-            .map(|b| indexa_core::store::hex_digest(<sha2::Sha256 as sha2::Digest>::digest(&b)))
-    });
+    let current = m
+        .source_path
+        .as_ref()
+        .and_then(|p| indexa_core::memory::source_hash(std::path::Path::new(p)));
     let check = check_source(m.source_sha256.as_deref(), current.as_deref());
     match check {
         SourceCheck::NoSource => println!("  source:  none recorded — nothing to compare"),
@@ -438,11 +435,10 @@ fn supersede(
     // operator asserting a corrected claim about the file as it stands today — inheriting the
     // stale hash would make the replacement instantly "unverifiable", and copying nothing would
     // make `verify` report "no source recorded" for a claim that plainly has one.
-    m.source_sha256 = old.source_path.as_ref().and_then(|p| {
-        std::fs::read(p)
-            .ok()
-            .map(|b| indexa_core::store::hex_digest(<sha2::Sha256 as sha2::Digest>::digest(&b)))
-    });
+    m.source_sha256 = old
+        .source_path
+        .as_ref()
+        .and_then(|p| indexa_core::memory::source_hash(std::path::Path::new(p)));
     m.tags = old.tags.clone();
     m.paths = old.paths.clone();
 
@@ -558,9 +554,7 @@ fn reflect(store: &Store, json: bool) -> Result<()> {
         let (Some(path), Some(recorded)) = (&m.source_path, &m.source_sha256) else {
             continue;
         };
-        let current = std::fs::read(path)
-            .ok()
-            .map(|b| indexa_core::store::hex_digest(<sha2::Sha256 as sha2::Digest>::digest(&b)));
+        let current = indexa_core::memory::source_hash(std::path::Path::new(path));
         if check_source(Some(recorded), current.as_deref()) == SourceCheck::Changed {
             stale.push((m.id, path.clone()));
         }

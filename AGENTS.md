@@ -55,7 +55,7 @@ These preserve the repo's dev loop and [.orchestration/lanes.yml](.orchestration
 
 ## Feature surface (timeless — details in CHANGELOG.md)
 
-- **MCP server:** 53 tools across router modules in `crates/mcp` composed in `tool_router()` (NOT one lib.rs), + 4 resources (`indexa://…`) + 3 prompts. A pinned test (`doc_tool_count_matches_code`) keeps this number honest — update it when tools change.
+- **MCP server:** 56 tools across router modules in `crates/mcp` composed in `tool_router()` (NOT one lib.rs), + 4 resources (`indexa://…`) + 3 prompts. A pinned test (`doc_tool_count_matches_code`) keeps this number honest — update it when tools change.
 
 Before changing a feature, read the [full feature surface](docs/agents/operations.md#feature-surface-timeless--details-in-changelogmd).
 

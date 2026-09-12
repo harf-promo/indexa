@@ -71,7 +71,7 @@ Indexa has three ways to persist something you learned. Picking the wrong one bu
 |---|---|---|
 | Save a page of prose for later reading | `add_note` | Writes a Markdown file that flows through normal indexing. Searchable **only after a re-index** — not immediately. |
 | Pin a judgment call about a specific change | `record_decision` | Lands in the Decision Ledger with a `patch_id`, so it survives a rebase or squash. Shows up in the user's Review inbox. |
-| Record a durable *claim* — a fact, a constraint, a lead | memory (CLI: `indexa memory add`) | Typed, with a confidence, a source hash and an expiry. Queryable immediately, and it ages honestly. |
+| Record a durable *claim* — a fact, a constraint, a lead | `memory_record` | Typed, with a confidence, a source hash and an expiry. Queryable immediately via `memory_search`, and it ages honestly. |
 
 A memory carries its **kind**, and that is what keeps it useful:
 `observed` (you saw it) · `stated` (you were told) · `inferred` (you worked it out) ·
@@ -80,7 +80,14 @@ A memory carries its **kind**, and that is what keeps it useful:
 own guesses back to you. Anything you author is capped at 0.75 confidence for exactly that
 reason; only the user, or a passing verification, lifts a claim above it.
 
-*(No MCP tools for memory in this release — the CLI is the surface for now.)*
+Call **`memory_search`** before re-deriving something you may already have worked out, and
+before changing a file — a constraint may have been recorded against it. Use **`memory_update`**
+with `supersede` the moment you learn a recorded claim was wrong: a stale claim left in place is
+worse than never having recorded one.
+
+You cannot verify a memory. There is no such tool, deliberately — you cannot independently
+confirm your own claim, and asking you to would just produce a second assertion from the same
+source. Verification is the user's, via `indexa memory verify`.
 
 ## Predicate grammar in search (if enabled)
 

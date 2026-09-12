@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **MCP memory tools — `memory_record`, `memory_search`, `memory_update` (53 → 56 tools).** An
+  agent can now write durable claims and read them back across sessions. Two limits are enforced
+  by the server rather than trusted to the caller: `author` is **forced** to agent, which is what
+  caps confidence at 0.75 (the CLI defaults to operator; that single difference is the whole
+  ceiling mechanism), and the response *says* when it clamped rather than silently lowering the
+  number. And there is deliberately **no** agent-facing verify tool — an agent cannot
+  independently confirm its own claim, and asking it to would just produce a second assertion
+  from the same source, so verification stays operator authority via `indexa memory verify`. A
+  test asserts no such tool exists, matching on a function definition rather than the word, since
+  the module's own docs explain why it doesn't.
+  `memory_search` joins `CORE_TOOL_NAMES`: an agent on the constrained profile still needs to
+  know what it already worked out, or a bounded toolset silently forgets everything between
+  sessions. `memory_record` is annotated non-destructive — it is additive and dedups, and never
+  loses a claim. `memory_update` is annotated **destructive**: `supersede` keeps the original row
+  and links it, but `retire` has no exposed undo (no `memory_unretire` tool, and re-recording the
+  same text creates a fresh agent/unverified claim rather than restoring the retired row), and one
+  annotation covers both actions, so the irreversible one governs. `memory_search` also composes
+  its `query`/`paths`/`kinds`/`min_confidence` filters together instead of `paths` silently
+  overriding `query`.
+  The tool descriptions do real work: they tell an agent to pick `kind` honestly ("mislabelling
+  an inference as an observation is how a memory store starts repeating your guesses back as
+  facts") and to supersede a claim the moment it learns one was wrong, since a stale claim left
+  in place is worse than never having recorded it.
+  Also extracts `indexa_core::memory::source_hash` — the CLI and MCP had three inlined copies of
+  the same read-and-hash snippet, which is exactly how the two `watch` implementations drifted
+  apart.
+
 - **Cross-language boundary scanner (`crates/parsers/src/boundaries.rs`).** Finds the two halves
   of a language boundary so a call graph no longer stops exactly where the interesting questions
   start: HTTP routes (`@app.post`, `.route(...)`, `app.get`, `HandleFunc`, `@PostMapping`,
@@ -60,8 +87,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control proving the fallback cannot shadow or double-count a call the primary patterns already
   read correctly.
 
-### Added
-
 - **Recorded memories can be offered to `ask` — opt-in, `[memory] retrieval = false` by default.**
   When enabled, live claims are rendered as a labelled `RECORDED MEMORY` block ahead of the
   numbered excerpts, each line carrying its kind, confidence, whether it was ever checked, and
@@ -83,8 +108,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `QaConfig::from_retrieval` became `QaConfig::from_config` and now takes the whole `Config`: the
   Q&A pipeline reads `[memory]` as well as `[retrieval]`, and a second constructor call would
   have been exactly the per-surface divergence that one-constructor rule exists to prevent.
-
-### Added
 
 - **`indexa memory` — record and query durable claims.** The operator surface over the memory
   store: `add` · `list` · `show` · `search` · `verify` · `supersede` · `retire` · `expire` ·
@@ -109,8 +132,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `inferred`/`hypothesis`, and never deletes.
   `ask` does not read memories in this release — retrieval integration is separate and ships
   default-off.
-
-### Added
 
 - **Typed durable memory — the storage layer.** Indexa can now hold *claims*, not just indexed
   content: a new `memories` table plus `crate::memory`'s domain types. Every memory carries a

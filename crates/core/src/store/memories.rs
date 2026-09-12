@@ -200,28 +200,54 @@ impl Store {
     /// order the retrieval block renders in, so a caller reading a truncated list is reading
     /// the most trustworthy part of it. Rows whose validity window has closed, and rows whose
     /// verification failed, are excluded.
+    ///
+    /// `kinds` is applied in SQL, before `LIMIT` — not as a Rust-side `retain` afterward. A
+    /// retain-after-`LIMIT` composes wrong: a caller's `limit` can be smaller than the number of
+    /// off-kind rows that outrank the one they asked for, so the row they wanted is never even
+    /// fetched. `min_confidence` was already a `WHERE` clause ahead of `LIMIT`; `kinds` now
+    /// matches it.
     pub fn active_memories(
         &self,
         kinds: Option<&[MemoryKind]>,
         min_confidence: f32,
         limit: usize,
     ) -> Result<Vec<MemoryRecord>> {
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {COLS} FROM memories
+        if let Some(want) = kinds {
+            if want.is_empty() {
+                // An explicit, empty kind list matches nothing — distinct from `None`, which
+                // means "no kind restriction".
+                return Ok(Vec::new());
+            }
+        }
+        let mut sql = "SELECT ".to_owned()
+            + COLS
+            + " FROM memories
               WHERE status = 'active'
                 AND verify_status != 'failed'
-                AND confidence >= ?1
-                AND (valid_to IS NULL OR valid_to > unixepoch())
-              ORDER BY confidence DESC, COALESCE(verified_at, 0) DESC, id DESC
-              LIMIT ?2"
-        ))?;
-        let rows = stmt.query_map(params![min_confidence as f64, limit as i64], row_to_memory)?;
-        let mut out = rows.collect::<Result<Vec<_>, _>>()?;
+                AND confidence >= ?
+                AND (valid_to IS NULL OR valid_to > unixepoch())";
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(min_confidence as f64)];
         if let Some(want) = kinds {
-            out.retain(|m| want.contains(&m.kind));
+            let placeholders = vec!["?"; want.len()].join(",");
+            sql.push_str(&format!(" AND kind IN ({placeholders})"));
+            args.extend(
+                want.iter()
+                    .map(|k| -> Box<dyn rusqlite::ToSql> { Box::new(k.as_str().to_owned()) }),
+            );
         }
+        sql.push_str(" ORDER BY confidence DESC, COALESCE(verified_at, 0) DESC, id DESC LIMIT ?");
+        args.push(Box::new(limit as i64));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(args.iter().map(|b| b.as_ref())),
+            row_to_memory,
+        )?;
+        let mut out = rows.collect::<Result<Vec<_>, _>>()?;
         // Trust rank is a Rust-side property of the enum, not a column, so the final ordering
-        // is applied here rather than in SQL. Stable sort keeps the SQL tiebreak intact.
+        // is applied here rather than in SQL. Stable sort keeps the SQL tiebreak intact; it can
+        // only reorder the already-fully-filtered `limit`-sized result, never drop a match, since
+        // every filter above ran before `LIMIT`.
         out.sort_by_key(|m| std::cmp::Reverse(m.kind.trust_rank()));
         Ok(out)
     }
@@ -267,6 +293,102 @@ impl Store {
             qualified_cols("m")
         ))?;
         let rows = stmt.query_map(params![fts, limit as i64], row_to_memory)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// `memory_search`'s composed-filter query: `query` and/or `paths`, plus `kinds` and
+    /// `min_confidence`, all applied in one `WHERE` clause so ordering and the caller's real
+    /// `limit` are the last things evaluated — never a candidate cap that runs before `kinds`
+    /// or `min_confidence` narrow the set. That ordering is what #538's re-review flagged:
+    /// truncating to any cap first — even a generous one — before those filters can silently
+    /// drop a real match that exists but isn't among the first rows fetched.
+    ///
+    /// At least one of `query` / `paths` must be given; the neither-case is `active_memories`'s
+    /// job and is cheaper there (no join, no path predicate).
+    pub fn memories_matching(
+        &self,
+        query: Option<&str>,
+        paths: &[String],
+        kinds: Option<&[MemoryKind]>,
+        min_confidence: f32,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>> {
+        debug_assert!(
+            query.is_some() || !paths.is_empty(),
+            "use active_memories when neither query nor paths narrows the search"
+        );
+        if let Some(want) = kinds {
+            if want.is_empty() {
+                return Ok(Vec::new());
+            }
+        }
+        let fts = match query {
+            Some(q) => {
+                let f = super::search::build_fts_query(q);
+                if f.is_empty() {
+                    return Ok(Vec::new());
+                }
+                Some(f)
+            }
+            None => None,
+        };
+
+        let (from, order_by) = if fts.is_some() {
+            (
+                "memories_fts f JOIN memories m ON m.id = CAST(f.memory_id AS INTEGER)",
+                "bm25(memories_fts), m.confidence DESC",
+            )
+        } else {
+            ("memories m", "m.confidence DESC, m.id DESC")
+        };
+
+        let mut clauses: Vec<String> = Vec::new();
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(f) = &fts {
+            clauses.push("memories_fts MATCH ?".to_owned());
+            args.push(Box::new(f.clone()));
+        }
+        clauses.push("m.status = 'active'".to_owned());
+        clauses.push("m.verify_status != 'failed'".to_owned());
+        clauses.push("(m.valid_to IS NULL OR m.valid_to > unixepoch())".to_owned());
+        clauses.push("m.confidence >= ?".to_owned());
+        args.push(Box::new(min_confidence as f64));
+        if let Some(want) = kinds {
+            let placeholders = vec!["?"; want.len()].join(",");
+            clauses.push(format!("m.kind IN ({placeholders})"));
+            args.extend(
+                want.iter()
+                    .map(|k| -> Box<dyn rusqlite::ToSql> { Box::new(k.as_str().to_owned()) }),
+            );
+        }
+        if !paths.is_empty() {
+            let placeholders = vec!["?"; paths.len()].join(",");
+            clauses.push(format!(
+                "(m.subject IN ({placeholders})
+                     OR EXISTS (SELECT 1 FROM memory_paths mp
+                                 WHERE mp.memory_id = m.id
+                                   AND mp.path IN ({placeholders})))"
+            ));
+            // The path list is bound twice (subject IN …, and memory_paths IN …).
+            args.extend(
+                paths
+                    .iter()
+                    .chain(paths.iter())
+                    .map(|p| -> Box<dyn rusqlite::ToSql> { Box::new(p.clone()) }),
+            );
+        }
+        args.push(Box::new(limit as i64));
+
+        let sql = format!(
+            "SELECT {} FROM {from} WHERE {} ORDER BY {order_by} LIMIT ?",
+            qualified_cols("m"),
+            clauses.join(" AND ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(args.iter().map(|b| b.as_ref())),
+            row_to_memory,
+        )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
