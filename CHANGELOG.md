@@ -36,6 +36,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same read-and-hash snippet, which is exactly how the two `watch` implementations drifted
   apart.
 
+- **Cross-language boundary scanner (`crates/parsers/src/boundaries.rs`).** Finds the two halves
+  of a language boundary so a call graph no longer stops exactly where the interesting questions
+  start: HTTP routes (`@app.post`, `.route(...)`, `app.get`, `HandleFunc`, `@PostMapping`,
+  `[HttpGet]`) and their `fetch`/`axios`/`requests`/`WebSocket` callers, plus `#[wasm_bindgen]`
+  and `extern "C"` exports and the JS imports that consume them. Path parameters normalize
+  across five syntaxes — `{id}`, `<int:id>`, `:id`, `${id}`, `*` all collapse to the same key —
+  and FFI names fold case and underscores, because wasm-bindgen renames `snake_case` to
+  `camelCase` and matching literally reports every export as uncalled *and* every caller as
+  calling nothing.
+  Works on raw text rather than the AST, deliberately: a boundary **is** a string, and only the
+  literal tells you which endpoint a handler answers.
+  Three rules it will not break, each pinned by a test: a captured string that is not a path (a
+  CSS selector, a MIME type, an event name) is **rejected** rather than stored as a key nothing
+  can ever join; an unstated method is **never** coerced to GET, because a `fetch` whose options
+  object is built elsewhere genuinely does not say; and every display path uses the spelling the
+  source wrote, never the folded matching key — a filter that cannot find its own output is
+  worse than no filter.
+  This ships the scanner only: no storage, no CLI, no MCP tool, nothing wired into indexing.
+  Adds a `regex` dependency edge to `crates/parsers` (already workspace-pinned and in the tree,
+  so no new crate); `apps/indexa-desktop/Cargo.lock` updated by exactly that one edge, with no
+  version float.
+  A fourth rule closes a gap found in review: a client call's closing quote is not proof its
+  argument ended there — `fetch("/api/users/" + userId)` was matching the leading literal and
+  reporting a resolved `/api/users` key even though the path is built at runtime. The extractor
+  now checks what follows the literal (skipping whitespace and comments, across line breaks) and
+  records an **unresolved** (empty-key) boundary whenever the argument continues past the quote,
+  preserving any stated method rather than inventing one.
+  Two more review findings, same head: an FFI-flavored JS import (`import { x } from "./y.js"`)
+  was matched by a bare `ffi` substring check, so `office.js`/`traffic.js` — which merely
+  contain the letters — were misread as FFI modules; the specifier is now checked for `ffi` as
+  its own token (not flanked by a letter) rather than anywhere in the filename. And
+  `#[wasm_bindgen]` immediately above an explicit `pub extern "C" fn foo() {}` was reported
+  twice — once by the attribute look-ahead, once by the separate `extern "C"` matcher on the
+  same line — and is now deduplicated to one export. The case/underscore folding in `ffi_key`
+  and the lowercasing in `normalise_path` are unchanged: both are deliberate, documented,
+  test-pinned heuristic choices (a real risk of over-joining `foo_bar`/`foobar` or
+  `/Users`/`/users`), not defects, and are accepted as-is for this PR.
+  A fifth finding, from re-review of the fourth: `literal_argument_ends_here` only runs once a
+  leading literal has already matched, so a client call whose first argument isn't a literal at
+  all — `fetch(url)`, `fetch(baseUrl + "/api/users")`, `axios.get(endpoint)`,
+  `requests.post(base + path)`, `new WebSocket(wsUrl)` — matched none of the `## clients`
+  patterns and produced no boundary whatsoever, not even an unresolved one, silently dropping
+  the call instead of flagging it. A second, narrower set of client-call-head patterns now
+  fires only when the primary literal-leading patterns didn't already match a given call, and
+  reads the first argument's source text with a bounded forward scan (depth-tracked parens and
+  quoted substrings, no backtracking, no regex) rather than approximating a path from it,
+  recording an unresolved Http/Consumes boundary with an empty key and any stated method
+  preserved. Table-tested against the five reported shapes plus a literal-leading positive
+  control proving the fallback cannot shadow or double-count a call the primary patterns already
+  read correctly.
+
 - **Recorded memories can be offered to `ask` — opt-in, `[memory] retrieval = false` by default.**
   When enabled, live claims are rendered as a labelled `RECORDED MEMORY` block ahead of the
   numbered excerpts, each line carrying its kind, confidence, whether it was ever checked, and
