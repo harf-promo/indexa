@@ -232,6 +232,40 @@ fn looks_like_a_path(raw: &str) -> bool {
     raw.starts_with('/') || raw.contains("://")
 }
 
+/// Does a client call's first argument end at the literal's closing quote, or does the source
+/// keep going as an expression from there?
+///
+/// A closing quote is not proof the argument is complete: `fetch("/api/users/" + userId)` keeps
+/// going right past it, and the module's own contract (line 17) says a path built at runtime
+/// must be recorded as unresolved, not approximated from the leading literal. This walks forward
+/// from just past the quote, skipping whitespace and `//` / `/* */` comments — including across
+/// line breaks, so a newline inserted between the quote and the `+` can't hide the continuation
+/// — and inspects the next syntactically meaningful character: a comma or closing parenthesis
+/// means the argument ended here; anything else (`+`, `.concat(`, …) means it didn't.
+fn literal_argument_ends_here(text: &str, mut i: usize) -> bool {
+    loop {
+        let Some(rest) = text.get(i..) else {
+            return false;
+        };
+        let Some(c) = rest.chars().next() else {
+            return false;
+        };
+        if c.is_whitespace() {
+            i += c.len_utf8();
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("//") {
+            i += 2 + after.find('\n').map(|o| o + 1).unwrap_or(after.len());
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("/*") {
+            i += 2 + after.find("*/").map(|o| o + 2).unwrap_or(after.len());
+            continue;
+        }
+        return matches!(c, ',' | ')');
+    }
+}
+
 /// Extract every boundary fragment in one file's text.
 pub fn scan_boundaries(path: &Path, text: &str, language: &str) -> Vec<Boundary> {
     let p = patterns();
@@ -241,13 +275,16 @@ pub fn scan_boundaries(path: &Path, text: &str, language: &str) -> Vec<Boundary>
 
     for (n, line) in lines.iter().enumerate() {
         let line_no = n + 1;
+        // Offset of this line within the original text, so a client call's continuation can be
+        // checked past the end of the line the literal itself sits on.
+        let line_offset = line.as_ptr() as usize - text.as_ptr() as usize;
 
         for (re, method_group, path_group, side) in &p.http {
             for caps in re.captures_iter(line) {
-                let Some(raw) = caps.get(*path_group) else {
+                let Some(raw_match) = caps.get(*path_group) else {
                     continue;
                 };
-                let raw = raw.as_str();
+                let raw = raw_match.as_str();
                 if !looks_like_a_path(raw) {
                     continue;
                 }
@@ -257,14 +294,28 @@ pub fn scan_boundaries(path: &Path, text: &str, language: &str) -> Vec<Boundary>
                     // `all`/`use`/`Request` are not methods — they mean "any", which is
                     // unstated, not a verb.
                     .filter(|m| m != "ALL" && m != "USE" && m != "REQUEST");
-                let norm = normalise_path(raw);
+
+                // A client call's path can be built at runtime past the leading literal —
+                // `fetch("/api/users/" + userId)` — and the closing quote is not proof the
+                // argument ended there. Servers' route literals never share this problem (a
+                // decorator's or router's whole argument list is just the one string), so this
+                // only applies to the consuming side.
+                let unresolved = *side == Side::Consumes
+                    && !literal_argument_ends_here(text, line_offset + raw_match.end() + 1);
+
+                let key = if unresolved {
+                    String::new()
+                } else {
+                    let norm = normalise_path(raw);
+                    match &method {
+                        Some(m) => format!("{m} {norm}"),
+                        None => norm,
+                    }
+                };
                 out.push(Boundary {
                     kind: BoundaryKind::Http,
                     side: *side,
-                    key: match &method {
-                        Some(m) => format!("{m} {norm}"),
-                        None => norm,
-                    },
+                    key,
                     method,
                     raw: raw.to_owned(),
                     language: language.to_owned(),
@@ -413,6 +464,54 @@ mod tests {
             "CSS selectors, MIME types and event names must be rejected: {:?}",
             scan(junk, "javascript")
         );
+    }
+
+    #[test]
+    fn a_runtime_concatenation_is_recorded_but_never_joinable() {
+        // Rule 1's other half: a path built at runtime is unresolved, not approximated from
+        // its leading literal. Before the fix, the closing quote of "/api/users/" was treated
+        // as proof the argument had ended, so this returned key="/api/users" (normalised,
+        // trailing slash stripped) with is_unresolved() false — a resolved endpoint invented
+        // out of a call nothing said was complete.
+        let bs = scan(r#"fetch("/api/users/" + userId)"#, "javascript");
+        assert_eq!(bs.len(), 1);
+        assert_eq!(bs[0].side, Side::Consumes);
+        assert_eq!(bs[0].kind, BoundaryKind::Http);
+        assert!(bs[0].key.is_empty(), "{bs:?}");
+        assert!(bs[0].is_unresolved(), "{bs:?}");
+        assert_eq!(bs[0].method, None);
+        assert_eq!(bs[0].line, 1);
+
+        // The literal-only sibling call is untouched: a call whose argument really does end at
+        // the closing quote still resolves normally.
+        let literal = scan(r#"fetch("/api/users/")"#, "javascript");
+        assert_eq!(literal.len(), 1);
+        assert!(!literal[0].is_unresolved());
+        assert_eq!(literal[0].key, "/api/users");
+    }
+
+    #[test]
+    fn a_stated_method_concatenation_still_reports_an_empty_key() {
+        // A concatenated path with a stated verb must not become "POST " or a wildcard guess —
+        // the method is real, the key is still unresolved.
+        let bs = scan(r#"axios.post("/api/users/" + userId)"#, "javascript");
+        assert_eq!(bs.len(), 1);
+        assert_eq!(bs[0].method.as_deref(), Some("POST"));
+        assert!(bs[0].key.is_empty(), "{bs:?}");
+        assert!(bs[0].is_unresolved(), "{bs:?}");
+    }
+
+    #[test]
+    fn a_comment_or_line_break_before_the_plus_does_not_hide_the_concatenation() {
+        // The continuation can be pushed past the literal's own line, or past a comment, by
+        // formatting alone. Neither should let a runtime-built path slip through as resolved.
+        let bs = scan("fetch(\"/api/users/\"\n  + userId)", "javascript");
+        assert_eq!(bs.len(), 1);
+        assert!(bs[0].is_unresolved(), "{bs:?}");
+
+        let bs = scan("fetch(\"/api/users/\" /* id */ + userId)", "javascript");
+        assert_eq!(bs.len(), 1);
+        assert!(bs[0].is_unresolved(), "{bs:?}");
     }
 
     #[test]

@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Adds a `regex` dependency edge to `crates/parsers` (already workspace-pinned and in the tree,
   so no new crate); `apps/indexa-desktop/Cargo.lock` updated by exactly that one edge, with no
   version float.
+  A fourth rule closes a gap found in review: a client call's closing quote is not proof its
+  argument ended there — `fetch("/api/users/" + userId)` was matching the leading literal and
+  reporting a resolved `/api/users` key even though the path is built at runtime. The extractor
+  now checks what follows the literal (skipping whitespace and comments, across line breaks) and
+  records an **unresolved** (empty-key) boundary whenever the argument continues past the quote,
+  preserving any stated method rather than inventing one.
 
 ### Added
 
