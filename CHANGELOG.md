@@ -46,6 +46,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the lowercasing in `normalise_path` are unchanged: both are deliberate, documented,
   test-pinned heuristic choices (a real risk of over-joining `foo_bar`/`foobar` or
   `/Users`/`/users`), not defects, and are accepted as-is for this PR.
+  A fifth finding, from re-review of the fourth: `literal_argument_ends_here` only runs once a
+  leading literal has already matched, so a client call whose first argument isn't a literal at
+  all — `fetch(url)`, `fetch(baseUrl + "/api/users")`, `axios.get(endpoint)`,
+  `requests.post(base + path)`, `new WebSocket(wsUrl)` — matched none of the `## clients`
+  patterns and produced no boundary whatsoever, not even an unresolved one, silently dropping
+  the call instead of flagging it. A second, narrower set of client-call-head patterns now
+  fires only when the primary literal-leading patterns didn't already match a given call, and
+  reads the first argument's source text with a bounded forward scan (depth-tracked parens and
+  quoted substrings, no backtracking, no regex) rather than approximating a path from it,
+  recording an unresolved Http/Consumes boundary with an empty key and any stated method
+  preserved. Table-tested against the five reported shapes plus a literal-leading positive
+  control proving the fallback cannot shadow or double-count a call the primary patterns already
+  read correctly.
 
 ### Added
 

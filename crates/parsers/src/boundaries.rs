@@ -121,6 +121,13 @@ impl Boundary {
 struct Patterns {
     /// `(regex, method capture group, path capture group, side)`.
     http: Vec<(Regex, Option<usize>, usize, Side)>,
+    /// Client-call heads only — the same receivers as the `## clients` entries in `http` above,
+    /// but the pattern stops at the opening `(` instead of requiring a quote to follow. Used as
+    /// a fallback when a call's first argument does not start with a literal, so `fetch(url)`
+    /// and `axios.get(endpoint)` are still recorded (as unresolved) instead of vanishing. See
+    /// `first_argument_expression` for how the argument text itself is recovered.
+    /// `(regex, method capture group)`.
+    http_client_head: Vec<(Regex, Option<usize>)>,
     wasm_export: Regex,
     ffi_export: Regex,
     exported_fn: Regex,
@@ -162,6 +169,12 @@ fn patterns() -> &'static Patterns {
                 (r(r#"\b(?:axios|http|client|api)\.(get|post|put|patch|delete)\s*\(\s*["'`]([^"'`]+)["'`]"#), Some(1), 2, Side::Consumes),
                 (r(r#"\brequests\.(get|post|put|patch|delete)\s*\(\s*["']([^"']+)["']"#), Some(1), 2, Side::Consumes),
                 (r(r#"\bnew WebSocket\s*\(\s*["'`]([^"'`]+)["'`]"#), None, 1, Side::Consumes),
+            ],
+            http_client_head: vec![
+                (r(r#"\bfetch\s*\("#), None),
+                (r(r#"\b(?:axios|http|client|api)\.(get|post|put|patch|delete)\s*\("#), Some(1)),
+                (r(r#"\brequests\.(get|post|put|patch|delete)\s*\("#), Some(1)),
+                (r(r#"\bnew WebSocket\s*\("#), None),
             ],
             // `#[wasm_bindgen]` sits on its own line above the item, so the exported name is
             // found by looking ahead rather than on this line.
@@ -294,6 +307,75 @@ fn literal_argument_ends_here(text: &str, mut i: usize) -> bool {
     }
 }
 
+/// Byte offset of the first non-whitespace character at or after `i`, or the text's length if
+/// none remain. Used to find where a call's first argument actually starts once the opening
+/// `(` has been located, so the character there can be inspected before deciding how to read
+/// the rest of the argument.
+fn skip_whitespace(text: &str, mut i: usize) -> usize {
+    while let Some(c) = text.get(i..).and_then(|s| s.chars().next()) {
+        if !c.is_whitespace() {
+            break;
+        }
+        i += c.len_utf8();
+    }
+    i
+}
+
+/// The fallback for a client call whose first argument does not start with a quote —
+/// `fetch(url)`, `fetch(baseUrl + "/api/users")`, `axios.get(endpoint)`. The literal-leading
+/// patterns in [`Patterns::http`] never match these at all (there is no leading `["'`]` for
+/// their capture group to anchor on), so before this fallback existed such a call produced no
+/// boundary whatsoever — not even an unresolved one — silently dropping it from unmatched
+/// and unresolved reporting. That is a bigger honesty gap than the one `literal_argument_ends_here`
+/// closes: a build-time-unknown path is still a call to *some* endpoint, and this module's own
+/// contract (line 17) says it belongs in the index as unresolved, not omitted.
+///
+/// Returns the argument's source text exactly as written, from `start` up to (not including)
+/// the top-level comma or closing parenthesis that ends it — mirroring how a real parser would
+/// find an argument boundary, but without building one. Nested `(`, `[`, `{` and their closers
+/// are depth-tracked so `fetch(getUrl())` and `fetch(cfg[key])` don't truncate early, and
+/// quoted substrings (`"`, `'`, `` ` ``) are skipped as opaque runs so a comma or paren inside a
+/// string literal embedded in the expression doesn't end the argument prematurely.
+///
+/// This is a single forward scan over the remaining text with no backtracking and no
+/// regex — the argument list of one call cannot make it re-examine text it has already passed,
+/// so it cannot become catastrophic the way an unbounded regex alternation could.
+fn first_argument_expression(text: &str, start: usize) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut i = start;
+    let mut depth: i32 = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' if depth == 0 => return Some(text[start..i].trim()),
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                i += 1;
+            }
+            b',' if depth == 0 => return Some(text[start..i].trim()),
+            quote @ (b'"' | b'\'' | b'`') => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == quote {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// Extract every boundary fragment in one file's text.
 pub fn scan_boundaries(path: &Path, text: &str, language: &str) -> Vec<Boundary> {
     let p = patterns();
@@ -349,6 +431,43 @@ pub fn scan_boundaries(path: &Path, text: &str, language: &str) -> Vec<Boundary>
                     kind: BoundaryKind::Http,
                     side: *side,
                     key,
+                    method,
+                    raw: raw.to_owned(),
+                    language: language.to_owned(),
+                    line: line_no,
+                    path: rel.clone(),
+                });
+            }
+        }
+
+        // A client call whose first argument isn't a literal at all — `fetch(url)`,
+        // `axios.get(endpoint)`, `requests.post(base + path)` — never matches the patterns
+        // above, since those require a quote to follow the opening paren. Find the same call
+        // heads again, and for any whose argument does NOT start with a quote (the quote case
+        // was already handled above; re-reporting it here would double-count it), record it as
+        // an unresolved consumer instead of dropping it.
+        for (re, method_group) in &p.http_client_head {
+            for caps in re.captures_iter(line) {
+                let head_end = line_offset + caps.get(0).expect("group 0 always matches").end();
+                let arg_start = skip_whitespace(text, head_end);
+                match text.get(arg_start..).and_then(|s| s.chars().next()) {
+                    None | Some(')') => continue, // no argument, or the call site is degenerate
+                    Some('"' | '\'' | '`') => continue, // literal-leading: handled above
+                    Some(_) => {}
+                }
+                let Some(raw) = first_argument_expression(text, arg_start) else {
+                    continue;
+                };
+                if raw.is_empty() {
+                    continue;
+                }
+                let method = method_group
+                    .and_then(|g| caps.get(g))
+                    .map(|m| m.as_str().to_uppercase());
+                out.push(Boundary {
+                    kind: BoundaryKind::Http,
+                    side: Side::Consumes,
+                    key: String::new(),
                     method,
                     raw: raw.to_owned(),
                     language: language.to_owned(),
@@ -555,6 +674,57 @@ mod tests {
         let bs = scan("fetch(\"/api/users/\" /* id */ + userId)", "javascript");
         assert_eq!(bs.len(), 1);
         assert!(bs[0].is_unresolved(), "{bs:?}");
+    }
+
+    #[test]
+    fn a_nonliteral_leading_client_call_is_still_recorded_as_unresolved() {
+        // Rule 1's third half: `literal_argument_ends_here` above only fires once a leading
+        // literal has already been captured, so it never sees a call whose argument doesn't
+        // start with a quote at all — `fetch(url)`, `fetch(baseUrl + "/api/users")`. Before
+        // this fallback existed, none of the `## clients` patterns matched these lines, so
+        // `scan` returned an empty vector: not an unresolved boundary, nothing. That silently
+        // dropped the call from unmatched/unresolved reporting instead of flagging it.
+        let cases: [(&str, &str, Option<&str>); 5] = [
+            (r#"fetch(baseUrl + "/api/users")"#, "javascript", None),
+            (r#"fetch(url)"#, "javascript", None),
+            (r#"axios.get(endpoint)"#, "javascript", Some("GET")),
+            (r#"requests.post(base + path)"#, "python", Some("POST")),
+            (r#"new WebSocket(wsUrl)"#, "javascript", None),
+        ];
+        for (src, lang, method) in cases {
+            let bs = scan(src, lang);
+            assert_eq!(bs.len(), 1, "{src}: {bs:?}");
+            assert_eq!(bs[0].kind, BoundaryKind::Http, "{src}: {bs:?}");
+            assert_eq!(bs[0].side, Side::Consumes, "{src}: {bs:?}");
+            assert!(bs[0].key.is_empty(), "{src}: {bs:?}");
+            assert!(bs[0].is_unresolved(), "{src}: {bs:?}");
+            assert_eq!(bs[0].method.as_deref(), method, "{src}: {bs:?}");
+        }
+
+        // Positive control: the same four call shapes, literal-leading, still resolve exactly
+        // as before — the fallback only fires when the primary patterns didn't already match,
+        // so it can't shadow or double-count a call the module already knew how to read.
+        for (src, key, method) in [
+            (r#"fetch("/api/users")"#, "/api/users", None),
+            (r#"axios.get("/api/users")"#, "GET /api/users", Some("GET")),
+            (
+                r#"requests.post("/api/users")"#,
+                "POST /api/users",
+                Some("POST"),
+            ),
+            (r#"new WebSocket("/api/users")"#, "/api/users", None),
+        ] {
+            let lang = if src.starts_with("requests") {
+                "python"
+            } else {
+                "javascript"
+            };
+            let bs = scan(src, lang);
+            assert_eq!(bs.len(), 1, "{src}: {bs:?}");
+            assert!(!bs[0].is_unresolved(), "{src}: {bs:?}");
+            assert_eq!(bs[0].key, key, "{src}: {bs:?}");
+            assert_eq!(bs[0].method.as_deref(), method, "{src}: {bs:?}");
+        }
     }
 
     #[test]
