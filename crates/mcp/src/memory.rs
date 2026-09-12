@@ -86,12 +86,6 @@ pub struct MemoryUpdateParams {
     pub text: Option<String>,
 }
 
-/// How many candidate rows `memory_search` pulls from a narrowing store lookup (`paths` and/or
-/// `query`) before applying `kinds`/`min_confidence` and cutting down to the caller's requested
-/// `limit`. Large enough that no realistic memory store pre-truncates a match away before those
-/// filters run; a real index's active-memory count is nowhere near this.
-const CANDIDATE_LIMIT: usize = 10_000;
-
 fn parse_kind(s: &str) -> Result<MemoryKind, ErrorData> {
     MemoryKind::parse(s).ok_or_else(|| {
         let all = MemoryKind::ALL
@@ -205,61 +199,22 @@ claims about specific files, `query` to search the text, or neither to list the 
         // `query`, `paths`, `kinds` and `min_confidence` are filters meant to compose, not
         // alternate modes — an agent asking for `paths=[…], kinds=[…]` expects every clause to
         // apply, not for `paths` to silently win and `query`/`kinds`/`min_confidence` to be
-        // ignored or applied too late to matter. When either `paths` or `query` narrows the
-        // search, fetch candidates up to CANDIDATE_LIMIT (well past the caller's requested
-        // `limit`), intersect `paths` and `query` when both are given, then apply
-        // `kinds`/`min_confidence` and only THEN cut down to `limit` — truncating to `limit`
-        // first (the previous behavior) can silently drop a match that exists but didn't happen
-        // to be among the first `limit` unfiltered rows. `active_memories` (neither `paths` nor
-        // `query` given) already composes `kinds`/`min_confidence` before its own trust-rank
-        // ordering and is left as-is here.
-        let mut rows = if !p.paths.is_empty() || query.is_some() {
-            let mut candidates = if !p.paths.is_empty() {
-                store
-                    .memories_for_paths(&p.paths, CANDIDATE_LIMIT)
-                    .map_err(mcp_err)?
-            } else {
-                // `query.is_some()` per the outer condition, since `p.paths` is empty here.
-                store
-                    .search_memories(query.expect("query is Some"), CANDIDATE_LIMIT)
-                    .map_err(mcp_err)?
-            };
-            if !p.paths.is_empty() {
-                if let Some(q) = query {
-                    let matched: std::collections::HashSet<i64> = store
-                        .search_memories(q, CANDIDATE_LIMIT)
-                        .map_err(mcp_err)?
-                        .into_iter()
-                        .map(|m| m.id)
-                        .collect();
-                    candidates.retain(|m| matched.contains(&m.id));
-                }
-            }
-            if !kinds.is_empty() {
-                candidates.retain(|m| kinds.contains(&m.kind));
-            }
-            candidates.retain(|m| m.confidence >= min_conf);
-            // Most-trusted first, matching the response text's promise; a stable sort keeps
-            // each source query's own tiebreak (bm25 rank, path-match confidence order, …).
-            candidates.sort_by(|a, b| {
-                b.confidence
-                    .partial_cmp(&a.confidence)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            candidates.truncate(limit);
-            candidates
-        } else {
-            let filter = (!kinds.is_empty()).then_some(kinds.as_slice());
+        // ignored or applied too late to matter. Both store calls below apply every requested
+        // filter in SQL — inside the `WHERE`, ahead of `ORDER BY`/`LIMIT` — so the caller's
+        // `limit` is the last thing evaluated, never a candidate cap that runs before `kinds` or
+        // `min_confidence` can narrow the set. A cap-then-filter composition (this endpoint's
+        // previous shape) can silently drop a match that exists but isn't among the first rows a
+        // capped fetch happens to return; see `Store::memories_matching`'s doc comment.
+        let kind_filter = (!kinds.is_empty()).then_some(kinds.as_slice());
+        let rows = if !p.paths.is_empty() || query.is_some() {
             store
-                .active_memories(filter, min_conf, limit)
+                .memories_matching(query, &p.paths, kind_filter, min_conf, limit)
+                .map_err(mcp_err)?
+        } else {
+            store
+                .active_memories(kind_filter, min_conf, limit)
                 .map_err(mcp_err)?
         };
-        // A defensive no-op for the `active_memories` branch (which already applies both), and
-        // the actual composition step for the `paths`/`query` branch above.
-        if !kinds.is_empty() {
-            rows.retain(|m| kinds.contains(&m.kind));
-        }
-        rows.retain(|m| m.confidence >= min_conf);
 
         if rows.is_empty() {
             return Ok(ok_text(
@@ -488,6 +443,176 @@ mod tests {
         assert!(
             !out.contains("retries on timeout"),
             "the non-matching /x claim must be excluded once `query` narrows it, got: {out}"
+        );
+    }
+
+    /// The re-review's "two-row manifestation": with neither `paths` nor `query` given,
+    /// `memory_search` falls through to `active_memories`, whose SQL used to apply `LIMIT`
+    /// before the `kinds` filter that used to run afterward in Rust. Two claims, one observed
+    /// at higher confidence and one inferred at lower confidence; asking for `kinds=[inferred],
+    /// limit=1` must return the inferred claim rather than let the higher-confidence,
+    /// wrong-kind claim fill the only slot and get filtered away with nothing left.
+    #[tokio::test]
+    async fn memory_search_kinds_filter_survives_a_tight_limit_with_no_paths_or_query() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir, |store| {
+            let mut observed =
+                NewMemory::new(MemoryKind::Observed, "seen directly", Author::Operator);
+            observed.confidence = 0.75;
+            store.record_memory(&observed).unwrap();
+
+            let mut inferred =
+                NewMemory::new(MemoryKind::Inferred, "reasoned out", Author::Operator);
+            inferred.confidence = 0.50;
+            store.record_memory(&inferred).unwrap();
+        });
+
+        let out = text_of(
+            mcp.memory_search(Parameters(MemorySearchParams {
+                query: None,
+                paths: vec![],
+                kinds: vec!["inferred".into()],
+                min_confidence: None,
+                limit: Some(1),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            out.contains("reasoned out"),
+            "the inferred claim must be returned even though a higher-confidence observed \
+             claim would otherwise fill the only slot, got: {out}"
+        );
+        assert!(
+            !out.contains("No matching memories"),
+            "a real match exists, got: {out}"
+        );
+    }
+
+    /// `min_confidence` and `kinds` must compose together, not just each alone: a wrong-kind
+    /// claim ranks first by confidence, one right-kind claim clears `min_confidence`, and
+    /// another right-kind claim doesn't. `limit=1` must return the one claim satisfying every
+    /// filter, not the wrong-kind claim that would fill the slot if `kinds` were applied after
+    /// `LIMIT`.
+    #[tokio::test]
+    async fn memory_search_composes_min_confidence_with_kinds_and_a_tight_limit() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir, |store| {
+            let mut wrong_kind =
+                NewMemory::new(MemoryKind::Stated, "the user said so", Author::Operator);
+            wrong_kind.confidence = 0.9;
+            store.record_memory(&wrong_kind).unwrap();
+
+            let mut too_low =
+                NewMemory::new(MemoryKind::Inferred, "a shaky guess", Author::Operator);
+            too_low.confidence = 0.3;
+            store.record_memory(&too_low).unwrap();
+
+            let mut wanted =
+                NewMemory::new(MemoryKind::Inferred, "a solid inference", Author::Operator);
+            wanted.confidence = 0.6;
+            store.record_memory(&wanted).unwrap();
+        });
+
+        let out = text_of(
+            mcp.memory_search(Parameters(MemorySearchParams {
+                query: None,
+                paths: vec![],
+                kinds: vec!["inferred".into()],
+                min_confidence: Some(0.5),
+                limit: Some(1),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            out.contains("a solid inference"),
+            "the one claim meeting both the kind and confidence filters must be returned, \
+             got: {out}"
+        );
+        assert!(!out.contains("the user said so"), "got: {out}");
+        assert!(!out.contains("a shaky guess"), "got: {out}");
+    }
+
+    /// The exact "single remaining finding" from the #538 re-review: a narrowing store lookup
+    /// (`paths` here) used to run its own `SELECT … LIMIT` ahead of `kinds`/`min_confidence`,
+    /// capped generously (10,000) but still a cap — so a store holding more matching rows than
+    /// that cap, none of them individually unrealistic, can push a real match past the cutoff
+    /// before `kinds` ever gets to filter on it. 10,000 observed claims about `/x` at 0.75
+    /// confidence, plus one inferred claim about `/x` at 0.50, reproduces the re-review's
+    /// fixture at the scale where the old cap actually mattered.
+    #[tokio::test]
+    async fn memory_search_does_not_drop_a_match_behind_a_large_prefiltered_candidate_set() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir, |store| {
+            for i in 0..10_000 {
+                let mut filler = NewMemory::new(
+                    MemoryKind::Observed,
+                    format!("/x filler claim #{i}"),
+                    Author::Operator,
+                );
+                filler.subject = "/x".into();
+                filler.confidence = 0.75;
+                store.record_memory(&filler).unwrap();
+            }
+            let mut inferred = NewMemory::new(
+                MemoryKind::Inferred,
+                "/x might leak file handles",
+                Author::Operator,
+            );
+            inferred.subject = "/x".into();
+            inferred.confidence = 0.50;
+            store.record_memory(&inferred).unwrap();
+        });
+
+        let out = text_of(
+            mcp.memory_search(Parameters(MemorySearchParams {
+                query: None,
+                paths: vec!["/x".into()],
+                kinds: vec!["inferred".into()],
+                min_confidence: None,
+                limit: Some(1),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            out.contains("might leak"),
+            "the inferred claim about /x must be returned even with 10,000 higher-confidence \
+             observed claims about /x ahead of it, got: {out}"
+        );
+    }
+
+    /// No candidate satisfies the requested filters: the response must say so plainly rather
+    /// than erroring or returning an unrelated claim.
+    #[tokio::test]
+    async fn memory_search_reports_no_match_when_nothing_qualifies() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir, |store| {
+            let mut observed = NewMemory::new(
+                MemoryKind::Observed,
+                "/x uses LRU eviction",
+                Author::Operator,
+            );
+            observed.subject = "/x".into();
+            observed.confidence = 0.75;
+            store.record_memory(&observed).unwrap();
+        });
+
+        let out = text_of(
+            mcp.memory_search(Parameters(MemorySearchParams {
+                query: None,
+                paths: vec!["/x".into()],
+                kinds: vec!["hypothesis".into()],
+                min_confidence: None,
+                limit: Some(20),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            out.contains("No matching memories"),
+            "no hypothesis claim about /x exists, got: {out}"
         );
     }
 
