@@ -168,8 +168,12 @@ fn patterns() -> &'static Patterns {
             wasm_export: r(r#"#\[wasm_bindgen"#),
             ffi_export: r(r#"extern\s+"C"\s+fn\s+(\w+)"#),
             exported_fn: r(r#"\bfn\s+(\w+)"#),
-            // `import { solve_ik, init } from './avatar_ik_wasm.js'`
-            wasm_import: r(r#"import\s*\{([^}]+)\}\s*from\s*["'`]([^"'`]*(?:wasm|_bg|ffi)[^"'`]*)["'`]"#),
+            // `import { solve_ik, init } from './avatar_ik_wasm.js'`. The specifier itself is
+            // matched broadly here — whether it actually names a wasm/FFI module is decided in
+            // code by `looks_like_a_wasm_or_ffi_module`, because a bare `ffi` substring check
+            // inside the regex would also match ordinary files like `office.js`/`traffic.js`,
+            // and Rust's regex crate has no lookaround to bound it inline.
+            wasm_import: r(r#"import\s*\{([^}]+)\}\s*from\s*["'`]([^"'`]+)["'`]"#),
         }
     })
 }
@@ -232,6 +236,30 @@ fn looks_like_a_path(raw: &str) -> bool {
     raw.starts_with('/') || raw.contains("://")
 }
 
+/// Does an import's module specifier actually name a wasm/FFI binding, or does it just
+/// happen to contain the letters?
+///
+/// `wasm` and `_bg` rarely collide with an unrelated word, so a plain substring check is
+/// enough for those. `ffi` is different: `office.js` and `traffic.js` both contain the
+/// literal substring "ffi", and treating every import from those files as an FFI boundary
+/// would drown the real ones the same way treating every named import as one would (see
+/// [`an_ordinary_js_import_is_not_an_ffi_boundary`]). So `ffi` only counts when it is not
+/// flanked by an ASCII letter on either side — `ffi.js`, `my_ffi.js` and `ffi_bridge.js`
+/// still match, `office.js` and `traffic.js` don't. Rust's regex crate has no lookaround to
+/// express that boundary inline, so it is checked here instead of in the pattern.
+fn looks_like_a_wasm_or_ffi_module(spec: &str) -> bool {
+    if spec.contains("wasm") || spec.contains("_bg") {
+        return true;
+    }
+    let bytes = spec.as_bytes();
+    spec.match_indices("ffi").any(|(i, m)| {
+        let before_is_letter = i > 0 && bytes[i - 1].is_ascii_alphabetic();
+        let after = i + m.len();
+        let after_is_letter = after < bytes.len() && bytes[after].is_ascii_alphabetic();
+        !before_is_letter && !after_is_letter
+    })
+}
+
 /// Does a client call's first argument end at the literal's closing quote, or does the source
 /// keep going as an expression from there?
 ///
@@ -272,6 +300,11 @@ pub fn scan_boundaries(path: &Path, text: &str, language: &str) -> Vec<Boundary>
     let rel = path.to_string_lossy().replace('\\', "/");
     let mut out = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
+    // Line indices whose `fn` was already reported via a preceding `#[wasm_bindgen]`
+    // look-ahead, so the separate `extern "C" fn` matcher below doesn't also report it —
+    // `#[wasm_bindgen]\npub extern "C" fn foo() {}` is one export, not two.
+    let mut wasm_attr_consumed_lines: std::collections::HashSet<usize> =
+        std::collections::HashSet::new();
 
     for (n, line) in lines.iter().enumerate() {
         let line_no = n + 1;
@@ -328,12 +361,16 @@ pub fn scan_boundaries(path: &Path, text: &str, language: &str) -> Vec<Boundary>
         // Rust exports across the FFI boundary.
         if p.wasm_export.is_match(line) {
             // The attribute is on its own line; the item follows within a few lines.
-            if let Some(name) = lines
+            if let Some((offset, name)) = lines
                 .iter()
                 .skip(n + 1)
                 .take(4)
-                .find_map(|l| p.exported_fn.captures(l).map(|c| c[1].to_owned()))
+                .enumerate()
+                .find_map(|(i, l)| p.exported_fn.captures(l).map(|c| (i, c[1].to_owned())))
             {
+                // Mark the line the `fn` itself sits on as already accounted for, so an
+                // `extern "C" fn` on that same line isn't reported again below.
+                wasm_attr_consumed_lines.insert(n + 1 + offset);
                 out.push(Boundary {
                     kind: BoundaryKind::Ffi,
                     side: Side::Provides,
@@ -346,21 +383,27 @@ pub fn scan_boundaries(path: &Path, text: &str, language: &str) -> Vec<Boundary>
                 });
             }
         }
-        if let Some(caps) = p.ffi_export.captures(line) {
-            let name = caps[1].to_owned();
-            out.push(Boundary {
-                kind: BoundaryKind::Ffi,
-                side: Side::Provides,
-                key: ffi_key(&name),
-                method: None,
-                raw: name,
-                language: language.to_owned(),
-                line: line_no,
-                path: rel.clone(),
-            });
+        if !wasm_attr_consumed_lines.contains(&n) {
+            if let Some(caps) = p.ffi_export.captures(line) {
+                let name = caps[1].to_owned();
+                out.push(Boundary {
+                    kind: BoundaryKind::Ffi,
+                    side: Side::Provides,
+                    key: ffi_key(&name),
+                    method: None,
+                    raw: name,
+                    language: language.to_owned(),
+                    line: line_no,
+                    path: rel.clone(),
+                });
+            }
         }
         // JS importing wasm/FFI bindings: each named import is one consumed symbol.
-        if let Some(caps) = p.wasm_import.captures(line) {
+        if let Some(caps) = p
+            .wasm_import
+            .captures(line)
+            .filter(|caps| looks_like_a_wasm_or_ffi_module(&caps[2]))
+        {
             for name in caps[1].split(',') {
                 // `import { a as b }` — the local alias is irrelevant; the exported name is
                 // what crosses the boundary.
@@ -643,6 +686,23 @@ mod tests {
     }
 
     #[test]
+    fn a_wasm_export_with_an_explicit_extern_c_signature_is_recorded_once() {
+        // Regression: the attribute look-ahead found `foo` via `fn foo`, and the separate
+        // `extern "C" fn` matcher found the very same `foo` again on the line the look-ahead
+        // landed on — one export, reported twice.
+        let bs = scan("#[wasm_bindgen]\npub extern \"C\" fn foo() {}", "rust");
+        assert_eq!(bs.len(), 1, "{bs:?}");
+        assert_eq!(bs[0].raw, "foo");
+
+        // An `extern "C"` export with no preceding `#[wasm_bindgen]` is untouched by the
+        // dedup and still reported normally.
+        assert_eq!(
+            scan(r#"pub extern "C" fn indexa_init() {}"#, "rust").len(),
+            1
+        );
+    }
+
+    #[test]
     fn a_wasm_import_records_one_consumer_per_named_symbol() {
         let bs = scan(
             r#"import { solve_ik, auto_detect_chains } from './avatar_ik_wasm.js'"#,
@@ -673,6 +733,32 @@ mod tests {
         // Only modules whose specifier looks like a wasm/FFI binding count. Treating every
         // named import as a boundary would drown the real ones.
         assert!(scan(r#"import { useState } from 'react'"#, "javascript").is_empty());
+    }
+
+    #[test]
+    fn a_filename_that_merely_contains_the_substring_ffi_is_not_an_ffi_boundary() {
+        // Regression: "office" and "traffic" both contain the literal substring "ffi",
+        // and a bare substring check treated importing from either file as an FFI boundary.
+        assert!(
+            scan(r#"import { useState } from './office.js'"#, "javascript").is_empty(),
+            "office.js is not an FFI module"
+        );
+        assert!(
+            scan(r#"import { report } from './traffic.js'"#, "javascript").is_empty(),
+            "traffic.js is not an FFI module"
+        );
+
+        // A genuine ffi-flavored specifier still matches, whether "ffi" is its own segment
+        // or attached with an underscore/hyphen on either side.
+        for spec in [
+            "./ffi.js",
+            "./my_ffi.js",
+            "./ffi_bridge.js",
+            "./my-ffi-lib.js",
+        ] {
+            let bs = scan(&format!("import {{ solve }} from '{spec}'"), "javascript");
+            assert_eq!(bs.len(), 1, "{spec}: {bs:?}");
+        }
     }
 
     // ── the end-to-end join shape ────────────────────────────────────────────

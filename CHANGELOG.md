@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now checks what follows the literal (skipping whitespace and comments, across line breaks) and
   records an **unresolved** (empty-key) boundary whenever the argument continues past the quote,
   preserving any stated method rather than inventing one.
+  Two more review findings, same head: an FFI-flavored JS import (`import { x } from "./y.js"`)
+  was matched by a bare `ffi` substring check, so `office.js`/`traffic.js` — which merely
+  contain the letters — were misread as FFI modules; the specifier is now checked for `ffi` as
+  its own token (not flanked by a letter) rather than anywhere in the filename. And
+  `#[wasm_bindgen]` immediately above an explicit `pub extern "C" fn foo() {}` was reported
+  twice — once by the attribute look-ahead, once by the separate `extern "C"` matcher on the
+  same line — and is now deduplicated to one export. The case/underscore folding in `ffi_key`
+  and the lowercasing in `normalise_path` are unchanged: both are deliberate, documented,
+  test-pinned heuristic choices (a real risk of over-joining `foo_bar`/`foobar` or
+  `/Users`/`/users`), not defects, and are accepted as-is for this PR.
 
 ### Added
 
