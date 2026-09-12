@@ -676,6 +676,89 @@ pub(crate) fn check_huge_root_guard(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What a confirmation gate should do, given `--yes` and whether stdin is a terminal.
+///
+/// Split from the IO so the policy is testable without a real terminal — a test cannot make
+/// `std::io::stdin().is_terminal()` return `true`, and a command that silently proceeds when
+/// nobody is there to answer is exactly the failure this type exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmMode {
+    /// `--yes` was passed — proceed with no prompt.
+    Skip,
+    /// Interactive session — ask.
+    Prompt,
+    /// Non-interactive (cron, CI, a piped wrapper) and no `--yes` — refuse rather than
+    /// proceed with no confirmation of any kind.
+    Refuse,
+}
+
+pub(crate) fn confirm_mode(yes: bool, is_tty: bool) -> ConfirmMode {
+    match (yes, is_tty) {
+        (true, _) => ConfirmMode::Skip,
+        (false, true) => ConfirmMode::Prompt,
+        (false, false) => ConfirmMode::Refuse,
+    }
+}
+
+/// Ask for confirmation before something destructive or hard to reverse, or bail.
+///
+/// One rule for every such command: `--yes` proceeds, an interactive session prompts, and a
+/// **non-interactive session without `--yes` refuses**. `indexa update` already worked this
+/// way (it replaces the running binary); `weight apply` and `pack create --auto` did not —
+/// each simply skipped the prompt and proceeded when stdin was not a terminal, so a cron job
+/// or CI wrapper applied changes with no confirmation of any kind and no way to tell from the
+/// outside that a human had never agreed. This exists so a fourth command cannot diverge
+/// again: the rule lives here, not in three hand-rolled copies.
+///
+/// `default_yes` picks the polarity of a bare Enter at the prompt (`[Y/n]` vs `[y/N]`); it
+/// deliberately does NOT affect the non-interactive case, where the answer is always "refuse".
+/// Complements [`check_huge_root_guard`], which applies the same split to a different
+/// question (an over-broad scan root) and returns `()` because it has no "user said no"
+/// branch to report.
+pub(crate) fn confirm_or_bail(
+    prompt: &str,
+    default_yes: bool,
+    yes: bool,
+    refusal: &str,
+) -> anyhow::Result<bool> {
+    use std::io::IsTerminal as _;
+    confirm_or_bail_with(
+        prompt,
+        default_yes,
+        yes,
+        std::io::stdin().is_terminal(),
+        refusal,
+    )
+}
+
+/// [`confirm_or_bail`] with the terminal check injected, for tests.
+pub(crate) fn confirm_or_bail_with(
+    prompt: &str,
+    default_yes: bool,
+    yes: bool,
+    is_tty: bool,
+    refusal: &str,
+) -> anyhow::Result<bool> {
+    match confirm_mode(yes, is_tty) {
+        ConfirmMode::Skip => Ok(true),
+        ConfirmMode::Refuse => anyhow::bail!("{refusal}"),
+        ConfirmMode::Prompt => {
+            use std::io::Write as _;
+            let suffix = if default_yes { "[Y/n]" } else { "[y/N]" };
+            print!("\n{prompt} {suffix} ");
+            let _ = std::io::stdout().flush();
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            let answer = input.trim().to_lowercase();
+            Ok(if answer.is_empty() {
+                default_yes
+            } else {
+                answer == "y" || answer == "yes"
+            })
+        }
+    }
+}
+
 /// Current Unix time in whole seconds (fails open to 0 before the epoch / on a clock error).
 /// Single source for the timestamps several commands stamp into snapshots, packs, and reports
 /// (was duplicated as `now_str`/`chrono_now`/`now_unix`/`now_secs`). Use `.to_string()` where a
@@ -722,7 +805,10 @@ pub(crate) fn format_unix_timestamp(ts: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{finalize_export, ollama_requirements, resolve_roots, ExportSink};
+    use super::{
+        confirm_mode, confirm_or_bail_with, finalize_export, ollama_requirements, resolve_roots,
+        ConfirmMode, ExportSink,
+    };
     use indexa_core::config::Config;
     use std::path::PathBuf;
 
@@ -946,5 +1032,51 @@ mod tests {
             1,
             "default config: embed and describer share one Ollama host"
         );
+    }
+
+    // ── Confirmation gate ────────────────────────────────────────────────────
+
+    #[test]
+    fn yes_flag_skips_the_gate_regardless_of_terminal() {
+        assert_eq!(confirm_mode(true, true), ConfirmMode::Skip);
+        assert_eq!(confirm_mode(true, false), ConfirmMode::Skip);
+    }
+
+    #[test]
+    fn an_interactive_session_without_yes_prompts() {
+        assert_eq!(confirm_mode(false, true), ConfirmMode::Prompt);
+    }
+
+    #[test]
+    fn a_non_interactive_session_without_yes_refuses() {
+        // The behavior change. `weight apply` and `pack create --auto` used to return
+        // "proceed" here — a cron job or CI wrapper applied the change with no confirmation
+        // of any kind, and nothing in the output distinguished that from a human agreeing.
+        assert_eq!(confirm_mode(false, false), ConfirmMode::Refuse);
+    }
+
+    #[test]
+    fn refusing_surfaces_the_callers_own_message() {
+        // Each command explains what it refused and how to proceed; a generic "aborted"
+        // would leave a scripted caller guessing which flag it was missing.
+        let err = confirm_or_bail_with("do it?", false, false, false, "Refusing to frobnicate.")
+            .expect_err("non-interactive without --yes must bail");
+        assert_eq!(err.to_string(), "Refusing to frobnicate.");
+    }
+
+    #[test]
+    fn yes_proceeds_without_reading_stdin() {
+        // `is_tty = false` and `yes = true`: must return true without touching stdin, which
+        // under `cargo test` is not a terminal and would otherwise hang or read EOF.
+        assert!(confirm_or_bail_with("do it?", false, true, false, "unused").unwrap());
+        assert!(confirm_or_bail_with("do it?", true, true, false, "unused").unwrap());
+    }
+
+    #[test]
+    fn default_polarity_does_not_leak_into_the_non_interactive_answer() {
+        // A `[Y/n]` prompt (pack create --auto) must still REFUSE non-interactively — the
+        // Enter-key default is a convenience for a human at a terminal, not a stand-in for
+        // consent when nobody is there.
+        assert!(confirm_or_bail_with("add them?", true, false, false, "Refusing.").is_err());
     }
 }

@@ -31,8 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same read-and-hash snippet, which is exactly how the two `watch` implementations drifted
   apart.
 
-### Added
-
 - **Recorded memories can be offered to `ask` — opt-in, `[memory] retrieval = false` by default.**
   When enabled, live claims are rendered as a labelled `RECORDED MEMORY` block ahead of the
   numbered excerpts, each line carrying its kind, confidence, whether it was ever checked, and
@@ -54,8 +52,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `QaConfig::from_retrieval` became `QaConfig::from_config` and now takes the whole `Config`: the
   Q&A pipeline reads `[memory]` as well as `[retrieval]`, and a second constructor call would
   have been exactly the per-surface divergence that one-constructor rule exists to prevent.
-
-### Added
 
 - **`indexa memory` — record and query durable claims.** The operator surface over the memory
   store: `add` · `list` · `show` · `search` · `verify` · `supersede` · `retire` · `expire` ·
@@ -80,8 +76,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `inferred`/`hypothesis`, and never deletes.
   `ask` does not read memories in this release — retrieval integration is separate and ships
   default-off.
-
-### Added
 
 - **Typed durable memory — the storage layer.** Indexa can now hold *claims*, not just indexed
   content: a new `memories` table plus `crate::memory`'s domain types. Every memory carries a
@@ -108,6 +102,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contract, GC of resolved rows, a candidate list), and an agent that learned "memory lives in
   the ledger" would start *answering* memories as if they were open questions.
   `SCHEMA_VERSION` 10 → 11; existing databases migrate in place on the next open.
+### Changed
+
+- **`indexa weight apply` and `indexa pack create --auto` now require `--yes` in a
+  non-interactive session** instead of silently proceeding. Both prompted on a terminal but
+  treated "no terminal" as a *yes* — `pack.rs` said so outright with a `// non-interactive:
+  accept` comment — so a cron job, CI step, or piped wrapper applied recency weights (which
+  change search ranking) or auto-populated a pack with semantically-guessed paths, with no
+  confirmation of any kind and nothing in the output to distinguish that from a human agreeing.
+  `indexa update` already refused in this situation, because self-replacing the running binary
+  made the stakes obvious first. All three now share one `helpers::confirm_or_bail` — `--yes`
+  proceeds, a terminal prompts, no terminal without `--yes` refuses with a message naming what
+  it refused and how to proceed — so a fourth command cannot diverge again.
+  **This is a breaking change for existing non-interactive callers of those two commands**;
+  the fix is to pass `--yes`, which now means what its help text says. The `--yes` help on all
+  three commands was reworded to state the requirement rather than describe it as merely
+  "skipping a prompt".
 
 ### Fixed
 
@@ -188,6 +198,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A new `embedded_directory_has_no_placeholder_entries` test keeps a template from being
   re-committed, and `find` gained a `find_in` seam so its case-insensitive matching is tested
   against a synthetic list instead of whatever the shipped directory happens to hold.
+- **A config file holding API keys that can't be locked down now says so.** `config::load`
+  re-tightens a hand-authored `config.toml` to `0600` when `[api_keys]` is populated (a text
+  editor leaves it at the umask default, commonly `0644`), and that re-tighten was written as
+  `let _ = std::fs::set_permissions(...)`. Failing open is right — a permissions error must
+  never block startup — but the error was *discarded*, so on a read-only filesystem, a
+  differently-owned file, or a restrictive mount, a file containing live API keys stayed
+  readable beyond its owner and nothing anywhere reported it. It now warns with the path and
+  the underlying error (never a key value, per the keys-never-logged invariant) and points at
+  `indexa doctor`, whose existing `config_permission_line` reports the residual mode. The
+  policy moved into a `tighten_key_file_perms` helper so both outcomes are testable — including
+  the failure branch, which is exercised against a `/proc` path whose chmod always fails for an
+  unprivileged process.
 
 ## [0.80.3] — 2026-09-01
 

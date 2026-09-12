@@ -134,7 +134,13 @@ function subscribeJob(jobId, path, kind) {
 
     fetch('/api/jobs/' + jobId).then(function(r) {
       if (r.status === 404) {
-        // Server evicted the job (60 s after done)
+        // Server evicted the job (60 s after it finished) — it completed, this SSE
+        // stream just dropped after eviction. Mark it terminal and stop tracking it
+        // so the row doesn't hang on "reconnecting" forever (it would otherwise
+        // never see a 'done'/'failed' event again and retry indefinitely).
+        if (j.status !== 'done' && j.status !== 'failed') j.status = 'done';
+        _removeActiveJob(jobId);
+        _markDirty(jobId);
         return;
       }
       const retries = j._retries || 0;

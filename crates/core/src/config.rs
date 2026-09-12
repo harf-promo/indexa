@@ -985,27 +985,57 @@ pub fn load(path: &Path) -> Result<Config> {
     let cfg: Config =
         toml::from_str(&text).with_context(|| format!("parsing config: {}", path.display()))?;
 
-    // `save()` always writes 0600 (with a TOCTOU-safe create + re-tighten), but the documented
-    // way to set `[api_keys]` is hand-authoring the TOML directly — a file created that way
-    // (e.g. by a text editor) is left at the umask default, commonly 0644 (group/other-readable).
-    // Mirror `Store::open`'s unconditional re-tighten of `index.db` on every open: fail-open (a
-    // permissions error must never block startup) and unix-only. Gated on `has_any()` so a config
-    // with no keys in it — the common case — is never touched or warned about; there's nothing
-    // sensitive to protect.
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if cfg.api_keys.has_any() {
-            if let Ok(meta) = std::fs::metadata(path) {
-                let mode = meta.permissions().mode() & 0o777;
-                if mode & 0o077 != 0 {
-                    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-                }
-            }
-        }
+    if let Err(e) = tighten_key_file_perms(path, cfg.api_keys.has_any()) {
+        // Still fail-open — a permissions error must never block startup — but no longer
+        // SILENT. Before this, a `let _ =` discarded the error, so a chmod that failed
+        // (read-only filesystem, a file owned by another user, a restrictive mount) left a
+        // file containing live API keys readable beyond its owner and nothing anywhere said
+        // so. `indexa doctor`'s `config_permission_line` reports the residual mode, but only
+        // if the user thinks to run it; this warns at the moment it happens. The key VALUES
+        // are never logged — only the path and the mode — per the keys-never-logged invariant.
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "config file contains API keys but could not be tightened to 0600 — it stays \
+             readable beyond its owner; run `indexa doctor` for the current mode"
+        );
     }
 
     Ok(cfg)
+}
+
+/// Re-tighten a config file that holds API keys to `0600`, returning whether a change was
+/// applied.
+///
+/// `save()` always writes 0600 (with a TOCTOU-safe create + re-tighten), but the documented
+/// way to set `[api_keys]` is hand-authoring the TOML directly — a file created that way (e.g.
+/// by a text editor) is left at the umask default, commonly 0644 (group/other-readable).
+/// Mirrors `Store::open`'s unconditional re-tighten of `index.db` on every open.
+///
+/// Gated on `has_keys` so a config with nothing sensitive in it — the common case — is never
+/// touched or warned about. A `metadata` failure reports `Ok(false)`: if the file cannot even
+/// be stat'd there is nothing actionable to say beyond what the caller's own read already
+/// reported. A `set_permissions` failure is the case worth surfacing, and is the only `Err`
+/// this returns; the caller warns rather than propagating.
+///
+/// Split out of [`load`] so both outcomes are testable without needing `load` to parse the
+/// target as TOML — the error branch in particular is only reachable on a path whose chmod
+/// genuinely fails.
+#[cfg(unix)]
+pub(crate) fn tighten_key_file_perms(path: &Path, has_keys: bool) -> std::io::Result<bool> {
+    use std::os::unix::fs::PermissionsExt;
+    if !has_keys {
+        return Ok(false);
+    }
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Ok(false);
+    };
+    if meta.permissions().mode() & 0o077 == 0 {
+        return Ok(false);
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(true)
 }
 
 /// Load config from the default platform path.
@@ -1586,5 +1616,87 @@ overlap = 50
              genuinely not user-facing, note why in the ALL_CONFIG_FIELDS doc comment and \
              exclude it there instead): {undocumented:?}"
         );
+    }
+
+    #[cfg(unix)]
+    mod key_file_perms {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        fn mode_of(p: &Path) -> u32 {
+            std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+        }
+
+        #[test]
+        fn a_group_readable_key_file_is_tightened_to_owner_only() {
+            let dir = tempfile::tempdir().unwrap();
+            let f = dir.path().join("config.toml");
+            std::fs::write(&f, "x").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+            assert!(
+                tighten_key_file_perms(&f, true).unwrap(),
+                "a change was applied"
+            );
+            assert_eq!(mode_of(&f), 0o600);
+            // Idempotent: a second pass has nothing to do and reports so.
+            assert!(!tighten_key_file_perms(&f, true).unwrap());
+        }
+
+        #[test]
+        fn a_config_with_no_keys_is_never_touched() {
+            // The common case. Nothing sensitive is in the file, so tightening it would be
+            // a surprising side effect of merely reading config.
+            let dir = tempfile::tempdir().unwrap();
+            let f = dir.path().join("config.toml");
+            std::fs::write(&f, "x").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+            assert!(!tighten_key_file_perms(&f, false).unwrap());
+            assert_eq!(mode_of(&f), 0o644, "left exactly as the user wrote it");
+        }
+
+        #[test]
+        fn a_missing_file_is_not_an_error() {
+            let dir = tempfile::tempdir().unwrap();
+            assert!(!tighten_key_file_perms(&dir.path().join("nope.toml"), true).unwrap());
+        }
+
+        /// The branch this whole change exists for. `/proc/self/stat` is world-readable
+        /// (0444, so it looks like a tighten candidate) but its chmod always fails for an
+        /// unprivileged process — a stand-in for the real cases: a read-only filesystem, a
+        /// file owned by another user, a restrictive mount. Before this change the error was
+        /// discarded by `let _ =`, leaving a key-bearing file readable beyond its owner with
+        /// no signal at all.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_chmod_that_fails_is_reported_rather_than_discarded() {
+            let p = Path::new("/proc/self/stat");
+            if !p.exists() {
+                return; // no procfs (container without /proc) — nothing to assert
+            }
+            let err = tighten_key_file_perms(p, true)
+                .expect_err("chmod on procfs must fail for an unprivileged process");
+            assert!(
+                matches!(
+                    err.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Other
+                ),
+                "unexpected error kind: {err:?}"
+            );
+        }
+
+        /// `load` must still succeed even when the tighten fails — fail-open is the whole
+        /// point, the warning is the only new behavior.
+        #[test]
+        fn load_still_succeeds_when_the_file_holds_keys() {
+            let dir = tempfile::tempdir().unwrap();
+            let f = dir.path().join("config.toml");
+            std::fs::write(&f, "[api_keys]\nopenai = \"sk-test\"\n").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let cfg = load(&f).expect("load must not fail on a permissions problem");
+            assert!(cfg.api_keys.has_any());
+            assert_eq!(mode_of(&f), 0o600, "load tightens as a side effect");
+        }
     }
 }
