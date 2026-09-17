@@ -13,11 +13,15 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  # Debug symbols dominate Windows linking/cache size. Assertions and tests stay on.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   check:
     name: fmt + clippy + test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +39,10 @@ jobs:
       # The action keys by job, OS, toolchain, flags and lockfiles automatically.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # Even dependency-only Windows target archives cost several minutes.
+          # Cache downloaded sources there; Linux/macOS retain compiled dependencies.
+          cache-targets: ${{ runner.os != 'Windows' }}
 
       - name: Check formatting
         run: cargo fmt --all -- --check
