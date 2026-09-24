@@ -11,9 +11,7 @@
 //! glue in `lib.rs` calls them. Missing data fails open to an explanatory message; a
 //! missing required argument is an `invalid_params` error.
 
-use rmcp::model::{
-    GetPromptResult, JsonObject, Prompt, PromptArgument, PromptMessage, PromptMessageRole,
-};
+use rmcp::model::{GetPromptResult, JsonObject, Prompt, PromptArgument, PromptMessage, Role};
 use rmcp::ErrorData;
 
 use indexa_query::redact::redact_secrets;
@@ -76,11 +74,10 @@ impl IndexaMcp {
                          and where I'd start reading."
                     )
                 };
-                Ok(GetPromptResult::new(vec![PromptMessage::new_text(
-                    PromptMessageRole::User,
-                    body,
-                )])
-                .with_description("Guided project tour"))
+                Ok(
+                    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, body)])
+                        .with_description("Guided project tour"),
+                )
             }
             "explain-file" => {
                 let path = required_arg(args, "path")?;
@@ -99,11 +96,10 @@ impl IndexaMcp {
                          `indexa index {path}` first, or use `read_file` to read it raw."
                     ),
                 };
-                Ok(GetPromptResult::new(vec![PromptMessage::new_text(
-                    PromptMessageRole::User,
-                    body,
-                )])
-                .with_description("Explain an indexed file"))
+                Ok(
+                    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, body)])
+                        .with_description("Explain an indexed file"),
+                )
             }
             "pack-context" => {
                 let name = required_arg(args, "name")?;
@@ -123,11 +119,10 @@ impl IndexaMcp {
                          with `indexa pack create \"{name}\"` and add paths."
                     ),
                 };
-                Ok(GetPromptResult::new(vec![PromptMessage::new_text(
-                    PromptMessageRole::User,
-                    body,
-                )])
-                .with_description("Load a Context Pack as working context"))
+                Ok(
+                    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, body)])
+                        .with_description("Load a Context Pack as working context"),
+                )
             }
             other => Err(ErrorData::invalid_params(
                 format!("unknown prompt: {other}"),

@@ -35,7 +35,7 @@ use anyhow::Result;
 use rmcp::{
     handler::server::router::tool::ToolRouter,
     model::{
-        CallToolResult, Content, GetPromptRequestParams, GetPromptResult, Implementation,
+        CallToolResult, ContentBlock, GetPromptRequestParams, GetPromptResult, Implementation,
         ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
         PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, ServerCapabilities,
         ServerInfo,
@@ -168,7 +168,7 @@ fn mcp_invalid(e: impl std::fmt::Display) -> ErrorData {
 }
 
 fn ok_text(s: impl Into<String>) -> CallToolResult {
-    CallToolResult::success(vec![Content::text(s.into())])
+    CallToolResult::success(vec![ContentBlock::text(s.into())])
 }
 
 /// Best-effort token-savings telemetry — a recording failure must never fail
