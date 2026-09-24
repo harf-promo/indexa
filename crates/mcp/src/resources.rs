@@ -11,10 +11,7 @@
 //! The methods are inherent + pure (no `RequestContext`) so they unit-test directly,
 //! mirroring `read_file_inner`. The `ServerHandler` glue in `lib.rs` calls them.
 
-use rmcp::model::{
-    AnnotateAble, RawResource, RawResourceTemplate, ReadResourceResult, Resource, ResourceContents,
-    ResourceTemplate,
-};
+use rmcp::model::{ReadResourceResult, Resource, ResourceContents, ResourceTemplate};
 use rmcp::ErrorData;
 
 use indexa_query::redact::redact_secrets;
@@ -28,30 +25,26 @@ impl IndexaMcp {
     /// The static resource list (`resources/list`).
     pub(crate) fn list_resources_inner(&self) -> Vec<Resource> {
         vec![
-            RawResource::new("indexa://overview", "Project overview")
+            Resource::new("indexa://overview", "Project overview")
                 .with_description(
                     "Whole-project roll-up: directory summaries describing what this index covers.",
                 )
-                .with_mime_type("text/markdown")
-                .no_annotation(),
-            RawResource::new("indexa://packs", "Context Packs")
+                .with_mime_type("text/markdown"),
+            Resource::new("indexa://packs", "Context Packs")
                 .with_description("The list of named, cross-directory Context Packs (JSON).")
-                .with_mime_type("application/json")
-                .no_annotation(),
+                .with_mime_type("application/json"),
         ]
     }
 
     /// The parameterized resource templates (`resources/templates/list`).
     pub(crate) fn resource_templates_inner(&self) -> Vec<ResourceTemplate> {
         vec![
-            RawResourceTemplate::new("indexa://pack/{name}", "Context Pack export")
+            ResourceTemplate::new("indexa://pack/{name}", "Context Pack export")
                 .with_description("A named Context Pack rendered as Markdown (secrets redacted).")
-                .with_mime_type("text/markdown")
-                .no_annotation(),
-            RawResourceTemplate::new("indexa://summary/{path}", "File or directory summary")
+                .with_mime_type("text/markdown"),
+            ResourceTemplate::new("indexa://summary/{path}", "File or directory summary")
                 .with_description("The indexed summary of a file or directory (secrets redacted).")
-                .with_mime_type("text/markdown")
-                .no_annotation(),
+                .with_mime_type("text/markdown"),
         ]
     }
 
