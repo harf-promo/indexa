@@ -1,4 +1,4 @@
-<!-- fleet-template: v1 | reconciled-against: fleet-kit/templates/AGENT-CONTEXT-TEMPLATE.md @ 35354d0 2026-09-07 -->
+<!-- fleet-template: v1 | reconciled-against: fleet-kit/templates/AGENT-CONTEXT-TEMPLATE.md @ 08dbc79 2026-09-19 -->
 # Indexa — agent contract
 
 Feature history lives in `CHANGELOG.md` — do not narrate versions here. This file holds only the pitch, the invariants, and the procedures.
@@ -20,7 +20,8 @@ Indexa is **the local context engine for AI**. The index is the substrate; conte
 - `crates/http-util/` — shared HTTP client, rustls-only
 - `crates/web/` — the `:7620` web UI, `include_str!`-concatenated JS/CSS (hot file)
 - `crates/update/` — in-app updater; bridges Rust→web over SSE, no Tauri IPC
-- `apps/indexa/` — the CLI binary (`main.rs` is a hot file)
+- `crates/cli/` — `indexa-cli`: the clap command/flag definitions only (`lib.rs` is a hot file)
+- `apps/indexa/` — the CLI binary: per-command logic in `src/commands/` (`main.rs` is a hot file)
 - `apps/indexa-desktop/` — Tauri app; **workspace-excluded**, own committed `Cargo.lock`
 - `tools/gen-fingerprints/` — generator for the fingerprint matcher
 
