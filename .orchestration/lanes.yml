@@ -35,7 +35,15 @@ setup:
   copy_env: []
   ports: {}
 
-required_checks: [ci]
+required_checks:  # = branch protection contexts on main (gh api .../protection/required_status_checks, 2026-10-05)
+  - "fmt + clippy + test (ubuntu-latest)"
+  - "fmt + clippy + test (macos-latest)"
+  - "fmt + clippy + test (windows-latest)"
+  - "License and advisory check"
+  - "DCO sign-off check"
+  - "desktop build (macOS)"
+  - "web smoke (headless Chrome)"
+  - "retrieval eval (self-golden, hermetic)"
 merge: squash
 force_push: blocked
 serialized_ci: []
