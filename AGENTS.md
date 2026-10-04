@@ -133,7 +133,7 @@ Web preview belongs on this VPS (headless Chrome + Xvfb + chrome-devtools MCP). 
 
 | Topic | Where |
 | --- | --- |
-| Configuring models, changing features/defaults, or inspecting the index | [Operations](docs/agents/operations.md); MCP/retrieval internals: `crates/mcp/src/lib.rs`, `crates/query/src/qa/retrieve.rs` |
+| Configuring models, changing features/defaults, or inspecting the index | [Operations](docs/agents/operations.md), [gotchas](docs/agents/gotchas.md) (schema, watchdog, updater, CI traps); MCP/retrieval internals: `crates/mcp/src/lib.rs`, `crates/query/src/qa/retrieve.rs` |
 | Validating changes, editing dependencies/shared files/counts | [Verification](docs/agents/verification.md), [.orchestration/lanes.yml](.orchestration/lanes.yml) (`hot_files`, counters, required checks) |
 | Releasing, signing, building desktop, or choosing a verification host | [Release and hosts](docs/agents/release-and-hosts.md), [signing](docs/signing.md) (.dmg notarization) |
 | Using CLI commands or finding per-platform index DB paths | [USAGE.md](USAGE.md) |
