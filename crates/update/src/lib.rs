@@ -54,36 +54,210 @@ fn build_client() -> anyhow::Result<Client> {
 /// release assets are signed with its private half in `.github/workflows/release.yml`.
 const MINISIGN_PUBKEY_B64: &str = "RWR14gZtQFIISnysTnP1hTZ1o/OHzJenqE1f0SpTNe0W/UjFr5yfR1Uv";
 
-/// Fetch `{asset_url}.sig` and verify `bytes` against [`MINISIGN_PUBKEY_B64`].
-///
-/// **Fail-open when no signature is published** (HTTP error / empty): pre-signature release tags
-/// have no `.sig`, and refusing them would break self-update for everyone until the next signed
-/// release. A signature that IS published but does NOT verify is a hard error (tampering). The
-/// `.sig` is the Tauri format — base64 of a standard minisign signature file — so we base64-decode
-/// it before parsing, matching how the desktop verifies the bundle.
+/// The first release whose CLI assets all carry a minisign `.sig`. Every release since has one and
+/// none before it does (checked against the published release assets, v0.77.0–v0.80.3). From this
+/// version on, a signature that is missing, unreachable or empty aborts the update: anyone able to
+/// alter release assets could otherwise just delete the `.sig` to get an unverified binary installed.
+const FIRST_SIGNED_VERSION: Version = Version::new(0, 77, 0);
+
+/// Upper bound on a downloaded CLI asset (current ones are 50–80 MB), so a missing or lying
+/// `Content-Length` can't grow memory without bound.
+const MAX_ASSET_BYTES: u64 = 512 * 1024 * 1024;
+/// Upper bound on a downloaded `.sig` (they are ~400 bytes).
+const MAX_SIG_BYTES: u64 = 64 * 1024;
+
+/// Set to `1` to let [`apply`] install a release older than the running binary. Off by default: an
+/// older, correctly signed release still verifies, so a downgrade must be an explicit choice.
+pub const ALLOW_DOWNGRADE_ENV: &str = "INDEXA_UPDATE_ALLOW_DOWNGRADE";
+
+/// Parse a release tag (`v0.81.0` or `0.81.0`) as strict semver and return it with the canonical
+/// `v`-prefixed tag rebuilt from the parsed version. The tag is interpolated into download URLs, so
+/// anything that isn't exactly a version (`v1/../../other/repo/…`, `v1?x`, `%2e`) is rejected here
+/// instead of being normalised by the URL parser into some other repository's asset.
+fn parse_release_tag(tag: &str) -> anyhow::Result<(Version, String)> {
+    let raw = tag.strip_prefix('v').unwrap_or(tag);
+    let version = Version::parse(raw).with_context(|| {
+        format!("invalid release tag {tag:?} — expected a version like v0.81.0")
+    })?;
+    let canonical = format!("v{version}");
+    Ok((version, canonical))
+}
+
+/// The reason [`apply`] must refuse to install `target` over `current`, or `None` when it may.
+/// Pure so the policy is unit-tested; `apply` feeds it [`ALLOW_DOWNGRADE_ENV`].
+fn downgrade_refusal(current: &Version, target: &Version, allow_downgrade: bool) -> Option<String> {
+    (target < current && !allow_downgrade).then(|| {
+        format!(
+            "refusing to downgrade v{current} → v{target}: an older release can carry bugs or \
+             vulnerabilities that later releases fixed. Set {ALLOW_DOWNGRADE_ENV}=1 to install it \
+             anyway."
+        )
+    })
+}
+
+/// What fetching `{asset}.sig` produced, kept apart from the HTTP client so the policy in
+/// [`signature_to_verify`] is unit-testable.
+#[derive(Debug)]
+enum SigFetch {
+    /// A 2xx response with this body.
+    Body(String),
+    /// A non-2xx response.
+    Status(reqwest::StatusCode),
+    /// No usable response: connect/timeout/read error.
+    Failed(String),
+}
+
+/// Decide what to do with a fetched signature for release `version`: `Ok(Some(sig))` means
+/// verify it, `Ok(None)` means a pre-signature release with no `.sig` (installed unverified), and
+/// `Err` aborts the update. Fails closed: only an explicit 404 for a release older than
+/// [`FIRST_SIGNED_VERSION`] skips verification. An error page, a timeout or an empty file is never
+/// taken to mean "this release is unsigned".
+fn signature_to_verify(version: &Version, fetch: SigFetch) -> anyhow::Result<Option<String>> {
+    let signed_release = *version >= FIRST_SIGNED_VERSION;
+    match fetch {
+        SigFetch::Body(sig) if !sig.trim().is_empty() => Ok(Some(sig)),
+        SigFetch::Body(_) => anyhow::bail!(
+            "the update signature for v{version} is empty — refusing to install an unverified binary"
+        ),
+        SigFetch::Status(status) if status == reqwest::StatusCode::NOT_FOUND && !signed_release => {
+            Ok(None)
+        }
+        SigFetch::Status(status) if status == reqwest::StatusCode::NOT_FOUND => anyhow::bail!(
+            "no update signature is published for v{version}, but every release since \
+             v{FIRST_SIGNED_VERSION} is signed — refusing to install an unverified binary"
+        ),
+        SigFetch::Status(status) => anyhow::bail!(
+            "could not fetch the update signature for v{version} (HTTP {status}) — refusing to \
+             install an unverified binary; try again later"
+        ),
+        SigFetch::Failed(e) => anyhow::bail!(
+            "could not fetch the update signature for v{version} ({e}) — refusing to install an \
+             unverified binary; try again later"
+        ),
+    }
+}
+
+/// Fetch `{asset_url}.sig` and verify `bytes` against `pubkey_b64` ([`MINISIGN_PUBKEY_B64`] in
+/// production), failing closed per [`signature_to_verify`]. A signature that is published but does
+/// not verify is always a hard error (tampering). The `.sig` is the Tauri format — base64 of a
+/// standard minisign signature file — so we base64-decode it before parsing, matching how the
+/// desktop verifies the bundle.
 async fn verify_asset_signature(
     client: &Client,
     asset_url: &str,
+    version: &Version,
     bytes: &[u8],
+    pubkey_b64: &str,
 ) -> anyhow::Result<()> {
     let sig_url = format!("{asset_url}.sig");
-    let sig_b64 = match client.get(&sig_url).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.text().await {
-            Ok(t) if !t.trim().is_empty() => t,
-            _ => {
-                tracing::warn!(%sig_url, "signature asset is empty — installing UNVERIFIED (pre-signature release)");
-                return Ok(());
+    let fetch = match client.get(&sig_url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            match read_body_capped(resp, MAX_SIG_BYTES, None).await {
+                Ok(body) => SigFetch::Body(String::from_utf8_lossy(&body).into_owned()),
+                Err(e) => SigFetch::Failed(format!("{e:#}")),
             }
-        },
-        _ => {
-            tracing::warn!(%sig_url, "no signature published for this release — installing UNVERIFIED (pre-signature release)");
-            return Ok(());
         }
+        Ok(resp) => SigFetch::Status(resp.status()),
+        Err(e) => SigFetch::Failed(e.to_string()),
     };
 
-    verify_minisign(MINISIGN_PUBKEY_B64, &sig_b64, bytes)?;
-    tracing::info!("update signature verified (minisign 4A0852406D06E275)");
+    match signature_to_verify(version, fetch)? {
+        Some(sig_b64) => {
+            verify_minisign(pubkey_b64, &sig_b64, bytes)?;
+            tracing::info!("update signature verified (minisign 4A0852406D06E275)");
+        }
+        None => tracing::warn!(
+            %sig_url,
+            "v{version} predates signed releases (v{FIRST_SIGNED_VERSION}) and has no signature — installing UNVERIFIED"
+        ),
+    }
     Ok(())
+}
+
+/// Read a response body chunk by chunk, refusing anything over `cap` bytes — checked against
+/// `Content-Length` up front and against the running total, so a missing or lying header can't
+/// grow memory without bound — and anything shorter than its `Content-Length`.
+/// `on_progress(downloaded, total)` runs after each chunk.
+async fn read_body_capped(
+    mut resp: reqwest::Response,
+    cap: u64,
+    on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
+) -> anyhow::Result<Vec<u8>> {
+    let content_len = resp.content_length();
+    if let Some(len) = content_len {
+        if len > cap {
+            anyhow::bail!("download is {len} bytes, over the {cap}-byte limit — refusing");
+        }
+    }
+    let mut bytes: Vec<u8> = Vec::with_capacity(content_len.unwrap_or(0) as usize);
+    while let Some(chunk) = resp.chunk().await.context("download stream interrupted")? {
+        if bytes.len() as u64 + chunk.len() as u64 > cap {
+            anyhow::bail!("download exceeded the {cap}-byte limit — refusing");
+        }
+        bytes.extend_from_slice(&chunk);
+        if let Some(cb) = on_progress {
+            cb(bytes.len() as u64, content_len);
+        }
+    }
+    if let Some(expected) = content_len {
+        if bytes.len() as u64 != expected {
+            anyhow::bail!(
+                "download truncated: received {} bytes, expected {expected} — aborting to protect \
+                 the installed binary",
+                bytes.len()
+            );
+        }
+    }
+    Ok(bytes)
+}
+
+/// Download this platform's CLI asset for release `version` (canonical tag `tag`) from
+/// `base_url`, then check it the same way for every caller: size cap, non-empty, a valid
+/// signature (fail-closed) and executable magic bytes. `base_url` is the GitHub releases URL in
+/// production and a local server in tests.
+async fn download_verified_asset(
+    client: &Client,
+    base_url: &str,
+    version: &Version,
+    tag: &str,
+    on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
+    pubkey_b64: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let asset = asset_name()?;
+    let url = format!("{base_url}/{tag}/{asset}");
+    tracing::info!(%url, "downloading release asset");
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .context("download request failed")?;
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "download failed (HTTP {}): tag={tag} asset={asset}\n\
+             Make sure the release exists at https://github.com/{REPO}/releases",
+            resp.status()
+        );
+    }
+    let bytes = read_body_capped(resp, MAX_ASSET_BYTES, on_progress).await?;
+    if bytes.is_empty() {
+        anyhow::bail!("downloaded binary is empty — the release asset may be missing");
+    }
+
+    // Cryptographically verify the download before it is installed, and sanity-check the magic
+    // bytes (a clearer error for an HTML error page or an LFS pointer).
+    verify_asset_signature(client, &url, version, &bytes, pubkey_b64).await?;
+    if !looks_like_executable(&bytes) {
+        anyhow::bail!(
+            "downloaded asset is not a recognized executable (Mach-O/ELF/PE) — refusing to install"
+        );
+    }
+    Ok(bytes)
+}
+
+/// Where release assets are downloaded from: `{RELEASES_BASE}/{tag}/{asset}`.
+fn releases_base() -> String {
+    format!("https://github.com/{REPO}/releases/download")
 }
 
 /// Verify `bytes` against a base64-wrapped minisign signature file (`sig_b64` — the Tauri `.sig`
@@ -306,8 +480,8 @@ fn self_replace_refusal(exe: Option<&std::path::Path>, is_desktop: bool) -> Opti
 /// binary. Returns the semver version string that was installed (without
 /// leading `v`), e.g. `"0.12.1"`.
 ///
-/// `tag` may be `"v0.12.1"` or `"0.12.1"` — a leading `v` is added if
-/// needed for the download URL.
+/// `tag` may be `"v0.12.1"` or `"0.12.1"`; it must parse as semver, and the
+/// download URL is built from the parsed version (see [`parse_release_tag`]).
 ///
 /// Refuses to run inside the Indexa desktop app (binary self-replace would
 /// corrupt the `.app` bundle — see [`is_inside_app_bundle`]); the desktop
@@ -318,7 +492,10 @@ fn self_replace_refusal(exe: Option<&std::path::Path>, is_desktop: bool) -> Opti
 /// Returns a human-readable, actionable error on:
 /// - Running inside a `.app` bundle / the desktop app.
 /// - Permission denied (binary in root-owned dir like `/usr/local/bin`).
-/// - Truncated or empty download.
+/// - A `tag` that is not a strict semver version (it is interpolated into the download URL).
+/// - A `tag` older than the running binary, unless [`ALLOW_DOWNGRADE_ENV`] is `1`.
+/// - Truncated, empty or oversized download.
+/// - A missing, unreachable, empty or non-verifying signature for a signed-era release.
 /// - Non-existent release/asset (404).
 pub async fn apply(tag: &str) -> anyhow::Result<String> {
     // Guard (defense in depth): never self-replace the desktop app's bundled
@@ -333,56 +510,27 @@ pub async fn apply(tag: &str) -> anyhow::Result<String> {
         anyhow::bail!(reason);
     }
 
-    let tag_str = if tag.starts_with('v') {
-        tag.to_string()
-    } else {
-        format!("v{tag}")
-    };
-    let version_str = tag.trim_start_matches('v').to_string();
-
-    let asset = asset_name()?;
-    let url = format!("https://github.com/{REPO}/releases/download/{tag_str}/{asset}");
-
-    tracing::info!(%url, "downloading update");
+    let (version, tag_str) = parse_release_tag(tag)?;
+    let current = Version::parse(env!("CARGO_PKG_VERSION"))
+        .context("the running binary's version is not semver")?;
+    if let Some(reason) = downgrade_refusal(
+        &current,
+        &version,
+        std::env::var(ALLOW_DOWNGRADE_ENV).as_deref() == Ok("1"),
+    ) {
+        anyhow::bail!(reason);
+    }
 
     let client = build_client()?;
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .context("download request failed")?;
-
-    if !resp.status().is_success() {
-        anyhow::bail!(
-            "download failed (HTTP {}): tag={tag_str} asset={asset}\n\
-             Make sure the release exists at https://github.com/{REPO}/releases",
-            resp.status()
-        );
-    }
-
-    let content_len = resp.content_length();
-    let bytes = resp.bytes().await.context("download stream interrupted")?;
-
-    if bytes.is_empty() {
-        anyhow::bail!("downloaded binary is empty — the release asset may be missing");
-    }
-    if let Some(expected) = content_len {
-        let got = bytes.len() as u64;
-        if got != expected {
-            anyhow::bail!(
-                "download truncated: received {got} bytes, expected {expected} — aborting to protect the running binary"
-            );
-        }
-    }
-
-    // Cryptographically verify the download before replacing the running binary (fail-open only for
-    // pre-signature releases), and sanity-check the magic bytes.
-    verify_asset_signature(&client, &url, &bytes).await?;
-    if !looks_like_executable(&bytes) {
-        anyhow::bail!(
-            "downloaded asset is not a recognized executable (Mach-O/ELF/PE) — refusing to install"
-        );
-    }
+    let bytes = download_verified_asset(
+        &client,
+        &releases_base(),
+        &version,
+        &tag_str,
+        None,
+        MINISIGN_PUBKEY_B64,
+    )
+    .await?;
 
     // Determine where the running exe lives — the temp file must be on the
     // same filesystem for `self_replace` to do an atomic rename.
@@ -398,31 +546,11 @@ pub async fn apply(tag: &str) -> anyhow::Result<String> {
     #[cfg(target_os = "macos")]
     let exe_clone = exe.clone(); // for the post-replace re-sign step on macOS
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        let mut tmp = tempfile::Builder::new()
-            .prefix(".indexa-update-")
-            .tempfile_in(&exe_dir)
-            .map_err(|e| permission_error(e, &exe_dir))?;
+        let tmp_path = stage_executable(&exe_dir, ".indexa-update-", &bytes)?;
 
-        tmp.write_all(&bytes).context("write to temp file failed")?;
-        tmp.flush().context("flush temp file failed")?;
-
-        // Ensure the new binary is executable on Unix.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            tmp.as_file()
-                .set_permissions(std::fs::Permissions::from_mode(0o755))
-                .context("chmod on temp file failed")?;
-        }
-
-        // Persist the temp file so self_replace can rename it into place;
-        // auto-deletion on drop would remove it before the rename.
-        let (_, tmp_path) = tmp
-            .keep()
-            .map_err(|e| anyhow::anyhow!("could not persist temp file: {e}"))?;
-
-        // Atomically replace the running binary. On UNIX: rename(2). On Windows:
-        // MoveFileExW with MOVEFILE_REPLACE_EXISTING (old exe is deleted at exit).
+        // Atomically replace the running binary. `self_replace` COPIES `tmp_path` next to the
+        // exe and renames that copy into place, so `tmp_path` itself is never consumed; it is a
+        // `TempPath`, deleted when it drops here — after success and on every error path alike.
         self_replace::self_replace(&tmp_path).map_err(|e| permission_error(e, &tmp_path))?;
 
         // macOS 26+ Code Signing Monitor invalidates the trust record when a
@@ -471,8 +599,8 @@ pub async fn apply(tag: &str) -> anyhow::Result<String> {
     .await
     .context("update task panicked")??;
 
-    tracing::info!(version = %version_str, "update applied — restart to run the new version");
-    Ok(version_str)
+    tracing::info!(%version, "update applied — restart to run the new version");
+    Ok(version.to_string())
 }
 
 /// Download the matching CLI binary for this platform from release `tag` into `dir`, writing it
@@ -493,54 +621,19 @@ pub async fn download_cli_to(
     tag: &str,
     on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
 ) -> anyhow::Result<std::path::PathBuf> {
-    let tag_str = if tag.starts_with('v') {
-        tag.to_string()
-    } else {
-        format!("v{tag}")
-    };
-    let asset = asset_name()?;
-    let url = format!("https://github.com/{REPO}/releases/download/{tag_str}/{asset}");
-    tracing::info!(%url, "downloading CLI binary");
-
+    // No downgrade check here: this never replaces the running binary, it installs the CLI that
+    // matches the desktop app's own version.
+    let (version, tag_str) = parse_release_tag(tag)?;
     let client = build_client()?;
-    let mut resp = client
-        .get(&url)
-        .send()
-        .await
-        .context("download request failed")?;
-    if !resp.status().is_success() {
-        anyhow::bail!(
-            "download failed (HTTP {}): tag={tag_str} asset={asset}",
-            resp.status()
-        );
-    }
-    let content_len = resp.content_length();
-    // Stream the body so we can report progress per chunk. `chunk()` is available without the
-    // `stream` cargo feature, unlike `bytes_stream()`.
-    let mut bytes: Vec<u8> = Vec::with_capacity(content_len.unwrap_or(0) as usize);
-    while let Some(chunk) = resp.chunk().await.context("download stream interrupted")? {
-        bytes.extend_from_slice(&chunk);
-        if let Some(cb) = on_progress {
-            cb(bytes.len() as u64, content_len);
-        }
-    }
-    if bytes.is_empty() {
-        anyhow::bail!("downloaded binary is empty — the release asset may be missing");
-    }
-    if let Some(expected) = content_len {
-        if bytes.len() as u64 != expected {
-            anyhow::bail!("download truncated — aborting");
-        }
-    }
-
-    // Verify the signature (fail-open only for pre-signature releases) + magic bytes before this
-    // binary is written to a PATH dir and later executed as `indexa`.
-    verify_asset_signature(&client, &url, &bytes).await?;
-    if !looks_like_executable(&bytes) {
-        anyhow::bail!(
-            "downloaded asset is not a recognized executable (Mach-O/ELF/PE) — refusing to install"
-        );
-    }
+    let bytes = download_verified_asset(
+        &client,
+        &releases_base(),
+        &version,
+        &tag_str,
+        on_progress,
+        MINISIGN_PUBKEY_B64,
+    )
+    .await?;
 
     let bin_name = if cfg!(windows) {
         "indexa.exe"
@@ -551,26 +644,7 @@ pub async fn download_cli_to(
     let dest = dir.join(bin_name);
     let dest_for_task = dest.clone();
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        std::fs::create_dir_all(&dir).map_err(|e| permission_error(e, &dir))?;
-        // Write to a temp file in the target dir, then rename into place (atomic on the same fs).
-        let mut tmp = tempfile::Builder::new()
-            .prefix(".indexa-cli-")
-            .tempfile_in(&dir)
-            .map_err(|e| permission_error(e, &dir))?;
-        tmp.write_all(&bytes).context("write to temp file failed")?;
-        tmp.flush().context("flush temp file failed")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            tmp.as_file()
-                .set_permissions(std::fs::Permissions::from_mode(0o755))
-                .context("chmod on temp file failed")?;
-        }
-        let (_, tmp_path) = tmp
-            .keep()
-            .map_err(|e| anyhow::anyhow!("could not persist temp file: {e}"))?;
-        std::fs::rename(&tmp_path, &dest_for_task)
-            .map_err(|e| permission_error(e, &dest_for_task))?;
+        install_executable(&dir, &dest_for_task, &bytes)?;
         // macOS: ad-hoc sign so Gatekeeper (and the macOS 26+ Code Signing Monitor)
         // lets the freshly-written binary run. Best-effort, but NOT silent — a failed
         // sign means the next `indexa` launch is killed (exit 137), so we surface it
@@ -615,6 +689,46 @@ pub async fn download_cli_to(
     Ok(dest)
 }
 
+/// Write `bytes` to a fresh temp file in `dir` (named `{prefix}…`), mark it executable on Unix,
+/// and return it as a `TempPath`: the handle is closed, and the file is deleted when the
+/// `TempPath` drops unless it is persisted first — so no error path can leave a stray copy of a
+/// tens-of-MB binary behind.
+fn stage_executable(
+    dir: &std::path::Path,
+    prefix: &str,
+    bytes: &[u8],
+) -> anyhow::Result<tempfile::TempPath> {
+    let mut tmp = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempfile_in(dir)
+        .map_err(|e| permission_error(e, dir))?;
+    tmp.write_all(bytes).context("write to temp file failed")?;
+    tmp.flush().context("flush temp file failed")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tmp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o755))
+            .context("chmod on temp file failed")?;
+    }
+    Ok(tmp.into_temp_path())
+}
+
+/// Install `bytes` as the executable `dest` inside `dir`: stage a temp file in `dir`, then rename
+/// it into place (atomic on the same filesystem). If the rename fails, the temp file is removed.
+fn install_executable(
+    dir: &std::path::Path,
+    dest: &std::path::Path,
+    bytes: &[u8],
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir).map_err(|e| permission_error(e, dir))?;
+    let tmp_path = stage_executable(dir, ".indexa-cli-", bytes)?;
+    tmp_path
+        .persist(dest)
+        .map_err(|e| permission_error(e.error, dest))?;
+    Ok(())
+}
+
 /// Build a human-readable, actionable error for a file-write permission failure.
 fn permission_error(source: impl std::fmt::Display, path: &std::path::Path) -> anyhow::Error {
     anyhow::anyhow!(
@@ -632,8 +746,11 @@ fn permission_error(source: impl std::fmt::Display, path: &std::path::Path) -> a
 #[cfg(test)]
 mod tests {
     use super::{
-        cumulative_changelog, is_inside_app_bundle, looks_like_executable, self_replace_refusal,
-        verify_minisign, MINISIGN_PUBKEY_B64,
+        asset_name, cumulative_changelog, downgrade_refusal, download_verified_asset,
+        install_executable, is_inside_app_bundle, looks_like_executable, parse_release_tag,
+        read_body_capped, self_replace_refusal, signature_to_verify, stage_executable,
+        verify_asset_signature, verify_minisign, SigFetch, ALLOW_DOWNGRADE_ENV,
+        FIRST_SIGNED_VERSION, MINISIGN_PUBKEY_B64,
     };
     use semver::Version;
     use std::path::Path;
@@ -794,5 +911,299 @@ All notable changes to this project.
         assert!(self_replace_refusal(Some(Path::new("/usr/local/bin/indexa")), false).is_none());
         // Unknown exe path, not desktop → allowed (we don't block what we can't classify).
         assert!(self_replace_refusal(None, false).is_none());
+    }
+
+    // ── Fail-closed update path ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn release_tags_must_be_strict_semver() {
+        assert_eq!(
+            parse_release_tag("v0.81.0").unwrap(),
+            (Version::new(0, 81, 0), "v0.81.0".to_owned())
+        );
+        assert_eq!(parse_release_tag("0.81.0").unwrap().1, "v0.81.0");
+        assert_eq!(parse_release_tag("v1.2.3-rc.1").unwrap().1, "v1.2.3-rc.1");
+        for bad in [
+            // Dot-segments would be normalised by the URL parser into another repo's asset.
+            "v1/../../../../attacker/repo/releases/download/v9",
+            "v0.81.0/../../../evil",
+            "v1?x",
+            "%2e%2e",
+            "v0.81.0%2F..",
+            "v0.81",
+            "vv0.81.0",
+            " v0.81.0",
+            "v0.81.0/",
+            "",
+        ] {
+            assert!(parse_release_tag(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn downgrades_are_refused_unless_explicitly_allowed() {
+        let current = Version::new(0, 80, 3);
+        let older = Version::new(0, 79, 0);
+        let reason = downgrade_refusal(&current, &older, false).unwrap();
+        assert!(reason.contains(ALLOW_DOWNGRADE_ENV), "{reason}");
+        assert!(downgrade_refusal(&current, &older, true).is_none());
+        // Same version (reinstall) and upgrades are not downgrades.
+        assert!(downgrade_refusal(&current, &current, false).is_none());
+        assert!(downgrade_refusal(&current, &Version::new(0, 81, 0), false).is_none());
+        // A pre-release of the running version is older than it.
+        let rc = Version::parse("0.80.3-rc.1").unwrap();
+        assert!(downgrade_refusal(&current, &rc, false).is_some());
+    }
+
+    #[test]
+    fn signature_policy_fails_closed_for_signed_releases() {
+        use reqwest::StatusCode;
+        let signed = FIRST_SIGNED_VERSION.clone();
+        let legacy = Version::new(0, 76, 0);
+        let sig = || SigFetch::Body("c2ln".to_owned());
+
+        assert_eq!(
+            signature_to_verify(&signed, sig()).unwrap(),
+            Some("c2ln".into())
+        );
+        for fetch in [
+            SigFetch::Status(StatusCode::NOT_FOUND),
+            SigFetch::Status(StatusCode::INTERNAL_SERVER_ERROR),
+            SigFetch::Status(StatusCode::FORBIDDEN),
+            SigFetch::Body(String::new()),
+            SigFetch::Body(" \n".to_owned()),
+            SigFetch::Failed("connection refused".to_owned()),
+        ] {
+            let desc = format!("{fetch:?}");
+            assert!(
+                signature_to_verify(&signed, fetch).is_err(),
+                "signed release must not install unverified on {desc}"
+            );
+        }
+
+        // Only an explicit 404 for a release that predates signing skips verification.
+        assert_eq!(
+            signature_to_verify(&legacy, SigFetch::Status(StatusCode::NOT_FOUND)).unwrap(),
+            None
+        );
+        assert_eq!(
+            signature_to_verify(&legacy, sig()).unwrap(),
+            Some("c2ln".into())
+        );
+        for fetch in [
+            SigFetch::Status(StatusCode::BAD_GATEWAY),
+            SigFetch::Body(String::new()),
+            SigFetch::Failed("timed out".to_owned()),
+        ] {
+            assert!(signature_to_verify(&legacy, fetch).is_err());
+        }
+    }
+
+    /// A tiny HTTP/1.1 server on 127.0.0.1: each request gets the canned raw response for its
+    /// path (or a 404) and the connection is closed. Returns the base URL.
+    async fn serve(routes: Vec<(String, Vec<u8>)>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let routes = std::sync::Arc::new(routes);
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let routes = routes.clone();
+                tokio::spawn(async move {
+                    let mut req = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match sock.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => req.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&req);
+                    let path = head.split_whitespace().nth(1).unwrap_or_default();
+                    let resp = routes
+                        .iter()
+                        .find(|(p, _)| p == path)
+                        .map(|(_, r)| r.clone())
+                        .unwrap_or_else(|| status(404));
+                    let _ = sock.write_all(&resp).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// A client that talks to the local test server directly, whatever `HTTP(S)_PROXY` says.
+    fn local_client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
+    fn ok(body: &[u8]) -> Vec<u8> {
+        let mut r = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        r.extend_from_slice(body);
+        r
+    }
+
+    fn status(code: u16) -> Vec<u8> {
+        format!("HTTP/1.1 {code} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").into_bytes()
+    }
+
+    #[tokio::test]
+    async fn missing_errored_or_empty_signature_aborts_a_signed_release() {
+        let base = serve(vec![
+            ("/a404.sig".into(), status(404)),
+            ("/a500.sig".into(), status(500)),
+            ("/aempty.sig".into(), ok(b"")),
+            ("/alegacy.sig".into(), status(404)),
+        ])
+        .await;
+        let client = local_client();
+        let signed = Version::new(0, 80, 3);
+        let check = |name: &'static str, v: Version| {
+            let client = client.clone();
+            let url = format!("{base}/{name}");
+            async move {
+                verify_asset_signature(&client, &url, &v, TEST_MSG, TEST_PUBKEY)
+                    .await
+                    .map_err(|e| format!("{e:#}"))
+            }
+        };
+
+        let e = check("a404", signed.clone()).await.unwrap_err();
+        assert!(e.contains("no update signature is published"), "{e}");
+        let e = check("a500", signed.clone()).await.unwrap_err();
+        assert!(e.contains("HTTP 500"), "{e}");
+        let e = check("aempty", signed.clone()).await.unwrap_err();
+        assert!(e.contains("empty"), "{e}");
+        // A release predating signing still installs on an explicit 404 (reachable only via an
+        // explicitly allowed downgrade).
+        check("alegacy", Version::new(0, 76, 0)).await.unwrap();
+
+        // Nothing listening: a network error is not "unsigned".
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}/asset", l.local_addr().unwrap())
+        };
+        let e = verify_asset_signature(&client, &dead, &signed, TEST_MSG, TEST_PUBKEY)
+            .await
+            .unwrap_err();
+        assert!(format!("{e:#}").contains("could not fetch"), "{e:#}");
+    }
+
+    #[tokio::test]
+    async fn published_signature_is_verified_over_http() {
+        let base = serve(vec![("/asset.sig".into(), ok(TEST_SIG_B64.as_bytes()))]).await;
+        let client = local_client();
+        let url = format!("{base}/asset");
+        let v = Version::new(0, 80, 3);
+        verify_asset_signature(&client, &url, &v, TEST_MSG, TEST_PUBKEY)
+            .await
+            .unwrap();
+        assert!(
+            verify_asset_signature(&client, &url, &v, b"tampered", TEST_PUBKEY)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn download_runs_size_and_signature_checks_end_to_end() {
+        let asset = asset_name().unwrap();
+        let base = serve(vec![
+            // Signed release whose .sig is missing → refused before anything is installed.
+            (format!("/v0.80.3/{asset}"), ok(b"\x7fELF-not-really")),
+            // Valid signature over a non-executable payload → verified, then rejected by magic.
+            (format!("/v0.80.2/{asset}"), ok(TEST_MSG)),
+            (format!("/v0.80.2/{asset}.sig"), ok(TEST_SIG_B64.as_bytes())),
+        ])
+        .await;
+        let client = local_client();
+        let get = |v: Version| {
+            let client = client.clone();
+            let base = base.clone();
+            async move {
+                let tag = format!("v{v}");
+                download_verified_asset(&client, &base, &v, &tag, None, TEST_PUBKEY)
+                    .await
+                    .map_err(|e| format!("{e:#}"))
+            }
+        };
+        let e = get(Version::new(0, 80, 3)).await.unwrap_err();
+        assert!(e.contains("no update signature is published"), "{e}");
+        let e = get(Version::new(0, 80, 2)).await.unwrap_err();
+        assert!(e.contains("not a recognized executable"), "{e}");
+        let e = get(Version::new(0, 80, 1)).await.unwrap_err();
+        assert!(e.contains("HTTP 404"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn body_reads_are_capped_and_truncation_is_caught() {
+        let mut no_len = b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n".to_vec();
+        no_len.extend_from_slice(&[b'x'; 64]);
+        let mut short =
+            b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\nconnection: close\r\n\r\n".to_vec();
+        short.extend_from_slice(&[b'x'; 10]);
+        let base = serve(vec![
+            ("/declared".into(), ok(&[b'x'; 64])),
+            ("/undeclared".into(), no_len),
+            ("/short".into(), short),
+            ("/fits".into(), ok(&[b'x'; 16])),
+        ])
+        .await;
+        let client = local_client();
+        let read = |path: &'static str| {
+            let client = client.clone();
+            let url = format!("{base}{path}");
+            async move {
+                let resp = client.get(&url).send().await.unwrap();
+                read_body_capped(resp, 16, None).await
+            }
+        };
+        // Declared Content-Length over the cap → refused before reading.
+        assert!(read("/declared").await.is_err());
+        // No Content-Length, body grows past the cap → refused mid-stream.
+        assert!(read("/undeclared").await.is_err());
+        // Fewer bytes than declared → truncated.
+        assert!(read("/short").await.is_err());
+        assert_eq!(read("/fits").await.unwrap().len(), 16);
+    }
+
+    fn leftovers(dir: &Path, prefix: &str) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(prefix))
+            .collect()
+    }
+
+    #[test]
+    fn staged_binary_is_deleted_when_dropped() {
+        // `apply` hands this to `self_replace`, which copies it rather than moving it — so the
+        // staged file must clean itself up (it used to be `keep()`-ed and left behind).
+        let dir = tempfile::tempdir().unwrap();
+        let staged = stage_executable(dir.path(), ".indexa-update-", b"\x7fELF").unwrap();
+        assert_eq!(leftovers(dir.path(), ".indexa-update-").len(), 1);
+        drop(staged);
+        assert!(leftovers(dir.path(), ".indexa-update-").is_empty());
+    }
+
+    #[test]
+    fn install_leaves_no_temp_file_on_success_or_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("indexa");
+        install_executable(dir.path(), &dest, b"\x7fELF-v1").unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"\x7fELF-v1");
+        assert!(leftovers(dir.path(), ".indexa-cli-").is_empty());
+
+        // The rename fails when the destination is a non-empty directory.
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join("keep"), b"x").unwrap();
+        assert!(install_executable(dir.path(), &blocked, b"\x7fELF-v2").is_err());
+        assert!(leftovers(dir.path(), ".indexa-cli-").is_empty());
     }
 }
