@@ -214,6 +214,15 @@ async fn run_scan_phase_with_entries(
     entries: &[indexa_core::walker::Entry],
     handle: &Arc<JobHandle>,
 ) -> bool {
+    // The walk is fail-open, so a missing/unreadable root yields nothing — and reconciling that
+    // would delete everything indexed under it. Fail the job and leave the index untouched.
+    if let Err(e) =
+        indexa_core::walker::ensure_walked_root_present(std::path::Path::new(path), entries.len())
+    {
+        let e = e.context("scan skipped — this root's existing index was left untouched");
+        finalize_failed(handle, "scan", &e);
+        return false;
+    }
     let n = entries.len() as u64;
     push(
         handle,

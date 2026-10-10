@@ -422,7 +422,10 @@ pub fn walk_streaming(
                     move |result: std::result::Result<ignore::DirEntry, ignore::Error>| {
                         let de = match result {
                             Ok(d) => d,
-                            Err(_) => return WalkState::Continue, // fail-open: skip unreadable
+                            // fail-open: skip unreadable. A missing/unreadable ROOT therefore
+                            // yields nothing — callers that prune must gate on
+                            // `ensure_walked_root_present`.
+                            Err(_) => return WalkState::Continue,
                         };
                         let path = de.path();
                         let is_dir = de.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -586,6 +589,34 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
         Ok(())
     })?;
     Ok(all)
+}
+
+/// Check that a finished walk of `root` can be trusted as the complete live set under it, before
+/// a caller prunes the index rows the walk didn't re-see.
+///
+/// [`walk_streaming`] is fail-open: a missing or unreadable root yields zero entries and `Ok`
+/// (pack refresh relies on that to hand vanished files to `deep`). Pruning on such a walk would
+/// delete the root's whole index — entries, chunks, summaries, edges — when its drive is merely
+/// unmounted or a permission error is transient. Callers that prune (`indexa scan`, the web scan
+/// phase) call this after the walk and skip the prune on `Err`.
+///
+/// `Err` when `root` can't be stat'ed, is a directory that can't be listed, or the walk saw
+/// nothing at all: an existing root is always yielded as its own depth-0 entry, so
+/// `entries_seen == 0` means it was unreadable while the walk ran, even if it is back by now.
+pub fn ensure_walked_root_present(root: &Path, entries_seen: usize) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let meta = std::fs::metadata(root)
+        .with_context(|| format!("{} is missing or unreadable", root.display()))?;
+    if meta.is_dir() {
+        std::fs::read_dir(root).with_context(|| format!("{} can't be listed", root.display()))?;
+    }
+    if entries_seen == 0 {
+        anyhow::bail!(
+            "walking {} yielded nothing, not even the root itself — it was unreadable during the walk",
+            root.display()
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1190,5 +1221,62 @@ mod tests {
             "more than STREAM_BATCH_SIZE entries with one worker must flush mid-walk, not just \
              once via Drop at the end (got {batches} batch(es))"
         );
+    }
+
+    #[test]
+    fn missing_root_walks_empty_and_fails_the_prune_guard() {
+        // The walk stays fail-open (pack refresh hands vanished paths to `deep`), so the guard is
+        // what stops a scan from pruning an unmounted root's whole index.
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("unmounted-drive");
+        let entries = walk(&gone, &WalkConfig::default()).unwrap();
+        assert!(entries.is_empty());
+        let err = ensure_walked_root_present(&gone, entries.len()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("missing or unreadable"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn prune_guard_accepts_walked_dir_and_file_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "hello").unwrap();
+
+        let entries = walk(dir.path(), &WalkConfig::default()).unwrap();
+        ensure_walked_root_present(dir.path(), entries.len()).unwrap();
+        let entries = walk(&file, &WalkConfig::default()).unwrap();
+        ensure_walked_root_present(&file, entries.len()).unwrap();
+    }
+
+    #[test]
+    fn prune_guard_rejects_an_empty_walk_even_if_the_root_is_back() {
+        // A drive that was unmounted during the walk and remounted before the check: the walk saw
+        // nothing, so its result is not the live set even though the root exists now.
+        let dir = tempfile::tempdir().unwrap();
+        let err = ensure_walked_root_present(dir.path(), 0).unwrap_err();
+        assert!(format!("{err:#}").contains("yielded nothing"), "{err:#}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_guard_rejects_an_unlistable_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("locked");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "hello").unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Running as root ignores the mode bits — nothing to test then.
+        let listable = std::fs::read_dir(&root).is_ok();
+        let entries = walk(&root, &WalkConfig::default()).unwrap();
+        let guard = ensure_walked_root_present(&root, entries.len());
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if listable {
+            return;
+        }
+        let err = guard.unwrap_err();
+        assert!(format!("{err:#}").contains("can't be listed"), "{err:#}");
     }
 }
