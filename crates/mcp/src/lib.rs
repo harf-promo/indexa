@@ -3532,4 +3532,147 @@ mod tests {
             "expected redaction marker"
         );
     }
+
+    // ── read_file guards: indexed-only, no secret files, redaction, bounded reads ──────────────
+
+    /// An MCP server over a fresh index whose root is `root` (indexed as a Dir) and whose File
+    /// entries are `indexed`. The returned TempDir owns the database.
+    fn mcp_indexing(root: &Path, indexed: &[&Path]) -> (IndexaMcp, tempfile::TempDir) {
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            let mut entries = vec![Entry {
+                path: root.to_path_buf(),
+                kind: EntryKind::Dir,
+                size: 0,
+                modified: None,
+                hint: None,
+                is_binary: false,
+            }];
+            entries.extend(indexed.iter().map(|p| Entry {
+                path: p.to_path_buf(),
+                kind: EntryKind::File,
+                size: std::fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+                modified: None,
+                hint: None,
+                is_binary: false,
+            }));
+            store.upsert_entries(&entries).unwrap();
+        }
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+        (mcp, dbdir)
+    }
+
+    fn read_text(mcp: &IndexaMcp, p: &Path, offset: usize) -> Result<String, String> {
+        mcp.read_file_inner(p.to_str().unwrap(), offset, "read_file")
+            .map(|r| {
+                r.content
+                    .iter()
+                    .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    #[tokio::test]
+    async fn read_file_refuses_unindexed_and_secret_files_under_a_root() {
+        let root = tempfile::tempdir().unwrap();
+        let notes = root.path().join("notes.md");
+        std::fs::write(&notes, "# notes\nplain text").unwrap();
+        // On disk under the root but never indexed (ignored, or written after the scan).
+        let stray = root.path().join("stray.txt");
+        std::fs::write(&stray, "not in the index").unwrap();
+        // A secret file: scan records it as an entry, but its contents must never be served.
+        let env = root.path().join(".env");
+        std::fs::write(&env, "PLACEHOLDER=not-a-real-value").unwrap();
+        let unindexed_env = root.path().join(".env.local");
+        std::fs::write(&unindexed_env, "PLACEHOLDER=not-a-real-value").unwrap();
+        let pem = root.path().join("deploy.pem");
+        std::fs::write(&pem, "placeholder").unwrap();
+        let (mcp, _db) = mcp_indexing(root.path(), &[&notes, &env, &pem]);
+
+        assert!(read_text(&mcp, &notes, 0).unwrap().contains("plain text"));
+        let e = read_text(&mcp, &stray, 0).unwrap_err();
+        assert!(e.contains("not an indexed file"), "{e}");
+        let e = read_text(&mcp, &unindexed_env, 0).unwrap_err();
+        assert!(e.contains("not an indexed file"), "{e}");
+        for secret in [&env, &pem] {
+            let e = read_text(&mcp, secret, 0).unwrap_err();
+            assert!(e.contains("secret/credential file"), "{e}");
+            assert!(
+                !e.contains("not-a-real-value"),
+                "contents leaked in the error"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_file_redacts_secrets_and_refuses_private_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let cfg = root.path().join("settings.toml");
+        std::fs::write(
+            &cfg,
+            "name = \"demo\"\napi_key = \"abcdefghijklmnop1234\"\n",
+        )
+        .unwrap();
+        // `.key` stays readable in general (it is Apple Keynote to the indexer), but a PEM
+        // private key in any file is refused outright.
+        let key = root.path().join("server.key");
+        std::fs::write(
+            &key,
+            "-----BEGIN PRIVATE KEY-----\nplaceholder\n-----END PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        let (mcp, _db) = mcp_indexing(root.path(), &[&cfg, &key]);
+
+        let body = read_text(&mcp, &cfg, 0).unwrap();
+        assert!(body.contains("name = \"demo\""), "{body}");
+        assert!(
+            !body.contains("abcdefghijklmnop1234"),
+            "secret leaked: {body}"
+        );
+        assert!(body.contains("api_key = [REDACTED-"), "{body}");
+        assert!(body.contains("1 secret(s) redacted"), "{body}");
+
+        let e = read_text(&mcp, &key, 0).unwrap_err();
+        assert!(e.contains("contains a private key"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn read_file_of_a_huge_indexed_file_serves_one_bounded_window() {
+        let root = tempfile::tempdir().unwrap();
+        let big = root.path().join("big.log");
+        let size: u64 = 64 * 1024 * 1024;
+        {
+            let f = std::fs::File::create(&big).unwrap();
+            f.set_len(size).unwrap();
+        }
+        let (mcp, _db) = mcp_indexing(root.path(), &[&big]);
+
+        let body = read_text(&mcp, &big, 0).unwrap();
+        assert!(
+            body.ends_with("…[truncated]"),
+            "tail of body: {:?}",
+            &body[body.len() - 40..]
+        );
+        assert!(
+            body.len() <= READ_FILE_CAP + 64,
+            "served {} bytes",
+            body.len()
+        );
+
+        let tail = read_text(&mcp, &big, (size - 5) as usize).unwrap();
+        assert!(
+            tail.starts_with(&format!("…[{} bytes before]", size - 5)),
+            "{tail:?}"
+        );
+        assert!(!tail.contains("[truncated]"), "{tail:?}");
+    }
 }
