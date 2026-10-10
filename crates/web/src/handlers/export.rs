@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::dto::err_json;
 use crate::AppState;
+use indexa_core::store::Store;
 
 #[derive(Deserialize)]
 pub(crate) struct ExportQuery {
@@ -31,12 +32,29 @@ pub(crate) struct ExportQuery {
     category: Option<String>,
 }
 
+/// Runs on its own connection inside `spawn_blocking` (like `api_packs_export`): a full-tree
+/// export walks every root synchronously, and holding the shared store mutex for that long froze
+/// every other handler that takes it (stats, tree, jobs).
 pub(crate) async fn api_export(
     State(state): State<AppState>,
     Query(params): Query<ExportQuery>,
 ) -> Response {
-    let store = state.store.lock().await;
+    let db_path = state.db_path.clone();
+    tokio::task::spawn_blocking(move || match Store::open(&db_path) {
+        Ok(store) => export_response(&store, &params),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    })
+    .await
+    .unwrap_or_else(|e| {
+        err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("export task panicked: {e}"),
+        )
+    })
+}
 
+/// The whole export rendering. Synchronous by construction, so it runs in `spawn_blocking`.
+fn export_response(store: &Store, params: &ExportQuery) -> Response {
     // Resolve roots: explicit path or all indexed roots.
     let roots: Vec<String> = match &params.path {
         Some(p) if !p.trim().is_empty() => vec![p.clone()],
@@ -70,7 +88,7 @@ pub(crate) async fn api_export(
     // Relational slice (v0.60): same `--changed-since` / `--category` filters as CLI `export`,
     // shared via `build_export_filter`. `None` ⇒ export everything; a bad duration → 400.
     let allow = match indexa_query::build_export_filter(
-        &store,
+        store,
         params.changed_since.as_deref(),
         params.category.as_deref(),
         now_secs,
@@ -101,7 +119,7 @@ pub(crate) async fn api_export(
             }
             continue;
         }
-        match indexa_query::build_tree(&store, root_path, params.depth) {
+        match indexa_query::build_tree(store, root_path, params.depth) {
             Ok(Some(tree)) => {
                 // Apply the relational slice; skip a root that matched nothing.
                 let tree = match &allow {

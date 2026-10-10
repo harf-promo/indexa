@@ -45,33 +45,53 @@ pub(crate) async fn register_job(jobs: &Jobs, kind: &str, path: String) -> (Uuid
 /// client could pull by firing many `/api/jobs/*` starts — each spawns a heavy scan/embed loop.
 const MAX_CONCURRENT_JOBS: usize = 4;
 
-/// `Some(429 response)` when the concurrency cap is already reached, else `None` (proceed).
-pub(crate) async fn job_slot_available(jobs: &Jobs) -> Option<Response> {
-    let running = jobs
-        .read()
-        .await
-        .values()
+fn cap_reached(jobs: &std::collections::HashMap<Uuid, Arc<JobHandle>>) -> bool {
+    jobs.values()
         .filter(|h| h.status() == JobStatus::Running)
-        .count();
-    (running >= MAX_CONCURRENT_JOBS).then(|| {
-        err_json(
-            StatusCode::TOO_MANY_REQUESTS,
-            format!(
-                "at most {MAX_CONCURRENT_JOBS} jobs may run concurrently; wait for one to finish"
-            ),
-        )
-        .into_response()
-    })
+        .count()
+        >= MAX_CONCURRENT_JOBS
+}
+
+fn too_many_jobs() -> Response {
+    err_json(
+        StatusCode::TOO_MANY_REQUESTS,
+        format!("at most {MAX_CONCURRENT_JOBS} jobs may run concurrently; wait for one to finish"),
+    )
+    .into_response()
+}
+
+/// `Some(429 response)` when the concurrency cap is already reached, else `None` (proceed).
+/// A separate check-then-register can overshoot the cap under concurrent starts; prefer
+/// [`try_register_job`], which does both under one write lock.
+pub(crate) async fn job_slot_available(jobs: &Jobs) -> Option<Response> {
+    cap_reached(&*jobs.read().await).then(too_many_jobs)
+}
+
+/// Check the concurrency cap and register a new job under ONE write lock, so simultaneous
+/// starts can't all pass the check before any of them registers. `None` when the cap is already
+/// reached (answer with [`too_many_jobs`]).
+pub(crate) async fn try_register_job(
+    jobs: &Jobs,
+    kind: &str,
+    path: String,
+) -> Option<(Uuid, Arc<JobHandle>)> {
+    let mut jobs = jobs.write().await;
+    if cap_reached(&jobs) {
+        return None;
+    }
+    let handle = Arc::new(JobHandle::new(kind, path));
+    jobs.insert(handle.id, handle.clone());
+    Some((handle.id, handle))
 }
 
 pub(crate) async fn api_job_scan(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
 ) -> Response {
-    if let Some(resp) = job_slot_available(&s.jobs).await {
-        return resp;
-    }
-    let (id, handle) = register_job(&s.jobs, "scan", q.path.clone()).await;
+    let (id, handle) = match try_register_job(&s.jobs, "scan", q.path.clone()).await {
+        Some(job) => job,
+        None => return too_many_jobs(),
+    };
     let state = s.clone();
     tokio::spawn(async move {
         run_scan_phase_standalone(&state, &q.path, &handle).await;
@@ -84,10 +104,10 @@ pub(crate) async fn api_job_deep(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
 ) -> Response {
-    if let Some(resp) = job_slot_available(&s.jobs).await {
-        return resp;
-    }
-    let (id, handle) = register_job(&s.jobs, "deep", q.path.clone()).await;
+    let (id, handle) = match try_register_job(&s.jobs, "deep", q.path.clone()).await {
+        Some(job) => job,
+        None => return too_many_jobs(),
+    };
     let state = s.clone();
     tokio::spawn(async move {
         run_deep_phase_standalone(&state, &q.path, &handle).await;
@@ -100,10 +120,10 @@ pub(crate) async fn api_job_summarize(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
 ) -> Response {
-    if let Some(resp) = job_slot_available(&s.jobs).await {
-        return resp;
-    }
-    let (id, handle) = register_job(&s.jobs, "summarize", q.path.clone()).await;
+    let (id, handle) = match try_register_job(&s.jobs, "summarize", q.path.clone()).await {
+        Some(job) => job,
+        None => return too_many_jobs(),
+    };
     let model_override = model_override_from(&q, s.config.describer.num_ctx);
     let state = s.clone();
     tokio::spawn(async move {
@@ -117,10 +137,10 @@ pub(crate) async fn api_job_index(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
 ) -> Response {
-    if let Some(resp) = job_slot_available(&s.jobs).await {
-        return resp;
-    }
-    let (id, handle) = register_job(&s.jobs, "index", q.path.clone()).await;
+    let (id, handle) = match try_register_job(&s.jobs, "index", q.path.clone()).await {
+        Some(job) => job,
+        None => return too_many_jobs(),
+    };
     let model_override = model_override_from(&q, s.config.describer.num_ctx);
     let state = s.clone();
     tokio::spawn(async move {
@@ -330,4 +350,59 @@ pub(crate) async fn api_job_delete(
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
     StatusCode::NO_CONTENT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_starts_never_exceed_the_job_cap() {
+        // A separate read-locked check followed by a write-locked insert let every start that
+        // raced past the check register, overshooting MAX_CONCURRENT_JOBS.
+        let jobs: Jobs = Default::default();
+        let starts = 4 * MAX_CONCURRENT_JOBS;
+        let barrier = Arc::new(tokio::sync::Barrier::new(starts));
+        let tasks: Vec<_> = (0..starts)
+            .map(|i| {
+                let jobs = jobs.clone();
+                let barrier = barrier.clone();
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    try_register_job(&jobs, "scan", format!("/p{i}"))
+                        .await
+                        .is_some()
+                })
+            })
+            .collect();
+        let mut admitted = 0;
+        for t in tasks {
+            if t.await.unwrap() {
+                admitted += 1;
+            }
+        }
+        assert_eq!(admitted, MAX_CONCURRENT_JOBS);
+        assert_eq!(jobs.read().await.len(), MAX_CONCURRENT_JOBS);
+    }
+
+    #[tokio::test]
+    async fn a_finished_job_frees_its_slot() {
+        let jobs: Jobs = Default::default();
+        let mut handles = Vec::new();
+        for i in 0..MAX_CONCURRENT_JOBS {
+            handles.push(
+                try_register_job(&jobs, "scan", format!("/p{i}"))
+                    .await
+                    .unwrap()
+                    .1,
+            );
+        }
+        assert!(try_register_job(&jobs, "scan", "/full".into())
+            .await
+            .is_none());
+        handles[0].set_status(JobStatus::Done);
+        assert!(try_register_job(&jobs, "scan", "/freed".into())
+            .await
+            .is_some());
+    }
 }
