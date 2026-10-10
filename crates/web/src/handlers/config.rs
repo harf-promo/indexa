@@ -212,6 +212,7 @@ pub(crate) async fn api_config_features_get(
         audio_binary: state.config.parsers.audio.binary.clone(),
         video_caption: state.config.parsers.video.caption,
         video_model: state.config.parsers.video.model.clone(),
+        video_transcribe: state.config.parsers.video.transcribe,
     })
 }
 
@@ -332,6 +333,9 @@ pub(crate) async fn api_config_features_set(
     }
     if let Some(v) = body.video_caption {
         cfg.parsers.video.caption = v;
+    }
+    if let Some(v) = body.video_transcribe {
+        cfg.parsers.video.transcribe = v;
     }
     if let Some(v) = body.video_model {
         cfg.parsers.video.model = if v.trim().is_empty() {

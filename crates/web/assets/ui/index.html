@@ -424,6 +424,15 @@
             <input type="text" class="key-input" id="feat-video-model" placeholder="llama3.2-vision (default)" autocomplete="off" aria-label="Video vision model name">
           </div>
           <p class="settings-note" style="margin-top:0">Requires <code>ffmpeg</code> (frame extraction) + an Ollama vision model. Samples 1 frame/2s, max 8 frames per video — frames are captioned one at a time, so the memory peak is a single frame's model (not 8×). The memory watchdog now counts that vision model and warns here if it won't fit.</p>
+          <!-- Video transcription -->
+          <div class="key-row" style="margin-top:8px">
+            <span class="key-label">Video transcription</span>
+            <label class="toggle-label">
+              <input type="checkbox" id="feat-video-transcribe" aria-label="Transcribe the audio track of video files with whisper-cli">
+              <span class="toggle-text">Transcribe videos' audio track with the whisper CLI above</span>
+            </label>
+          </div>
+          <p class="settings-note" style="margin-top:0">Requires <code>ffmpeg</code> (audio-track extraction) + the whisper binary/model from Audio transcription. The transcript keeps segment timestamps; silent videos are skipped. Applies on the next <code>indexa deep</code> run.</p>
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
           <button class="btn-sm" onclick="saveFeatures()">Save features</button>

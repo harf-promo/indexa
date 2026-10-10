@@ -831,8 +831,9 @@ pub struct AudioParserConfig {
     /// (opt-in). Requires the `binary` (default `whisper-cli`) on PATH and a `model`. The
     /// transcript is stored as a searchable chunk; the binary must accept the input format
     /// (whisper.cpp expects 16 kHz WAV — convert beforehand if needed). Only `audio/*` files
-    /// are transcribed — extract the audio track from video files first. Like captioning,
-    /// this applies to newly-scanned or modified files on the next `deep`.
+    /// are transcribed here; video files' audio tracks are covered by `[parsers.video]
+    /// transcribe`, which reuses this `binary`/`model`. Like captioning, this applies to
+    /// newly-scanned or modified files on the next `deep`.
     pub transcribe: bool,
     /// Transcription CLI to invoke. Defaults to [`DEFAULT_TRANSCRIBE_BINARY`].
     pub binary: Option<String>,
@@ -866,6 +867,10 @@ pub struct VideoParserConfig {
     pub fps_sample: Option<f32>,
     /// Maximum frames to caption per video (default 8 — caps LLM cost).
     pub max_frames: Option<usize>,
+    /// Set true to transcribe a video's audio track (opt-in): ffmpeg (`binary`) extracts it
+    /// to 16 kHz WAV, then the `[parsers.audio]` whisper CLI + model transcribe it with
+    /// segment timestamps. Videos without an audio track are skipped quietly.
+    pub transcribe: bool,
 }
 
 impl VideoParserConfig {
@@ -1337,6 +1342,7 @@ auto_reindex = "7d"
             "mixedbread-ai/mxbai-rerank-xsmall-v1"
         );
         assert!(!cfg.parsers.audio.transcribe);
+        assert!(!cfg.parsers.video.transcribe);
         assert!(!cfg.parsers.image.caption);
         // Caption model falls back to the default vision model when unset.
         assert_eq!(cfg.parsers.image.caption_model(), DEFAULT_CAPTION_MODEL);
@@ -1479,6 +1485,7 @@ overlap = 50
         "parsers.video.binary",
         "parsers.video.fps_sample",
         "parsers.video.max_frames",
+        "parsers.video.transcribe",
         "parsers.max_file_mb",
         "parsers.encoding",
         "parsers.preprocessor",

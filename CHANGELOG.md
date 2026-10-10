@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Video audio-track transcription — `[parsers.video] transcribe` (opt-in).** A video's
+  speech is now searchable, not just its sampled frames. ffmpeg extracts the first audio track
+  to 16 kHz mono WAV and the same whisper CLI + model as `[parsers.audio]` transcribes it into a
+  `transcript` chunk that keeps whisper's segment timestamps (`[00:00:00.000 --> 00:00:03.120]
+  …`), so a hit says where in the video the words were spoken. A video with no audio track is
+  skipped quietly rather than warned about. Both `indexa deep` and the web deep job run it; the
+  web Settings → Features panel has a toggle, and `indexa multimodal --enable` turns it on when
+  ffmpeg and the whisper binary are present. Audio-file transcripts are unchanged (still plain
+  text, no timestamps).
+
 - **MCP memory tools — `memory_record`, `memory_search`, `memory_update` (53 → 56 tools).** An
   agent can now write durable claims and read them back across sessions. Two limits are enforced
   by the server rather than trusted to the caller: `author` is **forced** to agent, which is what

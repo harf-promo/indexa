@@ -12,6 +12,7 @@ pub(crate) struct Readiness {
     pub ocr_ready: bool,
     pub whisper: bool,
     pub video_ready: bool,
+    pub video_transcribe_ready: bool,
     pub vision_model: String,
     pub whisper_bin: String,
 }
@@ -40,6 +41,7 @@ pub(crate) async fn multimodal_readiness(cfg: &Config) -> Readiness {
         ocr_ready: tesseract && pdftoppm,
         whisper,
         video_ready: ffmpeg && vision_ok,
+        video_transcribe_ready: ffmpeg && whisper,
         vision_model,
         whisper_bin,
     };
@@ -72,6 +74,16 @@ pub(crate) async fn multimodal_readiness(cfg: &Config) -> Readiness {
         cfg.parsers.video.caption,
         "ffmpeg on PATH + a vision model",
         "[parsers.video] caption = true",
+    );
+    feat_line(
+        "Video audio-track transcription",
+        r.video_transcribe_ready,
+        cfg.parsers.video.transcribe,
+        &format!(
+            "ffmpeg + `{}` on PATH (+ a whisper model file)",
+            r.whisper_bin
+        ),
+        "[parsers.video] transcribe = true",
     );
     r
 }
@@ -112,6 +124,10 @@ pub(crate) async fn cmd_multimodal(enable: bool, cfg: &Config, config_path: &Pat
     if r.video_ready && !c.parsers.video.caption {
         c.parsers.video.caption = true;
         changed.push("video frame captioning");
+    }
+    if r.video_transcribe_ready && !c.parsers.video.transcribe {
+        c.parsers.video.transcribe = true;
+        changed.push("video audio-track transcription");
     }
 
     if changed.is_empty() {

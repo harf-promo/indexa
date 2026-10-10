@@ -1,6 +1,7 @@
 //! Audio/video metadata parser via ffprobe subprocess.
 //! Default: duration, codec, title/artist tags from metadata.
-//! Whisper transcription is opt-in via config (not implemented here).
+//! Whisper transcription (audio files, and the audio track of video files) is opt-in via
+//! config; the deep loops call [`transcribe_audio`] / [`transcribe_video_audio`].
 
 use crate::types::{Chunk, Extracted, Parser};
 use anyhow::{Context, Result};
@@ -103,12 +104,31 @@ impl Parser for MediaParser {
 /// (binary absent, non-zero exit, empty output) propagate so the caller can warn and skip,
 /// leaving the file's metadata chunk intact.
 pub fn transcribe_audio(path: &Path, binary: &str, model: Option<&str>) -> Result<String> {
+    run_whisper(path, binary, model, false)
+}
+
+/// Like [`transcribe_audio`], but keeps whisper's segment timestamps: one
+/// `[HH:MM:SS.mmm --> HH:MM:SS.mmm] text` line per segment, so a search hit in a long
+/// recording says *where* the words were spoken. Same blocking/error contract.
+pub fn transcribe_audio_timestamped(
+    path: &Path,
+    binary: &str,
+    model: Option<&str>,
+) -> Result<String> {
+    run_whisper(path, binary, model, true)
+}
+
+fn run_whisper(path: &Path, binary: &str, model: Option<&str>, timestamps: bool) -> Result<String> {
     let path_str = path.to_str().context("non-UTF-8 audio path")?;
     let mut cmd = Command::new(binary);
     if let Some(m) = model {
         cmd.args(["-m", m]);
     }
-    cmd.args(["-f", path_str, "-nt", "-np"]);
+    cmd.args(["-f", path_str]);
+    if !timestamps {
+        cmd.arg("-nt");
+    }
+    cmd.arg("-np");
     let output = crate::proc::run_capped(cmd, crate::proc::WHISPER_TIMEOUT)
         .with_context(|| format!("running {binary} (is it installed and on PATH?)"))?;
     if !output.status.success() {
@@ -118,11 +138,100 @@ pub fn transcribe_audio(path: &Path, binary: &str, model: Option<&str>) -> Resul
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let text = if timestamps {
+        tidy_timestamped(&raw)
+    } else {
+        raw.trim().to_owned()
+    };
     if text.is_empty() {
         anyhow::bail!("{binary} produced no transcript");
     }
     Ok(text)
+}
+
+/// Normalise whisper's timestamped stdout: drop blank lines and collapse the padding
+/// between the `[.. --> ..]` stamp and the segment text to a single space.
+fn tidy_timestamped(raw: &str) -> String {
+    raw.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| match l.split_once(']') {
+            Some((stamp, rest)) if l.starts_with('[') && stamp.contains("-->") => {
+                format!("{stamp}] {}", rest.trim())
+            }
+            _ => l.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Extract a video's first audio track to a 16 kHz mono WAV (the input whisper.cpp
+/// expects) in a temp dir, by shelling out to ffmpeg like [`extract_video_frames`].
+/// Returns `Ok(None)` when the video has **no audio track** (a silent screen recording is
+/// normal, not an error), otherwise the temp dir — keep it alive until the WAV is consumed —
+/// and the WAV path. Blocking subprocess.
+pub fn extract_audio_track(
+    path: &Path,
+    ffmpeg_binary: &str,
+) -> Result<Option<(TempDir, std::path::PathBuf)>> {
+    let dir = tempfile::tempdir().context("creating temp dir for the audio track")?;
+    let wav = dir.path().join("audio.wav");
+    let mut cmd = Command::new(ffmpeg_binary);
+    cmd.args([
+        "-v",
+        "error",
+        "-i",
+        path.to_str().context("non-UTF-8 video path")?,
+        "-map",
+        "0:a:0?",
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        wav.to_str().context("non-UTF-8 temp dir")?,
+        "-y",
+    ]);
+    let output = crate::proc::run_capped(cmd, crate::proc::FFMPEG_TIMEOUT)
+        .with_context(|| format!("running {ffmpeg_binary} (is ffmpeg installed and on PATH?)"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        // `-map 0:a:0?` makes the audio optional, so a silent video leaves the output with
+        // no streams at all — ffmpeg reports that rather than a decode failure.
+        if stderr.contains("does not contain any stream") {
+            return Ok(None);
+        }
+        anyhow::bail!(
+            "{ffmpeg_binary} audio extraction failed ({}): {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+    let has_audio = std::fs::metadata(&wav)
+        .map(|m| m.len() > WAV_HEADER_BYTES)
+        .unwrap_or(false);
+    Ok(has_audio.then_some((dir, wav)))
+}
+
+/// A canonical PCM WAV header; a file no larger than this holds no samples.
+const WAV_HEADER_BYTES: u64 = 44;
+
+/// Transcribe a video's spoken audio: [`extract_audio_track`] with `ffmpeg_binary`, then
+/// [`transcribe_audio_timestamped`] on the extracted WAV. `Ok(None)` when the video has no
+/// audio track. Blocking (ffmpeg + whisper) — wrap in `spawn_blocking` from async code.
+pub fn transcribe_video_audio(
+    path: &Path,
+    ffmpeg_binary: &str,
+    whisper_binary: &str,
+    model: Option<&str>,
+) -> Result<Option<String>> {
+    let Some((_dir, wav)) = extract_audio_track(path, ffmpeg_binary)? else {
+        return Ok(None);
+    };
+    transcribe_audio_timestamped(&wav, whisper_binary, model).map(Some)
 }
 
 fn run_ffprobe(path: &Path) -> Result<String> {
@@ -280,6 +389,31 @@ mod tests {
         assert!(
             res.is_err(),
             "missing binary must Err, not panic or succeed"
+        );
+    }
+
+    #[test]
+    fn transcribe_video_audio_errors_gracefully_when_ffmpeg_missing() {
+        let res = transcribe_video_audio(
+            Path::new("/tmp/nonexistent.mp4"),
+            "indexa-no-such-ffmpeg-binary",
+            "indexa-no-such-whisper-binary",
+            None,
+        );
+        assert!(
+            res.is_err(),
+            "missing ffmpeg must Err, not panic or succeed"
+        );
+    }
+
+    #[test]
+    fn tidy_timestamped_collapses_padding_and_blank_lines() {
+        let raw = "\n[00:00:00.000 --> 00:00:03.120]   Indexa makes local context.\n\n\
+                   [00:00:03.120 --> 00:00:05.000]  Second line.\n";
+        assert_eq!(
+            tidy_timestamped(raw),
+            "[00:00:00.000 --> 00:00:03.120] Indexa makes local context.\n\
+             [00:00:03.120 --> 00:00:05.000] Second line."
         );
     }
 }
