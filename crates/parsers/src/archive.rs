@@ -10,13 +10,28 @@
 
 use crate::types::{chunk_words, Chunk, ChunkParams, Extracted, Parser};
 use anyhow::Result;
+use std::cell::Cell;
 use std::io::Read;
 use std::path::Path;
+use std::rc::Rc;
 
 pub struct ArchiveParser;
 
 /// Cap the listing so a pathological archive with millions of entries can't blow up memory.
 const MAX_ENTRIES: usize = 5000;
+
+/// Cap the bytes a `.tar.gz` listing may inflate. A tar stream has no index, so reaching the
+/// next header means decompressing every byte of the entry before it: one small file holding a
+/// huge zero-filled entry would otherwise pin a CPU for minutes, and the size guard upstream
+/// only sees the compressed size.
+const MAX_TAR_GZ_DECOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Why a listing stopped early.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Truncation {
+    Entries,
+    Bytes,
+}
 
 impl Parser for ArchiveParser {
     fn accepts_path(&self, path: &Path) -> bool {
@@ -73,10 +88,15 @@ impl Parser for ArchiveParser {
             );
             // The cap skips directory rows, so entries.len() can be below MAX_ENTRIES even
             // when truncated — rely on the explicit flag, not the row count, to stay honest.
-            if truncated {
-                s.push_str(&format!(
+            match truncated {
+                Some(Truncation::Entries) => s.push_str(&format!(
                     "\n(listing truncated — showing first {MAX_ENTRIES})"
-                ));
+                )),
+                Some(Truncation::Bytes) => s.push_str(&format!(
+                    "\n(listing truncated — stopped after {} MiB decompressed)",
+                    MAX_TAR_GZ_DECOMPRESSED_BYTES / (1024 * 1024)
+                )),
+                None => {}
             }
             s
         };
@@ -119,12 +139,12 @@ fn file_name_lower(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
-/// Returns `(entry listing, truncated)`. `truncated` is true when the archive held more
-/// than `MAX_ENTRIES` entries and the listing was capped.
-fn list_zip(path: &Path) -> Result<(Vec<String>, bool)> {
+/// Returns `(entry listing, truncation)`. Truncated when the archive held more than
+/// `MAX_ENTRIES` entries and the listing was capped.
+fn list_zip(path: &Path) -> Result<(Vec<String>, Option<Truncation>)> {
     let file = std::fs::File::open(path)?;
     let mut zip = zip::ZipArchive::new(file)?;
-    let truncated = zip.len() > MAX_ENTRIES;
+    let truncated = (zip.len() > MAX_ENTRIES).then_some(Truncation::Entries);
     let n = zip.len().min(MAX_ENTRIES);
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
@@ -137,21 +157,40 @@ fn list_zip(path: &Path) -> Result<(Vec<String>, bool)> {
     Ok((out, truncated))
 }
 
-/// Returns `(entry listing, truncated)`. A tar entry stream has no length, so truncation
-/// is detected by the iterator still yielding once we've consumed `MAX_ENTRIES` entries.
-fn list_tar(path: &Path, gz: bool) -> Result<(Vec<String>, bool)> {
+/// Returns `(entry listing, truncation)`. A tar entry stream has no length, so entry
+/// truncation is detected by the iterator still yielding once we've consumed `MAX_ENTRIES`
+/// entries. A `.tar.gz` also stops, with the entries listed so far, once it has inflated
+/// `MAX_TAR_GZ_DECOMPRESSED_BYTES`.
+fn list_tar(path: &Path, gz: bool) -> Result<(Vec<String>, Option<Truncation>)> {
+    list_tar_with_budget(path, gz, MAX_TAR_GZ_DECOMPRESSED_BYTES)
+}
+
+fn list_tar_with_budget(
+    path: &Path,
+    gz: bool,
+    gz_budget: u64,
+) -> Result<(Vec<String>, Option<Truncation>)> {
     let file = std::fs::File::open(path)?;
+    let exhausted = Rc::new(Cell::new(false));
     let reader: Box<dyn Read> = if gz {
-        Box::new(flate2::read::GzDecoder::new(file))
+        Box::new(BudgetReader {
+            inner: flate2::read::GzDecoder::new(file),
+            remaining: gz_budget,
+            exhausted: Rc::clone(&exhausted),
+        })
     } else {
         Box::new(file)
     };
     let mut archive = tar::Archive::new(reader);
     let mut out = Vec::new();
-    let mut truncated = false;
+    let mut truncated = None;
     for (i, entry) in archive.entries()?.enumerate() {
+        if exhausted.get() {
+            truncated = Some(Truncation::Bytes);
+            break;
+        }
         if i >= MAX_ENTRIES {
-            truncated = true;
+            truncated = Some(Truncation::Entries);
             break;
         }
         let Ok(entry) = entry else { continue };
@@ -162,7 +201,35 @@ fn list_tar(path: &Path, gz: bool) -> Result<(Vec<String>, bool)> {
             out.push(format!("{ps} ({size} bytes)"));
         }
     }
+    // The budget can run out inside the stream's final read, after which the iterator just
+    // ends (tar fuses on the first error) without yielding again.
+    if exhausted.get() {
+        truncated = Some(Truncation::Bytes);
+    }
     Ok((out, truncated))
+}
+
+/// A `Read` that fails once `remaining` bytes have passed through it, flagging `exhausted` so
+/// the caller can tell a spent budget from a corrupt stream.
+struct BudgetReader<R> {
+    inner: R,
+    remaining: u64,
+    exhausted: Rc<Cell<bool>>,
+}
+
+impl<R: Read> Read for BudgetReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.remaining == 0 {
+            self.exhausted.set(true);
+            return Err(std::io::Error::other("decompressed-size budget exhausted"));
+        }
+        let max = buf
+            .len()
+            .min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
+        let n = self.inner.read(&mut buf[..max])?;
+        self.remaining -= n as u64;
+        Ok(n)
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +332,58 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(all.contains("notes/a.txt"), "{all}");
+    }
+
+    /// A `.tar.gz` whose first entry is `zeros` bytes of zeros (a few KB compressed), followed by
+    /// a small `after.txt` that can only be reached by inflating the whole first entry.
+    fn zero_bomb_tgz(zeros: u64) -> tempfile::TempDir {
+        let mut b = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(zeros);
+        header.set_mode(0o644);
+        header.set_cksum();
+        b.append_data(&mut header, "bomb.bin", std::io::repeat(0).take(zeros))
+            .unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(2);
+        header.set_mode(0o644);
+        header.set_cksum();
+        b.append_data(&mut header, "after.txt", &b"hi"[..]).unwrap();
+        let gz = b.into_inner().unwrap().finish().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bomb.tar.gz"), gz).unwrap();
+        dir
+    }
+
+    #[test]
+    fn tar_gz_zero_bomb_stops_at_the_decompressed_budget() {
+        let dir = zero_bomb_tgz(8 * 1024 * 1024);
+        let p = dir.path().join("bomb.tar.gz");
+        let (entries, truncated) = list_tar_with_budget(&p, true, 1024 * 1024).unwrap();
+        assert_eq!(truncated, Some(Truncation::Bytes), "{entries:?}");
+        assert!(
+            entries.iter().any(|e| e.starts_with("bomb.bin")),
+            "{entries:?}"
+        );
+        assert!(
+            !entries.iter().any(|e| e.starts_with("after.txt")),
+            "listing must stop at the budget, not inflate past it: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn tar_gz_within_the_budget_lists_everything() {
+        let dir = zero_bomb_tgz(8 * 1024 * 1024);
+        let p = dir.path().join("bomb.tar.gz");
+        let (entries, truncated) = list_tar_with_budget(&p, true, 64 * 1024 * 1024).unwrap();
+        assert_eq!(truncated, None, "{entries:?}");
+        assert!(
+            entries.iter().any(|e| e.starts_with("after.txt")),
+            "{entries:?}"
+        );
     }
 
     #[test]
