@@ -1,15 +1,21 @@
 //! Retrieval tools: `search`, `browse_tree`, `get_summary` (l0/l1/l2),
 //! `read_file`, and `ask`.
 
-use std::path::PathBuf;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
 use rmcp::{
     handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router, ErrorData,
 };
 use serde::Deserialize;
 
-use indexa_core::{config::HybridMode, store::Store};
-use indexa_query::{PriorTurn, QaConfig};
+use indexa_core::{
+    config::HybridMode,
+    pathutil::ancestor_dirs_to_root,
+    store::Store,
+    walker::{is_sensitive_dir, is_sensitive_file},
+};
+use indexa_query::{redact::redact_secrets, PriorTurn, QaConfig};
 
 use crate::{
     mcp_err, ok_text, parse_hybrid_mode, path_within_roots, record_usage, IndexaMcp, READ_FILE_CAP,
@@ -784,10 +790,19 @@ impl IndexaMcp {
 
     /// Shared raw-content reader used by `read_file` and `get_summary(tier=l2)`.
     ///
-    /// Reads are **confined to files under an indexed root**. The tool contract is "an indexed
-    /// file"; an MCP client must not be able to read arbitrary paths (`/etc/passwd`, `../../…`)
-    /// through it. (Threat model is local stdio — the client already has the user's filesystem
-    /// rights — so this is contract hygiene / defense-in-depth, not a privilege boundary.)
+    /// Reads are **confined to indexed files under an indexed root**. The tool contract is "an
+    /// indexed file"; an MCP client must not be able to read arbitrary paths (`/etc/passwd`,
+    /// `../../…`) or files the indexer deliberately skips through it. Threat model is local stdio
+    /// (the client already has the user's filesystem rights), but the client is often a cloud
+    /// model, so the guards keep secrets out of what this tool serves:
+    /// - the path must be a `File` row in the index, not just any file under a root;
+    /// - secret files and credential stores (`.env`, `id_rsa`, `*.pem`, `.ssh/`, …, the same
+    ///   list the indexer keeps out of the searchable index) are refused unless
+    ///   `[scan] include_sensitive` is set;
+    /// - a window holding a PEM private key is refused (redaction can't scrub a raw key);
+    /// - obvious secrets in the served window are redacted.
+    ///
+    /// Only the served window is read from disk (seek + bounded read), never the whole file.
     pub(crate) fn read_file_inner(
         &self,
         path: &str,
@@ -797,33 +812,53 @@ impl IndexaMcp {
         let requested =
             std::fs::canonicalize(path).map_err(|e| mcp_err(format!("reading {path}: {e}")))?;
         let mut store = Store::open(&self.db_path).map_err(mcp_err)?;
-        let roots: Vec<PathBuf> = store
+        // (as stored, canonical) — entries are recorded under the root as it was scanned.
+        let roots: Vec<(PathBuf, PathBuf)> = store
             .root_paths()
             .map_err(mcp_err)?
-            .iter()
-            .filter_map(|r| std::fs::canonicalize(r).ok())
+            .into_iter()
+            .filter_map(|r| {
+                let stored = PathBuf::from(r);
+                std::fs::canonicalize(&stored).ok().map(|c| (stored, c))
+            })
             .collect();
-        if !path_within_roots(&requested, &roots) {
+        let canonical_roots: Vec<PathBuf> = roots.iter().map(|(_, c)| c.clone()).collect();
+        if !path_within_roots(&requested, &canonical_roots) {
             return Err(mcp_err(format!(
                 "path is not within an indexed root: {path}"
             )));
         }
-
-        let bytes =
-            std::fs::read(&requested).map_err(|e| mcp_err(format!("reading {path}: {e}")))?;
-        let text = String::from_utf8_lossy(&bytes);
-        // Page within the file: snap the requested offset DOWN to a char boundary, then serve a
-        // READ_FILE_CAP-wide window. `offset > 0` pages past the cap into a later slice.
-        let start = indexa_core::text::floor_char_boundary(&text, offset);
-        let end =
-            indexa_core::text::floor_char_boundary(&text, start.saturating_add(READ_FILE_CAP));
-        let mut body = String::new();
-        if start > 0 {
-            body.push_str(&format!("…[{start} bytes before]\n"));
+        if !is_indexed_file(&store, path, &requested, &roots) {
+            return Err(mcp_err(format!(
+                "path is not an indexed file: {path} (run a scan, or check it isn't ignored)"
+            )));
         }
-        body.push_str(&text[start..end]);
-        if end < text.len() {
+        if !self.config.scan.include_sensitive && is_sensitive_path(&requested, &canonical_roots) {
+            return Err(mcp_err(format!(
+                "refusing to read {path}: it is a secret/credential file the indexer keeps out of \
+                 the index (set [scan] include_sensitive to allow)"
+            )));
+        }
+
+        let (window, file_len) = read_window(&requested, offset as u64, READ_FILE_CAP)
+            .map_err(|e| mcp_err(format!("reading {path}: {e}")))?;
+        if window.text.contains("PRIVATE KEY-----") {
+            return Err(mcp_err(format!(
+                "refusing to read {path}: it contains a private key"
+            )));
+        }
+        let (text, redacted) = redact_secrets(&window.text);
+
+        let mut body = String::new();
+        if window.start > 0 {
+            body.push_str(&format!("…[{} bytes before]\n", window.start));
+        }
+        body.push_str(&text);
+        if window.end < file_len {
             body.push_str("\n…[truncated]");
+        }
+        if redacted > 0 {
+            body.push_str(&format!("\n…[{redacted} secret(s) redacted]"));
         }
 
         // Counterfactual = the file's full on-disk size (vs. the served window).
@@ -831,12 +866,93 @@ impl IndexaMcp {
             &mut store,
             tool,
             body.len(),
-            bytes.len() as u64,
+            file_len,
             indexa_query::impact::BASIS_RENDERED_RESPONSE,
         );
 
         Ok(ok_text(body))
     }
+}
+
+/// Whether `requested` (canonical) is a `File` row in the index. Looked up as the caller spelled
+/// it, as the canonical path, and re-based onto each stored root — entries are stored under the
+/// root as it was scanned, which can differ from the canonical form (macOS `/var` vs
+/// `/private/var`, a symlinked home).
+fn is_indexed_file(
+    store: &Store,
+    raw: &str,
+    requested: &Path,
+    roots: &[(PathBuf, PathBuf)],
+) -> bool {
+    let rebased = roots.iter().filter_map(|(stored, canonical)| {
+        requested
+            .strip_prefix(canonical)
+            .ok()
+            .map(|rel| stored.join(rel))
+    });
+    std::iter::once(PathBuf::from(raw))
+        .chain(std::iter::once(requested.to_path_buf()))
+        .chain(rebased)
+        .any(|p| {
+            matches!(
+                store.entry_by_path(&p.to_string_lossy()),
+                Ok(Some(info)) if info.kind == "file"
+            )
+        })
+}
+
+/// Whether `path` is a secret file (`.env`, `id_rsa`, `*.pem`, …) or lies inside a credential
+/// store (`.ssh/`, `.gnupg/`, …) below its root — the indexer's own sensitive classification.
+fn is_sensitive_path(path: &Path, roots: &[PathBuf]) -> bool {
+    is_sensitive_file(path)
+        || ancestor_dirs_to_root(path, roots)
+            .iter()
+            .any(|d| is_sensitive_dir(d))
+}
+
+/// A UTF-8 window of a file: `text` decodes bytes `start..end` of the file.
+struct Window {
+    text: String,
+    start: u64,
+    end: u64,
+}
+
+/// Read at most `cap` bytes of `path` starting at byte `offset` (snapped down to a UTF-8 char
+/// boundary, and the end snapped down likewise), without loading the rest of the file. Returns the
+/// window and the file's size. Only regular files are read (a FIFO would block forever).
+fn read_window(path: &Path, offset: u64, cap: usize) -> std::io::Result<(Window, u64)> {
+    let mut file = std::fs::File::open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    let file_len = meta.len();
+    let want = offset.min(file_len);
+    // A char starts at most 3 bytes before any offset, so read from there to snap down.
+    let read_start = want.saturating_sub(3);
+    file.seek(SeekFrom::Start(read_start))?;
+    let mut buf = Vec::new();
+    file.take((want - read_start) + cap as u64 + 4)
+        .read_to_end(&mut buf)?;
+
+    let is_boundary = |i: usize| i >= buf.len() || (buf[i] & 0xC0) != 0x80;
+    let mut s = (want - read_start) as usize;
+    while s > 0 && !is_boundary(s) {
+        s -= 1;
+    }
+    let mut e = (s + cap).min(buf.len());
+    while e > s && !is_boundary(e) {
+        e -= 1;
+    }
+    let text = String::from_utf8_lossy(&buf[s..e]).into_owned();
+    Ok((
+        Window {
+            text,
+            start: read_start + s as u64,
+            end: read_start + e as u64,
+        },
+        file_len,
+    ))
 }
 
 /// How many recent turns of a conversation to fold into an MCP `ask` (matches the web surface).
@@ -1150,5 +1266,40 @@ mod tests {
             "the tagged file must survive the combined ext+category filter even though it \
              ranks below the untagged file and `limit` is 1, got: {out}"
         );
+    }
+
+    #[test]
+    fn read_window_is_bounded_and_snaps_to_char_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("utf8.txt");
+        // "é" is 2 bytes (0xC3 0xA9): offsets 1 and 3 land mid-char.
+        std::fs::write(&f, "aéb€c").unwrap(); // a(1) é(2) b(1) €(3) c(1) = 8 bytes
+        let (w, len) = read_window(&f, 2, 100).unwrap();
+        assert_eq!(len, 8);
+        assert_eq!((w.start, w.text.as_str()), (1, "éb€c"), "offset snaps down");
+        // A cap that ends mid-`€` snaps the end down too.
+        let (w, _) = read_window(&f, 0, 5).unwrap();
+        assert_eq!((w.text.as_str(), w.end), ("aéb", 4));
+        // Past the end: empty window at EOF, no error.
+        let (w, _) = read_window(&f, 100, 10).unwrap();
+        assert_eq!((w.start, w.end, w.text.as_str()), (8, 8, ""));
+        // Not a regular file.
+        assert!(read_window(dir.path(), 0, 10).is_err());
+    }
+
+    #[test]
+    fn read_window_of_a_huge_file_reads_only_the_window() {
+        // 256 MiB sparse file: the old code read it whole (and lossy-decoded a second copy)
+        // to serve 40 KB. The window must stay within the cap wherever it starts.
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("huge.log");
+        let size: u64 = 256 * 1024 * 1024;
+        std::fs::File::create(&f).unwrap().set_len(size).unwrap();
+        let cap = 40 * 1024;
+        let (w, len) = read_window(&f, 0, cap).unwrap();
+        assert_eq!(len, size);
+        assert_eq!((w.start, w.end), (0, cap as u64));
+        let (w, _) = read_window(&f, size - 10, cap).unwrap();
+        assert_eq!((w.start, w.end, w.text.len()), (size - 10, size, 10));
     }
 }
