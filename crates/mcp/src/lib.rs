@@ -3675,4 +3675,87 @@ mod tests {
         );
         assert!(!tail.contains("[truncated]"), "{tail:?}");
     }
+
+    #[tokio::test]
+    async fn insights_days_tools_clamp_a_huge_day_count() {
+        // `days * 86_400` overflowed for a client-supplied `days: i64::MAX` (a panic in debug, a
+        // wrapped cutoff in release). It is clamped to 100 years instead.
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = mcp_with_db(&dbdir);
+        let stale = tool_text(
+            mcp.insights_stale(Parameters(InsightsDaysParams {
+                days: Some(i64::MAX),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(stale.contains("threshold: 36500 days"), "{stale}");
+        let diff = tool_text(
+            mcp.insights_diff(Parameters(InsightsDaysParams {
+                days: Some(i64::MAX),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(diff.starts_with("Index diff (last 36500 day(s))"), "{diff}");
+    }
+
+    #[tokio::test]
+    async fn list_open_decisions_clamps_limit_and_offset() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            for i in 0..201 {
+                store
+                    .record_decision(indexa_core::store::NewDecision {
+                        decision_type: "classification".to_owned(),
+                        subject: format!("/r/proj{i}"),
+                        params: serde_json::json!({"category": "code", "confidence": 0.7}),
+                        options: serde_json::json!(["work", "code", "ignore"]),
+                        auto_value: Some("code".to_owned()),
+                        confidence: Some(0.7),
+                        evidence_hash: format!("fp{i}"),
+                        priority: 50,
+                        paths: vec![format!("/r/proj{i}")],
+                    })
+                    .unwrap()
+                    .unwrap();
+            }
+        }
+        let mcp = mcp_with_db(&dbdir);
+
+        // `usize::MAX` reached SQLite as `LIMIT -1` (no limit) and dumped all 201 rows.
+        let listed = tool_text(
+            mcp.list_open_decisions(Parameters(ListOpenDecisionsParams {
+                decision_type: None,
+                limit: Some(usize::MAX),
+                offset: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            listed.starts_with("200 open question(s)"),
+            "limit must clamp to 200, got first line: {:?}",
+            listed.lines().next()
+        );
+        assert!(listed.contains("call again with offset: 200"), "{listed}");
+
+        // `usize::MAX` wrapped to `OFFSET -1` (read as 0 by SQLite) and then overflowed the
+        // row numbering. It is capped instead, so it lands past the end of the inbox.
+        let past_end = tool_text(
+            mcp.list_open_decisions(Parameters(ListOpenDecisionsParams {
+                decision_type: None,
+                limit: Some(usize::MAX),
+                offset: Some(usize::MAX),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            past_end.starts_with("No more open questions past offset"),
+            "{past_end}"
+        );
+    }
 }
