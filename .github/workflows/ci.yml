@@ -20,12 +20,18 @@ env:
 jobs:
   check:
     name: fmt + clippy + test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner || matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        # `os` is the check-name label branch protection requires
+        # ("fmt + clippy + test (ubuntu-latest)"); `runner` pins the actual image
+        # because ubuntu-latest moves to Ubuntu 26 on 2026-10-19.
         os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            runner: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v7
@@ -59,7 +65,7 @@ jobs:
   # fast — promoted to a branch-protection required check (M14).
   web-smoke:
     name: web smoke (headless Chrome)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v7
@@ -75,7 +81,7 @@ jobs:
       - name: Build indexa (debug)
         run: cargo build --locked -p indexa
 
-      # ubuntu-latest runner images ship Google Chrome preinstalled at
+      # ubuntu-24.04 runner images ship Google Chrome preinstalled at
       # /usr/bin/google-chrome — no setup action needed. Node >= 22 (global
       # fetch + WebSocket) is also preinstalled.
       - name: Run web smoke test
@@ -103,7 +109,7 @@ jobs:
   # (M14) now that C4's RRF tie-break fix made sparse-mode scoring deterministic.
   eval:
     name: retrieval eval (self-golden, hermetic)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v7

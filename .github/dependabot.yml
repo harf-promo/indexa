@@ -70,6 +70,16 @@ updates:
         update-types:
           - "version-update:semver-major"
           - "version-update:semver-minor"
+      # GHSA-cq8v-f236-94qc (https://github.com/advisories/GHSA-cq8v-f236-94qc, alert
+      # https://github.com/harf-promo/indexa/security/dependabot/8): rand >= 0.7.0, < 0.8.6.
+      # The only vulnerable copy is rand 0.7.3, pulled at build time by
+      # hyperpolyglot 0.1.7 -> phf_codegen 0.8 -> phf_generator 0.8 (`cargo tree -i rand@0.7.3`).
+      # The 0.7 line has no patched release and hyperpolyglot 0.1.7 (2020) is the newest
+      # version, so the security update fails with security_update_not_possible (run
+      # 37425376716). Build-time only, no custom logger: the unsound path is unreachable.
+      # Remove this entry once hyperpolyglot is replaced or stops depending on phf 0.8.
+      # Cost: it also skips patch bumps of the already-patched rand 0.8/0.9/0.10 copies here.
+      - dependency-name: "rand"
 
   - package-ecosystem: github-actions
     directory: "/"
