@@ -552,3 +552,50 @@ fn summary_provenance_stamp_and_replace() {
         .unwrap();
     assert_eq!(read(&store), (Some("claude-code".into()), Some(1), Some(0)));
 }
+
+#[test]
+fn guarded_scan_of_missing_root_keeps_entries_and_children() {
+    // Regression: a scan of a stored root whose drive was unmounted walked nothing (the walk is
+    // fail-open), and reconcile_by_generation then treated every indexed row under it as a ghost,
+    // wiping entries, chunks, summaries, edges, … The scan paths gate the prune on
+    // `ensure_walked_root_present`; this locks that the guard trips and that skipping the prune
+    // leaves every child table intact.
+    use crate::walker::{ensure_walked_root_present, walk_streaming, WalkConfig};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("drive");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("a.rs"), "fn run() {}").unwrap();
+    let root_str = root.to_string_lossy().into_owned();
+    let file = root.join("a.rs").to_string_lossy().into_owned();
+    let cfg = WalkConfig::default();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let scan = |store: &mut Store| -> anyhow::Result<usize> {
+        let gen = store.next_scan_generation()?;
+        let mut seen = 0usize;
+        walk_streaming(&root, &cfg, |batch| {
+            seen += batch.len();
+            store.upsert_entries_with_generation(&batch, Some(gen))
+        })?;
+        ensure_walked_root_present(&root, seen)?;
+        store.reconcile_by_generation(&root_str, gen)?;
+        store.prune_orphans()?;
+        Ok(seen)
+    };
+
+    assert_eq!(scan(&mut store).unwrap(), 2, "root dir + a.rs");
+    seed_full_entry(&mut store, &file);
+    let entries = store.entry_count().unwrap();
+    let children = orphan_rows_for(&store, &file);
+    assert!(children >= 6);
+
+    std::fs::rename(&root, dir.path().join("drive.unmounted")).unwrap();
+    let err = scan(&mut store).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("missing or unreadable"),
+        "{err:#}"
+    );
+    assert_eq!(store.entry_count().unwrap(), entries);
+    assert_eq!(orphan_rows_for(&store, &file), children);
+}
