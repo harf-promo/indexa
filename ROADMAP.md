@@ -198,9 +198,9 @@ is opt-in and off by default; `indexa multimodal` reports what's configured and 
   defaults to `gemma3`); the caption becomes a searchable chunk
 - **Audio** *(shipped)* — local transcription → searchable chunks (`[parsers.audio] transcribe`,
   via a whisper.cpp-style CLI you install; nothing is auto-downloaded)
-- **Video** *(frame captioning shipped)* — sample frames with ffmpeg → caption
-  (`[parsers.video] caption`). A separate audio-track transcript for video is still not built:
-  extract the audio track first and index that.
+- **Video** *(shipped)* — sample frames with ffmpeg → caption (`[parsers.video] caption`), and
+  transcribe the audio track (`[parsers.video] transcribe`: ffmpeg extracts it, the
+  `[parsers.audio]` whisper CLI transcribes it with segment timestamps; silent videos are skipped)
 - Opt-in per region; goes through the same parse → embed → store pipeline and the resource watchdog
 - Default vision/audio models follow the project's model policy (non-Chinese defaults; user-configurable)
 

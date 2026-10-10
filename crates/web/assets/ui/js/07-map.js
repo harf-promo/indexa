@@ -397,6 +397,8 @@ async function loadFeatures() {
     var vidModel = document.getElementById('feat-video-model');
     if (vidCap)  vidCap.checked = !!d.video_caption;
     if (vidModel && d.video_model) vidModel.value = d.video_model;
+    var vidTx = document.getElementById('feat-video-transcribe');
+    if (vidTx)   vidTx.checked = !!d.video_transcribe;
   } catch(_) {}
 }
 
@@ -413,6 +415,7 @@ async function saveFeatures() {
     audio_binary:     (document.getElementById('feat-audio-binary')?.value || '').trim() || null,
     video_caption:    document.getElementById('feat-video-caption')?.checked,
     video_model:      (document.getElementById('feat-video-model')?.value || '').trim() || null,
+    video_transcribe: document.getElementById('feat-video-transcribe')?.checked,
   };
   try {
     var r = await fetch('/api/config/features', {

@@ -165,7 +165,7 @@ impl IndexaMcp {
              Chunking:  {:?}, size {}, overlap {}\n\
              Scan:      respect_gitignore={}, auto_reindex={}, ignore=[{}]\n\
              Parsers:   max_file_mb={}, pdf_backend={}, image_caption={}, \
-             audio_transcribe={}, video_caption={}",
+             audio_transcribe={}, video_caption={}, video_transcribe={}",
             c.embedding.provider,
             c.embedding.model,
             c.embedding.dim,
@@ -192,6 +192,7 @@ impl IndexaMcp {
             c.parsers.image.caption,
             c.parsers.audio.transcribe,
             c.parsers.video.caption,
+            c.parsers.video.transcribe,
         );
         Ok(ok_text(out))
     }

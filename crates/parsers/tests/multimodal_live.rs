@@ -95,3 +95,59 @@ fn extract_video_frames_produces_jpegs() {
         );
     }
 }
+
+#[test]
+#[ignore = "needs ffmpeg; run with --ignored"]
+fn extract_audio_track_yields_wav_and_skips_silent_video() {
+    if !have("ffmpeg") {
+        eprintln!("SKIP: ffmpeg not installed");
+        return;
+    }
+    let (_keep, wav) =
+        indexa_parsers::media::extract_audio_track(&fixture("speech_clip.mp4"), "ffmpeg")
+            .expect("audio extraction should succeed with ffmpeg present")
+            .expect("speech_clip.mp4 has an audio track");
+    assert!(
+        std::fs::metadata(&wav)
+            .map(|m| m.len() > 44)
+            .unwrap_or(false),
+        "extracted WAV {wav:?} should hold samples"
+    );
+    // clip.mp4 is video-only: no audio track is a quiet `None`, not an error.
+    let silent = indexa_parsers::media::extract_audio_track(&fixture("clip.mp4"), "ffmpeg")
+        .expect("a video without audio must not Err");
+    assert!(
+        silent.is_none(),
+        "video-only clip should yield no audio track"
+    );
+}
+
+#[test]
+#[ignore = "needs ffmpeg + whisper-cli + a ggml model in INDEXA_TEST_WHISPER_MODEL; run with --ignored"]
+fn transcribe_video_audio_recovers_spoken_words_with_timestamps() {
+    if !have("ffmpeg") || !have("whisper-cli") {
+        eprintln!("SKIP: ffmpeg/whisper-cli not installed");
+        return;
+    }
+    let Ok(model) = std::env::var("INDEXA_TEST_WHISPER_MODEL") else {
+        eprintln!("SKIP: set INDEXA_TEST_WHISPER_MODEL=/path/to/ggml-*.bin to run this");
+        return;
+    };
+    let text = indexa_parsers::media::transcribe_video_audio(
+        &fixture("speech_clip.mp4"),
+        "ffmpeg",
+        "whisper-cli",
+        Some(&model),
+    )
+    .expect("video transcription should succeed with ffmpeg + whisper-cli + a model")
+    .expect("speech_clip.mp4 has an audio track");
+    let lc = text.to_lowercase();
+    assert!(
+        lc.contains("indexa") && lc.contains("local context"),
+        "transcript should contain the spoken phrase, got: {text:?}"
+    );
+    assert!(
+        text.starts_with("[00:00:00.000 -->"),
+        "video transcript should keep segment timestamps, got: {text:?}"
+    );
+}

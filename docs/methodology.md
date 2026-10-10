@@ -376,6 +376,7 @@ mis-synthesize from good evidence (and the sources are always listed so you can 
 | Feature | Why opt-in | How to enable |
 |---|---|---|
 | **Whisper transcription** (audio) | Requires a ~150MB model + compute | `[parsers.audio] transcribe = true` |
+| **Whisper transcription** (video audio track) | Same model + ffmpeg to extract the track | `[parsers.video] transcribe = true` |
 | **Vision captioning** (images) | Requires a vision model | `[parsers.image] caption = true` |
 | **OCR** (scanned PDFs) | Requires poppler (`pdftoppm`) + Tesseract CLI | `[parsers.pdf] backend = "ocr"` |
 | **Cross-encoder re-ranking** | Downloads a DeBERTa-v2 model on first use (~85 MB xsmall default; base/large-v1 via `rerank_model`) | `[retrieval] rerank_backend = "cross-encoder"` (base `rerank` is on by default) |

@@ -391,6 +391,8 @@ model       = "gemma3:4b" # vision model (default: gemma3 summary model)
 binary      = "ffmpeg"    # ffmpeg binary on PATH, used for frame extraction (external tool)
 fps_sample  = 0.5         # frames per second to sample (default: one frame every 2s)
 max_frames  = 8           # max frames captioned per video (caps LLM cost)
+transcribe  = false       # set true to transcribe the audio track (ffmpeg extracts it; the
+                          # [parsers.audio] binary/model transcribe it, with segment timestamps)
 
 [parsers.pdf]
 backend    = "text"   # "text" = pdf-extract text layer only | "ocr" = also OCR scanned/image-only pages
