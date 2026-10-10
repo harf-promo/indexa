@@ -18,9 +18,13 @@ pub struct InsightsDuplicatesParams {
     pub exact: Option<bool>,
 }
 
+/// Upper bound on a client-supplied `days` window (100 years). Anything larger is clamped, so
+/// `days * 86_400` can never overflow into a wrong (or panicking) cutoff.
+const MAX_DAYS: i64 = 36_500;
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct InsightsDaysParams {
-    /// Number of days for the look-back window.
+    /// Number of days for the look-back window (at most 36500).
     #[serde(default)]
     pub days: Option<i64>,
 }
@@ -113,7 +117,7 @@ impl IndexaMcp {
         &self,
         params: Parameters<InsightsDaysParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let days = params.0.days.unwrap_or(365).max(1);
+        let days = params.0.days.unwrap_or(365).clamp(1, MAX_DAYS);
         let store = self.store()?;
         let stale = store.find_stale_entries(days).map_err(mcp_err)?;
         if stale.is_empty() {
@@ -144,10 +148,10 @@ impl IndexaMcp {
         params: Parameters<InsightsDaysParams>,
     ) -> Result<CallToolResult, ErrorData> {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let days = params.0.days.unwrap_or(7).max(1);
+        let days = params.0.days.unwrap_or(7).clamp(1, MAX_DAYS);
         let since = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64 - days * 86_400)
+            .map(|d| (d.as_secs() as i64).saturating_sub(days.saturating_mul(86_400)))
             .unwrap_or(0);
         let store = self.store()?;
         let diff = store.weekly_diff(since).map_err(mcp_err)?;
