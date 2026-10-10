@@ -17,7 +17,7 @@ jobs:
   # v0.20.x shipped with no CHANGELOG sections because nothing enforced this.
   changelog-gate:
     name: CHANGELOG has this release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Require a CHANGELOG section matching the tag
@@ -34,7 +34,7 @@ jobs:
   # right after updating, since the self-replace lands the same already-stale version (H6).
   version-gate:
     name: Cargo.toml version matches the tag
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - name: Require both Cargo.toml version fields to equal the tag
@@ -69,10 +69,10 @@ jobs:
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact: indexa-x86_64-apple-darwin
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             artifact: indexa-x86_64-linux-gnu
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: aarch64-unknown-linux-gnu
             artifact: indexa-aarch64-linux-gnu
           - os: windows-latest
@@ -121,7 +121,7 @@ jobs:
   release:
     name: Create GitHub release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -316,7 +316,7 @@ jobs:
     # shipped green a few times). Promote to blocking by deleting continue-on-error.
     name: Desktop (Linux x86_64) (experimental)
     needs: [build, release]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     continue-on-error: true
     permissions:
       contents: write
