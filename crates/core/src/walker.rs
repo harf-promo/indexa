@@ -151,6 +151,17 @@ pub fn is_sensitive_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// True if `path` is a secret file ([`is_sensitive_file`]) or lies inside a credential store
+/// ([`is_sensitive_dir`]) between it and the `roots` entry that contains it — the indexer's
+/// sensitive classification, for surfaces that serve file content (previews) and must keep
+/// secrets out the same way the deep phase does.
+pub fn is_sensitive_path(path: &Path, roots: &[PathBuf]) -> bool {
+    is_sensitive_file(path)
+        || crate::pathutil::ancestor_dirs_to_root(path, roots)
+            .iter()
+            .any(|d| is_sensitive_dir(d))
+}
+
 /// Highest-precedence per-directory ignore filename (ripgrep's `.rgignore` pattern) — lets a user
 /// tune indexing without touching git behavior, including `!`-prefixed re-includes of paths
 /// `.gitignore`/`.ignore` exclude. Registered with `WalkBuilder::add_custom_ignore_filename`,
@@ -1278,5 +1289,29 @@ mod tests {
         }
         let err = guard.unwrap_err();
         assert!(format!("{err:#}").contains("can't be listed"), "{err:#}");
+    }
+
+    #[test]
+    fn is_sensitive_path_flags_secret_files_and_credential_dirs_below_root() {
+        let roots = vec![PathBuf::from("/home/u/proj"), PathBuf::from("/Users/u")];
+        assert!(is_sensitive_path(Path::new("/home/u/proj/.env"), &roots));
+        assert!(is_sensitive_path(
+            Path::new("/home/u/proj/deploy.pem"),
+            &roots
+        ));
+        // A credential store between the file and its root (a path-based rule; the `~/.ssh`-style
+        // rules key on the live home dir, so they aren't portable in a test).
+        assert!(is_sensitive_path(
+            Path::new("/Users/u/Library/Keychains/login.keychain-db"),
+            &roots
+        ));
+        assert!(!is_sensitive_path(
+            Path::new("/home/u/proj/src/main.rs"),
+            &roots
+        ));
+        assert!(!is_sensitive_path(
+            Path::new("/home/u/proj/talks/deck.key"),
+            &roots
+        ));
     }
 }

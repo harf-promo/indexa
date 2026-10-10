@@ -2582,4 +2582,108 @@ mod tests {
         // Reset the process-global channel so it doesn't leak a stale value to other tests.
         report_update_progress(UpdateProgress::idle());
     }
+
+    // ── /api/file guards: indexed-only, no secret files, redaction, bounded reads ──────────────
+
+    /// A router over an index whose root `root` is a Dir entry and whose File entries are `files`.
+    fn preview_router(root: &std::path::Path, files: &[&std::path::Path]) -> Router {
+        let mut entries = vec![entry(root.to_str().unwrap(), EntryKind::Dir)];
+        entries.extend(
+            files
+                .iter()
+                .map(|f| entry(f.to_str().unwrap(), EntryKind::File)),
+        );
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_entries(&entries).unwrap();
+        build_router(state_with(store), 7620)
+    }
+
+    fn file_uri(p: &std::path::Path) -> String {
+        // Temp paths need no escaping; the existing preview test passes them raw too.
+        format!("/api/file?path={}", p.display())
+    }
+
+    #[tokio::test]
+    async fn api_file_refuses_unindexed_and_secret_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let notes = root.join("notes.md");
+        std::fs::write(&notes, "# notes\nplain text\n").unwrap();
+        // Under the root on disk, but never indexed.
+        let stray = root.join("stray.txt");
+        std::fs::write(&stray, "not in the index\n").unwrap();
+        // Secret files: scan records them as entries, but their contents must never be served.
+        let env = root.join(".env");
+        std::fs::write(&env, "PLACEHOLDER=not-a-real-value\n").unwrap();
+        let pem = root.join("deploy.pem");
+        std::fs::write(&pem, "placeholder\n").unwrap();
+        let app = preview_router(&root, &[&notes, &env, &pem]);
+
+        let (status, json) = get_json(app.clone(), &file_uri(&notes)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["content"].as_str().unwrap().contains("plain text"));
+
+        let (status, json) = get_json(app.clone(), &file_uri(&stray)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+        assert!(json.to_string().contains("not an indexed file"), "{json}");
+        for secret in [&env, &pem] {
+            let (status, json) = get_json(app.clone(), &file_uri(secret)).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+            assert!(json.to_string().contains("secret/credential"), "{json}");
+            assert!(!json.to_string().contains("not-a-real-value"), "{json}");
+        }
+    }
+
+    #[tokio::test]
+    async fn api_file_redacts_secrets_and_refuses_private_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let cfg = root.join("settings.toml");
+        std::fs::write(
+            &cfg,
+            "name = \"demo\"\napi_key = \"abcdefghijklmnop1234\"\n",
+        )
+        .unwrap();
+        // `.key` is Apple Keynote to the indexer, so it isn't refused by name — but PEM
+        // private-key content is refused in any file.
+        let key = root.join("server.key");
+        std::fs::write(
+            &key,
+            "-----BEGIN PRIVATE KEY-----\nplaceholder\n-----END PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        let app = preview_router(&root, &[&cfg, &key]);
+
+        let (status, json) = get_json(app.clone(), &file_uri(&cfg)).await;
+        assert_eq!(status, StatusCode::OK);
+        let content = json["content"].as_str().unwrap();
+        assert!(content.contains("name = \"demo\""), "{content}");
+        assert!(
+            !content.contains("abcdefghijklmnop1234"),
+            "secret leaked: {content}"
+        );
+        assert!(content.contains("api_key = [REDACTED-"), "{content}");
+        assert_eq!(json["redacted"], 1);
+
+        let (status, json) = get_json(app, &file_uri(&key)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+        assert!(json.to_string().contains("private key"), "{json}");
+    }
+
+    #[tokio::test]
+    async fn api_file_serves_one_bounded_window_of_a_huge_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let big = root.join("big.log");
+        let line = "a log line that repeats until the file is far larger than the preview\n";
+        let size = 8 * 1024 * 1024;
+        std::fs::write(&big, line.repeat(size / line.len() + 1)).unwrap();
+        let app = preview_router(&root, &[&big]);
+
+        let (status, json) = get_json(app, &file_uri(&big)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["truncated"], true);
+        assert!(json["bytes_total"].as_u64().unwrap() > size as u64);
+        assert!(json["content"].as_str().unwrap().len() <= 40 * 1024);
+    }
 }
