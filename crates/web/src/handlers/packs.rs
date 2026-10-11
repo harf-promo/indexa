@@ -24,7 +24,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::dto::{err_json, JobStartResponse};
-use crate::handlers::jobs::{job_slot_available, register_job};
+use crate::handlers::jobs::{job_slot_available, too_many_jobs, try_register_job};
 use crate::jobs_exec::{
     finalize_done, run_deep_phase, scan_walk_config, schedule_cleanup, walk_for_job,
 };
@@ -519,6 +519,7 @@ pub(crate) async fn api_packs_refresh(
     Path(name): Path<String>,
     State(s): State<AppState>,
 ) -> Response {
+    // Fast-path 429 before any store work; the authoritative cap check is `try_register_job`.
     if let Some(resp) = job_slot_available(&s.jobs).await {
         return resp;
     }
@@ -543,7 +544,11 @@ pub(crate) async fn api_packs_refresh(
         .filter(|p| !std::path::Path::new(p).exists())
         .count();
 
-    let (id, handle) = register_job(&s.jobs, "pack_refresh", name.clone()).await;
+    // Check the cap and register under one lock: a refresh racing another start for the last
+    // slot passed the early check above too, and must not overshoot the cap.
+    let Some((id, handle)) = try_register_job(&s.jobs, "pack_refresh", name.clone()).await else {
+        return too_many_jobs();
+    };
     let state = s.clone();
     tokio::spawn(async move {
         // Walk each stale path independently (ignore::WalkBuilder handles a bare file root
@@ -634,14 +639,11 @@ pub(crate) async fn api_packs_note(
     };
 
     // Best-effort background reindex — skipped, not failed, when the job cap is full. The note is
-    // already durably saved and registered above, so a busy job queue must not undo that. Note
-    // this is deliberately the OPPOSITE branch from `api_packs_refresh`'s `job_slot_available`
-    // check: refresh returns the 429 response to the caller when the cap is full (a foreground
-    // reindex request); here the reindex is backgrounded and optional, so a full cap just means
-    // "skip the reindex, the save already happened" — `is_none()` (a slot IS free) gates whether
-    // we spawn at all.
-    if job_slot_available(&s.jobs).await.is_none() {
-        let (id, handle) = register_job(&s.jobs, "pack_note", name.clone()).await;
+    // already durably saved and registered above, so a busy job queue must not undo that. Unlike
+    // `api_packs_refresh`, which answers 429 when the cap is full (a foreground reindex request),
+    // here the reindex is backgrounded and optional: `try_register_job` checks the cap and
+    // registers under one lock, and `None` just means "skip the reindex, the save happened".
+    if let Some((id, handle)) = try_register_job(&s.jobs, "pack_note", name.clone()).await {
         let state = s.clone();
         let path_for_job = note_path.clone();
         tokio::spawn(async move {
@@ -797,4 +799,173 @@ pub(crate) async fn api_packs_search(
         .collect();
 
     Json(serde_json::json!({ "name": name, "query": query, "hits": hits })).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handlers::jobs::try_register_job;
+    use crate::jobs::{JobHandle, JobStatus, Jobs};
+    use indexa_core::store::{ChunkRecord, Store};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct StubEmbedder;
+    #[async_trait::async_trait]
+    impl indexa_embed::Embedder for StubEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.0; 8])
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+    struct StubGenerator;
+    #[async_trait::async_trait]
+    impl indexa_llm::Generator for StubGenerator {
+        async fn generate(&self, _prompt: &str) -> anyhow::Result<String> {
+            Ok("stub".to_owned())
+        }
+    }
+
+    /// A minimal `AppState`: a single walk permit (so a test can hold it and keep spawned pack
+    /// jobs parked at their walk, i.e. still `Running`) and a scratch config path.
+    fn state(store: Store, dir: &std::path::Path) -> AppState {
+        let (_tx, telemetry) = tokio::sync::watch::channel(crate::dto::TelemetrySample::default());
+        AppState {
+            store: Arc::new(tokio::sync::Mutex::new(store)),
+            embedder: Arc::new(StubEmbedder),
+            llm: Arc::new(StubGenerator),
+            config: Arc::new(indexa_core::config::Config::default()),
+            jobs: Default::default(),
+            db_path: Arc::new(dir.join("index.db")),
+            config_path: Arc::new(dir.join("config.toml")),
+            log_dir: Arc::new(dir.to_path_buf()),
+            walk_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            machine_spec: Arc::new(indexa_core::resource::detect_machine()),
+            telemetry,
+            ann: Default::default(),
+            ann_build_lock: Default::default(),
+            watch_sessions: Default::default(),
+        }
+    }
+
+    /// Fill the job registry to its cap, then finish one job so exactly ONE slot is free.
+    async fn leave_one_free_slot(jobs: &Jobs) -> Vec<Arc<JobHandle>> {
+        let mut held = Vec::new();
+        while let Some((_, handle)) = try_register_job(jobs, "scan", "/busy".into()).await {
+            held.push(handle);
+        }
+        held[0].set_status(JobStatus::Done);
+        held
+    }
+
+    fn running_jobs(jobs: &std::collections::HashMap<uuid::Uuid, Arc<JobHandle>>) -> usize {
+        jobs.values()
+            .filter(|h| h.status() == JobStatus::Running)
+            .count()
+    }
+
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn simultaneous_refreshes_into_the_last_slot_register_exactly_one_job() {
+        // A refresh used to check the job cap, then do its store work, then register — so two
+        // refreshes racing for the last free slot both passed the check and both registered,
+        // overshooting the cap.
+        let dir = tempfile::tempdir().unwrap();
+        // An indexed member that has vanished from disk counts as stale (and its walk is empty).
+        let gone = dir.path().join("gone.rs").to_string_lossy().into_owned();
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_chunks(&[ChunkRecord {
+                entry_path: gone.clone(),
+                seq: 0,
+                heading: String::new(),
+                text: "fn gone() {}".to_owned(),
+                language: None,
+                embedding: Some(vec![0.0; 8]),
+                embed_model: Some("test".to_owned()),
+                content_hash: None,
+            }])
+            .unwrap();
+        let pack_id = store.create_pack("race", None).unwrap();
+        store.add_pack_paths(&pack_id, &[gone]).unwrap();
+        let s = state(store, dir.path());
+        let held = leave_one_free_slot(&s.jobs).await;
+
+        // Park every spawned refresh job at its walk so it stays `Running` (holding its slot).
+        let _walk = s.walk_semaphore.clone().acquire_owned().await.unwrap();
+        // Hold the store lock so both requests reach the same point before either registers.
+        let store_guard = s.store.lock().await;
+        let requests: Vec<_> = (0..2)
+            .map(|_| {
+                let s = s.clone();
+                tokio::spawn(async move { api_packs_refresh(Path("race".into()), State(s)).await })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(store_guard);
+
+        let mut started = 0;
+        let mut rejected = 0;
+        for request in requests {
+            let resp = request.await.unwrap();
+            match resp.status() {
+                StatusCode::OK => {
+                    let json = body_json(resp).await;
+                    assert!(json.get("job_id").is_some(), "{json}");
+                    started += 1;
+                }
+                StatusCode::TOO_MANY_REQUESTS => rejected += 1,
+                other => panic!("unexpected status {other}"),
+            }
+        }
+        assert_eq!((started, rejected), (1, 1));
+        assert_eq!(running_jobs(&*s.jobs.read().await), held.len());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn simultaneous_notes_into_the_last_slot_save_both_and_start_one_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_in_memory().unwrap();
+        store.create_pack("notes", None).unwrap();
+        let s = state(store, dir.path());
+        let held = leave_one_free_slot(&s.jobs).await;
+
+        let _walk = s.walk_semaphore.clone().acquire_owned().await.unwrap();
+        let store_guard = s.store.lock().await;
+        let requests: Vec<_> = (0..2)
+            .map(|i| {
+                let s = s.clone();
+                let body = NoteBody {
+                    title: format!("Note {i}"),
+                    body: "body".to_owned(),
+                };
+                tokio::spawn(async move {
+                    api_packs_note(Path("notes".into()), State(s), Json(body)).await
+                })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(store_guard);
+
+        let mut jobs_started = 0;
+        for request in requests {
+            let resp = request.await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let json = body_json(resp).await;
+            assert_eq!(json["saved"], true, "{json}");
+            if json.get("job_id").is_some() {
+                jobs_started += 1;
+            }
+        }
+        assert_eq!(jobs_started, 1);
+        assert_eq!(running_jobs(&*s.jobs.read().await), held.len());
+    }
 }

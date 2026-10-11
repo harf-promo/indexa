@@ -32,14 +32,6 @@ fn model_override_from(q: &JobPathQuery, default_num_ctx: u32) -> Option<(String
     })
 }
 
-/// Register a new job in the shared registry and return its handle + id.
-pub(crate) async fn register_job(jobs: &Jobs, kind: &str, path: String) -> (Uuid, Arc<JobHandle>) {
-    let handle = Arc::new(JobHandle::new(kind, path));
-    let id = handle.id;
-    jobs.write().await.insert(id, handle.clone());
-    (id, handle)
-}
-
 /// Max background jobs (scan/deep/summarize/index) that may run at once. Bounds the DoS lever a
 /// drive-by page (blocked by the request guard, but defense-in-depth) or a token-holding LAN
 /// client could pull by firing many `/api/jobs/*` starts — each spawns a heavy scan/embed loop.
@@ -52,7 +44,7 @@ fn cap_reached(jobs: &std::collections::HashMap<Uuid, Arc<JobHandle>>) -> bool {
         >= MAX_CONCURRENT_JOBS
 }
 
-fn too_many_jobs() -> Response {
+pub(crate) fn too_many_jobs() -> Response {
     err_json(
         StatusCode::TOO_MANY_REQUESTS,
         format!("at most {MAX_CONCURRENT_JOBS} jobs may run concurrently; wait for one to finish"),
