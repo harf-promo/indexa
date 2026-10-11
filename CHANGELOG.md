@@ -372,6 +372,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The web UI's `escapeHtml` / `escapeAttr` now escape single quotes** (`'` → `&#39;`). Every
   current call site uses double-quoted attributes, so nothing was exploitable today, but a
   future single-quoted attribute built from a filename could have broken out of it.
+- **The desktop app drops the unused shell plugin and no longer ships `"csp": null`.** Nothing
+  called `tauri-plugin-shell`: the webview loads `http://localhost:7620` as a remote origin with
+  no Tauri capabilities, so the plugin's only effect was an injected click handler that swallowed
+  `target="_blank"` links and sent a `plugin:shell|open` call the ACL then denied. Removing it
+  drops 8 packages from the desktop lockfile. `tauri.conf.json` now carries the same policy the
+  embedded server already sends as a `Content-Security-Policy` header on every response
+  (`crates/web/src/lib.rs`). That header is the one in force; Tauri injects its own CSP only into
+  `tauri://` assets, which this window doesn't load.
 
 ## [0.80.3] — 2026-09-01
 
