@@ -654,3 +654,35 @@ fn prune_clears_every_entry_child_table() {
         "a pair whose both sides are entried survives"
     );
 }
+
+#[test]
+fn orphan_summary_reports_every_swept_count() {
+    // The CLI and MCP prune messages print `OrphanCounts::summary`; it must name every field
+    // the sweep deletes, including the edges/note_anchors/co_change counts added for F15
+    // (previously swept but never printed). Distinct values pin each field to its label.
+    let counts = OrphanCounts {
+        chunks: 1,
+        summaries: 2,
+        queue: 3,
+        classifications: 4,
+        directory_apps: 5,
+        symbols: 6,
+        edges: 7,
+        note_anchors: 8,
+        co_change: 9,
+    };
+    let s = counts.summary();
+    for part in [
+        "1 orphaned chunk(s)",
+        "2 summary(ies)",
+        "3 stale queue row(s)",
+        "4 classification(s)",
+        "5 app detection(s)",
+        "6 symbol row(s)",
+        "7 edge row(s)",
+        "8 note anchor(s)",
+        "9 co-change pair(s)",
+    ] {
+        assert!(s.contains(part), "missing {part:?} in {s:?}");
+    }
+}

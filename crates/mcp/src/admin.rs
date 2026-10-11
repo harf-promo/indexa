@@ -205,16 +205,7 @@ impl IndexaMcp {
     pub(crate) async fn prune(&self) -> Result<CallToolResult, ErrorData> {
         let mut store = self.store()?;
         let counts = store.prune_orphans().map_err(mcp_err)?;
-        Ok(ok_text(format!(
-            "Pruned {} orphaned chunk(s), {} stale queue row(s), {} summary row(s), {} \
-             classification(s), {} app detection(s), and {} symbol row(s).",
-            counts.chunks,
-            counts.queue,
-            counts.summaries,
-            counts.classifications,
-            counts.directory_apps,
-            counts.symbols
-        )))
+        Ok(ok_text(format!("Pruned {}.", counts.summary())))
     }
 
     /// Trigger a full scan → deep-index → summarize pipeline on a path.
@@ -472,5 +463,48 @@ mod tests {
             stats.contains("rendered_response") && stats.contains("answer_and_citations"),
             "the split must name both contributing bases, got: {stats}"
         );
+    }
+
+    /// The `prune` tool must report the note-anchor and co-change rows the sweep deletes
+    /// (F15 added them to `prune_orphans`; the message kept printing only the older six
+    /// counts, so those deletions were invisible to the caller).
+    #[tokio::test]
+    async fn prune_reports_note_anchor_and_co_change_counts() {
+        use indexa_core::walker::{Entry, EntryKind};
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            // One live entry, so prune's empty-index guard does not short-circuit.
+            store
+                .upsert_entries(&[Entry {
+                    path: "/p/live.md".into(),
+                    kind: EntryKind::File,
+                    size: 0,
+                    modified: None,
+                    hint: None,
+                    is_binary: false,
+                }])
+                .unwrap();
+            store
+                .upsert_note_anchor("/p/gone-note.md", "/p/live.md", "path", "t", "pack")
+                .unwrap();
+            store
+                .replace_co_change(&[("/p/live.md".into(), "/p/gone.md".into(), 2)])
+                .unwrap();
+        }
+        let mcp = IndexaMcp::new(
+            dbpath.clone(),
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+        let out = tool_text(mcp.prune().await.unwrap());
+        assert!(
+            out.contains("1 note anchor(s)") && out.contains("1 co-change pair(s)"),
+            "prune must report the swept note-anchor/co-change rows, got: {out}"
+        );
+        let store = Store::open(&dbpath).unwrap();
+        assert!(store.count_orphans().unwrap().is_empty());
     }
 }

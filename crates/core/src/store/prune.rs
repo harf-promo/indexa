@@ -65,6 +65,27 @@ impl OrphanCounts {
             && self.note_anchors == 0
             && self.co_change == 0
     }
+
+    /// Every count as one human-readable list, e.g. `"3 orphaned chunk(s), …, and 1 co-change
+    /// pair(s)"`. The single wording shared by `indexa prune` (dry-run and real) and the MCP
+    /// `prune` tool, so a field added here is reported everywhere instead of being deleted
+    /// silently (`edges`/`note_anchors`/`co_change` were swept but never printed).
+    pub fn summary(&self) -> String {
+        format!(
+            "{} orphaned chunk(s), {} stale queue row(s), {} summary(ies), {} classification(s), \
+             {} app detection(s), {} symbol row(s), {} edge row(s), {} note anchor(s), and {} \
+             co-change pair(s)",
+            self.chunks,
+            self.queue,
+            self.summaries,
+            self.classifications,
+            self.directory_apps,
+            self.symbols,
+            self.edges,
+            self.note_anchors,
+            self.co_change
+        )
+    }
 }
 
 impl Store {

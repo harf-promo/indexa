@@ -462,7 +462,11 @@ async fn main() -> Result<()> {
             json,
         } => commands::cmd_status(unknown, deep, json, &cfg).await,
         Commands::Formats { json, level } => commands::cmd_formats(json, level).await,
-        Commands::Rm { paths, recursive } => commands::cmd_rm(paths, recursive).await,
+        Commands::Rm {
+            paths,
+            recursive,
+            yes,
+        } => commands::cmd_rm(paths, recursive, yes).await,
         Commands::Prune { dry_run, vacuum } => commands::cmd_prune(dry_run, vacuum).await,
         Commands::Doctor {
             profile,

@@ -870,16 +870,22 @@ Kinds, most to least trusted:
     /// Remove one or more paths from the context store.
     #[command(after_help = "Examples:
   indexa rm ~/Documents/old-project
-  indexa rm -r ~/Documents/old-folder")]
+  indexa rm -r ~/Documents/old-folder
+  indexa rm -r --yes ~/Documents/old-folder   # scripts / non-interactive use")]
     #[command(display_order = 24)]
     Rm {
         /// Paths to remove from the index.
         #[arg(required = true, num_args = 1..)]
         paths: Vec<String>,
 
-        /// Also remove all entries under each path (for directories).
+        /// Also remove all entries under each path (for directories). Asks for confirmation
+        /// first; a non-interactive session refuses unless `--yes` is given.
         #[arg(short, long)]
         recursive: bool,
+
+        /// Confirm `-r` without prompting. Required in a non-interactive session.
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 
     /// Garbage-collect orphaned index rows (chunks/summaries left behind after a root
@@ -1887,11 +1893,30 @@ mod tests {
     fn cli_rm_recursive() {
         let cli = Cli::try_parse_from(["indexa", "rm", "-r", "~/old"]).unwrap();
         match cli.command {
-            Commands::Rm { paths, recursive } => {
+            Commands::Rm {
+                paths,
+                recursive,
+                yes,
+            } => {
                 assert!(recursive);
+                assert!(!yes, "confirmation is not skipped unless asked");
                 assert_eq!(paths, vec!["~/old"]);
             }
             _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_rm_recursive_yes() {
+        for args in [
+            &["indexa", "rm", "-r", "--yes", "~/old"][..],
+            &["indexa", "rm", "-ry", "~/old"][..],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            match cli.command {
+                Commands::Rm { recursive, yes, .. } => assert!(recursive && yes, "{args:?}"),
+                _ => panic!("wrong command"),
+            }
         }
     }
 

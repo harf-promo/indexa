@@ -199,6 +199,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`indexa rm -r` confirms before dropping a subtree, and prune reports everything it sweeps.**
+  `rm -r` deleted every entry, chunk and summary under each path with no confirmation of any
+  kind. It now follows the same rule as `update`, `weight apply` and `pack create --auto`: an
+  interactive session prompts, `-y`/`--yes` skips the prompt, and a non-interactive session
+  without `--yes` refuses before touching the index. A plain `rm` of named entries is unchanged.
+  `indexa prune` (dry-run and real) and the MCP `prune` tool now also print the edge,
+  note-anchor and co-change counts that the sweep has deleted since the full orphan prune, from
+  one shared `OrphanCounts::summary`.
+
 - **Four stale or unbacked product claims in the docs, and a guard so one of them can't recur.**
   `ROADMAP.md`'s v0.13 milestone — marked `(shipped — v0.15.0)` — listed *"First-party plugin:
   browser history indexer (opt-in)"*, which no code has ever backed (`grep -ri
