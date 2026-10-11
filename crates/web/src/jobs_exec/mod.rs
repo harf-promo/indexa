@@ -208,6 +208,16 @@ pub(crate) async fn run_scan_phase_standalone(
     }
 }
 
+/// The scan job's self-heal prune warning. Uses the same [`OrphanCounts::summary`] wording as
+/// `indexa prune` and the MCP `prune` tool, so every swept table is reported — this message
+/// used to print only chunks and summaries, so a sweep that removed only edges, note anchors or
+/// co-change pairs showed "pruned 0 orphaned chunk(s) and 0 summary(ies)".
+///
+/// [`OrphanCounts::summary`]: indexa_core::store::OrphanCounts::summary
+fn orphan_prune_message(orphans: &indexa_core::store::OrphanCounts) -> String {
+    format!("pruned {}", orphans.summary())
+}
+
 async fn run_scan_phase_with_entries(
     state: &AppState,
     path: &str,
@@ -263,10 +273,7 @@ async fn run_scan_phase_with_entries(
             JobEvent::Warning {
                 stage: "scan".to_owned(),
                 item_path: None,
-                message: format!(
-                    "pruned {} orphaned chunk(s) and {} summary(ies)",
-                    orphans.chunks, orphans.summaries
-                ),
+                message: orphan_prune_message(&orphans),
                 pressure: None,
             },
         ),
@@ -649,7 +656,7 @@ pub(crate) async fn run_summarize_phase(
 
 #[cfg(test)]
 mod tests {
-    use super::throughput_eta;
+    use super::{orphan_prune_message, throughput_eta};
     use std::collections::VecDeque;
     use std::time::Instant;
 
@@ -667,5 +674,24 @@ mod tests {
         let (rate, eta) = throughput_eta(&s, 200, 100);
         assert!(rate.is_some());
         assert!(eta.unwrap() >= 0.0);
+    }
+
+    /// The scan job's prune warning must name every count the sweep deletes, in the same
+    /// wording as the CLI and MCP `prune`. It used to print only chunks and summaries, so a
+    /// sweep of note anchors and co-change pairs alone read "pruned 0 orphaned chunk(s) and 0
+    /// summary(ies)".
+    #[test]
+    fn orphan_prune_message_reports_every_swept_count() {
+        let orphans = indexa_core::store::OrphanCounts {
+            edges: 4,
+            note_anchors: 2,
+            co_change: 3,
+            ..Default::default()
+        };
+        let msg = orphan_prune_message(&orphans);
+        assert_eq!(msg, format!("pruned {}", orphans.summary()));
+        for want in ["4 edge row(s)", "2 note anchor(s)", "3 co-change pair(s)"] {
+            assert!(msg.contains(want), "missing {want:?} in {msg:?}");
+        }
     }
 }

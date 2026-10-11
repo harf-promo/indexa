@@ -65,20 +65,40 @@ fn rm_paths(
         }
     }
 
+    let remove = |store: &mut Store, path: &str| {
+        if recursive {
+            store.delete_subtree(path)
+        } else {
+            store.delete_entry(path)
+        }
+    };
     let mut total_removed = 0usize;
     for expanded in &expanded {
-        if recursive {
-            let n = store.delete_subtree(expanded)?;
-            total_removed += n;
-            println!("Removed subtree: {expanded} ({n} entries)");
-        } else {
-            let n = store.delete_entry(expanded)?;
-            total_removed += n;
-            if n > 0 {
-                println!("Removed: {expanded}");
-            } else {
-                println!("Not found in index: {expanded}");
+        // Scanned roots are stored canonicalized (`resolve_roots`), so `rm ./src` or a path
+        // through a symlink matched nothing. Try the path as given first — it is exactly what
+        // the user named and confirmed — and only when it removes nothing retry its canonical
+        // form, the same way `review history` looks a subject up.
+        let mut path = expanded.clone();
+        let mut n = remove(store, &path)?;
+        if n == 0 {
+            let canonical = super::helpers::resolve_roots(vec![expanded.clone()], false)?
+                .into_iter()
+                .next()
+                .map(|p| p.to_string_lossy().into_owned());
+            if let Some(canonical) = canonical.filter(|c| c != expanded) {
+                n = remove(store, &canonical)?;
+                if n > 0 {
+                    path = canonical;
+                }
             }
+        }
+        total_removed += n;
+        if recursive {
+            println!("Removed subtree: {path} ({n} entries)");
+        } else if n > 0 {
+            println!("Removed: {path}");
+        } else {
+            println!("Not found in index: {path}");
         }
     }
 
@@ -146,5 +166,77 @@ mod tests {
         let n = rm_paths(&mut store, &["/proj/a.rs".into()], false, false, false).unwrap();
         assert_eq!(n, Some(1));
         assert_eq!(entry_count(&store), 1);
+    }
+
+    /// F23: `rm` used the path exactly as typed, but scanned roots are stored canonicalized,
+    /// so a relative or `..`/symlinked spelling of an indexed path matched nothing. A path
+    /// that misses literally falls back to its canonical form.
+    #[test]
+    fn rm_falls_back_to_the_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join("sub")).unwrap();
+        std::fs::write(real.join("a.rs"), "a").unwrap();
+        std::fs::write(real.join("sub").join("b.rs"), "b").unwrap();
+        let canon =
+            super::super::helpers::resolve_roots(vec![real.to_string_lossy().into_owned()], false)
+                .unwrap()
+                .remove(0);
+        let a = canon.join("a.rs").to_string_lossy().into_owned();
+        let b = canon
+            .join("sub")
+            .join("b.rs")
+            .to_string_lossy()
+            .into_owned();
+        let mut store = store_with(&[&a, &b]);
+
+        // A non-canonical spelling of the same directory: real/sub/.. == real.
+        let roundabout = real.join("sub").join("..");
+        let file = roundabout.join("a.rs").to_string_lossy().into_owned();
+        let n = rm_paths(&mut store, &[file], false, false, false).unwrap();
+        assert_eq!(n, Some(1), "plain rm must find the canonical entry");
+
+        let subtree = roundabout.join("sub").to_string_lossy().into_owned();
+        let n = rm_paths(&mut store, &[subtree], true, true, false).unwrap();
+        assert_eq!(n, Some(1), "rm -r must find the canonical subtree");
+        assert_eq!(entry_count(&store), 0);
+    }
+
+    /// The literal path always wins: when it matches, the canonical form is not also
+    /// removed, so `rm` never deletes more than the entry the user named.
+    #[test]
+    fn rm_prefers_the_literal_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join("sub")).unwrap();
+        std::fs::write(real.join("a.rs"), "a").unwrap();
+        let canon =
+            super::super::helpers::resolve_roots(vec![real.to_string_lossy().into_owned()], false)
+                .unwrap()
+                .remove(0);
+        let literal = real
+            .join("sub")
+            .join("..")
+            .join("a.rs")
+            .to_string_lossy()
+            .into_owned();
+        let canonical = canon.join("a.rs").to_string_lossy().into_owned();
+        assert_ne!(literal, canonical);
+        let mut store = store_with(&[&literal, &canonical]);
+
+        let n = rm_paths(
+            &mut store,
+            std::slice::from_ref(&literal),
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(n, Some(1));
+        let left: String = store
+            .db_connection()
+            .query_row("SELECT path FROM entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, canonical, "the canonical entry must survive");
     }
 }
