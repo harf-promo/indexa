@@ -8,7 +8,7 @@ use anyhow::Result;
 ///
 /// **INVARIANT: bump this whenever the DDL or any migration in `init_schema` changes** — otherwise a
 /// DB stamped at the old value would skip the new migration and silently miss a column/table.
-pub(super) const SCHEMA_VERSION: i64 = 11;
+pub(super) const SCHEMA_VERSION: i64 = 12;
 
 /// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
 /// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
@@ -55,11 +55,34 @@ fn pack_events_allows_refreshed(conn: &rusqlite::Connection) -> bool {
     .unwrap_or(true)
 }
 
-/// Does `pack_paths` already carry the per-item inclusion-mode columns (v0.78)? Returns `true`
-/// when the table is absent (fresh DB — the CREATE above already includes both columns).
-fn pack_paths_has_inclusion_mode(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
-    conn.prepare("SELECT 1 FROM pragma_table_info('pack_paths') WHERE name = 'inclusion_mode'")?
-        .exists([])
+/// Does `table` already have `column`? `false` when the table is absent.
+fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?
+        .exists([table, column])
+}
+
+/// Run `ddl` (an `ALTER TABLE … ADD COLUMN` plus any companion statements) when `table` lacks
+/// `column` — race-safe across processes. `serve`, `worker` and the MCP server each open the DB,
+/// so two can hit a pre-migration DB at once; a bare probe-then-ALTER lets both see the column
+/// missing and the second ALTER fails with "duplicate column name", failing `Store::open`. So:
+/// a lock-free pre-check (the common already-migrated path takes no write lock), then the probe
+/// is re-done inside an IMMEDIATE transaction — the second opener blocks on the write lock
+/// (bounded by busy_timeout), re-checks, sees the column and skips. Same pattern as the
+/// table-rebuild migrations in [`Store::init_schema`].
+fn add_column_if_missing(
+    conn: &mut rusqlite::Connection,
+    table: &str,
+    column: &str,
+    ddl: &str,
+) -> rusqlite::Result<()> {
+    if has_column(conn, table, column)? {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if !has_column(&tx, table, column)? {
+        tx.execute_batch(ddl)?;
+    }
+    tx.commit()
 }
 
 impl Store {
@@ -220,6 +243,12 @@ impl Store {
                 error       TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_summary_queue_state ON summary_queue(state);
+            -- Backs the claim in `next_queue_item` (`WHERE state='pending' ORDER BY depth DESC
+            -- LIMIT 1`): the index hands back the deepest pending row directly instead of
+            -- sorting every pending row on each claim (O(n log n) per claim under the write lock,
+            -- O(n² log n) to drain a large queue). Also serves `subtree_has_unfinished`'s
+            -- `state IN (…) AND depth > ?` filter. Locked by an EXPLAIN QUERY PLAN test.
+            CREATE INDEX IF NOT EXISTS idx_summary_queue_claim ON summary_queue(state, depth DESC);
 
             -- Smart (semantic) classification — a SECOND axis over the technical
             -- hint_cat. One row per classified path (directories for now). Kept off
@@ -597,41 +626,35 @@ impl Store {
         // the intended semantics (it mirrors a genuinely-vanished file, since neither case was
         // re-confirmed present by this scan). Deliberately no companion index — see the base DDL
         // comment for why `reconcile_by_generation`'s query never uses one.
-        let has_scan_generation: bool = self
-            .conn
-            .prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'scan_generation'")?
-            .exists([])?;
-        if !has_scan_generation {
-            self.conn
-                .execute_batch("ALTER TABLE entries ADD COLUMN scan_generation INTEGER;")?;
-        }
+        add_column_if_missing(
+            &mut self.conn,
+            "entries",
+            "scan_generation",
+            "ALTER TABLE entries ADD COLUMN scan_generation INTEGER;",
+        )?;
 
         // Migration: add decisions.patch_id (v0.78) — the durable content-based reference (see
         // the base DDL comment above). Nullable, NO backfill: pre-existing rows have no
         // recorded git state to derive one from, and NULL correctly means "no durable
         // reference" for them, same as a fresh row where `record_decision` found no repo.
-        let has_patch_id: bool = self
-            .conn
-            .prepare("SELECT 1 FROM pragma_table_info('decisions') WHERE name = 'patch_id'")?
-            .exists([])?;
-        if !has_patch_id {
-            self.conn
-                .execute_batch("ALTER TABLE decisions ADD COLUMN patch_id TEXT;")?;
-        }
+        add_column_if_missing(
+            &mut self.conn,
+            "decisions",
+            "patch_id",
+            "ALTER TABLE decisions ADD COLUMN patch_id TEXT;",
+        )?;
 
         // Migration: add entries.agent_session (v0.81) — the tri-state content-sniffed
         // transcript flag (see the base DDL comment above). Nullable, NO backfill: existing
         // `.jsonl`/`.ndjson` rows stay NULL (not yet checked) until the next
         // `session_scope::tag_agent_session_entries` pass content-sniffs them, same as a
         // freshly-scanned row on a brand-new DB.
-        let has_agent_session: bool = self
-            .conn
-            .prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'agent_session'")?
-            .exists([])?;
-        if !has_agent_session {
-            self.conn
-                .execute_batch("ALTER TABLE entries ADD COLUMN agent_session INTEGER;")?;
-        }
+        add_column_if_missing(
+            &mut self.conn,
+            "entries",
+            "agent_session",
+            "ALTER TABLE entries ADD COLUMN agent_session INTEGER;",
+        )?;
 
         // Migration: add entries.first_indexed_at (v0.10) — the original discovery
         // timestamp. Unlike indexed_at (reset on every rescan), this is set once and
@@ -642,28 +665,23 @@ impl Store {
         // So the FIRST weekly-diff after upgrading an old DB can over-report files as
         // "added this week." This self-corrects: every subsequent insert stamps a true
         // discovery time. Fresh DBs get the column from the base DDL and are unaffected.
-        let has_first_indexed_at: bool = self
-            .conn
-            .prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'first_indexed_at'")?
-            .exists([])?;
-        if !has_first_indexed_at {
-            self.conn.execute_batch(
-                "ALTER TABLE entries ADD COLUMN first_indexed_at INTEGER;
-                 UPDATE entries SET first_indexed_at = indexed_at WHERE first_indexed_at IS NULL;",
-            )?;
-        }
+        add_column_if_missing(
+            &mut self.conn,
+            "entries",
+            "first_indexed_at",
+            "ALTER TABLE entries ADD COLUMN first_indexed_at INTEGER;
+             UPDATE entries SET first_indexed_at = indexed_at WHERE first_indexed_at IS NULL;",
+        )?;
 
         // Migration: add summaries.summary_l0 (L0 one-line abstract) to databases
         // created before tiered summaries existed. SQLite has no ADD COLUMN IF NOT
         // EXISTS, so we check table_info first and ignore if already present.
-        let has_l0: bool = self
-            .conn
-            .prepare("SELECT 1 FROM pragma_table_info('summaries') WHERE name = 'summary_l0'")?
-            .exists([])?;
-        if !has_l0 {
-            self.conn
-                .execute_batch("ALTER TABLE summaries ADD COLUMN summary_l0 TEXT;")?;
-        }
+        add_column_if_missing(
+            &mut self.conn,
+            "summaries",
+            "summary_l0",
+            "ALTER TABLE summaries ADD COLUMN summary_l0 TEXT;",
+        )?;
 
         // Migration: summaries provenance columns (v0.21) — provider / passes / fallback.
         // Checked per column (not as a trio) so a DB that somehow has a subset still
@@ -679,28 +697,18 @@ impl Store {
                 "ALTER TABLE summaries ADD COLUMN fallback INTEGER;",
             ),
         ] {
-            let present: bool = self
-                .conn
-                .prepare(&format!(
-                    "SELECT 1 FROM pragma_table_info('summaries') WHERE name = '{col}'"
-                ))?
-                .exists([])?;
-            if !present {
-                self.conn.execute_batch(ddl)?;
-            }
+            add_column_if_missing(&mut self.conn, "summaries", col, ddl)?;
         }
 
         // Migration: tool_usage.session_id (per-session savings ledger). Fresh DBs get it
         // from the base DDL; older DBs add it here. Nullable — stateless (non-session) calls
         // leave it NULL, so existing rows and non-ask tools are unaffected.
-        let has_usage_session_id: bool = self
-            .conn
-            .prepare("SELECT 1 FROM pragma_table_info('tool_usage') WHERE name = 'session_id'")?
-            .exists([])?;
-        if !has_usage_session_id {
-            self.conn
-                .execute_batch("ALTER TABLE tool_usage ADD COLUMN session_id TEXT;")?;
-        }
+        add_column_if_missing(
+            &mut self.conn,
+            "tool_usage",
+            "session_id",
+            "ALTER TABLE tool_usage ADD COLUMN session_id TEXT;",
+        )?;
         // Create the session index HERE (not in the base DDL) so it runs only after the column is
         // guaranteed to exist — on a fresh DB (column from the base CREATE TABLE) and on an
         // upgraded DB (column just added by the ALTER above). Idempotent, so it's a no-op once
@@ -714,14 +722,12 @@ impl Store {
         // blended savings ledger can reconcile per-surface). Fresh DBs get it from the base
         // DDL; older DBs add it here. Nullable — pre-migration rows and untagged callers stay
         // NULL/'', reported as "unspecified".
-        let has_served_basis: bool = self
-            .conn
-            .prepare("SELECT 1 FROM pragma_table_info('tool_usage') WHERE name = 'served_basis'")?
-            .exists([])?;
-        if !has_served_basis {
-            self.conn
-                .execute_batch("ALTER TABLE tool_usage ADD COLUMN served_basis TEXT;")?;
-        }
+        add_column_if_missing(
+            &mut self.conn,
+            "tool_usage",
+            "served_basis",
+            "ALTER TABLE tool_usage ADD COLUMN served_basis TEXT;",
+        )?;
 
         // Migration: give `chunks.id` AUTOINCREMENT on databases created before stable ids
         // (a bare rowid is reused after a delete, which would mis-attribute ANN results to a
@@ -865,50 +871,30 @@ impl Store {
         // Migration: add chunks.content_hash (v0.42) — a SHA-256 hex digest of the raw
         // chunk text, used as a cache key to skip re-embedding chunks whose text is unchanged.
         // Nullable so existing rows (NULL) are treated as "no cache" and re-embedded normally.
-        // The companion index makes the per-file hash lookup fast.
-        //
-        // Guard with an IMMEDIATE transaction (same pattern as the AUTOINCREMENT migration):
-        // the fast pre-check avoids the write-lock on the common "already migrated" path, and
-        // the re-check inside the exclusive lock prevents "duplicate column" races when
-        // multiple processes open the DB concurrently on a legacy database.
-        let needs_content_hash = |conn: &rusqlite::Connection| -> rusqlite::Result<bool> {
-            conn.prepare("SELECT 1 FROM pragma_table_info('chunks') WHERE name = 'content_hash'")?
-                .exists([])
-                .map(|present| !present)
-        };
-        if needs_content_hash(&self.conn)? {
-            let tx = self
-                .conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            if needs_content_hash(&tx)? {
-                tx.execute_batch(
-                    "ALTER TABLE chunks ADD COLUMN content_hash TEXT;
-                     CREATE INDEX IF NOT EXISTS idx_chunks_content_hash
-                         ON chunks(entry_path, content_hash);",
-                )?;
-            }
-            tx.commit()?;
-        }
+        // The companion index makes the per-file hash lookup fast; it's created in the same
+        // IMMEDIATE transaction as the column.
+        add_column_if_missing(
+            &mut self.conn,
+            "chunks",
+            "content_hash",
+            "ALTER TABLE chunks ADD COLUMN content_hash TEXT;
+             CREATE INDEX IF NOT EXISTS idx_chunks_content_hash
+                 ON chunks(entry_path, content_hash);",
+        )?;
 
         // Migration: add pack_paths.inclusion_mode / pack_paths.pinned_snapshot (v0.78, per-item
-        // inclusion mode). Same IMMEDIATE-tx double-check pattern as the content_hash migration
-        // above (a fast lock-free pre-check, then a re-check under the write lock, bounded by
-        // busy_timeout) — a legacy pack_paths row has no inclusion_mode, and the column DEFAULT
-        // ('reference') makes every existing row resolve to exactly the export behavior it had
-        // before this migration (build fresh from the current summaries tree at export time),
+        // inclusion mode). Both columns are added under one probe on inclusion_mode, in the same
+        // IMMEDIATE transaction — a legacy pack_paths row has no inclusion_mode, and the column
+        // DEFAULT ('reference') makes every existing row resolve to exactly the export behavior it
+        // had before this migration (build fresh from the current summaries tree at export time),
         // never 'pinned' (which would freeze it on content it never actually captured).
-        if !pack_paths_has_inclusion_mode(&self.conn)? {
-            let tx = self
-                .conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            if !pack_paths_has_inclusion_mode(&tx)? {
-                tx.execute_batch(
-                    "ALTER TABLE pack_paths ADD COLUMN inclusion_mode TEXT NOT NULL DEFAULT 'reference';
-                     ALTER TABLE pack_paths ADD COLUMN pinned_snapshot TEXT;",
-                )?;
-            }
-            tx.commit()?;
-        }
+        add_column_if_missing(
+            &mut self.conn,
+            "pack_paths",
+            "inclusion_mode",
+            "ALTER TABLE pack_paths ADD COLUMN inclusion_mode TEXT NOT NULL DEFAULT 'reference';
+             ALTER TABLE pack_paths ADD COLUMN pinned_snapshot TEXT;",
+        )?;
 
         // Referential integrity for chunks/summaries/edges → entries is maintained by
         // MANUAL multi-table cleanup in entries.rs (delete_entry / delete_subtree /
