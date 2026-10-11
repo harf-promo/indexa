@@ -101,7 +101,6 @@ fn main() {
             // `--target universal-apple-darwin` build in .github/workflows/release.yml.
             tauri_plugin_updater::Builder::new().build()
         })
-        .plugin(tauri_plugin_shell::init())
         // Remember the window's size + position across launches (v0.37). The plugin
         // auto-saves on move/resize/close and restores before the window shows; the
         // tauri.conf.json width/height become first-launch defaults, and
