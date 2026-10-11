@@ -1,7 +1,6 @@
 //! Retrieval tools: `search`, `browse_tree`, `get_summary` (l0/l1/l2),
 //! `read_file`, and `ask`.
 
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use rmcp::{
@@ -10,10 +9,7 @@ use rmcp::{
 use serde::Deserialize;
 
 use indexa_core::{
-    config::HybridMode,
-    pathutil::ancestor_dirs_to_root,
-    store::Store,
-    walker::{is_sensitive_dir, is_sensitive_file},
+    config::HybridMode, store::Store, text::read_file_window, walker::is_sensitive_path,
 };
 use indexa_query::{redact::redact_secrets, PriorTurn, QaConfig};
 
@@ -840,14 +836,16 @@ impl IndexaMcp {
             )));
         }
 
-        let (window, file_len) = read_window(&requested, offset as u64, READ_FILE_CAP)
+        let window = read_file_window(&requested, offset as u64, READ_FILE_CAP)
             .map_err(|e| mcp_err(format!("reading {path}: {e}")))?;
-        if window.text.contains("PRIVATE KEY-----") {
+        let file_len = window.file_len;
+        let raw = String::from_utf8_lossy(&window.bytes);
+        if raw.contains("PRIVATE KEY-----") {
             return Err(mcp_err(format!(
                 "refusing to read {path}: it contains a private key"
             )));
         }
-        let (text, redacted) = redact_secrets(&window.text);
+        let (text, redacted) = redact_secrets(&raw);
 
         let mut body = String::new();
         if window.start > 0 {
@@ -899,60 +897,6 @@ fn is_indexed_file(
                 Ok(Some(info)) if info.kind == "file"
             )
         })
-}
-
-/// Whether `path` is a secret file (`.env`, `id_rsa`, `*.pem`, …) or lies inside a credential
-/// store (`.ssh/`, `.gnupg/`, …) below its root — the indexer's own sensitive classification.
-fn is_sensitive_path(path: &Path, roots: &[PathBuf]) -> bool {
-    is_sensitive_file(path)
-        || ancestor_dirs_to_root(path, roots)
-            .iter()
-            .any(|d| is_sensitive_dir(d))
-}
-
-/// A UTF-8 window of a file: `text` decodes bytes `start..end` of the file.
-struct Window {
-    text: String,
-    start: u64,
-    end: u64,
-}
-
-/// Read at most `cap` bytes of `path` starting at byte `offset` (snapped down to a UTF-8 char
-/// boundary, and the end snapped down likewise), without loading the rest of the file. Returns the
-/// window and the file's size. Only regular files are read (a FIFO would block forever).
-fn read_window(path: &Path, offset: u64, cap: usize) -> std::io::Result<(Window, u64)> {
-    let mut file = std::fs::File::open(path)?;
-    let meta = file.metadata()?;
-    if !meta.is_file() {
-        return Err(std::io::Error::other("not a regular file"));
-    }
-    let file_len = meta.len();
-    let want = offset.min(file_len);
-    // A char starts at most 3 bytes before any offset, so read from there to snap down.
-    let read_start = want.saturating_sub(3);
-    file.seek(SeekFrom::Start(read_start))?;
-    let mut buf = Vec::new();
-    file.take((want - read_start) + cap as u64 + 4)
-        .read_to_end(&mut buf)?;
-
-    let is_boundary = |i: usize| i >= buf.len() || (buf[i] & 0xC0) != 0x80;
-    let mut s = (want - read_start) as usize;
-    while s > 0 && !is_boundary(s) {
-        s -= 1;
-    }
-    let mut e = (s + cap).min(buf.len());
-    while e > s && !is_boundary(e) {
-        e -= 1;
-    }
-    let text = String::from_utf8_lossy(&buf[s..e]).into_owned();
-    Ok((
-        Window {
-            text,
-            start: read_start + s as u64,
-            end: read_start + e as u64,
-        },
-        file_len,
-    ))
 }
 
 /// How many recent turns of a conversation to fold into an MCP `ask` (matches the web surface).
@@ -1268,38 +1212,107 @@ mod tests {
         );
     }
 
-    #[test]
-    fn read_window_is_bounded_and_snaps_to_char_boundaries() {
-        let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("utf8.txt");
-        // "é" is 2 bytes (0xC3 0xA9): offsets 1 and 3 land mid-char.
-        std::fs::write(&f, "aéb€c").unwrap(); // a(1) é(2) b(1) €(3) c(1) = 8 bytes
-        let (w, len) = read_window(&f, 2, 100).unwrap();
-        assert_eq!(len, 8);
-        assert_eq!((w.start, w.text.as_str()), (1, "éb€c"), "offset snaps down");
-        // A cap that ends mid-`€` snaps the end down too.
-        let (w, _) = read_window(&f, 0, 5).unwrap();
-        assert_eq!((w.text.as_str(), w.end), ("aéb", 4));
-        // Past the end: empty window at EOF, no error.
-        let (w, _) = read_window(&f, 100, 10).unwrap();
-        assert_eq!((w.start, w.end, w.text.as_str()), (8, 8, ""));
-        // Not a regular file.
-        assert!(read_window(dir.path(), 0, 10).is_err());
+    // ── read_file now uses the shared core helpers (#565); these pin parity with the
+    // MCP-local copies they replaced (#564), kept here verbatim as test oracles. ────────────
+
+    /// The `read_window` `read_file_inner` used before switching to `read_file_window`.
+    fn legacy_read_window(
+        path: &Path,
+        offset: u64,
+        cap: usize,
+    ) -> std::io::Result<(String, u64, u64, u64)> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::fs::File::open(path)?;
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(std::io::Error::other("not a regular file"));
+        }
+        let file_len = meta.len();
+        let want = offset.min(file_len);
+        let read_start = want.saturating_sub(3);
+        file.seek(SeekFrom::Start(read_start))?;
+        let mut buf = Vec::new();
+        file.take((want - read_start) + cap as u64 + 4)
+            .read_to_end(&mut buf)?;
+        let is_boundary = |i: usize| i >= buf.len() || (buf[i] & 0xC0) != 0x80;
+        let mut s = (want - read_start) as usize;
+        while s > 0 && !is_boundary(s) {
+            s -= 1;
+        }
+        let mut e = (s + cap).min(buf.len());
+        while e > s && !is_boundary(e) {
+            e -= 1;
+        }
+        let text = String::from_utf8_lossy(&buf[s..e]).into_owned();
+        Ok((text, read_start + s as u64, read_start + e as u64, file_len))
+    }
+
+    /// The `is_sensitive_path` `read_file_inner` used before switching to the core one.
+    fn legacy_is_sensitive_path(path: &Path, roots: &[PathBuf]) -> bool {
+        use indexa_core::walker::{is_sensitive_dir, is_sensitive_file};
+        is_sensitive_file(path)
+            || indexa_core::pathutil::ancestor_dirs_to_root(path, roots)
+                .iter()
+                .any(|d| is_sensitive_dir(d))
     }
 
     #[test]
-    fn read_window_of_a_huge_file_reads_only_the_window() {
-        // 256 MiB sparse file: the old code read it whole (and lossy-decoded a second copy)
-        // to serve 40 KB. The window must stay within the cap wherever it starts.
+    fn shared_read_file_window_serves_the_same_window_as_the_old_reader() {
         let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("huge.log");
-        let size: u64 = 256 * 1024 * 1024;
-        std::fs::File::create(&f).unwrap().set_len(size).unwrap();
-        let cap = 40 * 1024;
-        let (w, len) = read_window(&f, 0, cap).unwrap();
-        assert_eq!(len, size);
-        assert_eq!((w.start, w.end), (0, cap as u64));
-        let (w, _) = read_window(&f, size - 10, cap).unwrap();
-        assert_eq!((w.start, w.end, w.text.len()), (size - 10, size, 10));
+        let f = dir.path().join("mixed.txt");
+        // 1-, 2-, 3- and 4-byte chars plus an invalid byte, so every offset/cap pair below lands
+        // on, inside, or past a multi-byte char.
+        let mut bytes = "aé€𝄞b\nxyz".as_bytes().to_vec();
+        bytes.push(0xFF);
+        bytes.extend_from_slice("ü!".as_bytes());
+        std::fs::write(&f, &bytes).unwrap();
+        let len = bytes.len() as u64;
+        for offset in 0..=len + 2 {
+            for cap in 0..=bytes.len() + 2 {
+                let (text, start, end, file_len) = legacy_read_window(&f, offset, cap).unwrap();
+                let w = read_file_window(&f, offset, cap).unwrap();
+                assert_eq!(
+                    (
+                        String::from_utf8_lossy(&w.bytes).into_owned(),
+                        w.start,
+                        w.end,
+                        w.file_len
+                    ),
+                    (text, start, end, file_len),
+                    "offset {offset}, cap {cap}"
+                );
+            }
+        }
+        // Both refuse a non-regular file.
+        assert!(legacy_read_window(dir.path(), 0, 10).is_err());
+        assert!(read_file_window(dir.path(), 0, 10).is_err());
+    }
+
+    #[test]
+    fn shared_is_sensitive_path_matches_the_old_guard() {
+        let roots = vec![PathBuf::from("/home/u/proj"), PathBuf::from("/Users/u")];
+        let paths = [
+            "/home/u/proj/.env",
+            "/home/u/proj/.env.local",
+            "/home/u/proj/deploy.pem",
+            "/home/u/proj/id_rsa",
+            "/home/u/proj/.ssh/config",
+            "/home/u/proj/sub/.gnupg/pubring.kbx",
+            "/Users/u/Library/Keychains/login.keychain-db",
+            "/home/u/proj/src/main.rs",
+            "/home/u/proj/talks/deck.key",
+            "/home/u/proj/README.md",
+            "/elsewhere/.env",
+            "/elsewhere/notes.txt",
+        ];
+        let mut flagged = 0;
+        for p in paths {
+            let p = Path::new(p);
+            let old = legacy_is_sensitive_path(p, &roots);
+            assert_eq!(is_sensitive_path(p, &roots), old, "{}", p.display());
+            flagged += usize::from(old);
+        }
+        // The corpus exercises both answers, so agreement isn't vacuous.
+        assert!(flagged > 0 && flagged < paths.len(), "{flagged}");
     }
 }
