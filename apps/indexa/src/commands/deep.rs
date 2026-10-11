@@ -661,13 +661,13 @@ pub(crate) async fn cmd_deep(
                 match res {
                     Ok(Ok(text)) if !text.trim().is_empty() => {
                         let seq = extracted.chunks.len();
-                        extracted.chunks.push(indexa_parsers::types::Chunk {
-                            source: entry.path.clone(),
-                            seq,
-                            heading: "transcript".to_owned(),
-                            text,
-                            language: None,
-                        });
+                        extracted
+                            .chunks
+                            .extend(indexa_parsers::media::transcript_chunks(
+                                &entry.path,
+                                &text,
+                                seq,
+                            ));
                     }
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => {
@@ -700,13 +700,13 @@ pub(crate) async fn cmd_deep(
                 match res {
                     Ok(Ok(Some(text))) if !text.trim().is_empty() => {
                         let seq = extracted.chunks.len();
-                        extracted.chunks.push(indexa_parsers::types::Chunk {
-                            source: entry.path.clone(),
-                            seq,
-                            heading: "transcript".to_owned(),
-                            text,
-                            language: None,
-                        });
+                        extracted
+                            .chunks
+                            .extend(indexa_parsers::media::transcript_chunks(
+                                &entry.path,
+                                &text,
+                                seq,
+                            ));
                     }
                     Ok(Ok(_)) => {} // no audio track
                     Ok(Err(e)) => {
