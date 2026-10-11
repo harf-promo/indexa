@@ -288,26 +288,32 @@ mod tests {
         // `sleep <path>` (the parser always passes the file path as argv[1]) would just
         // error out immediately — sleep can't parse a path as a duration — which tests the
         // nonzero-exit fallback, not a genuine timeout. A tiny script that ignores its
-        // argv entirely and sleeps regardless exercises the real timeout path.
-        let script = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(script.path(), "#!/bin/sh\nsleep 30\n").unwrap();
-        std::fs::set_permissions(
-            script.path(),
-            std::os::unix::fs::PermissionsExt::from_mode(0o755),
-        )
-        .unwrap();
+        // argv entirely and sleeps regardless exercises the real timeout path. It is written
+        // into a temp dir (handle closed), not a `NamedTempFile`, whose still-open write handle
+        // makes exec fail with ETXTBSY on Linux — that spawn failure fell back instantly and
+        // passed this test without ever reaching the timeout.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("sleep.sh");
+        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
 
         let tmp = tempfile::NamedTempFile::with_suffix(".txt").unwrap();
         std::fs::write(tmp.path(), b"native fallback content").unwrap();
-        let mut s = spec("*.txt", script.path().to_str().unwrap());
+        let mut s = spec("*.txt", script.to_str().unwrap());
         s.timeout = Duration::from_millis(200);
         let p = PreprocessorParser::new(&s, ChunkParams::default()).unwrap();
 
         let start = std::time::Instant::now();
         let extracted = p.parse(tmp.path()).unwrap();
+        let elapsed = start.elapsed();
         assert!(
-            start.elapsed() < Duration::from_secs(5),
+            elapsed < Duration::from_secs(5),
             "must not actually wait for the 30s sleep"
+        );
+        assert!(
+            elapsed >= s.timeout,
+            "fell back before the timeout (elapsed: {elapsed:?}) — the script never ran"
         );
         assert!(extracted.chunks[0].text.contains("native fallback content"));
     }
@@ -345,26 +351,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    // Reproducibly fails ONLY on this project's ubuntu-latest GitHub Actions runner, not
-    // locally (macOS, confirmed) and not on macOS/Windows CI — six independent attempts
-    // (three script rewrites: /dev/zero+tr, single cat "$1" -, plus a bounded 3x retry on a
-    // fast `None`) all failed identically: `run_command` returns `None` in tens-to-hundreds
-    // of *microseconds*, deterministically on every attempt within a run (not intermittent —
-    // ruled out by the retry attempt, which failed 3/3 at similar speed each time), while the
-    // sibling script-spawning test right next to it (`parse_falls_back_to_a_native_parser_
-    // on_timeout`, same Command/process_group(0) construction) passes in the same CI run.
-    // The one substantive difference is this test's script actually moves ~200 KB through
-    // both stdin and stdout; every hypothesis tried to explain that difference (NUL-byte
-    // handling, multi-command pipelines, write-visibility timing) has been ruled out. Without
-    // shell access to that specific runner image, further guessing isn't productive — see the
-    // git history on this test for the full trail. Ignored on Linux only: this is a CI-image
-    // question, not evidence the underlying fix is wrong (proven separately, see below), and
-    // the test is unaffected everywhere else, including a local Linux dev machine.
-    #[cfg_attr(
-        target_os = "linux",
-        ignore = "deterministically fails only on this project's ubuntu-latest GH Actions \
-                  runner; passes locally and on macOS/Windows CI — see the comment above"
-    )]
     fn run_command_does_not_deadlock_on_large_stdin_racing_large_stdout() {
         // Regression test for the C1 deadlock: an input bigger than one pipe buffer
         // (~64 KB) fed to a command that writes MORE than one pipe buffer of stdout
@@ -385,13 +371,14 @@ mod tests {
         // THEN reads stdin, all in one command invocation — no multi-command pipeline, no
         // `/dev/zero`/`tr` NUL-byte handling. Same idiom `parse_indexes_the_commands_stdout`
         // above already relies on (`cat <path>`), just with a stdin operand appended.
-        let script = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(script.path(), "#!/bin/sh\ncat \"$1\" -\necho DONE-MARKER\n").unwrap();
-        std::fs::set_permissions(
-            script.path(),
-            std::os::unix::fs::PermissionsExt::from_mode(0o755),
-        )
-        .unwrap();
+        // The script lives in a temp dir with its write handle closed: a `NamedTempFile`'s open
+        // handle made exec fail with ETXTBSY on Linux, so `run_command` returned `None` within
+        // microseconds (this test was Linux-ignored for exactly that symptom).
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("echo-then-read.sh");
+        std::fs::write(&script, "#!/bin/sh\ncat \"$1\" -\necho DONE-MARKER\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
 
         let tmp = tempfile::NamedTempFile::with_suffix(".txt").unwrap();
         std::fs::write(tmp.path(), vec![b'y'; 200_000]).unwrap(); // > one pipe buffer as stdin
@@ -402,7 +389,7 @@ mod tests {
         );
         // Generous timeout — this asserts "does not hang forever", not "is fast"; a loaded
         // CI runner is not the failure mode this test exists to catch.
-        let mut s = spec("*.txt", script.path().to_str().unwrap());
+        let mut s = spec("*.txt", script.to_str().unwrap());
         s.timeout = Duration::from_secs(30);
         s.max_output_bytes = 1024 * 1024;
         let p = PreprocessorParser::new(&s, ChunkParams::default()).unwrap();
