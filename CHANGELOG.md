@@ -334,8 +334,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and 6to4 `2002::/16` check the embedded IPv4 address, so DNS64 networks still reach public
   sites while a prefix-wrapped private address stays blocked. This is why proxies are now
   disabled for `pack add-url` (see Changed).
-- **`pack add-url` follow-ups to the SSRF guard.** A host that fails to resolve fails at once
-  again, as it did before the resolver change, instead of being retried with backoff. Also
+- **`pack add-url` follow-ups to the SSRF guard.** A host the resolver says does not exist
+  (NXDOMAIN-class `getaddrinfo` result) now fails at once instead of being retried with backoff;
+  before this, every lookup failure was retried. A transient lookup failure (a DNS blip or
+  resolver timeout) still uses the configured retries, and an SSRF refusal is still never
+  retried. The proxy hint on a failed fetch is no longer shown for a deliberate SSRF refusal. Also
   blocked: AS112 `192.31.196.0/24`, `192.175.48.0/24`, `2001:4:112::/48` and
   `2620:4f:8000::/48`, AMT relay anycast `192.52.193.0/24`, and on IPv6 the dummy prefix
   `100:0:0:1::/64`, PCP/TURN anycast `2001:1::/32`, benchmarking `2001:2::/48`, ORCHID

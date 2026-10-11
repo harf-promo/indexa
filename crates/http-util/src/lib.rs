@@ -142,8 +142,10 @@ impl std::fmt::Display for SsrfBlocked {
 
 impl std::error::Error for SsrfBlocked {}
 
-/// The guarded client's DNS lookup for a user-supplied host failed. Final like [`SsrfBlocked`]: a
-/// mistyped or nonexistent host fails fast instead of being retried with backoff.
+/// The guarded client's DNS lookup said the user-supplied host does not exist
+/// ([`is_no_such_host`]). Final like [`SsrfBlocked`]: a mistyped or nonexistent host fails fast
+/// instead of being retried with backoff. Any other lookup failure stays a plain, retryable I/O
+/// error.
 #[derive(Debug)]
 struct Unresolvable {
     host: String,
@@ -177,6 +179,36 @@ fn chain_has<T: std::error::Error + 'static>(err: &(dyn std::error::Error + 'sta
 /// Does `err`'s source chain contain an [`SsrfBlocked`] refusal?
 fn is_ssrf_block(err: &(dyn std::error::Error + 'static)) -> bool {
     chain_has::<SsrfBlocked>(err)
+}
+
+/// Is `err` a refusal by [`ssrf_guarded_client`]'s guard (a blocked resolution or redirect hop),
+/// as opposed to a network failure? Lets callers word their error for a deliberate block.
+pub fn is_ssrf_refusal(err: &reqwest::Error) -> bool {
+    is_ssrf_block(err)
+}
+
+/// Is a failed host lookup a definitive "no such host" answer rather than a transient failure?
+///
+/// `std`'s resolver gives no typed kind for this. On Unix a `getaddrinfo` failure carries only the
+/// `gai_strerror` text, so this matches the `EAI_NONAME` / `EAI_NODATA` strings of glibc, musl and
+/// macOS; on Windows the raw `WSAHOST_NOT_FOUND` / `WSANO_DATA` codes. Everything else, including
+/// `EAI_AGAIN` ("Temporary failure in name resolution"), `EAI_FAIL`, timeouts, and a message
+/// translated by a non-English glibc locale, is treated as transient, so the worst a miss costs is
+/// a retry.
+fn is_no_such_host(err: &std::io::Error) -> bool {
+    const NOT_FOUND: [&str; 5] = [
+        "name or service not known",                    // glibc EAI_NONAME
+        "no address associated with hostname",          // glibc EAI_NODATA
+        "name does not resolve",                        // musl EAI_NONAME
+        "name has no usable address",                   // musl EAI_NODATA
+        "nodename nor servname provided, or not known", // macOS/BSD EAI_NONAME
+    ];
+    // WSAHOST_NOT_FOUND, WSANO_DATA.
+    if cfg!(windows) && matches!(err.raw_os_error(), Some(11001 | 11004)) {
+        return true;
+    }
+    let msg = err.to_string().to_ascii_lowercase();
+    NOT_FOUND.iter().any(|m| msg.contains(m))
 }
 
 /// Accept a host's resolved addresses only if there is at least one and NONE is blocked — a mixed
@@ -271,11 +303,23 @@ impl reqwest::dns::Resolve for SsrfGuardResolver {
         let host = name.as_str().to_owned();
         let lookup = (self.lookup)(host.clone());
         Box::pin(async move {
-            // A lookup failure is not an SSRF refusal, but it is final: not retried.
-            let addrs = lookup.await.map_err(|source| Unresolvable {
-                host: host.clone(),
-                source,
-            })?;
+            // A lookup failure is not an SSRF refusal. A definitive "no such host" is final; any
+            // other failure (a DNS blip, a resolver timeout) stays a plain, retryable I/O error.
+            let addrs = lookup
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                    if is_no_such_host(&e) {
+                        Box::new(Unresolvable {
+                            host: host.clone(),
+                            source: e,
+                        })
+                    } else {
+                        Box::new(std::io::Error::new(
+                            e.kind(),
+                            format!("resolving {host}: {e}"),
+                        ))
+                    }
+                })?;
             let vetted = vet_resolved(&host, addrs)?;
             let addrs: reqwest::dns::Addrs = Box::new(
                 vetted
@@ -341,7 +385,7 @@ pub fn backoff_delay(
 /// consumes the builder. Bulk indexing routinely hits 429/503 from cloud providers; without
 /// this each such response permanently fails that item. An SSRF refusal from
 /// [`ssrf_guarded_client`] surfaces as a connect error but is final, so it is never retried; nor is
-/// that client's failure to resolve the host at all.
+/// that client's definitive "no such host" lookup result. Its transient lookup failures are retried.
 pub async fn send_with_retry(
     build: impl Fn() -> reqwest::RequestBuilder,
     max_retries: u32,
@@ -633,6 +677,7 @@ mod tests {
             is_ssrf_block(&err),
             "expected an SSRF refusal, got: {err:?}"
         );
+        assert!(is_ssrf_refusal(&err), "the public check must agree");
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
@@ -645,18 +690,25 @@ mod tests {
         );
     }
 
+    /// A [`Lookup`] stub that always fails with `msg` (as `std` reports a `getaddrinfo` failure),
+    /// counting calls.
+    fn failing_lookup(
+        msg: &'static str,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Lookup {
+        std::sync::Arc::new(move |_host: String| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Err(std::io::Error::other(msg)) })
+        })
+    }
+
     #[tokio::test]
     async fn guarded_client_does_not_retry_an_unresolvable_host() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counted = calls.clone();
-        let lookup: Lookup = std::sync::Arc::new(move |_host: String| {
-            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Box::pin(async {
-                Err(std::io::Error::other(
-                    "failed to lookup address information: Name or service not known",
-                ))
-            })
-        });
+        let lookup = failing_lookup(
+            "failed to lookup address information: Name or service not known",
+            calls.clone(),
+        );
         let client = ssrf_guarded_client_with_lookup(5, lookup);
         let err = send_with_retry(|| client.get("http://no-such-host.test/"), 3)
             .await
@@ -671,6 +723,54 @@ mod tests {
             1,
             "an unresolvable host must not be retried"
         );
+    }
+
+    #[tokio::test]
+    async fn guarded_client_retries_a_transient_lookup_failure() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let lookup = failing_lookup(
+            "failed to lookup address information: Temporary failure in name resolution",
+            calls.clone(),
+        );
+        let client = ssrf_guarded_client_with_lookup(5, lookup);
+        // One retry keeps the test to a single 0.5 s backoff.
+        let err = send_with_retry(|| client.get("http://flaky-dns.test/"), 1)
+            .await
+            .unwrap_err();
+        assert!(!chain_has::<Unresolvable>(&err), "got: {err:?}");
+        assert!(!is_ssrf_refusal(&err), "a DNS blip is not an SSRF refusal");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a transient lookup failure must use the retry budget"
+        );
+    }
+
+    #[test]
+    fn only_a_definitive_lookup_answer_counts_as_no_such_host() {
+        let gai = |detail: &str| {
+            std::io::Error::other(format!("failed to lookup address information: {detail}"))
+        };
+        for detail in [
+            "Name or service not known",
+            "No address associated with hostname",
+            "Name does not resolve",
+            "Name has no usable address",
+            "nodename nor servname provided, or not known",
+        ] {
+            assert!(is_no_such_host(&gai(detail)), "{detail}");
+        }
+        for detail in [
+            "Temporary failure in name resolution",
+            "Try again",
+            "Non-recoverable failure in name resolution",
+            "Name ou service inconnu", // a translated glibc message: retried, not final
+        ] {
+            assert!(!is_no_such_host(&gai(detail)), "{detail}");
+        }
+        assert!(!is_no_such_host(&std::io::Error::from(
+            std::io::ErrorKind::TimedOut
+        )));
     }
 
     /// A one-shot HTTP server on 127.0.0.1 that answers its first request with a 302 to

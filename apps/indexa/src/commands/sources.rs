@@ -138,7 +138,12 @@ async fn fetch_web(url: &str, timeout: u64, retries: u32) -> Result<String> {
     let resp =
         indexa_http_util::send_with_retry(|| client.get(url).header("User-Agent", UA), retries)
             .await
-            .with_context(|| web_fetch_failed(|k| std::env::var(k).ok()))?;
+            .map_err(|e| {
+                let msg = web_fetch_failed(indexa_http_util::is_ssrf_refusal(&e), |k| {
+                    std::env::var(k).ok()
+                });
+                anyhow::Error::new(e).context(msg)
+            })?;
     if !resp.status().is_success() {
         anyhow::bail!("HTTP {} fetching {url}", resp.status());
     }
@@ -152,10 +157,14 @@ async fn fetch_web(url: &str, timeout: u64, retries: u32) -> Result<String> {
     Ok(md)
 }
 
-/// The context for a failed web-page fetch. The SSRF-guarded client ignores proxies (#574), so when
-/// a proxy is configured in the environment the plain message would hide the likely cause: a
-/// network that only allows outbound traffic through that proxy.
-fn web_fetch_failed(env: impl Fn(&str) -> Option<String>) -> String {
+/// The context for a failed web-page fetch. The SSRF-guarded client ignores proxies, so when a proxy
+/// is configured in the environment the plain message would hide the likely cause: a network that
+/// only allows outbound traffic through that proxy. A deliberate SSRF refusal (`ssrf_refused`) gets
+/// no proxy hint: the proxy is not why it failed.
+fn web_fetch_failed(ssrf_refused: bool, env: impl Fn(&str) -> Option<String>) -> String {
+    if ssrf_refused {
+        return "web fetch failed".to_owned();
+    }
     const PROXY_VARS: [&str; 6] = [
         "HTTPS_PROXY",
         "https_proxy",
@@ -169,9 +178,8 @@ fn web_fetch_failed(env: impl Fn(&str) -> Option<String>) -> String {
         .find(|k| env(k).is_some_and(|v| !v.is_empty()))
     {
         Some(var) => format!(
-            "web fetch failed ({var} is set, but proxies are ignored for web-page fetches since \
-             #574 so the SSRF guard sees the address it connects to; the page must be reachable \
-             directly)"
+            "web fetch failed ({var} is set, but proxies are ignored for web-page fetches so the \
+             SSRF guard sees the address it connects to; the page must be reachable directly)"
         ),
         None => "web fetch failed".to_owned(),
     }
@@ -282,19 +290,28 @@ mod tests {
 
     #[test]
     fn web_fetch_failure_names_an_ignored_proxy() {
-        let msg = web_fetch_failed(|k| (k == "HTTPS_PROXY").then(|| "http://proxy:3128".into()));
+        let https = |k: &str| (k == "HTTPS_PROXY").then(|| "http://proxy:3128".to_owned());
+        let msg = web_fetch_failed(false, https);
         assert!(
             msg.contains("HTTPS_PROXY is set") && msg.contains("proxies are ignored"),
             "{msg}"
         );
-        let msg = web_fetch_failed(|k| (k == "all_proxy").then(|| "socks5://proxy:1080".into()));
+        assert!(
+            !msg.contains('#'),
+            "no internal PR numbers in user text: {msg}"
+        );
+        let msg = web_fetch_failed(false, |k| {
+            (k == "all_proxy").then(|| "socks5://proxy:1080".into())
+        });
         assert!(msg.contains("all_proxy is set"), "{msg}");
         // No proxy, or only an empty variable: the plain message.
-        assert_eq!(web_fetch_failed(|_| None), "web fetch failed");
+        assert_eq!(web_fetch_failed(false, |_| None), "web fetch failed");
         assert_eq!(
-            web_fetch_failed(|k| (k == "HTTP_PROXY").then(String::new)),
+            web_fetch_failed(false, |k| (k == "HTTP_PROXY").then(String::new)),
             "web fetch failed"
         );
+        // A deliberate SSRF refusal never blames the proxy.
+        assert_eq!(web_fetch_failed(true, https), "web fetch failed");
     }
 
     #[test]
