@@ -99,8 +99,18 @@ pub fn assess_confidence(
     }
     // Sort scores locally: callers may hand us reranked (reordered) hits, and the
     // shape metrics must not depend on presentation order.
-    let mut scores: Vec<f64> = hits.iter().map(|h| h.rrf_score).collect();
-    scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    // A non-finite score carries no evidence: count it as zero so the sort stays a total order.
+    let mut scores: Vec<f64> = hits
+        .iter()
+        .map(|h| {
+            if h.rrf_score.is_finite() {
+                h.rrf_score
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    scores.sort_by(|a, b| b.total_cmp(a));
     let n = scores.len();
     let top = scores[0];
     let median = scores[n / 2].max(f64::EPSILON);
@@ -274,5 +284,21 @@ mod uncovered_tests {
         assert!(compute_uncovered("how does session login work?", &hits).is_none());
         // No salient terms (all short/stop words) ⇒ None, never an empty list.
         assert!(compute_uncovered("what is it?", &hits).is_none());
+    }
+
+    #[test]
+    fn a_nan_score_counts_as_no_evidence_not_as_the_top_hit() {
+        let with = |s: f64| SearchHit {
+            rrf_score: s,
+            ..hit_with("/a", "x")
+        };
+        let nan = [with(0.05), with(f64::NAN), with(0.04), with(0.03)];
+        let zero = [with(0.05), with(0.0), with(0.04), with(0.03)];
+        let a = assess_confidence(&nan, 4, 60.0, true).unwrap();
+        let b = assess_confidence(&zero, 4, 60.0, true).unwrap();
+        assert_eq!(a.level, b.level);
+        assert_eq!(a.inputs.top_score, 0.05);
+        assert_eq!(a.inputs.median_score, b.inputs.median_score);
+        assert!(a.inputs.gap.is_finite(), "{:?}", a.inputs);
     }
 }
