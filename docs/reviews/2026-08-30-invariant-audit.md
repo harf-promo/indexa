@@ -42,10 +42,17 @@ but the zstd half needs new decode-loop logic and is written up below instead. C
 with the fully-unfixed `update.rs` finding, that leaves two write-ups needing a deliberate
 follow-up decision:
 
-### Not fixed — needs a deliberate follow-up decision
+### Not fixed here — both since fixed in #502
+
+> **Status (2026-10-11):** both write-ups below were fixed the next day in #502 (`d10cfb1`).
+> `crates/parsers/src/compressed.rs` now loops `StreamingDecoder` per frame, handles
+> `SkipFrame`, and carries the bomb-guard cap across frames. `indexa update` now refuses a
+> non-interactive self-update without `--yes`, through the shared
+> `helpers.rs::confirm_or_bail` that `weight apply` and `pack create --auto` also use. The
+> original write-ups are kept below as the audit recorded them.
 
 **`crates/parsers/src/compressed.rs` — zstd codec only decodes the first frame of a
-multi-frame `.zst` file (Medium, not fixed).** Same root cause as the gzip finding fixed
+multi-frame `.zst` file (Medium; fixed in #502).** Same root cause as the gzip finding fixed
 below, but `ruzstd::decoding::StreamingDecoder`'s own doc comment states the caveat
 explicitly: *"expects the underlying stream to only contain a single frame... To decode
 all the frames... the calling code needs to recreate the instance of the decoder and
@@ -65,7 +72,7 @@ first archive's end-of-archive markers even with a multi-member gzip reader unde
 there's no equivalent fix to make there — left as-is.)
 
 **`apps/indexa/src/commands/update.rs::cmd_update` — non-interactive invocation without
-`--yes` silently self-updates with no confirmation (Low/Medium, not fixed).** The
+`--yes` silently self-updates with no confirmation (Low/Medium; fixed in #502).** The
 confirmation prompt is gated on `stdin.is_terminal()`; when stdin is redirected/piped
 (cron, CI, a wrapper script) AND `--yes` wasn't passed, the `if` block is simply skipped —
 no prompt, no bail — and the binary is downloaded and replaced. This reads as a real gap

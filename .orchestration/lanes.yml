@@ -16,7 +16,7 @@ hot_files:
 
 counters:
   mcp_tool_count: 56
-  ui_js_fragment_count: 32
+  ui_js_fragment_count: 33
   ui_css_fragment_count: 23
 
 # Rounds 1-5 (v0.78.0 -> v0.80.2) plus their critique-fix lanes are ALL merged and released.
