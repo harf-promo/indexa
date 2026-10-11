@@ -185,6 +185,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   three commands was reworded to state the requirement rather than describe it as merely
   "skipping a prompt".
 
+- **`pack add-url` no longer fetches web pages through `HTTP_PROXY` / `HTTPS_PROXY` /
+  `ALL_PROXY`.** The SSRF-guarded client is now built with `.no_proxy()`. A proxy
+  resolves the target host itself, out of the guard's sight, so honouring one would let any
+  proxy user bypass the rebinding fix below entirely; disabling it is the fail-closed choice.
+  **This breaks `pack add-url <pack> <web-page-url>` for anyone behind a mandatory outbound proxy**: the direct
+  connection fails or times out, and today the error says only `web fetch failed`. Only the
+  generic web-page path uses the guarded client: GitHub issue/PR URLs still go through the
+  GitHub API client, and every other outbound request keeps its proxy behaviour. An explicit
+  opt-in that re-enables a proxy and accepts the weaker guard is a possible
+  follow-up, not part of this change.
+
 ### Fixed
 
 - **Four stale or unbacked product claims in the docs, and a guard so one of them can't recur.**
@@ -276,6 +287,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy moved into a `tighten_key_file_perms` helper so both outcomes are testable — including
   the failure branch, which is exercised against a `/proc` path whose chmod always fails for an
   unprivileged process.
+- **Long audio and video transcripts are now embedded in full, not just their first ~8k
+  characters.** `indexa deep` and the web deep job stored a whole whisper transcript as one
+  `transcript` chunk, bypassing `MAX_CHUNK_CHARS`; the embedder truncates its input at
+  `EMBED_MAX_CHARS` (8000), so everything past the first few minutes of an hour-long recording
+  was invisible to dense retrieval. A new `media::transcript_chunks` packs whole transcript lines
+  into chunks of at most 4000 characters, so a timestamped segment never straddles two chunks;
+  a single runaway line is cut with the existing `split_char_budget`, and every piece keeps its
+  `[hh:mm:ss.mmm --> …]` stamp so a hit still says where the words were spoken. Plain
+  (untimestamped) audio transcripts are split the same way.
+- **Opening the same pre-migration index from two processes no longer fails, and the summary
+  queue stops sorting on every claim.** Each probe-then-`ALTER TABLE … ADD COLUMN` migration now
+  goes through one `add_column_if_missing` helper that re-checks inside an `IMMEDIATE`
+  transaction, so a second `Store::open` racing the first waits on the write lock and skips the
+  column instead of failing with `duplicate column name`. A new
+  `idx_summary_queue_claim ON summary_queue(state, depth DESC)` lets the claim read the deepest
+  pending row straight from the index, and `subtree_has_unfinished` uses a sargable range
+  (`path >= dir||'/' AND path < dir||'0'`, the same set under BINARY collation) instead of a
+  `substr` comparison that scanned the table; EXPLAIN tests pin both plans. `prune_orphans` now
+  also clears orphaned `note_anchors` rows and `co_change` pairs (a pair is orphaned when either
+  side has no entry), and `OrphanCounts` gains `edges`, `note_anchors` and `co_change` so the
+  count matches what was deleted — the CLI, MCP and web prune messages don't print those three
+  yet. `SCHEMA_VERSION` 11 → 12; existing databases get the index on their next open.
+- **Docs drift from the invariant audit and roadmap.** The 2026-08-30 invariant audit still
+  listed two items as "needs a deliberate follow-up decision" that #502 had already fixed; both
+  are now marked fixed with a dated note. `ROADMAP.md` gains a v0.26–v0.80.3 section above the
+  stale v0.21–v0.25 one and marks the v0.12 mobile milestone *(not started)*. The
+  `ui_js_fragment_count` counter in `.orchestration/lanes.yml` and
+  `docs/agents/verification.md` moves 32 → 33 to match the 33 `crates/web/assets/ui/js/`
+  fragments.
+
+### Security
+
+- **`pack add-url`'s SSRF guard can no longer be bypassed by DNS rebinding, and blocks more
+  non-public ranges.** The guard used to resolve the host once to check it and let reqwest
+  resolve it again to connect, so a rebinding DNS server could answer a public address for the
+  check and a private one for the connection. The guarded client now installs its own resolver
+  that looks the host up once, refuses the whole answer if it is empty or if *any* address is
+  blocked, and hands reqwest exactly the vetted addresses — no second lookup. Every redirect hop
+  to a hostname connects through the same resolver; IP-literal hops are still checked by the
+  redirect policy. An SSRF refusal is no longer retried with backoff. Newly blocked: all of
+  `0.0.0.0/8` and `240.0.0.0/4`, `192.0.0.0/24`, the three TEST-NET ranges, `192.88.99.0/24`,
+  `198.18.0.0/15`, and on IPv6 `::/96`, `64:ff9b:1::/48`, `100::/64`, Teredo `2001::/32`, the
+  documentation ranges `2001:db8::/32` and `3fff::/20`, and `fec0::/10`. NAT64 `64:ff9b::/96`
+  and 6to4 `2002::/16` check the embedded IPv4 address, so DNS64 networks still reach public
+  sites while a prefix-wrapped private address stays blocked. This is why proxies are now
+  disabled for `pack add-url` (see Changed).
+- **The web UI's `escapeHtml` / `escapeAttr` now escape single quotes** (`'` → `&#39;`). Every
+  current call site uses double-quoted attributes, so nothing was exploitable today, but a
+  future single-quoted attribute built from a filename could have broken out of it.
 
 ## [0.80.3] — 2026-09-01
 
