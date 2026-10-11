@@ -24,6 +24,10 @@ pub const WHISPER_TIMEOUT: Duration = Duration::from_secs(1800);
 pub const FFPROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// `ffmpeg` frame-extraction cap.
 pub const FFMPEG_TIMEOUT: Duration = Duration::from_secs(120);
+/// `ffmpeg` audio-track demux cap. Unlike frame extraction (a handful of frames), this decodes
+/// the whole audio track, so it scales with the video's length — the same runaway backstop as
+/// [`WHISPER_TIMEOUT`], which then transcribes that same track.
+pub const FFMPEG_AUDIO_TIMEOUT: Duration = WHISPER_TIMEOUT;
 
 /// Captured result of a capped subprocess run — mirrors the fields of [`std::process::Output`]
 /// that callers use.
@@ -41,8 +45,13 @@ pub struct CappedOutput {
 /// concurrent reader the timeout would never fire. On timeout the child is killed (which closes
 /// its pipes, letting the reader threads finish) and an [`std::io::ErrorKind::TimedOut`] error is
 /// returned; a spawn failure propagates as-is.
+///
+/// stdin is always `/dev/null`: none of these tools takes input on stdin, and an inherited
+/// terminal stdin lets ffmpeg consume keystrokes (or a backgrounded run stall on `SIGTTIN`).
 pub fn run_capped(mut cmd: Command, timeout: Duration) -> std::io::Result<CappedOutput> {
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
 
     // Take the pipes and drain them concurrently with the timed wait.
