@@ -479,6 +479,8 @@ pub(crate) struct FilePreviewResponse {
     pub(crate) bytes_total: u64,
     /// True when the file looks binary (a NUL byte was found) — no `content` is returned.
     pub(crate) binary: bool,
+    /// How many obvious secrets were redacted from `content`.
+    pub(crate) redacted: usize,
 }
 
 #[derive(Serialize)]
