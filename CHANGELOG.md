@@ -190,8 +190,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolves the target host itself, out of the guard's sight, so honouring one would let any
   proxy user bypass the rebinding fix below entirely; disabling it is the fail-closed choice.
   **This breaks `pack add-url <pack> <web-page-url>` for anyone behind a mandatory outbound proxy**: the direct
-  connection fails or times out, and the error now names the proxy variable it found and says
-  proxies are ignored for web-page fetches. Only the
+  connection fails or times out, and that error now names the proxy variable it found and says
+  web-page fetches make direct connections only. Only the
   generic web-page path uses the guarded client: GitHub issue/PR URLs still go through the
   GitHub API client, and every other outbound request keeps its proxy behaviour. An explicit
   opt-in that re-enables a proxy and accepts the weaker guard is a possible
@@ -369,6 +369,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `2001:10::/28` and ORCHIDv2 `2001:20::/28`, and SRv6 SIDs `5f00::/16`. New tests cover a
   redirect hop whose hostname resolves to a blocked address, a redirect to `0x7f.1`, and
   hex, octal, shortened and single-number IPv4 literals.
+- **`pack add-url`'s proxy hint now appears only when no server was reached, and two more
+  IPv6 special-purpose ranges are blocked.** The hint (a set `HTTP(S)_PROXY` / `ALL_PROXY`
+  variable, plus "direct connections only; proxies are bypassed so the SSRF guard can resolve
+  the target") used to be attached to every failure except an SSRF refusal, including a garbled
+  response or too many redirects from a server the fetch did reach. It is now attached only to a
+  connect error or timeout, via the new `indexa_http_util::is_direct_connect_failure`; the
+  message never includes the variable's value. Newly blocked: AMT `2001:3::/32` (RFC 7450) and
+  Drone Remote ID `2001:30::/28` (RFC 9374), which the previous follow-up's tests pinned as
+  public. Narrowing only.
 - **The web UI's `escapeHtml` / `escapeAttr` now escape single quotes** (`'` → `&#39;`). Every
   current call site uses double-quoted attributes, so nothing was exploitable today, but a
   future single-quoted attribute built from a filename could have broken out of it.
