@@ -177,7 +177,9 @@ impl Store {
 
     /// Return entries not modified on disk for more than `days` days.
     pub fn find_stale_entries(&self, days: i64) -> Result<Vec<StaleEntry>> {
-        let cutoff = days * 86_400;
+        // Saturate: a huge `days` means "older than any representable time", not a wrapped
+        // (negative) cutoff that would flag every directory as stale.
+        let cutoff = days.saturating_mul(86_400);
         let mut stmt = self.conn.prepare(
             "SELECT path, kind, modified_s,
                     (unixepoch() - COALESCE(modified_s, 0)) / 86400 AS days_age

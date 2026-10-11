@@ -256,17 +256,29 @@ impl CrossEncoder for CandleReranker {
                     return Vec::new(); // apply_rerank treats empty as "keep original"
                 }
             };
-            let mut scored: Vec<(usize, f32)> = docs
+            let scored: Vec<(usize, f32)> = docs
                 .iter()
                 .enumerate()
                 .map(|(i, doc)| (i, inner.score_pair(&query, doc)))
                 .collect();
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            scored.into_iter().map(|(i, _)| i).collect::<Vec<usize>>()
+            order_by_score(scored)
         })
         .await
         .map_err(|e| anyhow::anyhow!("candle rerank join: {e}"))
     }
+}
+
+/// Doc indices, best cross-encoder score first. A non-finite score (a NaN from a degenerate
+/// input) sinks to the end rather than breaking the sort's total order, which since Rust 1.81
+/// may panic or return an arbitrary permutation.
+fn order_by_score(mut scored: Vec<(usize, f32)>) -> Vec<usize> {
+    for (_, s) in &mut scored {
+        if !s.is_finite() {
+            *s = f32::NEG_INFINITY;
+        }
+    }
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scored.into_iter().map(|(i, _)| i).collect()
 }
 
 // ── LLM listwise helper ───────────────────────────────────────────────────────
@@ -573,5 +585,24 @@ mod tests {
             order[0], 1,
             "expected the tokio doc top-ranked, got {order:?}"
         );
+    }
+
+    #[test]
+    fn order_by_score_sinks_non_finite_scores_and_keeps_a_total_order() {
+        let order = order_by_score(vec![
+            (0, 0.5),
+            (1, f32::NAN),
+            (2, 0.9),
+            (3, f32::INFINITY),
+            (4, -0.2),
+        ]);
+        assert_eq!(
+            &order[..3],
+            &[2, 0, 4],
+            "finite scores, best first: {order:?}"
+        );
+        let mut tail = order[3..].to_vec();
+        tail.sort_unstable();
+        assert_eq!(tail, vec![1, 3], "non-finite scores rank last: {order:?}");
     }
 }
