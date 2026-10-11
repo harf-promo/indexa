@@ -2235,20 +2235,22 @@ mod tests {
 
     #[tokio::test]
     async fn api_export_renders_seeded_summary_respecting_depth() {
-        let mut store = Store::open_in_memory().unwrap();
-        store
-            .upsert_entries(&[
-                entry("/r", EntryKind::Dir),
-                entry("/r/a.rs", EntryKind::File),
-            ])
-            .unwrap();
-        store
-            .upsert_summary(&summary("/r", "dir", None, 0))
-            .unwrap();
-        store
-            .upsert_summary(&summary("/r/a.rs", "file", Some("/r"), 1))
-            .unwrap();
-        let app = build_router(state_with(store), 7620);
+        // Export reads through its own `db_path` connection, so the seed must live in a file.
+        let state = state_with_file_db("export-depth", |store| {
+            store
+                .upsert_entries(&[
+                    entry("/r", EntryKind::Dir),
+                    entry("/r/a.rs", EntryKind::File),
+                ])
+                .unwrap();
+            store
+                .upsert_summary(&summary("/r", "dir", None, 0))
+                .unwrap();
+            store
+                .upsert_summary(&summary("/r/a.rs", "file", Some("/r"), 1))
+                .unwrap();
+        });
+        let app = build_router(state, 7620);
         // depth=0 ⇒ root summary only; format defaults to XML.
         let resp = app
             .oneshot(
@@ -2273,6 +2275,42 @@ mod tests {
             .unwrap();
         let body = String::from_utf8_lossy(&bytes);
         assert!(body.contains("Summary of /r"));
+    }
+
+    #[tokio::test]
+    async fn api_export_does_not_hold_the_store_lock() {
+        // Regression guard: `/api/export` held the shared store mutex for the whole export,
+        // freezing every other handler that takes it. With the mutex held elsewhere, the export
+        // must still complete (it reads on its own connection). Pre-fix this hangs until the
+        // timeout below.
+        let state = state_with_file_db("export-lock", |store| {
+            store
+                .upsert_entries(&[entry("/r", EntryKind::Dir)])
+                .unwrap();
+            store
+                .upsert_summary(&summary("/r", "dir", None, 0))
+                .unwrap();
+        });
+        let held = state.store.clone();
+        let _guard = held.lock().await;
+        let app = build_router(state, 7620);
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            app.oneshot(
+                Request::builder()
+                    .uri("/api/export?path=/r&format=md")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("export must not wait on the shared store mutex")
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("Summary of /r"));
     }
 
     #[tokio::test]

@@ -216,6 +216,19 @@ fn find_stale_entries_returns_old_dirs() {
 }
 
 #[test]
+fn find_stale_entries_saturates_a_huge_day_count() {
+    // `days * 86_400` overflowed for a huge `days` (a panic in debug, a wrapped negative cutoff
+    // in release that flagged every directory as stale). It must saturate instead.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries(&[dummy_entry("/old/proj", EntryKind::Dir, 0)])
+        .unwrap();
+    let stale = store.find_stale_entries(i64::MAX).unwrap();
+    // A NULL-mtime dir is still "older than anything", so it stays reported.
+    assert_eq!(stale.len(), 1);
+}
+
+#[test]
 fn weekly_diff_reports_newly_added() {
     let mut store = Store::open_in_memory().unwrap();
     store

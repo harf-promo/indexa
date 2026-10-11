@@ -22,7 +22,7 @@ pub struct ListOpenDecisionsParams {
     /// Filter by decision type: `classification` or `duplicate`. Omit for all.
     #[serde(default)]
     pub decision_type: Option<String>,
-    /// Max questions to return (default 50).
+    /// Max questions to return (default 50, max 200).
     #[serde(default)]
     pub limit: Option<usize>,
     /// Skip the first N questions — page through a long inbox by advancing
@@ -134,8 +134,11 @@ impl IndexaMcp {
                 )));
             }
         }
-        let limit = limit.unwrap_or(50);
-        let offset = offset.unwrap_or(0);
+        // Bounded like the sibling listing tools: an unclamped `usize::MAX` reaches SQLite as
+        // `LIMIT -1` (no limit) and dumps the whole inbox. The offset is capped to what SQLite's
+        // signed OFFSET can hold, so it can't wrap negative (read as 0) either.
+        let limit = limit.unwrap_or(50).clamp(1, 200);
+        let offset = offset.unwrap_or(0).min(i64::MAX as usize);
         let store = self.store()?;
         let rows = store
             .open_decisions_paged(decision_type.as_deref(), limit, offset)
@@ -155,7 +158,7 @@ impl IndexaMcp {
             .map(|(i, d)| {
                 format!(
                     "{}. {}",
-                    offset + i + 1,
+                    offset.saturating_add(i + 1),
                     format_question(&render_question(d))
                 )
             })
@@ -164,7 +167,7 @@ impl IndexaMcp {
         let more = if rows.len() == limit {
             format!(
                 "\n\n(More may remain — call again with offset: {}.)",
-                offset + limit
+                offset.saturating_add(limit)
             )
         } else {
             String::new()
