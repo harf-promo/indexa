@@ -199,6 +199,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The web scan job's prune warning reports every swept count, and `indexa rm` finds
+  canonicalized paths.** The scan job's self-heal prune printed only chunks and summaries, so a
+  sweep that removed only edges, note anchors or co-change pairs read "pruned 0 orphaned
+  chunk(s) and 0 summary(ies)"; it now uses the same `OrphanCounts::summary` wording as
+  `indexa prune` and the MCP `prune` tool. `indexa rm` (plain and `-r`) matched paths only as
+  typed, while scanned roots are stored canonicalized, so `rm ./src` or a path through a symlink
+  removed nothing; a path that matches nothing as typed now resolves to its canonical form. The
+  literal path still wins when it matches, and the target is decided before anything is deleted:
+  the `-r` prompt and its non-interactive refusal name the path that will actually go and its
+  entry count, and say "`<typed>` resolves to `<canonical>`" when they differ. Like `rm` on
+  disk, a plain `rm` does not follow a symlink in the last path component: removing an unindexed
+  link's indexed target prompts on a terminal and otherwise needs `--yes`. `rm -r` on `/`, a
+  drive root, or an empty or blank path (a prefix of every entry) is refused without `--yes`,
+  even on a terminal, and a recursive miss reports "Not found in index" instead of "(0 entries)".
+
 - **`indexa rm -r` confirms before dropping a subtree, and prune reports everything it sweeps.**
   `rm -r` deleted every entry, chunk and summary under each path with no confirmation of any
   kind. It now follows the same rule as `update`, `weight apply` and `pack create --auto`: an
