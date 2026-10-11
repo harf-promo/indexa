@@ -47,7 +47,7 @@ pub struct ExportPackParams {
     #[serde(default)]
     pub include_graph: bool,
     /// With `include_graph`: `"text"` (per-format list, default) or `"mermaid"` (a fenced
-    /// ```mermaid flowchart block — pure text, renders natively in most AI tools/viewers).
+    /// mermaid flowchart block — pure text, renders natively in most AI tools/viewers).
     #[serde(default)]
     pub graph_format: Option<String>,
     /// Preview only: report the estimated token/byte cost (same redaction + rendering

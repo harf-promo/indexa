@@ -1326,7 +1326,7 @@ pub enum PackAction {
         #[arg(long)]
         include_graph: bool,
         /// With --include-graph: "text" (per-format list, default) or "mermaid" (a fenced
-        /// ```mermaid flowchart block — pure text, renders natively in most AI tools/viewers).
+        /// mermaid flowchart block — pure text, renders natively in most AI tools/viewers).
         #[arg(long, default_value = "text")]
         graph_format: String,
         /// Emit a code-skeleton view (symbol signatures, bodies elided) instead of summaries.
