@@ -190,7 +190,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolves the target host itself, out of the guard's sight, so honouring one would let any
   proxy user bypass the rebinding fix below entirely; disabling it is the fail-closed choice.
   **This breaks `pack add-url <pack> <web-page-url>` for anyone behind a mandatory outbound proxy**: the direct
-  connection fails or times out, and today the error says only `web fetch failed`. Only the
+  connection fails or times out, and the error now names the proxy variable it found and says
+  proxies are ignored for web-page fetches. Only the
   generic web-page path uses the guarded client: GitHub issue/PR URLs still go through the
   GitHub API client, and every other outbound request keeps its proxy behaviour. An explicit
   opt-in that re-enables a proxy and accepts the weaker guard is a possible
@@ -333,6 +334,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and 6to4 `2002::/16` check the embedded IPv4 address, so DNS64 networks still reach public
   sites while a prefix-wrapped private address stays blocked. This is why proxies are now
   disabled for `pack add-url` (see Changed).
+- **`pack add-url` follow-ups to the SSRF guard.** A host that fails to resolve fails at once
+  again, as it did before the resolver change, instead of being retried with backoff. Also
+  blocked: AS112 `192.31.196.0/24`, `192.175.48.0/24`, `2001:4:112::/48` and
+  `2620:4f:8000::/48`, AMT relay anycast `192.52.193.0/24`, and on IPv6 the dummy prefix
+  `100:0:0:1::/64`, PCP/TURN anycast `2001:1::/32`, benchmarking `2001:2::/48`, ORCHID
+  `2001:10::/28` and ORCHIDv2 `2001:20::/28`, and SRv6 SIDs `5f00::/16`. New tests cover a
+  redirect hop whose hostname resolves to a blocked address, a redirect to `0x7f.1`, and
+  hex, octal, shortened and single-number IPv4 literals.
 - **The web UI's `escapeHtml` / `escapeAttr` now escape single quotes** (`'` → `&#39;`). Every
   current call site uses double-quoted attributes, so nothing was exploitable today, but a
   future single-quoted attribute built from a filename could have broken out of it.
