@@ -102,6 +102,58 @@ pub fn floor_char_boundary(s: &str, byte: usize) -> usize {
     b
 }
 
+/// A window of a file's bytes: `bytes` are file bytes `start..end`, both ends on UTF-8 char
+/// boundaries; `file_len` is the file's full size.
+pub struct FileWindow {
+    pub bytes: Vec<u8>,
+    pub start: u64,
+    pub end: u64,
+    pub file_len: u64,
+}
+
+/// Read at most `cap` bytes of `path` from byte `offset` without loading the rest of the file:
+/// seek, then a bounded read. `offset` is snapped down to a UTF-8 char boundary and the end is
+/// snapped down likewise (an offset past EOF yields an empty window at EOF). Only regular files are
+/// read — a FIFO would block forever.
+pub fn read_file_window(
+    path: &std::path::Path,
+    offset: u64,
+    cap: usize,
+) -> std::io::Result<FileWindow> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    let file_len = meta.len();
+    let want = offset.min(file_len);
+    // A char starts at most 3 bytes before any offset, so read from there to snap down.
+    let read_start = want.saturating_sub(3);
+    file.seek(SeekFrom::Start(read_start))?;
+    let mut buf = Vec::new();
+    file.take((want - read_start) + cap as u64 + 4)
+        .read_to_end(&mut buf)?;
+
+    let is_boundary = |i: usize| i >= buf.len() || (buf[i] & 0xC0) != 0x80;
+    let mut s = (want - read_start) as usize;
+    while s > 0 && !is_boundary(s) {
+        s -= 1;
+    }
+    let mut e = (s + cap).min(buf.len());
+    while e > s && !is_boundary(e) {
+        e -= 1;
+    }
+    buf.truncate(e);
+    buf.drain(..s);
+    Ok(FileWindow {
+        bytes: buf,
+        start: read_start + s as u64,
+        end: read_start + e as u64,
+        file_len,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +270,32 @@ mod tests {
         assert_eq!(human_bytes(1_048_576), "1.0 MB");
         assert_eq!(human_bytes(1_073_741_824), "1.0 GB");
         assert_eq!(human_bytes(0), "0 B");
+    }
+
+    #[test]
+    fn read_file_window_is_bounded_and_snaps_to_char_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("utf8.txt");
+        std::fs::write(&f, "aéb€c").unwrap(); // a(1) é(2) b(1) €(3) c(1) = 8 bytes
+        let w = read_file_window(&f, 2, 100).unwrap();
+        assert_eq!(w.file_len, 8);
+        assert_eq!((w.start, w.bytes.as_slice()), (1, "éb€c".as_bytes()));
+        let w = read_file_window(&f, 0, 5).unwrap();
+        assert_eq!((w.bytes.as_slice(), w.end), ("aéb".as_bytes(), 4));
+        let w = read_file_window(&f, 100, 10).unwrap();
+        assert_eq!((w.start, w.end, w.bytes.len()), (8, 8, 0));
+        assert!(read_file_window(dir.path(), 0, 10).is_err());
+    }
+
+    #[test]
+    fn read_file_window_of_a_huge_file_reads_only_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("huge.log");
+        let size: u64 = 256 * 1024 * 1024;
+        std::fs::File::create(&f).unwrap().set_len(size).unwrap();
+        let w = read_file_window(&f, 0, 40 * 1024).unwrap();
+        assert_eq!((w.start, w.end, w.file_len), (0, 40 * 1024, size));
+        let w = read_file_window(&f, size - 10, 40 * 1024).unwrap();
+        assert_eq!((w.start, w.end, w.bytes.len()), (size - 10, size, 10));
     }
 }
