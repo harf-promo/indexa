@@ -51,8 +51,11 @@ const BLOCKED_V4: &[(std::net::Ipv4Addr, u32)] = {
         (A::new(172, 16, 0, 0), 12),   // private (RFC 1918)
         (A::new(192, 0, 0, 0), 24),    // IETF protocol assignments (RFC 6890)
         (A::new(192, 0, 2, 0), 24),    // TEST-NET-1 documentation
+        (A::new(192, 31, 196, 0), 24), // AS112-v4 (RFC 7535)
+        (A::new(192, 52, 193, 0), 24), // AMT (RFC 7450)
         (A::new(192, 88, 99, 0), 24),  // deprecated 6to4 relay anycast (RFC 7526)
         (A::new(192, 168, 0, 0), 16),  // private (RFC 1918)
+        (A::new(192, 175, 48, 0), 24), // AS112 direct delegation (RFC 7534)
         (A::new(198, 18, 0, 0), 15),   // benchmarking (RFC 2544)
         (A::new(198, 51, 100, 0), 24), // TEST-NET-2 documentation
         (A::new(203, 0, 113, 0), 24),  // TEST-NET-3 documentation
@@ -71,9 +74,17 @@ const BLOCKED_V6: &[(std::net::Ipv6Addr, u32)] = {
         (A::new(0, 0, 0, 0, 0, 0, 0, 0), 96), // IPv4-compatible (deprecated), incl. :: and ::1
         (A::new(0x64, 0xff9b, 1, 0, 0, 0, 0, 0), 48), // local-use NAT64 (RFC 8215)
         (A::new(0x100, 0, 0, 0, 0, 0, 0, 0), 64), // discard-only (RFC 6666)
+        (A::new(0x100, 0, 0, 1, 0, 0, 0, 0), 64), // dummy prefix (RFC 9780)
         (A::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 32), // Teredo
+        (A::new(0x2001, 1, 0, 0, 0, 0, 0, 0), 32), // PCP/TURN/DNS-SD anycast (RFC 7723, 8155, 9665)
+        (A::new(0x2001, 2, 0, 0, 0, 0, 0, 0), 48), // benchmarking (RFC 5180)
+        (A::new(0x2001, 4, 0x112, 0, 0, 0, 0, 0), 48), // AS112-v6 (RFC 7535)
+        (A::new(0x2001, 0x10, 0, 0, 0, 0, 0, 0), 28), // ORCHID (deprecated, RFC 4843)
+        (A::new(0x2001, 0x20, 0, 0, 0, 0, 0, 0), 28), // ORCHIDv2 (RFC 7343)
         (A::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32), // documentation
+        (A::new(0x2620, 0x4f, 0x8000, 0, 0, 0, 0, 0), 48), // AS112 direct delegation (RFC 7534)
         (A::new(0x3fff, 0, 0, 0, 0, 0, 0, 0), 20), // documentation (RFC 9637)
+        (A::new(0x5f00, 0, 0, 0, 0, 0, 0, 0), 16), // SRv6 SIDs (RFC 9602)
         (A::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 7), // unique-local
         (A::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10), // link-local
         (A::new(0xfec0, 0, 0, 0, 0, 0, 0, 0), 10), // site-local (deprecated)
@@ -131,16 +142,73 @@ impl std::fmt::Display for SsrfBlocked {
 
 impl std::error::Error for SsrfBlocked {}
 
-/// Does `err`'s source chain contain an [`SsrfBlocked`] refusal?
-fn is_ssrf_block(err: &(dyn std::error::Error + 'static)) -> bool {
+/// The guarded client's DNS lookup said the user-supplied host does not exist
+/// ([`is_no_such_host`]). Final like [`SsrfBlocked`]: a mistyped or nonexistent host fails fast
+/// instead of being retried with backoff. Any other lookup failure stays a plain, retryable I/O
+/// error.
+#[derive(Debug)]
+struct Unresolvable {
+    host: String,
+    source: std::io::Error,
+}
+
+impl std::fmt::Display for Unresolvable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "could not resolve {}", self.host)
+    }
+}
+
+impl std::error::Error for Unresolvable {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Does `err`'s source chain contain a `T`?
+fn chain_has<T: std::error::Error + 'static>(err: &(dyn std::error::Error + 'static)) -> bool {
     let mut cur = Some(err);
     while let Some(e) = cur {
-        if e.is::<SsrfBlocked>() {
+        if e.is::<T>() {
             return true;
         }
         cur = e.source();
     }
     false
+}
+
+/// Does `err`'s source chain contain an [`SsrfBlocked`] refusal?
+fn is_ssrf_block(err: &(dyn std::error::Error + 'static)) -> bool {
+    chain_has::<SsrfBlocked>(err)
+}
+
+/// Is `err` a refusal by [`ssrf_guarded_client`]'s guard (a blocked resolution or redirect hop),
+/// as opposed to a network failure? Lets callers word their error for a deliberate block.
+pub fn is_ssrf_refusal(err: &reqwest::Error) -> bool {
+    is_ssrf_block(err)
+}
+
+/// Is a failed host lookup a definitive "no such host" answer rather than a transient failure?
+///
+/// `std`'s resolver gives no typed kind for this. On Unix a `getaddrinfo` failure carries only the
+/// `gai_strerror` text, so this matches the `EAI_NONAME` / `EAI_NODATA` strings of glibc, musl and
+/// macOS; on Windows the raw `WSAHOST_NOT_FOUND` / `WSANO_DATA` codes. Everything else, including
+/// `EAI_AGAIN` ("Temporary failure in name resolution"), `EAI_FAIL`, timeouts, and a message
+/// translated by a non-English glibc locale, is treated as transient, so the worst a miss costs is
+/// a retry.
+fn is_no_such_host(err: &std::io::Error) -> bool {
+    const NOT_FOUND: [&str; 5] = [
+        "name or service not known",                    // glibc EAI_NONAME
+        "no address associated with hostname",          // glibc EAI_NODATA
+        "name does not resolve",                        // musl EAI_NONAME
+        "name has no usable address",                   // musl EAI_NODATA
+        "nodename nor servname provided, or not known", // macOS/BSD EAI_NONAME
+    ];
+    // WSAHOST_NOT_FOUND, WSANO_DATA.
+    if cfg!(windows) && matches!(err.raw_os_error(), Some(11001 | 11004)) {
+        return true;
+    }
+    let msg = err.to_string().to_ascii_lowercase();
+    NOT_FOUND.iter().any(|m| msg.contains(m))
 }
 
 /// Accept a host's resolved addresses only if there is at least one and NONE is blocked — a mixed
@@ -235,10 +303,23 @@ impl reqwest::dns::Resolve for SsrfGuardResolver {
         let host = name.as_str().to_owned();
         let lookup = (self.lookup)(host.clone());
         Box::pin(async move {
-            // A lookup failure stays a plain (retryable) I/O error, not an SSRF refusal.
+            // A lookup failure is not an SSRF refusal. A definitive "no such host" is final; any
+            // other failure (a DNS blip, a resolver timeout) stays a plain, retryable I/O error.
             let addrs = lookup
                 .await
-                .map_err(|e| std::io::Error::new(e.kind(), format!("resolving {host}: {e}")))?;
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                    if is_no_such_host(&e) {
+                        Box::new(Unresolvable {
+                            host: host.clone(),
+                            source: e,
+                        })
+                    } else {
+                        Box::new(std::io::Error::new(
+                            e.kind(),
+                            format!("resolving {host}: {e}"),
+                        ))
+                    }
+                })?;
             let vetted = vet_resolved(&host, addrs)?;
             let addrs: reqwest::dns::Addrs = Box::new(
                 vetted
@@ -303,7 +384,8 @@ pub fn backoff_delay(
 /// codes + connection/timeout errors). `build` is called once per attempt because `send()`
 /// consumes the builder. Bulk indexing routinely hits 429/503 from cloud providers; without
 /// this each such response permanently fails that item. An SSRF refusal from
-/// [`ssrf_guarded_client`] surfaces as a connect error but is final, so it is never retried.
+/// [`ssrf_guarded_client`] surfaces as a connect error but is final, so it is never retried; nor is
+/// that client's definitive "no such host" lookup result. Its transient lookup failures are retried.
 pub async fn send_with_retry(
     build: impl Fn() -> reqwest::RequestBuilder,
     max_retries: u32,
@@ -325,7 +407,8 @@ pub async fn send_with_retry(
             Err(e)
                 if attempt < max_retries
                     && (e.is_timeout() || e.is_connect() || e.is_request())
-                    && !is_ssrf_block(&e) =>
+                    && !is_ssrf_block(&e)
+                    && !chain_has::<Unresolvable>(&e) =>
             {
                 tokio::time::sleep(backoff_delay(attempt, None)).await;
                 attempt += 1;
@@ -385,6 +468,16 @@ mod tests {
             "http://[::1]/",
             "http://0.0.0.0/",
             "http://2130706433/",           // 127.0.0.1 in decimal form
+            "http://0x7f000001/",           // 127.0.0.1 as one hex number
+            "http://0x7f.1/",               // 127.0.0.1, hex + shortened
+            "http://0177.0.0.1/",           // 127.0.0.1, octal first octet
+            "http://017700000001/",         // 127.0.0.1 as one octal number
+            "http://127.1/",                // 127.0.0.1, shortened
+            "http://2852039166/",           // 169.254.169.254 in decimal form
+            "http://0xa9.0xfe.0xa9.0xfe/",  // 169.254.169.254, hex octets
+            "http://0251.0376.0251.0376/",  // 169.254.169.254, octal octets
+            "http://012.0.0.1/",            // 10.0.0.1, octal first octet
+            "http://0xc0a80101/",           // 192.168.1.1 as one hex number
             "http://[::ffff:127.0.0.1]/",   // IPv4-mapped loopback
             "http://[64:ff9b::a9fe:a9fe]/", // NAT64-embedded metadata address
             "ftp://example.com/",           // non-http scheme
@@ -424,8 +517,11 @@ mod tests {
             "172.31.255.255",         // RFC 1918, last
             "192.0.0.8",              // IETF protocol assignments 192.0.0.0/24
             "192.0.2.1",              // TEST-NET-1
+            "192.31.196.1",           // AS112-v4
+            "192.52.193.1",           // AMT
             "192.88.99.1",            // 6to4 relay anycast
             "192.168.1.1",            // RFC 1918
+            "192.175.48.6",           // AS112 direct delegation
             "198.18.0.0",             // benchmarking 198.18.0.0/15, first
             "198.19.255.255",         // benchmarking, last
             "198.51.100.7",           // TEST-NET-2
@@ -445,11 +541,21 @@ mod tests {
             "64:ff9b::a9fe:a9fe",     // NAT64 embedding 169.254.169.254
             "64:ff9b:1::1",           // local-use NAT64 64:ff9b:1::/48
             "100::1",                 // discard-only 100::/64
+            "100:0:0:1::1",           // dummy prefix 100:0:0:1::/64
             "2001::1",                // Teredo 2001::/32
+            "2001:1::1",              // PCP anycast 2001:1::/32
+            "2001:2::1",              // benchmarking 2001:2::/48
+            "2001:4:112::1",          // AS112-v6 2001:4:112::/48
+            "2001:10::1",             // ORCHID 2001:10::/28, first
+            "2001:1f:ffff::1",        // ORCHID, last
+            "2001:20::1",             // ORCHIDv2 2001:20::/28
+            "2001:2f:ffff::1",        // ORCHIDv2, last
             "2001:db8::1",            // documentation
             "2002:7f00:1::1",         // 6to4 2002::/16 embedding 127.0.0.1
             "2002:c0a8:101::",        // 6to4 embedding 192.168.1.1
+            "2620:4f:8000::1",        // AS112 direct delegation 2620:4f:8000::/48
             "3fff::1",                // documentation 3fff::/20
+            "5f00::1",                // SRv6 SIDs 5f00::/16
             "fc00::1",                // unique-local fc00::/7
             "fdff:ffff::1",           // unique-local, upper half
             "fe80::1",                // link-local fe80::/10
@@ -479,6 +585,12 @@ mod tests {
             "64:ff9b::808:808",     // NAT64 to a public address (DNS64 networks)
             "2002:808:808::1",      // 6to4 embedding a public address
             "2001:4860:4860::8888", // 2001:4860::/32 is outside Teredo 2001::/32
+            "2001:3::1",            // between the 2001:2::/48 and ORCHID blocks
+            "2001:30::1",           // just above ORCHIDv2
+            "2620:4f:8001::1",      // just above the AS112 v6 delegation
+            "192.31.197.1",         // just above AS112-v4
+            "192.175.49.1",         // just above the AS112 v4 delegation
+            "5f01::1",              // just above SRv6 SIDs
         ];
         for ip in public {
             let parsed: IpAddr = ip.parse().unwrap();
@@ -565,6 +677,7 @@ mod tests {
             is_ssrf_block(&err),
             "expected an SSRF refusal, got: {err:?}"
         );
+        assert!(is_ssrf_refusal(&err), "the public check must agree");
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
@@ -574,6 +687,171 @@ mod tests {
             listener.accept().map(|_| ()).unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock,
             "the guarded client must never open a connection to the private address"
+        );
+    }
+
+    /// A [`Lookup`] stub that always fails with `msg` (as `std` reports a `getaddrinfo` failure),
+    /// counting calls.
+    fn failing_lookup(
+        msg: &'static str,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Lookup {
+        std::sync::Arc::new(move |_host: String| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Err(std::io::Error::other(msg)) })
+        })
+    }
+
+    #[tokio::test]
+    async fn guarded_client_does_not_retry_an_unresolvable_host() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let lookup = failing_lookup(
+            "failed to lookup address information: Name or service not known",
+            calls.clone(),
+        );
+        let client = ssrf_guarded_client_with_lookup(5, lookup);
+        let err = send_with_retry(|| client.get("http://no-such-host.test/"), 3)
+            .await
+            .unwrap_err();
+        assert!(chain_has::<Unresolvable>(&err), "got: {err:?}");
+        assert!(
+            !is_ssrf_block(&err),
+            "a lookup failure is not an SSRF refusal"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an unresolvable host must not be retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn guarded_client_retries_a_transient_lookup_failure() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let lookup = failing_lookup(
+            "failed to lookup address information: Temporary failure in name resolution",
+            calls.clone(),
+        );
+        let client = ssrf_guarded_client_with_lookup(5, lookup);
+        // One retry keeps the test to a single 0.5 s backoff.
+        let err = send_with_retry(|| client.get("http://flaky-dns.test/"), 1)
+            .await
+            .unwrap_err();
+        assert!(!chain_has::<Unresolvable>(&err), "got: {err:?}");
+        assert!(!is_ssrf_refusal(&err), "a DNS blip is not an SSRF refusal");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a transient lookup failure must use the retry budget"
+        );
+    }
+
+    #[test]
+    fn only_a_definitive_lookup_answer_counts_as_no_such_host() {
+        let gai = |detail: &str| {
+            std::io::Error::other(format!("failed to lookup address information: {detail}"))
+        };
+        for detail in [
+            "Name or service not known",
+            "No address associated with hostname",
+            "Name does not resolve",
+            "Name has no usable address",
+            "nodename nor servname provided, or not known",
+        ] {
+            assert!(is_no_such_host(&gai(detail)), "{detail}");
+        }
+        for detail in [
+            "Temporary failure in name resolution",
+            "Try again",
+            "Non-recoverable failure in name resolution",
+            "Name ou service inconnu", // a translated glibc message: retried, not final
+        ] {
+            assert!(!is_no_such_host(&gai(detail)), "{detail}");
+        }
+        assert!(!is_no_such_host(&std::io::Error::from(
+            std::io::ErrorKind::TimedOut
+        )));
+    }
+
+    /// A one-shot HTTP server on 127.0.0.1 that answers its first request with a 302 to
+    /// `location(port)`. Returns the listener (to check for later connections), its port, and a
+    /// handle yielding the request line the server received.
+    fn redirect_once(
+        location: impl FnOnce(u16) -> String,
+    ) -> (std::net::TcpListener, u16, std::thread::JoinHandle<String>) {
+        use std::io::{BufRead, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let location = location(port);
+        let server = listener.try_clone().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = server.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap() > 2 {
+                line.clear();
+            }
+            write!(
+                &stream,
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\
+                 Connection: close\r\n\r\n"
+            )
+            .unwrap();
+            request_line
+        });
+        (listener, port, handle)
+    }
+
+    #[tokio::test]
+    async fn guarded_client_refuses_a_redirect_hop_that_resolves_to_a_blocked_address() {
+        // The first hop is an IP literal, so it skips DNS and lands on the local server (the
+        // up-front `validate_public_url_str` that `pack add-url` runs is deliberately skipped
+        // here). Its 302 names a hostname the rebinding DNS answers with loopback.
+        let (listener, port, server) =
+            redirect_once(|port| format!("http://internal.test:{port}/"));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client =
+            ssrf_guarded_client_with_lookup(5, stub_lookup(vec![vec!["127.0.0.1"]], calls.clone()));
+        let url = format!("http://127.0.0.1:{port}/start");
+        let err = send_with_retry(|| client.get(&url), 3).await.unwrap_err();
+        assert!(server.join().unwrap().starts_with("GET /start "));
+        assert!(
+            is_ssrf_block(&err),
+            "expected an SSRF refusal, got: {err:?}"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the hop is resolved once and the refusal is not retried"
+        );
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(
+            listener.accept().map(|_| ()).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the guarded client must never connect to the redirect hop's private address"
+        );
+    }
+
+    #[tokio::test]
+    async fn guarded_client_refuses_a_redirect_hop_to_an_alternate_form_ip_literal() {
+        // `0x7f.1` is 127.0.0.1: the redirect policy refuses it without any DNS lookup.
+        let (listener, port, server) = redirect_once(|port| format!("http://0x7f.1:{port}/"));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client = ssrf_guarded_client_with_lookup(5, stub_lookup(vec![vec![]], calls.clone()));
+        let url = format!("http://127.0.0.1:{port}/start");
+        let err = send_with_retry(|| client.get(&url), 3).await.unwrap_err();
+        assert!(server.join().unwrap().starts_with("GET /start "));
+        assert!(
+            is_ssrf_block(&err),
+            "expected an SSRF refusal, got: {err:?}"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(
+            listener.accept().map(|_| ()).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
         );
     }
 
