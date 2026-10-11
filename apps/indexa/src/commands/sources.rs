@@ -138,7 +138,12 @@ async fn fetch_web(url: &str, timeout: u64, retries: u32) -> Result<String> {
     let resp =
         indexa_http_util::send_with_retry(|| client.get(url).header("User-Agent", UA), retries)
             .await
-            .context("web fetch failed")?;
+            .map_err(|e| {
+                let msg = web_fetch_failed(indexa_http_util::is_ssrf_refusal(&e), |k| {
+                    std::env::var(k).ok()
+                });
+                anyhow::Error::new(e).context(msg)
+            })?;
     if !resp.status().is_success() {
         anyhow::bail!("HTTP {} fetching {url}", resp.status());
     }
@@ -150,6 +155,34 @@ async fn fetch_web(url: &str, timeout: u64, retries: u32) -> Result<String> {
         anyhow::bail!("converted page was empty — not HTML, or no extractable text");
     }
     Ok(md)
+}
+
+/// The context for a failed web-page fetch. The SSRF-guarded client ignores proxies, so when a proxy
+/// is configured in the environment the plain message would hide the likely cause: a network that
+/// only allows outbound traffic through that proxy. A deliberate SSRF refusal (`ssrf_refused`) gets
+/// no proxy hint: the proxy is not why it failed.
+fn web_fetch_failed(ssrf_refused: bool, env: impl Fn(&str) -> Option<String>) -> String {
+    if ssrf_refused {
+        return "web fetch failed".to_owned();
+    }
+    const PROXY_VARS: [&str; 6] = [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+    match PROXY_VARS
+        .into_iter()
+        .find(|k| env(k).is_some_and(|v| !v.is_empty()))
+    {
+        Some(var) => format!(
+            "web fetch failed ({var} is set, but proxies are ignored for web-page fetches so the \
+             SSRF guard sees the address it connects to; the page must be reachable directly)"
+        ),
+        None => "web fetch failed".to_owned(),
+    }
 }
 
 /// Remove every `<tag …>…</tag>` block (case-insensitive) from `html`. Used to drop `<script>`
@@ -253,6 +286,32 @@ mod tests {
         // Non-issue GitHub URLs and other hosts are not GitHub-issue refs.
         assert!(parse_github_issue_or_pr("https://github.com/harf-promo/indexa").is_none());
         assert!(parse_github_issue_or_pr("https://example.com/issues/1").is_none());
+    }
+
+    #[test]
+    fn web_fetch_failure_names_an_ignored_proxy() {
+        let https = |k: &str| (k == "HTTPS_PROXY").then(|| "http://proxy:3128".to_owned());
+        let msg = web_fetch_failed(false, https);
+        assert!(
+            msg.contains("HTTPS_PROXY is set") && msg.contains("proxies are ignored"),
+            "{msg}"
+        );
+        assert!(
+            !msg.contains('#'),
+            "no internal PR numbers in user text: {msg}"
+        );
+        let msg = web_fetch_failed(false, |k| {
+            (k == "all_proxy").then(|| "socks5://proxy:1080".into())
+        });
+        assert!(msg.contains("all_proxy is set"), "{msg}");
+        // No proxy, or only an empty variable: the plain message.
+        assert_eq!(web_fetch_failed(false, |_| None), "web fetch failed");
+        assert_eq!(
+            web_fetch_failed(false, |k| (k == "HTTP_PROXY").then(String::new)),
+            "web fetch failed"
+        );
+        // A deliberate SSRF refusal never blames the proxy.
+        assert_eq!(web_fetch_failed(true, https), "web fetch failed");
     }
 
     #[test]
