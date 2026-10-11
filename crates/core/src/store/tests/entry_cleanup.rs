@@ -599,3 +599,58 @@ fn guarded_scan_of_missing_root_keeps_entries_and_children() {
     assert_eq!(store.entry_count().unwrap(), entries);
     assert_eq!(orphan_rows_for(&store, &file), children);
 }
+
+#[test]
+fn prune_clears_every_entry_child_table() {
+    // F15: `prune_orphans` skipped `note_anchors` and `co_change` (both cleared by the entry-delete
+    // paths), and `OrphanCounts` omitted `edges` even though prune deleted them. Orphan a fully
+    // seeded entry (every child table populated by `seed_full_entry`) by removing only its
+    // `entries` row, then prune: `orphan_rows_for` — the one list of entry-keyed child tables —
+    // must hit zero for it, and a live entry's rows (incl. a co_change pair whose both sides are
+    // entried) must be untouched.
+    let mut store = Store::open_in_memory().unwrap();
+    seed_full_entry(&mut store, "/proj/gone.rs");
+    seed_full_entry(&mut store, "/proj/keep.rs");
+    // Make keep.rs's co_change partner a live entry, so that pair is NOT an orphan.
+    store
+        .upsert_entries(&[dummy_entry(
+            "/proj/keep.rs.cochange-partner",
+            EntryKind::File,
+            1,
+        )])
+        .unwrap();
+    store
+        .db_connection()
+        .execute("DELETE FROM entries WHERE path = '/proj/gone.rs'", [])
+        .unwrap();
+    let keep_before = orphan_rows_for(&store, "/proj/keep.rs");
+    assert!(orphan_rows_for(&store, "/proj/gone.rs") >= 10);
+
+    let before = store.count_orphans().unwrap();
+    assert_eq!(before.edges, 2, "both seeded edges are counted");
+    assert_eq!(before.note_anchors, 1, "the note anchor is counted");
+    assert_eq!(before.co_change, 1, "only gone.rs's pair is orphaned");
+    assert_eq!(before.symbols, 1);
+
+    let removed = store.prune_orphans().unwrap();
+    assert_eq!(
+        (removed.edges, removed.note_anchors, removed.co_change),
+        (2, 1, 1)
+    );
+    assert_eq!(
+        orphan_rows_for(&store, "/proj/gone.rs"),
+        0,
+        "prune must clear every entry-keyed child table"
+    );
+    assert!(store.count_orphans().unwrap().is_empty());
+    assert_eq!(
+        orphan_rows_for(&store, "/proj/keep.rs"),
+        keep_before,
+        "a live entry's child rows are untouched"
+    );
+    assert_eq!(
+        store.co_change_for("/proj/keep.rs", 10).unwrap().len(),
+        1,
+        "a pair whose both sides are entried survives"
+    );
+}

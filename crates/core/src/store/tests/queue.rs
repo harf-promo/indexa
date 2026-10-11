@@ -919,3 +919,126 @@ fn subtree_has_unfinished_guards_prefix_siblings() {
     // /projector/x.txt is a prefix-sibling, NOT inside /proj's subtree → /proj not blocked.
     assert!(!store.subtree_has_unfinished("/proj", 1).unwrap());
 }
+
+/// `EXPLAIN QUERY PLAN` detail lines for `sql` with `params` bound (EQP only plans; nothing runs).
+fn query_plan(store: &Store, sql: &str, params: impl rusqlite::Params) -> Vec<String> {
+    let mut stmt = store
+        .db_connection()
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap();
+    let rows = stmt.query_map(params, |r| r.get::<_, String>(3)).unwrap();
+    rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+}
+
+/// A queue with enough rows across every state and depth that the planner's choice is a real one.
+fn seed_mixed_queue(store: &mut Store) {
+    let items: Vec<(String, String, i64)> = (0..200)
+        .map(|i| {
+            (
+                format!("/q/d{}/f{i}.txt", i % 7),
+                "file".into(),
+                (i % 9) as i64,
+            )
+        })
+        .collect();
+    store.enqueue_summary_items(&items).unwrap();
+    for (path, _, _) in items.iter().step_by(3) {
+        store.mark_queue_state(path, "done", None).unwrap();
+    }
+}
+
+#[test]
+fn claim_query_uses_claim_index_without_sorting() {
+    // F14: `next_queue_item` claims `WHERE state='pending' ORDER BY depth DESC LIMIT 1`. With only
+    // idx_summary_queue_state(state) every claim sorted all pending rows in a temp B-tree (under
+    // the write lock) — O(n² log n) to drain a big queue. idx_summary_queue_claim(state, depth
+    // DESC) serves the filter AND the order, so the plan must name it and must not sort.
+    let mut store = Store::open_in_memory().unwrap();
+    seed_mixed_queue(&mut store);
+    let plan = query_plan(&store, crate::store::queue::NEXT_QUEUE_ITEM_SQL, []);
+    println!(
+        "EXPLAIN QUERY PLAN next_queue_item:\n  {}",
+        plan.join("\n  ")
+    );
+    assert!(
+        plan.iter()
+            .any(|d| d.contains("USING INDEX idx_summary_queue_claim")
+                || d.contains("USING COVERING INDEX idx_summary_queue_claim")),
+        "claim subquery must search idx_summary_queue_claim; plan: {plan:?}"
+    );
+    assert!(
+        !plan.iter().any(|d| d.contains("TEMP B-TREE")),
+        "claim must not sort pending rows per call; plan: {plan:?}"
+    );
+    // And the index really returns the deepest pending row.
+    let claimed = store.next_queue_item().unwrap().unwrap();
+    assert_eq!(claimed.depth, 8, "deepest pending first");
+}
+
+#[test]
+fn subtree_has_unfinished_query_is_sargable() {
+    // F14 (related): the subtree predicate was `substr(path, 1, length(?1) + 1) = ?1 || '/'` — a
+    // function of the column, so no index on `path` could ever serve it. It is now a plain range
+    // on `path`. Make `state`/`depth` unselective (a freshly enqueued tree: everything pending,
+    // ANALYZE stats to match), so the subtree's path range is the only selective predicate: the
+    // planner must then seek the path index by that range. The substr form can't, and falls back
+    // to walking every pending row.
+    let mut store = Store::open_in_memory().unwrap();
+    let items: Vec<(String, String, i64)> = (0..2000)
+        .map(|i| (format!("/q/d{}/f{i}.txt", i % 50), "file".into(), 3))
+        .collect();
+    store.enqueue_summary_items(&items).unwrap();
+    store.db_connection().execute_batch("ANALYZE").unwrap();
+    let plan = query_plan(
+        &store,
+        crate::store::queue::SUBTREE_HAS_UNFINISHED_SQL,
+        rusqlite::params!["/q/d1/", "/q/d10", 1],
+    );
+    println!(
+        "EXPLAIN QUERY PLAN subtree_has_unfinished:\n  {}",
+        plan.join("\n  ")
+    );
+    assert!(
+        plan.iter()
+            .any(|d| d.starts_with("SEARCH summary_queue") && d.contains("path>? AND path<?")),
+        "subtree check must seek the path index by range; plan: {plan:?}"
+    );
+    assert!(
+        !plan.iter().any(|d| d.starts_with("SCAN summary_queue")),
+        "subtree check must not full-scan summary_queue; plan: {plan:?}"
+    );
+}
+
+#[test]
+fn subtree_has_unfinished_range_matches_only_true_descendants() {
+    // The range form `[dir + "/", dir + "0")` must match exactly the old prefix semantics: only
+    // paths under `dir/`. Siblings whose next byte sorts just below `/` (`-`, `.`), exactly at the
+    // upper bound (`0`), or above it must not block the roll-up; LIKE metacharacters in the dir
+    // name are literal (it is a byte range, not a pattern).
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .enqueue_summary_items(&[
+            ("/p_r%oj".into(), "dir".into(), 1),
+            ("/p_r%oj-x/a.txt".into(), "file".into(), 2),
+            ("/p_r%oj.x/a.txt".into(), "file".into(), 2),
+            ("/p_r%oj0/a.txt".into(), "file".into(), 2),
+            ("/p_r%ojz/a.txt".into(), "file".into(), 2),
+            ("/pXr%oj/a.txt".into(), "file".into(), 2),
+        ])
+        .unwrap();
+    assert!(
+        !store.subtree_has_unfinished("/p_r%oj", 1).unwrap(),
+        "no true descendant is unfinished"
+    );
+    store
+        .enqueue_summary_items(&[("/p_r%oj/deep/é.txt".into(), "file".into(), 3)])
+        .unwrap();
+    assert!(
+        store.subtree_has_unfinished("/p_r%oj", 1).unwrap(),
+        "a nested non-ASCII descendant is inside the range"
+    );
+    assert!(
+        !store.subtree_has_unfinished("/p_r%oj", 3).unwrap(),
+        "depth filter still applies"
+    );
+}

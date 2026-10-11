@@ -4,6 +4,27 @@ use super::{FailedQueueItem, QueueItem, QueueStats, Store};
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 
+/// The atomic claim behind [`Store::next_queue_item`]. The inner `ORDER BY depth DESC LIMIT 1`
+/// is served by `idx_summary_queue_claim (state, depth DESC)` — no per-claim sort of every
+/// pending row. A named constant so the EXPLAIN QUERY PLAN test checks this exact statement.
+pub(super) const NEXT_QUEUE_ITEM_SQL: &str = "UPDATE summary_queue
+     SET state='in_flight', attempts=attempts+1, updated_at=unixepoch()
+     WHERE path = (
+         SELECT path FROM summary_queue
+         WHERE state='pending'
+         ORDER BY depth DESC LIMIT 1
+     )
+     RETURNING path, kind, depth";
+
+/// [`Store::subtree_has_unfinished`]'s query: `?1`/`?2` bound the subtree's path range, `?3` is
+/// the directory's depth. Every predicate is sargable (see that method's docs).
+pub(super) const SUBTREE_HAS_UNFINISHED_SQL: &str = "SELECT EXISTS(
+         SELECT 1 FROM summary_queue
+         WHERE state IN ('pending','in_flight')
+           AND depth > ?3
+           AND path >= ?1 AND path < ?2
+     )";
+
 impl Store {
     // ── Summary queue ────────────────────────────────────────────────────────
 
@@ -53,24 +74,13 @@ impl Store {
     pub fn next_queue_item(&mut self) -> Result<Option<QueueItem>> {
         let item = self
             .conn
-            .query_row(
-                "UPDATE summary_queue
-                 SET state='in_flight', attempts=attempts+1, updated_at=unixepoch()
-                 WHERE path = (
-                     SELECT path FROM summary_queue
-                     WHERE state='pending'
-                     ORDER BY depth DESC LIMIT 1
-                 )
-                 RETURNING path, kind, depth",
-                [],
-                |r| {
-                    Ok(QueueItem {
-                        path: r.get(0)?,
-                        kind: r.get(1)?,
-                        depth: r.get(2)?,
-                    })
-                },
-            )
+            .query_row(NEXT_QUEUE_ITEM_SQL, [], |r| {
+                Ok(QueueItem {
+                    path: r.get(0)?,
+                    kind: r.get(1)?,
+                    depth: r.get(2)?,
+                })
+            })
             .optional()?;
         Ok(item)
     }
@@ -82,17 +92,20 @@ impl Store {
     /// `pending`) until its children are summarized — so a concurrent worker can't roll
     /// the directory up from an incomplete child set and mark it `done`. This is a
     /// read-only check that does NOT touch the atomic claim in
-    /// [`next_queue_item`](Self::next_queue_item). The `|| '/'` trailing slash guards
-    /// prefix-siblings (`/proj` must not match `/projector/x`).
+    /// [`next_queue_item`](Self::next_queue_item).
+    ///
+    /// "Inside the subtree" is the half-open range `[dir_path + "/", dir_path + "0")`: under
+    /// BINARY collation (bytewise) that is exactly the set of paths starting with
+    /// `dir_path + "/"`, because `'0'` is the byte right after `'/'`. The trailing slash guards
+    /// prefix-siblings (`/proj` must not match `/projector/x`). Unlike the former
+    /// `substr(path, 1, length(?1) + 1) = ?1 || '/'`, a plain range on `path` is sargable, so
+    /// the planner can seek an index instead of evaluating `substr` on every unfinished row.
     pub fn subtree_has_unfinished(&self, dir_path: &str, dir_depth: i64) -> Result<bool> {
+        let lo = format!("{dir_path}/");
+        let hi = format!("{dir_path}0");
         let unfinished: bool = self.conn.query_row(
-            "SELECT EXISTS(
-                 SELECT 1 FROM summary_queue
-                 WHERE state IN ('pending','in_flight')
-                   AND depth > ?2
-                   AND substr(path, 1, length(?1) + 1) = ?1 || '/'
-             )",
-            params![dir_path, dir_depth],
+            SUBTREE_HAS_UNFINISHED_SQL,
+            params![lo, hi, dir_depth],
             |r| r.get(0),
         )?;
         Ok(unfinished)
