@@ -627,3 +627,181 @@ fn all_coverage_entries_grouped_join_matches_the_correlated_form() {
     assert_eq!(by_path["/r/two.rs"].4.as_deref(), Some("pending"));
     assert_eq!(by_path["/r/none.rs"].4, None);
 }
+
+/// Hand-build a pre-column-migration DB at `path`: `entries`, `summaries`, `tool_usage`,
+/// `decisions` and `pack_paths` exist but lack every column `init_schema` adds by `ALTER TABLE …
+/// ADD COLUMN`, and `user_version` is 0 — the shape an old index has before its first open by a
+/// newer build. WAL like a real Indexa DB, so concurrent opens contend only on the migration.
+fn build_pre_column_migration_db(path: &std::path::Path) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         CREATE TABLE entries (
+             id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, parent_path TEXT,
+             kind TEXT NOT NULL CHECK(kind IN ('file','dir')), size INTEGER NOT NULL DEFAULT 0,
+             modified_s INTEGER, hint_label TEXT, hint_cat TEXT, deep_policy TEXT,
+             indexed_at INTEGER NOT NULL DEFAULT (unixepoch()));
+         CREATE TABLE summaries (
+             path TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('file','dir')),
+             parent_path TEXT, depth INTEGER NOT NULL DEFAULT 0, summary TEXT NOT NULL,
+             embedding BLOB, child_count INTEGER NOT NULL DEFAULT 0,
+             byte_size INTEGER NOT NULL DEFAULT 0, model TEXT NOT NULL DEFAULT '',
+             source_hash TEXT NOT NULL DEFAULT '',
+             generated_at INTEGER NOT NULL DEFAULT (unixepoch()));
+         CREATE TABLE tool_usage (
+             id INTEGER PRIMARY KEY AUTOINCREMENT, surface TEXT NOT NULL, tool TEXT NOT NULL,
+             bytes_served INTEGER NOT NULL DEFAULT 0,
+             bytes_counterfactual INTEGER NOT NULL DEFAULT 0,
+             at INTEGER NOT NULL DEFAULT (unixepoch()));
+         CREATE TABLE decisions (
+             id INTEGER PRIMARY KEY AUTOINCREMENT, decision_type TEXT NOT NULL,
+             subject TEXT NOT NULL, params TEXT NOT NULL DEFAULT '{}',
+             options TEXT NOT NULL DEFAULT '[]', auto_value TEXT, chosen TEXT,
+             source TEXT CHECK(source IN ('auto','user','system')), confidence REAL,
+             evidence_hash TEXT NOT NULL DEFAULT '', priority INTEGER NOT NULL DEFAULT 50,
+             status TEXT NOT NULL DEFAULT 'open'
+                 CHECK(status IN ('open','decided','dismissed','expired')),
+             parent_id INTEGER REFERENCES decisions(id),
+             superseded_by INTEGER REFERENCES decisions(id),
+             effects TEXT, effects_applied_at INTEGER,
+             created_at INTEGER NOT NULL DEFAULT (unixepoch()), decided_at INTEGER);
+         CREATE TABLE packs (
+             id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT,
+             created_at INTEGER NOT NULL DEFAULT (unixepoch()));
+         CREATE TABLE pack_paths (
+             pack_id TEXT NOT NULL REFERENCES packs(id) ON DELETE CASCADE, path TEXT NOT NULL,
+             added_at INTEGER NOT NULL DEFAULT (unixepoch()), PRIMARY KEY (pack_id, path));
+         INSERT INTO entries (path, kind, indexed_at) VALUES ('/legacy/a.rs', 'file', 1234);",
+    )
+    .unwrap();
+}
+
+#[test]
+fn column_add_migrations_are_concurrency_safe() {
+    // F13: `serve`, `worker` and the MCP server open the DB as separate processes, so two can hit
+    // a pre-migration DB at once. Each column-add migration was a bare probe-then-ALTER: both
+    // openers saw the column missing, the second ALTER failed with "duplicate column name", and
+    // that `Store::open` errored. Each probe+ALTER now re-checks inside an IMMEDIATE transaction.
+    // Several rounds of simultaneous opens (released together by a barrier) on fresh legacy DBs.
+    const ROUNDS: usize = 12;
+    const OPENERS: usize = 8;
+    let dir = tempfile::tempdir().unwrap();
+    for round in 0..ROUNDS {
+        let path = dir.path().join(format!("legacy_columns_{round}.db"));
+        build_pre_column_migration_db(&path);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(OPENERS));
+        let handles: Vec<_> = (0..OPENERS)
+            .map(|_| {
+                let p = path.clone();
+                let b = barrier.clone();
+                std::thread::spawn(move || {
+                    b.wait();
+                    Store::open(&p).map(|_| ())
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap().unwrap_or_else(|e| {
+                panic!("round {round}: concurrent open of a legacy DB must not error: {e:#}")
+            });
+        }
+        let store = Store::open(&path).unwrap();
+        let c = store.db_connection();
+        for (table, col) in [
+            ("entries", "scan_generation"),
+            ("entries", "agent_session"),
+            ("entries", "first_indexed_at"),
+            ("summaries", "summary_l0"),
+            ("summaries", "provider"),
+            ("summaries", "passes"),
+            ("summaries", "fallback"),
+            ("tool_usage", "session_id"),
+            ("tool_usage", "served_basis"),
+            ("decisions", "patch_id"),
+            ("pack_paths", "inclusion_mode"),
+            ("pack_paths", "pinned_snapshot"),
+        ] {
+            let present = c
+                .prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")
+                .unwrap()
+                .exists([table, col])
+                .unwrap();
+            assert!(present, "round {round}: {table}.{col} must be migrated in");
+        }
+        // The first_indexed_at backfill ran exactly once and kept the legacy row.
+        let first: Option<i64> = c
+            .query_row(
+                "SELECT first_indexed_at FROM entries WHERE path = '/legacy/a.rs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            first,
+            Some(1234),
+            "round {round}: backfilled from indexed_at"
+        );
+    }
+}
+
+#[test]
+fn schema_v11_db_migrates_forward() {
+    // F14 adds `idx_summary_queue_claim` and bumps SCHEMA_VERSION. A DB stamped by the previous
+    // build (v11 — the current DDL minus that index) takes the version-mismatch path on open,
+    // gains the index, keeps its data, and is re-stamped. Without the bump it would take the
+    // fast path and silently never get the index.
+    const PREVIOUS_SCHEMA_VERSION: i64 = 11;
+    let has_claim_index = |c: &rusqlite::Connection| -> bool {
+        c.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_summary_queue_claim'",
+        )
+        .unwrap()
+        .exists([])
+        .unwrap()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("v11.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        store
+            .upsert_entries(&[
+                dummy_entry("/v11", EntryKind::Dir, 0),
+                dummy_entry("/v11/a.rs", EntryKind::File, 10),
+            ])
+            .unwrap();
+        store
+            .enqueue_summary_items(&[
+                ("/v11".into(), "dir".into(), 1),
+                ("/v11/a.rs".into(), "file".into(), 2),
+            ])
+            .unwrap();
+        // Roll the schema back to exactly what a v11 build left on disk.
+        store
+            .db_connection()
+            .execute_batch(&format!(
+                "DROP INDEX IF EXISTS idx_summary_queue_claim;
+                 PRAGMA user_version = {PREVIOUS_SCHEMA_VERSION};"
+            ))
+            .unwrap();
+        assert!(
+            !has_claim_index(store.db_connection()),
+            "precondition: v11 shape"
+        );
+    }
+
+    let mut store = Store::open(&db).unwrap();
+    let version: i64 = store
+        .db_connection()
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, crate::store::schema::SCHEMA_VERSION, "re-stamped");
+    assert!(
+        has_claim_index(store.db_connection()),
+        "the v11 → current open must create idx_summary_queue_claim"
+    );
+    // Data survives and the queue still drains deepest-first.
+    assert_eq!(store.entry_count().unwrap(), 2);
+    assert_eq!(store.next_queue_item().unwrap().unwrap().path, "/v11/a.rs");
+    assert_eq!(store.next_queue_item().unwrap().unwrap().path, "/v11");
+    assert!(store.next_queue_item().unwrap().is_none());
+}
