@@ -139,7 +139,7 @@ async fn fetch_web(url: &str, timeout: u64, retries: u32) -> Result<String> {
         indexa_http_util::send_with_retry(|| client.get(url).header("User-Agent", UA), retries)
             .await
             .map_err(|e| {
-                let msg = web_fetch_failed(indexa_http_util::is_ssrf_refusal(&e), |k| {
+                let msg = web_fetch_failed(indexa_http_util::is_direct_connect_failure(&e), |k| {
                     std::env::var(k).ok()
                 });
                 anyhow::Error::new(e).context(msg)
@@ -157,12 +157,13 @@ async fn fetch_web(url: &str, timeout: u64, retries: u32) -> Result<String> {
     Ok(md)
 }
 
-/// The context for a failed web-page fetch. The SSRF-guarded client ignores proxies, so when a proxy
-/// is configured in the environment the plain message would hide the likely cause: a network that
-/// only allows outbound traffic through that proxy. A deliberate SSRF refusal (`ssrf_refused`) gets
-/// no proxy hint: the proxy is not why it failed.
-fn web_fetch_failed(ssrf_refused: bool, env: impl Fn(&str) -> Option<String>) -> String {
-    if ssrf_refused {
+/// The context for a failed web-page fetch. The SSRF-guarded client bypasses proxies, so when a
+/// direct connection failed or timed out (`connect_failed`) and a proxy is configured in the
+/// environment, the plain message would hide the likely cause: a network that only allows outbound
+/// traffic through that proxy. Any other failure (a deliberate SSRF refusal, a bad response from a
+/// server that was reached) gets no proxy hint: the proxy is not why it failed.
+fn web_fetch_failed(connect_failed: bool, env: impl Fn(&str) -> Option<String>) -> String {
+    if !connect_failed {
         return "web fetch failed".to_owned();
     }
     const PROXY_VARS: [&str; 6] = [
@@ -178,8 +179,9 @@ fn web_fetch_failed(ssrf_refused: bool, env: impl Fn(&str) -> Option<String>) ->
         .find(|k| env(k).is_some_and(|v| !v.is_empty()))
     {
         Some(var) => format!(
-            "web fetch failed ({var} is set, but proxies are ignored for web-page fetches so the \
-             SSRF guard sees the address it connects to; the page must be reachable directly)"
+            "web fetch failed: could not connect directly ({var} is set, but web-page fetches make \
+             direct connections only; proxies are bypassed so the SSRF guard can resolve and check \
+             the target itself)"
         ),
         None => "web fetch failed".to_owned(),
     }
@@ -291,27 +293,31 @@ mod tests {
     #[test]
     fn web_fetch_failure_names_an_ignored_proxy() {
         let https = |k: &str| (k == "HTTPS_PROXY").then(|| "http://proxy:3128".to_owned());
-        let msg = web_fetch_failed(false, https);
+        let msg = web_fetch_failed(true, https);
         assert!(
-            msg.contains("HTTPS_PROXY is set") && msg.contains("proxies are ignored"),
+            msg.contains("HTTPS_PROXY is set")
+                && msg.contains("direct connections only")
+                && msg.contains("proxies are bypassed"),
             "{msg}"
         );
+        assert!(!msg.contains("3128"), "never echo the proxy's value: {msg}");
         assert!(
             !msg.contains('#'),
             "no internal PR numbers in user text: {msg}"
         );
-        let msg = web_fetch_failed(false, |k| {
+        let msg = web_fetch_failed(true, |k| {
             (k == "all_proxy").then(|| "socks5://proxy:1080".into())
         });
         assert!(msg.contains("all_proxy is set"), "{msg}");
         // No proxy, or only an empty variable: the plain message.
-        assert_eq!(web_fetch_failed(false, |_| None), "web fetch failed");
+        assert_eq!(web_fetch_failed(true, |_| None), "web fetch failed");
         assert_eq!(
-            web_fetch_failed(false, |k| (k == "HTTP_PROXY").then(String::new)),
+            web_fetch_failed(true, |k| (k == "HTTP_PROXY").then(String::new)),
             "web fetch failed"
         );
-        // A deliberate SSRF refusal never blames the proxy.
-        assert_eq!(web_fetch_failed(true, https), "web fetch failed");
+        // A failure that is not a failed direct connection (an SSRF refusal, a server that was
+        // reached but answered badly) never blames the proxy.
+        assert_eq!(web_fetch_failed(false, https), "web fetch failed");
     }
 
     #[test]

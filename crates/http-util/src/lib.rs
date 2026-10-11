@@ -78,9 +78,11 @@ const BLOCKED_V6: &[(std::net::Ipv6Addr, u32)] = {
         (A::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 32), // Teredo
         (A::new(0x2001, 1, 0, 0, 0, 0, 0, 0), 32), // PCP/TURN/DNS-SD anycast (RFC 7723, 8155, 9665)
         (A::new(0x2001, 2, 0, 0, 0, 0, 0, 0), 48), // benchmarking (RFC 5180)
+        (A::new(0x2001, 3, 0, 0, 0, 0, 0, 0), 32), // AMT (RFC 7450)
         (A::new(0x2001, 4, 0x112, 0, 0, 0, 0, 0), 48), // AS112-v6 (RFC 7535)
         (A::new(0x2001, 0x10, 0, 0, 0, 0, 0, 0), 28), // ORCHID (deprecated, RFC 4843)
         (A::new(0x2001, 0x20, 0, 0, 0, 0, 0, 0), 28), // ORCHIDv2 (RFC 7343)
+        (A::new(0x2001, 0x30, 0, 0, 0, 0, 0, 0), 28), // Drone Remote ID DETs (RFC 9374)
         (A::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32), // documentation
         (A::new(0x2620, 0x4f, 0x8000, 0, 0, 0, 0, 0), 48), // AS112 direct delegation (RFC 7534)
         (A::new(0x3fff, 0, 0, 0, 0, 0, 0, 0), 20), // documentation (RFC 9637)
@@ -185,6 +187,15 @@ fn is_ssrf_block(err: &(dyn std::error::Error + 'static)) -> bool {
 /// as opposed to a network failure? Lets callers word their error for a deliberate block.
 pub fn is_ssrf_refusal(err: &reqwest::Error) -> bool {
     is_ssrf_block(err)
+}
+
+/// Did `err` fail before any server answered — a connect error (refused, unreachable, a failed
+/// lookup, a TLS handshake) or a timeout — rather than a deliberate SSRF refusal or a bad response
+/// from a server that was reached? Only this kind of failure can be caused by
+/// [`ssrf_guarded_client`] bypassing a configured proxy, so callers use it to decide whether to
+/// mention one.
+pub fn is_direct_connect_failure(err: &reqwest::Error) -> bool {
+    (err.is_connect() || err.is_timeout()) && !is_ssrf_block(err)
 }
 
 /// Is a failed host lookup a definitive "no such host" answer rather than a transient failure?
@@ -545,11 +556,15 @@ mod tests {
             "2001::1",                // Teredo 2001::/32
             "2001:1::1",              // PCP anycast 2001:1::/32
             "2001:2::1",              // benchmarking 2001:2::/48
+            "2001:3::1",              // AMT 2001:3::/32, first
+            "2001:3:ffff::1",         // AMT, last
             "2001:4:112::1",          // AS112-v6 2001:4:112::/48
             "2001:10::1",             // ORCHID 2001:10::/28, first
             "2001:1f:ffff::1",        // ORCHID, last
             "2001:20::1",             // ORCHIDv2 2001:20::/28
             "2001:2f:ffff::1",        // ORCHIDv2, last
+            "2001:30::1",             // Drone Remote ID 2001:30::/28, first
+            "2001:3f:ffff::1",        // Drone Remote ID, last
             "2001:db8::1",            // documentation
             "2002:7f00:1::1",         // 6to4 2002::/16 embedding 127.0.0.1
             "2002:c0a8:101::",        // 6to4 embedding 192.168.1.1
@@ -585,8 +600,9 @@ mod tests {
             "64:ff9b::808:808",     // NAT64 to a public address (DNS64 networks)
             "2002:808:808::1",      // 6to4 embedding a public address
             "2001:4860:4860::8888", // 2001:4860::/32 is outside Teredo 2001::/32
-            "2001:3::1",            // between the 2001:2::/48 and ORCHID blocks
-            "2001:30::1",           // just above ORCHIDv2
+            "2001:2:1::1",          // just above benchmarking 2001:2::/48
+            "2001:4::1",            // just above AMT 2001:3::/32, below AS112-v6
+            "2001:40::1",           // just above Drone Remote ID 2001:30::/28
             "2620:4f:8001::1",      // just above the AS112 v6 delegation
             "192.31.197.1",         // just above AS112-v4
             "192.175.49.1",         // just above the AS112 v4 delegation
@@ -853,6 +869,64 @@ mod tests {
             listener.accept().map(|_| ()).unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock,
         );
+    }
+
+    #[tokio::test]
+    async fn only_a_failure_to_reach_any_server_counts_as_a_direct_connect_failure() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client =
+            ssrf_guarded_client_with_lookup(5, stub_lookup(vec![vec!["127.0.0.1"]], calls.clone()));
+        // Nothing listening: the connection is refused.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let refused = client
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(is_direct_connect_failure(&refused), "got: {refused:?}");
+        // A host the lookup says does not exist never reaches a server either.
+        let unresolvable = ssrf_guarded_client_with_lookup(
+            5,
+            failing_lookup(
+                "failed to lookup address information: Name or service not known",
+                calls.clone(),
+            ),
+        )
+        .get("http://no-such-host.test/")
+        .send()
+        .await
+        .unwrap_err();
+        assert!(
+            is_direct_connect_failure(&unresolvable),
+            "got: {unresolvable:?}"
+        );
+        // An SSRF refusal also surfaces as a connect error, but it is a deliberate block.
+        let refusal = client
+            .get(format!("http://internal.test:{port}/"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(refusal.is_connect() && is_ssrf_refusal(&refusal));
+        assert!(!is_direct_connect_failure(&refusal), "got: {refusal:?}");
+        // A server that answered, however badly, was reached.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).unwrap();
+            stream.write_all(b"not http at all\r\n\r\n").unwrap();
+        });
+        let garbled = client
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(!is_direct_connect_failure(&garbled), "got: {garbled:?}");
     }
 
     #[test]

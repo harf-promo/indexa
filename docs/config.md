@@ -511,6 +511,12 @@ max_retries  = 2      # retry attempts on transient HTTP failures (429/5xx/timeo
 
 > **Off by default** — fetching a URL reaches the network, so it must be explicitly enabled here
 > or via the environment variable.
+>
+> **No proxy for web pages.** A generic web-page fetch makes direct connections only and ignores
+> `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`: a proxy would resolve the target itself, out of the
+> SSRF guard's sight. Behind a mandatory outbound proxy that fetch fails, and the error names the
+> proxy variable it found. GitHub issue/PR URLs go through the GitHub API client and keep proxy
+> support.
 
 ---
 
