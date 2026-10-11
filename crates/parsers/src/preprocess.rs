@@ -87,12 +87,10 @@ impl PreprocessorParser {
         // which has no stdin write to race). A pipe is a fixed-size OS buffer (~64 KB): if
         // stdin is fed first and the file is bigger than one buffer, a child that writes
         // enough output to fill its own stdout pipe before it finishes reading stdin will
-        // block on that stdout write — at which point it stops reading stdin, and our
-        // synchronous `stdin.write_all` below blocks right back on ITS full pipe. Draining
-        // stdout concurrently means the child is never backpressured on its own output, so it
-        // keeps consuming stdin and the write below completes. `wait_with_timeout` /
-        // `max_output_bytes` are both downstream of that write; neither could ever fire while
-        // it was stuck.
+        // block on that stdout write — at which point it stops reading stdin, and the
+        // `stdin.write_all` below blocks right back on ITS full pipe. Draining stdout
+        // concurrently means the child is never backpressured on its own output, so it keeps
+        // consuming stdin and the write below completes.
         let mut stdout_pipe = child.stdout.take();
         let cap = self.max_output_bytes;
         let out_reader = std::thread::spawn(move || {
@@ -103,20 +101,30 @@ impl PreprocessorParser {
             buf
         });
 
-        if let Some(mut stdin) = child.stdin.take() {
-            // Best-effort: a tool that only reads argv[1] simply never reads stdin, and a
-            // closed pipe on write is not a failure worth propagating.
-            let _ = stdin.write_all(&bytes);
-        }
+        // stdin is fed on its own thread too, so the timed wait below starts immediately. A
+        // tool that only reads argv[1] never reads stdin: once the input outgrows one pipe
+        // buffer, a synchronous write would block until that tool exited on its own, and the
+        // timeout could never fire. Killing the process tree on timeout closes the pipe's read
+        // end, so the blocked write fails with EPIPE and this thread finishes.
+        let stdin_pipe = child.stdin.take();
+        let in_writer = std::thread::spawn(move || {
+            if let Some(mut stdin) = stdin_pipe {
+                // Best-effort: a tool that ignores stdin closing the pipe is not a failure
+                // worth propagating. Dropping `stdin` here sends EOF to tools that read it.
+                let _ = stdin.write_all(&bytes);
+            }
+        });
 
         let status = match wait_with_timeout(&mut child, self.timeout) {
             Some(status) => status,
             None => {
                 kill_process_tree(&mut child);
+                let _ = in_writer.join();
                 let _ = out_reader.join();
                 return None; // timeout ⇒ fall through
             }
         };
+        let _ = in_writer.join();
         let stdout = out_reader.join().unwrap_or_default();
         if !status.success() || stdout.is_empty() {
             return None; // nonzero exit / empty output ⇒ fall through
@@ -302,6 +310,37 @@ mod tests {
             "must not actually wait for the 30s sleep"
         );
         assert!(extracted.chunks[0].text.contains("native fallback content"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_fires_when_the_command_never_reads_a_large_stdin() {
+        // A command that ignores stdin, fed a file bigger than one pipe buffer (~64 KB). When the
+        // stdin write ran synchronously before the timed wait, it blocked until the command
+        // exited on its own (30s here), so the 200ms timeout never fired. The script is written
+        // into a temp dir rather than a `NamedTempFile`, whose still-open write handle makes
+        // exec fail with ETXTBSY on Linux — a spawn failure would also return `None` quickly
+        // and pass this test without ever running the command.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("ignore-stdin.sh");
+        std::fs::write(&script, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let tmp = tempfile::NamedTempFile::with_suffix(".txt").unwrap();
+        std::fs::write(tmp.path(), vec![b'y'; 1024 * 1024]).unwrap();
+        let mut s = spec("*.txt", script.to_str().unwrap());
+        s.timeout = Duration::from_millis(200);
+        let p = PreprocessorParser::new(&s, ChunkParams::default()).unwrap();
+
+        let start = std::time::Instant::now();
+        let result = p.run_command(tmp.path());
+        let elapsed = start.elapsed();
+        assert!(result.is_none(), "a timed-out command must fall through");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the timeout must fire while stdin is still unread (elapsed: {elapsed:?})"
+        );
     }
 
     #[cfg(unix)]

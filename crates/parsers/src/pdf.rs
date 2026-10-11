@@ -162,22 +162,49 @@ pub fn ocr_pdf(path: &Path, tesseract_bin: &str, lang: Option<&str>) -> Result<S
         .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("png"))
         .collect();
     pages.sort();
+    ocr_pages(&pages, tesseract_bin, lang, crate::proc::TESSERACT_TIMEOUT)
+}
+
+/// Run `tesseract_bin` on each page image in order, concatenating the recognised text. A page
+/// that times out (or exits nonzero) is skipped, so one pathological page doesn't discard the
+/// rest of the document. A missing binary is still an `Err` (every page would fail the same
+/// way), as is a document where every page failed to run.
+fn ocr_pages(
+    pages: &[std::path::PathBuf],
+    tesseract_bin: &str,
+    lang: Option<&str>,
+    timeout: std::time::Duration,
+) -> Result<String> {
+    use std::process::Command;
     let mut text = String::new();
+    let mut any_ran = false;
+    let mut last_err = None;
     for page in pages {
         let mut cmd = Command::new(tesseract_bin);
-        cmd.arg(&page).arg("stdout");
+        cmd.arg(page).arg("stdout");
         if let Some(l) = lang {
             cmd.args(["-l", l]);
         }
-        let out = crate::proc::run_capped(cmd, crate::proc::TESSERACT_TIMEOUT).map_err(|e| {
-            anyhow!("{tesseract_bin} unavailable or timed out ({e}); install tesseract for PDF OCR")
-        })?;
+        let out = match crate::proc::run_capped(cmd, timeout) {
+            Ok(out) => out,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                bail!("{tesseract_bin} unavailable ({e}); install tesseract for PDF OCR")
+            }
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
+        };
+        any_ran = true;
         if out.status.success() {
             text.push_str(&String::from_utf8_lossy(&out.stdout));
             text.push('\n');
         }
     }
-    Ok(text)
+    match last_err {
+        Some(e) if !any_ran => Err(anyhow!("{tesseract_bin} failed on every page ({e})")),
+        _ => Ok(text),
+    }
 }
 
 #[cfg(test)]
@@ -215,6 +242,52 @@ mod tests {
         // With a bogus tesseract binary (and pdftoppm typically absent in CI), this must
         // return an Err rather than panic — the pipeline then falls open to the text layer.
         let _ = ocr_pdf(&p, "indexa-nonexistent-tesseract-binary", Some("eng"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ocr_pages_skips_a_page_that_times_out() {
+        // A stand-in tesseract that hangs on page 2. One page timing out used to fail the whole
+        // document, discarding the text already recognised from page 1 and never reaching 3.
+        // Written into a temp dir, not a `NamedTempFile`: its open write handle makes exec fail
+        // with ETXTBSY on Linux.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("tesseract.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\ncase \"$1\" in\n  *page-2.png) exec sleep 30 ;;\n  *) echo \"text of $1\" ;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let pages: Vec<std::path::PathBuf> = (1..=3)
+            .map(|i| std::path::PathBuf::from(format!("page-{i}.png")))
+            .collect();
+
+        let start = std::time::Instant::now();
+        let text = ocr_pages(
+            &pages,
+            script.to_str().unwrap(),
+            None,
+            std::time::Duration::from_millis(300),
+        )
+        .expect("one hung page must not fail the document");
+        assert!(text.contains("text of page-1.png"), "{text}");
+        assert!(!text.contains("page-2.png"), "{text}");
+        assert!(text.contains("text of page-3.png"), "{text}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn ocr_pages_missing_binary_is_an_error() {
+        let pages = [std::path::PathBuf::from("page-1.png")];
+        let res = ocr_pages(
+            &pages,
+            "indexa-nonexistent-tesseract-binary",
+            None,
+            std::time::Duration::from_secs(5),
+        );
+        assert!(res.is_err(), "a missing tesseract must still Err");
     }
 
     #[test]

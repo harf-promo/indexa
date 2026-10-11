@@ -179,6 +179,7 @@ pub fn extract_audio_track(
     let wav = dir.path().join("audio.wav");
     let mut cmd = Command::new(ffmpeg_binary);
     cmd.args([
+        "-nostdin",
         "-v",
         "error",
         "-i",
@@ -195,7 +196,7 @@ pub fn extract_audio_track(
         wav.to_str().context("non-UTF-8 temp dir")?,
         "-y",
     ]);
-    let output = crate::proc::run_capped(cmd, crate::proc::FFMPEG_TIMEOUT)
+    let output = crate::proc::run_capped(cmd, crate::proc::FFMPEG_AUDIO_TIMEOUT)
         .with_context(|| format!("running {ffmpeg_binary} (is ffmpeg installed and on PATH?)"))?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
@@ -317,6 +318,7 @@ pub fn extract_video_frames(
     let pattern = dir.path().join("frame_%03d.jpg");
     let mut cmd = Command::new(ffmpeg_binary);
     cmd.args([
+        "-nostdin",
         "-i",
         path.to_str().context("non-UTF-8 video path")?,
         "-vf",
