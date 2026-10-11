@@ -38,61 +38,157 @@ pub fn http_client_with_user_agent(
         .build()
 }
 
-/// An IP an outbound "fetch a user-supplied URL" request must never reach — the SSRF blocklist:
-/// loopback, private (RFC1918), link-local (incl. the cloud-metadata `169.254.169.254`), CGNAT,
-/// unspecified, broadcast, and multicast — plus the IPv6 equivalents. Keeps a benign-looking URL
-/// from being used to reach internal services or the cloud metadata endpoint.
+/// IPv4 ranges an outbound "fetch a user-supplied URL" request must never reach (`(network,
+/// prefix length)`): everything that is not ordinary public unicast.
+const BLOCKED_V4: &[(std::net::Ipv4Addr, u32)] = {
+    use std::net::Ipv4Addr as A;
+    &[
+        (A::new(0, 0, 0, 0), 8),       // "this network", incl. unspecified 0.0.0.0
+        (A::new(10, 0, 0, 0), 8),      // private (RFC 1918)
+        (A::new(100, 64, 0, 0), 10),   // CGNAT shared address space (RFC 6598)
+        (A::new(127, 0, 0, 0), 8),     // loopback
+        (A::new(169, 254, 0, 0), 16),  // link-local, incl. cloud metadata 169.254.169.254
+        (A::new(172, 16, 0, 0), 12),   // private (RFC 1918)
+        (A::new(192, 0, 0, 0), 24),    // IETF protocol assignments (RFC 6890)
+        (A::new(192, 0, 2, 0), 24),    // TEST-NET-1 documentation
+        (A::new(192, 88, 99, 0), 24),  // deprecated 6to4 relay anycast (RFC 7526)
+        (A::new(192, 168, 0, 0), 16),  // private (RFC 1918)
+        (A::new(198, 18, 0, 0), 15),   // benchmarking (RFC 2544)
+        (A::new(198, 51, 100, 0), 24), // TEST-NET-2 documentation
+        (A::new(203, 0, 113, 0), 24),  // TEST-NET-3 documentation
+        (A::new(224, 0, 0, 0), 4),     // multicast
+        (A::new(240, 0, 0, 0), 4),     // reserved, incl. broadcast 255.255.255.255
+    ]
+};
+
+/// IPv6 ranges blocked outright. Prefixes that embed an IPv4 address a client really reaches
+/// (IPv4-mapped `::ffff:0:0/96`, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`) are not listed here:
+/// [`ip_is_blocked`] checks the embedded IPv4 address instead, so DNS64/NAT64 networks still reach
+/// public sites while `64:ff9b::7f00:1` (= 127.0.0.1) stays blocked.
+const BLOCKED_V6: &[(std::net::Ipv6Addr, u32)] = {
+    use std::net::Ipv6Addr as A;
+    &[
+        (A::new(0, 0, 0, 0, 0, 0, 0, 0), 96), // IPv4-compatible (deprecated), incl. :: and ::1
+        (A::new(0x64, 0xff9b, 1, 0, 0, 0, 0, 0), 48), // local-use NAT64 (RFC 8215)
+        (A::new(0x100, 0, 0, 0, 0, 0, 0, 0), 64), // discard-only (RFC 6666)
+        (A::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 32), // Teredo
+        (A::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32), // documentation
+        (A::new(0x3fff, 0, 0, 0, 0, 0, 0, 0), 20), // documentation (RFC 9637)
+        (A::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 7), // unique-local
+        (A::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10), // link-local
+        (A::new(0xfec0, 0, 0, 0, 0, 0, 0, 0), 10), // site-local (deprecated)
+        (A::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8), // multicast
+    ]
+};
+
+/// An IP an outbound "fetch a user-supplied URL" request must never reach — the SSRF blocklist
+/// ([`BLOCKED_V4`], [`BLOCKED_V6`], and any IPv4 address embedded in an IPv4-mapped, NAT64 or 6to4
+/// IPv6 address). Keeps a benign-looking URL from being used to reach internal services or the
+/// cloud metadata endpoint.
 fn ip_is_blocked(ip: std::net::IpAddr) -> bool {
-    use std::net::IpAddr;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_multicast()
-                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40) // 100.64.0.0/10 CGNAT
-        }
+        IpAddr::V4(v4) => BLOCKED_V4.iter().any(|&(net, len)| {
+            (u32::from(v4) ^ u32::from(net))
+                .checked_shr(32 - len)
+                .unwrap_or(0)
+                == 0
+        }),
         IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
-                || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
-                || v6.to_ipv4_mapped().is_some_and(|m| ip_is_blocked(IpAddr::V4(m)))
+            let bits = u128::from(v6);
+            let in_prefix = |net: Ipv6Addr, len: u32| {
+                (bits ^ u128::from(net)).checked_shr(128 - len).unwrap_or(0) == 0
+            };
+            let s = v6.segments();
+            let embedded = if in_prefix(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0, 0), 96)
+                || in_prefix(Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0, 0), 96)
+            {
+                // IPv4-mapped / NAT64: the IPv4 address is the low 32 bits.
+                Some(Ipv4Addr::from(bits as u32))
+            } else if s[0] == 0x2002 {
+                // 6to4: the IPv4 address is bits 16..48.
+                Some(Ipv4Addr::from(((s[1] as u32) << 16) | s[2] as u32))
+            } else {
+                None
+            };
+            BLOCKED_V6.iter().any(|&(net, len)| in_prefix(net, len))
+                || embedded.is_some_and(|e| ip_is_blocked(IpAddr::V4(e)))
         }
     }
 }
 
-/// Validate a URL for an outbound fetch of a **user-supplied** target: `http`/`https` only, and its
-/// host must resolve to at least one address, none in a blocked range ([`ip_is_blocked`]). Returns a
-/// human-readable reason on refusal. This is the SSRF guard for `pack add-url`; the shared
-/// [`http_client`] deliberately does NOT apply it (provider endpoints come from trusted config).
+/// Why a user-supplied fetch target was refused. Returned by the guarded client's DNS resolver, so
+/// it travels inside the `reqwest::Error` source chain; [`send_with_retry`] looks for it there and
+/// never retries a refusal.
+#[derive(Debug)]
+struct SsrfBlocked(String);
+
+impl std::fmt::Display for SsrfBlocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SsrfBlocked {}
+
+/// Does `err`'s source chain contain an [`SsrfBlocked`] refusal?
+fn is_ssrf_block(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur = Some(err);
+    while let Some(e) = cur {
+        if e.is::<SsrfBlocked>() {
+            return true;
+        }
+        cur = e.source();
+    }
+    false
+}
+
+/// Accept a host's resolved addresses only if there is at least one and NONE is blocked — a mixed
+/// answer is refused outright rather than filtered, so an attacker can't rely on connection
+/// fallback from a dead public address to a live private one.
+fn vet_resolved(
+    host: &str,
+    addrs: Vec<std::net::IpAddr>,
+) -> Result<Vec<std::net::IpAddr>, SsrfBlocked> {
+    if addrs.is_empty() {
+        return Err(SsrfBlocked(format!("{host} did not resolve")));
+    }
+    if let Some(ip) = addrs.iter().find(|ip| ip_is_blocked(**ip)) {
+        return Err(SsrfBlocked(format!(
+            "{host} resolves to a non-public address ({ip}); blocked to prevent SSRF into \
+             loopback/link-local/private ranges"
+        )));
+    }
+    Ok(addrs)
+}
+
+/// Validate a URL for an outbound fetch of a **user-supplied** target without touching DNS:
+/// `http`/`https` only, a host must be present, and an IP-literal host (incl. forms like
+/// `http://2130706433/`, which the URL parser normalises to `127.0.0.1`) must not be in a blocked
+/// range ([`ip_is_blocked`]). Returns a human-readable reason on refusal.
+///
+/// Hostnames are deliberately NOT resolved here: resolving now and letting the client resolve again
+/// at connect time is a DNS-rebinding window. [`ssrf_guarded_client`]'s resolver vets the addresses
+/// it actually connects to. The shared [`http_client`] applies none of this (provider endpoints come
+/// from trusted config).
 pub fn validate_public_url(url: &reqwest::Url) -> Result<(), String> {
-    use std::net::{IpAddr, ToSocketAddrs};
     match url.scheme() {
         "http" | "https" => {}
         other => return Err(format!("refusing non-http(s) URL scheme '{other}'")),
     }
     let host = url.host_str().ok_or_else(|| "URL has no host".to_owned())?;
-    let port = url.port_or_known_default().unwrap_or(443);
-    let addrs: Vec<IpAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
-        vec![ip]
-    } else {
-        (host, port)
-            .to_socket_addrs()
-            .map_err(|e| format!("resolving {host}: {e}"))?
-            .map(|sa| sa.ip())
-            .collect()
+    // `host_str` brackets IPv6 literals; IPv4 literals are already normalised to dotted-quad.
+    let Ok(ip) = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+    else {
+        return Ok(()); // a hostname — vetted at connect time by the guarded resolver
     };
-    if addrs.is_empty() {
-        return Err(format!("{host} did not resolve"));
-    }
-    if let Some(ip) = addrs.iter().find(|ip| ip_is_blocked(**ip)) {
+    if ip_is_blocked(ip) {
         return Err(format!(
-            "{host} resolves to a non-public address ({ip}); blocked to prevent SSRF into \
-             loopback/link-local/private ranges"
+            "{ip} is a non-public address; blocked to prevent SSRF into loopback/link-local/private \
+             ranges"
         ));
     }
     Ok(())
@@ -104,25 +200,83 @@ pub fn validate_public_url_str(url: &str) -> Result<(), String> {
     validate_public_url(&parsed)
 }
 
-/// A reqwest client for fetching **user-supplied** URLs (`pack add-url`): finite timeouts plus a
+/// Host → addresses lookup behind [`SsrfGuardResolver`]: the system resolver in production, a stub
+/// in tests.
+type Lookup = std::sync::Arc<
+    dyn Fn(
+            String,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = std::io::Result<Vec<std::net::IpAddr>>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+fn system_lookup() -> Lookup {
+    std::sync::Arc::new(|host: String| {
+        Box::pin(async move {
+            Ok(tokio::net::lookup_host((host.as_str(), 0))
+                .await?
+                .map(|sa| sa.ip())
+                .collect())
+        })
+    })
+}
+
+/// The guarded client's DNS resolver: resolves a host ONCE, [`vet_resolved`]s every address, and
+/// hands reqwest exactly those vetted addresses to connect to — so there is no second lookup an
+/// attacker's DNS could answer differently (rebinding). Every hostname connection goes through it,
+/// including redirect hops; IP-literal hosts skip DNS and are vetted by the redirect policy.
+struct SsrfGuardResolver {
+    lookup: Lookup,
+}
+
+impl reqwest::dns::Resolve for SsrfGuardResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+        let lookup = (self.lookup)(host.clone());
+        Box::pin(async move {
+            // A lookup failure stays a plain (retryable) I/O error, not an SSRF refusal.
+            let addrs = lookup
+                .await
+                .map_err(|e| std::io::Error::new(e.kind(), format!("resolving {host}: {e}")))?;
+            let vetted = vet_resolved(&host, addrs)?;
+            let addrs: reqwest::dns::Addrs = Box::new(
+                vetted
+                    .into_iter()
+                    .map(|ip| std::net::SocketAddr::new(ip, 0)),
+            );
+            Ok(addrs)
+        })
+    }
+}
+
+/// A reqwest client for fetching **user-supplied** URLs (`pack add-url`): finite timeouts, a
+/// DNS resolver that vets and pins every address it connects to ([`SsrfGuardResolver`]), and a
 /// redirect policy that [`validate_public_url`]s EVERY hop (capped at 5), so a benign first host
-/// can't `3xx` to `169.254.169.254` / `localhost` / an internal service. Kept separate from
-/// [`http_client`] — mutating the shared client's redirect policy would break the legitimate
-/// redirects every LLM/embed provider relies on.
+/// can't `3xx` to `169.254.169.254` / `localhost` / an internal service. Proxies are disabled: a
+/// proxy resolves the target itself, out of the guard's sight. Kept separate from [`http_client`] —
+/// mutating the shared client's redirect policy would break the legitimate redirects every LLM/embed
+/// provider relies on.
 pub fn ssrf_guarded_client(timeout_secs: u64) -> reqwest::Client {
+    ssrf_guarded_client_with_lookup(timeout_secs, system_lookup())
+}
+
+fn ssrf_guarded_client_with_lookup(timeout_secs: u64, lookup: Lookup) -> reqwest::Client {
     let policy = reqwest::redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= 5 {
             return attempt.error("too many redirects (max 5)".to_owned());
         }
         match validate_public_url(attempt.url()) {
             Ok(()) => attempt.follow(),
-            Err(reason) => attempt.error(reason),
+            Err(reason) => attempt.error(SsrfBlocked(reason)),
         }
     });
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .connect_timeout(std::time::Duration::from_secs(10))
         .redirect(policy)
+        .dns_resolver(SsrfGuardResolver { lookup })
+        .no_proxy()
         .build()
         .expect("building SSRF-guarded reqwest client (rustls TLS init)")
 }
@@ -148,7 +302,8 @@ pub fn backoff_delay(
 /// Send a freshly-built request with bounded retries on transient failures (retryable status
 /// codes + connection/timeout errors). `build` is called once per attempt because `send()`
 /// consumes the builder. Bulk indexing routinely hits 429/503 from cloud providers; without
-/// this each such response permanently fails that item.
+/// this each such response permanently fails that item. An SSRF refusal from
+/// [`ssrf_guarded_client`] surfaces as a connect error but is final, so it is never retried.
 pub async fn send_with_retry(
     build: impl Fn() -> reqwest::RequestBuilder,
     max_retries: u32,
@@ -169,7 +324,8 @@ pub async fn send_with_retry(
             Ok(resp) => return Ok(resp),
             Err(e)
                 if attempt < max_retries
-                    && (e.is_timeout() || e.is_connect() || e.is_request()) =>
+                    && (e.is_timeout() || e.is_connect() || e.is_request())
+                    && !is_ssrf_block(&e) =>
             {
                 tokio::time::sleep(backoff_delay(attempt, None)).await;
                 attempt += 1;
@@ -228,21 +384,197 @@ mod tests {
             "http://100.64.0.1/", // CGNAT
             "http://[::1]/",
             "http://0.0.0.0/",
-            "ftp://example.com/", // non-http scheme
-            "file:///etc/passwd", // non-http scheme
+            "http://2130706433/",           // 127.0.0.1 in decimal form
+            "http://[::ffff:127.0.0.1]/",   // IPv4-mapped loopback
+            "http://[64:ff9b::a9fe:a9fe]/", // NAT64-embedded metadata address
+            "ftp://example.com/",           // non-http scheme
+            "file:///etc/passwd",           // non-http scheme
         ] {
             assert!(
                 validate_public_url_str(blocked).is_err(),
                 "should be blocked: {blocked}"
             );
         }
-        // Public IP literals are allowed (no resolution needed).
-        for ok in ["http://8.8.8.8/", "https://93.184.216.34/"] {
+        // Public IP literals are allowed; hostnames are left to the connect-time resolver.
+        for ok in [
+            "http://8.8.8.8/",
+            "https://93.184.216.34/",
+            "https://example.com/",
+        ] {
             assert!(
                 validate_public_url_str(ok).is_ok(),
                 "should be allowed: {ok}"
             );
         }
+    }
+
+    #[test]
+    fn ip_blocklist_covers_every_non_public_range() {
+        use std::net::IpAddr;
+        let blocked = [
+            "0.1.2.3",                // 0.0.0.0/8
+            "0.0.0.0",                // unspecified
+            "10.1.2.3",               // RFC 1918
+            "100.64.0.0",             // CGNAT 100.64.0.0/10, first
+            "100.127.255.255",        // CGNAT, last
+            "127.0.0.1",              // loopback
+            "127.255.255.254",        // loopback /8
+            "169.254.169.254",        // link-local / cloud metadata
+            "172.16.0.1",             // RFC 1918
+            "172.31.255.255",         // RFC 1918, last
+            "192.0.0.8",              // IETF protocol assignments 192.0.0.0/24
+            "192.0.2.1",              // TEST-NET-1
+            "192.88.99.1",            // 6to4 relay anycast
+            "192.168.1.1",            // RFC 1918
+            "198.18.0.0",             // benchmarking 198.18.0.0/15, first
+            "198.19.255.255",         // benchmarking, last
+            "198.51.100.7",           // TEST-NET-2
+            "203.0.113.7",            // TEST-NET-3
+            "224.0.0.1",              // multicast
+            "239.255.255.250",        // multicast (SSDP)
+            "240.0.0.1",              // reserved 240.0.0.0/4
+            "255.255.255.255",        // broadcast
+            "::",                     // unspecified
+            "::1",                    // loopback
+            "::7f00:1",               // IPv4-compatible (deprecated) ::/96
+            "::808:808",              // IPv4-compatible, even embedding a public address
+            "::ffff:127.0.0.1",       // IPv4-mapped loopback
+            "::ffff:169.254.169.254", // IPv4-mapped metadata
+            "::ffff:10.0.0.1",        // IPv4-mapped private
+            "64:ff9b::7f00:1",        // NAT64 64:ff9b::/96 embedding 127.0.0.1
+            "64:ff9b::a9fe:a9fe",     // NAT64 embedding 169.254.169.254
+            "64:ff9b:1::1",           // local-use NAT64 64:ff9b:1::/48
+            "100::1",                 // discard-only 100::/64
+            "2001::1",                // Teredo 2001::/32
+            "2001:db8::1",            // documentation
+            "2002:7f00:1::1",         // 6to4 2002::/16 embedding 127.0.0.1
+            "2002:c0a8:101::",        // 6to4 embedding 192.168.1.1
+            "3fff::1",                // documentation 3fff::/20
+            "fc00::1",                // unique-local fc00::/7
+            "fdff:ffff::1",           // unique-local, upper half
+            "fe80::1",                // link-local fe80::/10
+            "febf:ffff::1",           // link-local, last
+            "fec0::1",                // site-local (deprecated)
+            "ff02::1",                // multicast ff00::/8
+            "ff0e::1",                // global-scope multicast
+        ];
+        for ip in blocked {
+            let parsed: IpAddr = ip.parse().unwrap();
+            assert!(ip_is_blocked(parsed), "should be blocked: {ip}");
+        }
+        let public = [
+            "1.1.1.1",
+            "8.8.8.8",
+            "93.184.216.34",
+            "100.63.255.255",  // just below CGNAT
+            "100.128.0.0",     // just above CGNAT
+            "172.32.0.1",      // just above 172.16/12
+            "192.0.1.1",       // between 192.0.0/24 and TEST-NET-1
+            "198.17.255.255",  // just below 198.18/15
+            "198.20.0.0",      // just above 198.18/15
+            "223.255.255.255", // just below multicast
+            "2606:4700:4700::1111",
+            "2a00:1450:4001::200e",
+            "::ffff:8.8.8.8",       // IPv4-mapped public
+            "64:ff9b::808:808",     // NAT64 to a public address (DNS64 networks)
+            "2002:808:808::1",      // 6to4 embedding a public address
+            "2001:4860:4860::8888", // 2001:4860::/32 is outside Teredo 2001::/32
+        ];
+        for ip in public {
+            let parsed: IpAddr = ip.parse().unwrap();
+            assert!(!ip_is_blocked(parsed), "should be allowed: {ip}");
+        }
+    }
+
+    /// A [`Lookup`] stub answering from `answers` in order (repeating the last one), counting calls.
+    fn stub_lookup(
+        answers: Vec<Vec<&'static str>>,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Lookup {
+        std::sync::Arc::new(move |_host: String| {
+            let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let answer: Vec<std::net::IpAddr> = answers[n.min(answers.len() - 1)]
+                .iter()
+                .map(|ip| ip.parse().unwrap())
+                .collect();
+            Box::pin(async move { Ok(answer) })
+        })
+    }
+
+    async fn resolve_with(
+        resolver: &SsrfGuardResolver,
+        host: &str,
+    ) -> Result<Vec<std::net::SocketAddr>, String> {
+        use reqwest::dns::Resolve;
+        resolver
+            .resolve(host.parse().unwrap())
+            .await
+            .map(|addrs| addrs.collect())
+            .map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn resolver_pins_vetted_addresses_and_refuses_a_rebound_answer() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // A rebinding DNS server: public on the first query, loopback on the next.
+        let resolver = SsrfGuardResolver {
+            lookup: stub_lookup(
+                vec![vec!["93.184.216.34"], vec!["127.0.0.1"]],
+                calls.clone(),
+            ),
+        };
+        // First resolution: the client connects to exactly the address that was vetted.
+        let first = resolve_with(&resolver, "rebind.test").await.unwrap();
+        assert_eq!(first, vec!["93.184.216.34:0".parse().unwrap()]);
+        // Any later resolution (a new connection, a redirect hop) is vetted again — the rebound
+        // private answer is refused instead of being connected to.
+        let second = resolve_with(&resolver, "rebind.test").await.unwrap_err();
+        assert!(second.contains("127.0.0.1"), "{second}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn resolver_refuses_mixed_and_empty_answers() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let resolver = SsrfGuardResolver {
+            lookup: stub_lookup(vec![vec!["93.184.216.34", "10.0.0.1"]], calls.clone()),
+        };
+        let mixed = resolve_with(&resolver, "mixed.test").await.unwrap_err();
+        assert!(mixed.contains("10.0.0.1"), "{mixed}");
+        let resolver = SsrfGuardResolver {
+            lookup: stub_lookup(vec![vec![]], calls),
+        };
+        let empty = resolve_with(&resolver, "empty.test").await.unwrap_err();
+        assert!(empty.contains("did not resolve"), "{empty}");
+    }
+
+    #[tokio::test]
+    async fn guarded_client_never_connects_to_a_private_resolution_and_does_not_retry() {
+        // A real local listener the request would land on if the guard let it through.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client =
+            ssrf_guarded_client_with_lookup(5, stub_lookup(vec![vec!["127.0.0.1"]], calls.clone()));
+        let url = format!("http://rebind.test:{port}/");
+        // The initial no-DNS check passes a hostname through; the connect-time resolver refuses it.
+        assert!(validate_public_url_str(&url).is_ok());
+        let err = send_with_retry(|| client.get(&url), 3).await.unwrap_err();
+        assert!(
+            is_ssrf_block(&err),
+            "expected an SSRF refusal, got: {err:?}"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an SSRF refusal must not be retried"
+        );
+        assert_eq!(
+            listener.accept().map(|_| ()).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the guarded client must never open a connection to the private address"
+        );
     }
 
     #[test]
