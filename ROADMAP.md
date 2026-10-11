@@ -19,6 +19,19 @@ Vote on upcoming features and suggest new ones in [Discussions → Ideas](../../
 > in local SQLite behind MCP). Together they widen the moat against cloud-only, repo-only, and
 > assistant-plugin tools. See [docs/COMPETITIVE.md](docs/COMPETITIVE.md).
 
+## 2026-06-13 → 2026-09-01: v0.26–v0.80.3
+
+The latest released line. Per-release detail lives in [CHANGELOG.md](CHANGELOG.md); the themes were:
+
+- **Directory understanding** (v0.66): Indexa recognises when a directory is a known application or structure (a Rust crate, a Next.js app, a Django project, a macOS `.app`) and reasons about groups of files, not just single ones.
+- **Retrieval quality** (v0.68–v0.70): sparse search tokenizes the query instead of phrase-matching it whole, and GraphRAG topic-clustered synthesis context is available (`[retrieval] graphrag_clusters`).
+- **Measured savings** (v0.69–v0.75): a per-session token-savings ledger, running per-conversation savings in the chat, and token estimates in every savings readout.
+- **Agent write-back and safety** (v0.76–v0.77): the `add_note` MCP tool closes the learning loop, and every MCP tool carries read-only/destructive `ToolAnnotations` hints.
+- **Context Packs and agent sessions** (v0.78–v0.79): per-item inclusion modes, `--dry-run` and typed redaction labels for packs, plus a parser for Claude Code session transcripts.
+- **Evaluation and hardening** (v0.80.x): `indexa eval --save-run`, one shared memory-pressure watchdog, and critique-driven fix rounds.
+
+Work merged since v0.80.3 waits in CHANGELOG's `[Unreleased]` section until the next tag.
+
 ## 2026-06-11: v0.21–v0.25 — five releases in one day
 
 A trust-and-accuracy sprint, each release one theme:
@@ -161,9 +174,10 @@ A native macOS desktop app — Indexa runs as a menu-bar app instead of a termin
 
 ---
 
-## v0.12 — Mobile read-only
+## v0.12 — Mobile read-only  *(not started)*
 
-Query your desktop context store from your phone.
+Query your desktop context store from your phone. This is the only theme here that has not
+shipped. No code or tracking issue exists for it yet; it stays a direction, not a commitment.
 
 - iOS and Android companion apps (read-only)
 - Local-network sync of the context store — no cloud required
