@@ -141,8 +141,11 @@ fn jar_classes(path: &Path) -> Result<Vec<String>> {
     let mut zip = zip::ZipArchive::new(file)?;
     let mut names = Vec::new();
     for i in 0..zip.len().min(MAX_SYMBOLS) {
-        if let Ok(f) = zip.by_index(i) {
-            let n = f.name();
+        if let Some(n) = zip
+            .by_index(i)
+            .ok()
+            .and_then(|f| f.name().ok().map(|n| n.into_owned()))
+        {
             if n.ends_with(".class") {
                 names.push(n.trim_end_matches(".class").replace('/', "."));
             }

@@ -149,8 +149,9 @@ fn list_zip(path: &Path) -> Result<(Vec<String>, Option<Truncation>)> {
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         if let Ok(f) = zip.by_index(i) {
-            if !f.is_dir() {
-                out.push(format!("{} ({} bytes)", f.name(), f.size()));
+            // zip 9 decodes entry names fallibly; skip an undecodable one like an unreadable entry.
+            if let (false, Ok(name)) = (f.is_dir(), f.name()) {
+                out.push(format!("{name} ({} bytes)", f.size()));
             }
         }
     }

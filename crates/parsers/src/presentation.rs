@@ -91,7 +91,11 @@ fn parse_pptx(path: &Path, filename: &str, chunk: ChunkParams) -> anyhow::Result
     let mut archive = zip::ZipArchive::new(file)?;
 
     // Collect all zip entry names once (can't hold the borrow across by_name calls).
-    let all_names: Vec<String> = archive.file_names().map(|s| s.to_owned()).collect();
+    // zip 9 decodes names fallibly; an undecodable entry name is skipped.
+    let all_names: Vec<String> = archive
+        .file_names()
+        .filter_map(|s| s.ok().map(|s| s.into_owned()))
+        .collect();
 
     // --- Enumerate slides numerically -----------------------------------------
     // Entry format: ppt/slides/slideN.xml  (N is a positive integer, may be non-contiguous).

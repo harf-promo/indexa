@@ -41,9 +41,9 @@ kamadak-exif = "0.6"
 # PDF text extraction (pure Rust, text-layer PDFs)
 pdf-extract = "0.12"
 # Office formats
-calamine = { version = "0.26", features = ["dates"] }
+calamine = { version = "0.37", features = ["dates"] }
 # docx extraction (zip-based)
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # Subprocess timeout: kill hung OCR/transcription/ffmpeg children instead of blocking indexing
 # forever. Tiny waitpid/WaitForSingleObject wrapper (MIT/Apache-2.0), no transitive deps.
 wait-timeout = { workspace = true }
@@ -58,7 +58,7 @@ htmd = { workspace = true }
 tar = "0.4.46"
 flate2 = "1.1.9"
 mail-parser = "0.11.3"
-object = "0.39.1"
+object = "0.40.0"
 wasmparser = "0.252.0"
 cfb = "0.14.0"
 # UTF-16/BOM transcoding for the text-family parsers ([parsers] encoding = "auto")
@@ -71,10 +71,9 @@ globset = { workspace = true }
 # dep at the same pinned version: zero new tree entries.
 libc = "0.2"
 # Transparent .zst content indexing — pure-Rust zstd decoder (decode-only, no C toolchain).
-# NOT zero new tree entries: `object` (above) pulls ruzstd 0.8.3 transitively, and this direct
-# dep pins the newer 0.9.0 — `cargo tree -i ruzstd` shows both coexisting. Bumping `object` (or
-# relaxing this pin to match its transitive version) would collapse the tree back to one.
-ruzstd = "0.9.0"
+# `object` 0.40 (above) pulls the same ruzstd 0.9 line, so the tree holds one copy.
+# >=0.9.1: RUSTSEC-2026-0344 (decompression bomb).
+ruzstd = "0.9.1"
 # Transparent .xz/.lzma content indexing — pure-Rust, decode-only. Genuinely new to the tree.
 lzma-rs = "0.3"
 # Transparent .br content indexing — pure-Rust brotli decoder. Exact pin (not a range): already
