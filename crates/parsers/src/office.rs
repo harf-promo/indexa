@@ -335,7 +335,11 @@ fn parse_docx_zip(path: &Path) -> Result<String> {
     let mut archive = zip::ZipArchive::new(file)?;
 
     // Collect all entry names up front (can't hold the archive borrow across by_name calls).
-    let names: Vec<String> = archive.file_names().map(|s| s.to_owned()).collect();
+    // zip 9 decodes names fallibly; an undecodable entry name is skipped.
+    let names: Vec<String> = archive
+        .file_names()
+        .filter_map(|s| s.ok().map(|s| s.into_owned()))
+        .collect();
 
     let mut parts = Vec::new();
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
