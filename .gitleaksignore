@@ -1,0 +1,6 @@
+# Reviewed gitleaks findings in indexa main history (2026-10-21, gitleaks 8.30.1, generated
+# fleet-security workflow). Exact commit:file:rule:line fingerprints only, so other lines,
+# commits and detectors stay scanned. None of these is a credential.
+
+# Redaction unit-test fixture: a fake ghp_ token beside the AWS documentation example key.
+ff16989e7a5d3d75c10cbfb48d9cc6a5b2a460e9:crates/query/src/redact.rs:github-pat:92
