@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.81.0] — 2026-10-21
+
 ### Added
 
 - **Video audio-track transcription — `[parsers.video] transcribe` (opt-in).** A video's
@@ -168,6 +170,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contract, GC of resolved rows, a candidate list), and an agent that learned "memory lives in
   the ledger" would start *answering* memories as if they were open questions.
   `SCHEMA_VERSION` 10 → 11; existing databases migrate in place on the next open.
+
 ### Changed
 
 - **`indexa weight apply` and `indexa pack create --auto` now require `--yes` in a
@@ -240,7 +243,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `competitive_snapshot_stamp_tracks_the_workspace_minor_version` asserts that stamp matches the
   workspace version at minor precision — a patch release won't force a competitive re-read, but a
   minor bump means features shipped and the page is worth re-checking.
-### Fixed
 
 - **Two web handlers no longer stall the entire local server while they run.** The web server
   shares one `Arc<Mutex<Store>>`, and `GET /api/packs/{name}/export` held it across a freshness
