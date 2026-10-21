@@ -344,6 +344,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Self-update fails closed.** For any signed release (v0.77.0 and later) a missing, unreachable or
+  empty `.sig` now aborts `indexa update` and the desktop CLI refresh instead of installing the
+  binary unverified. A pinned tag must be strict semver (a path-like `--pin` can no longer point the
+  download at another repository), a downgrade needs `INDEXA_UPDATE_ALLOW_DOWNGRADE=1`, downloads are
+  size-capped, and an update no longer leaves a temp copy of the binary next to it. The release
+  job now fails instead of publishing unsigned CLI assets when the signing key is missing, since
+  every client would refuse them.
+
 - **`pack add-url`'s SSRF guard can no longer be bypassed by DNS rebinding, and blocks more
   non-public ranges.** The guard used to resolve the host once to check it and let reqwest
   resolve it again to connect, so a rebinding DNS server could answer a public address for the
