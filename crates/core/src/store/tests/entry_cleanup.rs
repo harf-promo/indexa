@@ -1,5 +1,90 @@
 use super::*;
 
+#[test]
+fn older_scan_cannot_prune_newer_scan_entries_or_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    let mut older = Store::open(&db).unwrap();
+    let mut newer = Store::open(&db).unwrap();
+    seed_full_entry(&mut older, "/proj/live.rs");
+    seed_full_entry(&mut older, "/proj/ghost.rs");
+    let a = older.next_scan_generation().unwrap();
+    older
+        .upsert_entries_with_generation(
+            &[dummy_entry("/proj/live.rs", EntryKind::File, 10)],
+            Some(a),
+        )
+        .unwrap();
+    let b = newer.next_scan_generation().unwrap();
+    newer
+        .upsert_entries_with_generation(
+            &[dummy_entry("/proj/live.rs", EntryKind::File, 20)],
+            Some(b),
+        )
+        .unwrap();
+    newer.reconcile_by_generation("/proj", b).unwrap();
+    let artifacts = orphan_rows_for(&newer, "/proj/live.rs");
+    assert!(
+        artifacts >= 10,
+        "includes directory_apps and every child table"
+    );
+    // Explicit A/B interleaving, after B has completely finished.
+    assert_eq!(older.reconcile_by_generation("/proj", a).unwrap(), 0);
+    assert!(older.entry_exists("/proj/live.rs").unwrap());
+    assert_eq!(orphan_rows_for(&older, "/proj/live.rs"), artifacts);
+    assert_eq!(orphan_rows_for(&older, "/proj/ghost.rs"), 0);
+}
+
+#[test]
+fn delayed_scan_batch_cannot_overwrite_a_newer_generation() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .upsert_entries_with_generation(
+            &[dummy_entry("/proj/live.rs", EntryKind::File, 20)],
+            Some(3),
+        )
+        .unwrap();
+    store
+        .upsert_entries_with_generation(
+            &[dummy_entry("/proj/live.rs", EntryKind::File, 10)],
+            Some(2),
+        )
+        .unwrap();
+    let (size, generation): (i64, i64) = store
+        .db_connection()
+        .query_row(
+            "SELECT size, scan_generation FROM entries WHERE path = '/proj/live.rs'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((size, generation), (20, 3));
+}
+
+#[test]
+fn scan_lease_excludes_another_connection_and_releases_on_drop() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("index.db");
+    let mut first = Store::open(&db).unwrap();
+    let second = Store::open(&db).unwrap();
+    let lease = first.scan_lease().unwrap();
+    let contender = rusqlite::Connection::open(lease.path().unwrap()).unwrap();
+    contender.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let err = contender.execute_batch("BEGIN IMMEDIATE").unwrap_err();
+    assert_eq!(
+        err.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy)
+    );
+    let a = first.next_scan_generation().unwrap();
+    first
+        .upsert_entries_with_generation(&[dummy_entry("/proj/a.rs", EntryKind::File, 1)], Some(a))
+        .unwrap();
+    // Main-index writes are permitted while the scan lease is held.
+    drop(lease);
+    let _next_lease = second.scan_lease().unwrap();
+    assert!(second.next_scan_generation().unwrap() > a);
+}
+
 // ── Entry-cleanup integrity contract ──────────────────────────────────────────
 // These lock the invariant that deleting an entry leaves NO orphaned rows in any
 // entry-keyed child table. There is intentionally no FK ON DELETE CASCADE (the model

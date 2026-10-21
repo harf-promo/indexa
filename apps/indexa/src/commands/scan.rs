@@ -47,6 +47,9 @@ pub(crate) async fn cmd_scan(paths: Vec<String>, all: bool, yes: bool, cfg: &Con
 /// were skipped because they were missing or unreadable — their existing index rows are left
 /// untouched, so an unmounted drive or a transient permission error never wipes a root's index.
 fn scan_roots(store: &mut Store, roots: &[PathBuf], walk_cfg: &WalkConfig) -> Result<Vec<PathBuf>> {
+    // Serialize all roots, including parent/child overlaps, across CLI processes. The lease
+    // must precede generation allocation and outlive the final prune (including orphans).
+    let _lease = store.scan_lease()?;
     // One generation per `indexa scan` run, stamped on every upserted row so the post-scan prune
     // (reconcile_by_generation) can drop rows this run didn't re-see — removed from disk, or stale
     // from an interrupted prior scan — without ever holding a full live-path set in memory.
