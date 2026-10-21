@@ -159,10 +159,10 @@ fn persist_completed_file(
     store.upsert_entries(&[entry])?;
     // `summaries-only` never persists chunk rows — that's the entire ~100× size win;
     // `summarize_file` re-parses the file itself when no chunks are stored.
-    let written = if summaries_only {
+    let written = if summaries_only && !chunks.is_empty() {
         0
     } else {
-        store.upsert_chunks(&chunk_records)?;
+        store.replace_file_chunks(path_str, &chunk_records)?;
         chunk_records.len()
     };
 
@@ -770,6 +770,18 @@ pub(crate) async fn cmd_deep(
             }
 
             if extracted.chunks.is_empty() {
+                persist_completed_file(
+                    &mut store,
+                    (**entry).clone(),
+                    &path_str,
+                    &[],
+                    Vec::new(),
+                    &[],
+                    Vec::new(),
+                    None,
+                    false,
+                    cfg.scan.redact_at_index,
+                )?;
                 continue;
             }
 

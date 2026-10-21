@@ -771,3 +771,63 @@ fn orphan_summary_reports_every_swept_count() {
         assert!(s.contains(part), "missing {part:?} in {s:?}");
     }
 }
+
+#[test]
+fn empty_chunk_replacement_clears_content_and_requeues_rollups() {
+    let mut store = Store::open_in_memory().unwrap();
+    seed_full_entry(&mut store, "/proj/empty.rs");
+    seed_full_entry(&mut store, "/proj/keep.rs");
+    store
+        .upsert_entries(&[dummy_entry("/proj", EntryKind::Dir, 0)])
+        .unwrap();
+    store
+        .upsert_summary(&dummy_summary("/proj", "dir", Some("/"), 1))
+        .unwrap();
+    store.mark_for_resummary("/proj", "dir", 1).unwrap();
+    store.mark_queue_state("/proj", "done", None).unwrap();
+    store
+        .mark_queue_state("/proj/empty.rs", "done", None)
+        .unwrap();
+    let sibling_artifacts = orphan_rows_for(&store, "/proj/keep.rs");
+    store.replace_file_chunks("/proj/empty.rs", &[]).unwrap();
+    assert!(store.entry_exists("/proj/empty.rs").unwrap());
+    assert!(store
+        .chunks_for_path("/proj/empty.rs", 100)
+        .unwrap()
+        .is_empty());
+    assert_eq!(orphan_rows_for(&store, "/proj/keep.rs"), sibling_artifacts);
+    for (table, col) in [
+        ("chunks_fts", "entry_path"),
+        ("edges", "from_path"),
+        ("symbols", "path"),
+        ("note_anchors", "note_path"),
+        ("summaries", "path"),
+        ("classifications", "path"),
+        ("directory_apps", "path"),
+    ] {
+        let count: i64 = store
+            .db_connection()
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {col} = ?1"),
+                ["/proj/empty.rs"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "stale {table}");
+    }
+    assert!(store.summary_by_path("/proj").unwrap().is_none());
+    assert_eq!(
+        store.queue_state("/proj/empty.rs").unwrap().as_deref(),
+        Some("pending")
+    );
+    assert_eq!(
+        store.queue_state("/proj").unwrap().as_deref(),
+        Some("pending")
+    );
+    // Idempotent: the empty result remains empty on another successful parse.
+    store.replace_file_chunks("/proj/empty.rs", &[]).unwrap();
+    assert!(store
+        .chunks_for_path("/proj/empty.rs", 100)
+        .unwrap()
+        .is_empty());
+}

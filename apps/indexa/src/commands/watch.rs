@@ -175,9 +175,6 @@ pub(crate) async fn cmd_watch(
                         Ok(e) => e,
                         Err(_) => return,
                     };
-                    if extracted.chunks.is_empty() {
-                        return;
-                    }
 
                     let (chunk_records, degraded) = rt.block_on(build_chunk_records(
                         embedder.as_ref(),
@@ -219,7 +216,9 @@ pub(crate) async fn cmd_watch(
                         if let Err(e) = store.upsert_entries(&[entry]) {
                             tracing::warn!("failed to upsert entry for {}: {e}", path.display());
                         }
-                        if let Err(e) = store.upsert_chunks(&chunk_records) {
+                        if let Err(e) =
+                            store.replace_file_chunks(&path.to_string_lossy(), &chunk_records)
+                        {
                             tracing::warn!("failed to upsert chunks for {}: {e}", path.display());
                         } else {
                             // Re-embedding alone leaves the summary stale. Re-queue this file

@@ -179,9 +179,6 @@ pub(crate) async fn api_watch_start(
                             Ok(e) => e,
                             Err(_) => return,
                         };
-                        if extracted.chunks.is_empty() {
-                            return;
-                        }
 
                         // `block_on` is safe here: this closure runs on a `spawn_blocking`
                         // thread (not an async executor thread), so driving the embed futures
@@ -238,7 +235,7 @@ pub(crate) async fn api_watch_start(
                             if let Err(e) = store.upsert_entries(&[entry]) {
                                 tracing::warn!(path = %path.display(), error = %e, "watch: failed to upsert entry");
                             }
-                            if store.upsert_chunks(&chunk_records).is_ok() {
+                            if store.replace_file_chunks(&path.to_string_lossy(), &chunk_records).is_ok() {
                                 let s = path.to_string_lossy().into_owned();
                                 let depth = path_depth(&s);
                                 if let Err(e) = store.mark_for_resummary(&s, "file", depth) {
