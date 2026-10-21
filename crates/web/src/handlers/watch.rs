@@ -146,7 +146,7 @@ pub(crate) async fn api_watch_start(
                     ChangeKind::Remove => {
                         if let Ok(mut store) = Store::open(&db_path) {
                             let s = path.to_string_lossy().into_owned();
-                            if let Err(e) = store.delete_entry(&s) {
+                            if let Err(e) = store.delete_subtree(&s) {
                                 tracing::warn!("watch: remove {s}: {e}");
                             } else {
                                 for dir in

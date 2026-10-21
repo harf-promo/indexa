@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 use notify::{
-    event::{CreateKind, ModifyKind, RemoveKind},
+    event::{CreateKind, ModifyKind, RemoveKind, RenameMode},
     EventKind, RecursiveMode,
 };
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
@@ -80,23 +80,9 @@ pub fn watch<P: AsRef<Path>>(roots: &[P], cfg: &WatcherConfig) -> Result<WatchSe
             move |result: DebounceEventResult| match result {
                 Ok(events) => {
                     for ev in events {
-                        let kind = match &ev.event.kind {
-                            EventKind::Create(CreateKind::File)
-                            | EventKind::Create(CreateKind::Any)
-                            | EventKind::Modify(ModifyKind::Data(_))
-                            | EventKind::Modify(ModifyKind::Any)
-                            | EventKind::Modify(ModifyKind::Name(_)) => ChangeKind::Upsert,
-                            EventKind::Remove(RemoveKind::File)
-                            | EventKind::Remove(RemoveKind::Any)
-                            | EventKind::Remove(RemoveKind::Folder) => ChangeKind::Remove,
-                            _ => continue, // ignore access, metadata-only, etc.
-                        };
-                        for path in &ev.event.paths {
-                            debug!("fs event {:?}: {}", kind, path.display());
-                            let _ = tx.send(ChangeEvent {
-                                path: path.clone(),
-                                kind: kind.clone(),
-                            });
+                        for event in change_events(&ev.event) {
+                            debug!("fs event {:?}: {}", event.kind, event.path.display());
+                            let _ = tx.send(event);
                         }
                     }
                 }
@@ -121,6 +107,50 @@ pub fn watch<P: AsRef<Path>>(roots: &[P], cfg: &WatcherConfig) -> Result<WatchSe
         _debouncer: Box::new(debouncer),
         rx,
     })
+}
+
+// Keep event translation separate from OS delivery so rename direction can be tested
+// deterministically without relying on a filesystem backend's timing.
+fn change_events(event: &notify::Event) -> Vec<ChangeEvent> {
+    event
+        .paths
+        .iter()
+        .enumerate()
+        .filter_map(|(index, path)| {
+            let kind = match &event.kind {
+                EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if event.paths.len() == 2 => {
+                    if index == 0 {
+                        ChangeKind::Remove
+                    } else {
+                        ChangeKind::Upsert
+                    }
+                }
+                EventKind::Modify(ModifyKind::Name(RenameMode::From)) => ChangeKind::Remove,
+                EventKind::Modify(ModifyKind::Name(RenameMode::To)) => ChangeKind::Upsert,
+                EventKind::Modify(ModifyKind::Name(_)) => {
+                    // Some backends cannot identify direction. Only confirmed absence is a
+                    // deletion; an IO/permission error must not erase a live index entry.
+                    if matches!(path.try_exists(), Ok(false)) {
+                        ChangeKind::Remove
+                    } else {
+                        ChangeKind::Upsert
+                    }
+                }
+                EventKind::Create(CreateKind::File)
+                | EventKind::Create(CreateKind::Any)
+                | EventKind::Modify(ModifyKind::Data(_))
+                | EventKind::Modify(ModifyKind::Any) => ChangeKind::Upsert,
+                EventKind::Remove(RemoveKind::File)
+                | EventKind::Remove(RemoveKind::Any)
+                | EventKind::Remove(RemoveKind::Folder) => ChangeKind::Remove,
+                _ => return None,
+            };
+            Some(ChangeEvent {
+                path: path.clone(),
+                kind,
+            })
+        })
+        .collect()
 }
 
 /// How often the cooperative-stop loop wakes to re-check its `stop` flag while idle.
@@ -250,5 +280,58 @@ mod tests {
             "the buffered event is handled, then stop ends the loop"
         );
         drop(tx);
+    }
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+    use notify::event::RenameMode;
+
+    fn events(mode: RenameMode, paths: &[&str]) -> Vec<(PathBuf, ChangeKind)> {
+        let mut event = notify::Event::new(EventKind::Modify(ModifyKind::Name(mode)));
+        event.paths = paths.iter().map(PathBuf::from).collect();
+        change_events(&event)
+            .into_iter()
+            .map(|e| (e.path, e.kind))
+            .collect()
+    }
+
+    #[test]
+    fn paired_rename_removes_source_before_upserting_destination() {
+        assert_eq!(
+            events(RenameMode::Both, &["/old", "/new"]),
+            vec![
+                ("/old".into(), ChangeKind::Remove),
+                ("/new".into(), ChangeKind::Upsert)
+            ]
+        );
+    }
+
+    #[test]
+    fn split_rename_from_removes_and_to_upserts() {
+        assert_eq!(
+            events(RenameMode::From, &["/old"]),
+            vec![("/old".into(), ChangeKind::Remove)]
+        );
+        assert_eq!(
+            events(RenameMode::To, &["/new"]),
+            vec![("/new".into(), ChangeKind::Upsert)]
+        );
+    }
+
+    #[test]
+    fn ambiguous_rename_checks_whether_the_path_survived() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old.txt");
+        let new = dir.path().join("new.txt");
+        std::fs::write(&new, "renamed").unwrap();
+        assert_eq!(
+            events(
+                RenameMode::Any,
+                &[old.to_str().unwrap(), new.to_str().unwrap()]
+            ),
+            vec![(old, ChangeKind::Remove), (new, ChangeKind::Upsert)]
+        );
     }
 }

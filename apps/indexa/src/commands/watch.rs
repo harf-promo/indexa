@@ -139,9 +139,9 @@ pub(crate) async fn cmd_watch(
                         let path_str = path.to_string_lossy().into_owned();
                         // Full removal — `delete_chunks_for` left the file's summary, queue,
                         // and entry rows behind, so search/browse kept returning a file that
-                        // no longer exists. `delete_entry` clears chunks + FTS + summary +
-                        // queue + classification + entry in one transaction.
-                        if let Err(e) = store.delete_entry(&path_str) {
+                        // no longer exists. `delete_subtree` also covers a renamed directory's
+                        // descendants, clearing every child table in one transaction.
+                        if let Err(e) = store.delete_subtree(&path_str) {
                             tracing::warn!("failed to remove {path_str}: {e}");
                         } else {
                             // The dead file's ancestor roll-ups must refresh without it.
