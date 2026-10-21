@@ -1,6 +1,49 @@
 use super::*;
 use crate::store::search::{fts5_quote, like_prefix};
 
+#[test]
+fn every_summary_enqueue_rejects_excluded_entries() {
+    for enqueue in 0..3 {
+        let mut store = Store::open_in_memory().unwrap();
+        for (path, policy) in [("/proj/.env", "Sensitive"), ("/proj/cache", "Skip")] {
+            store
+                .upsert_entries(&[dummy_entry(path, EntryKind::File, 10)])
+                .unwrap();
+            store
+                .db_connection()
+                .execute(
+                    "UPDATE entries SET deep_policy = ?2 WHERE path = ?1",
+                    rusqlite::params![path, policy],
+                )
+                .unwrap();
+            let items = [(path.to_owned(), "file".to_owned(), 2)];
+            match enqueue {
+                0 => store.enqueue_summary_items(&items).unwrap(),
+                1 => store.mark_for_resummary(path, "file", 2).unwrap(),
+                _ => store.mark_for_resummary_batch(&items).unwrap(),
+            }
+            assert_eq!(
+                store.queue_state(path).unwrap(),
+                None,
+                "enqueue {enqueue} admitted {policy}"
+            );
+        }
+        store
+            .mark_for_resummary_batch(&[("/proj/missing".into(), "file".into(), 2)])
+            .unwrap();
+        assert_eq!(store.queue_state("/proj/missing").unwrap(), None);
+    }
+}
+
+#[test]
+fn entryless_summary_enqueue_still_rejects_sensitive_files() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .enqueue_summary_items(&[("/proj/.env".into(), "file".into(), 2)])
+        .unwrap();
+    assert_eq!(store.queue_state("/proj/.env").unwrap(), None);
+}
+
 // ── v0.28.2: queue hygiene — honest counts, self-clean, prune report, enqueue guard ──
 
 #[test]

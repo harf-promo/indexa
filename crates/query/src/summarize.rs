@@ -212,6 +212,10 @@ pub async fn summarize_file(
     model_fallback: bool,
     mut on_fragment: Option<&mut (dyn FnMut(String) + Send)>,
 ) -> Result<SummaryWrite> {
+    anyhow::ensure!(
+        store.summary_path_allowed(path)?,
+        "path is excluded from summarization"
+    );
     // Freshness gate (incremental re-summarize): hash the file's current content
     // and skip the LLM entirely when it matches the stored summary's source_hash —
     // the existing summary is still true for these exact bytes, so the row (and its
@@ -565,10 +569,9 @@ pub async fn process_queue_item_with_passes(
     // otherwise sit `pending` forever or re-summarize junk. Delete the row and move on.
     // Guarded by "the index has entries": an entry-less `deep`/`summarize`-without-`scan`
     // index is legitimate, and there every queue path intentionally lacks an `entries` row.
-    // entry_exists errors degrade to `true` (don't drop on a read error).
-    if store.entry_count().map(|n| n > 0).unwrap_or(false)
-        && !store.entry_exists(&item.path).unwrap_or(true)
-    {
+    // Recheck exclusions too: historical queue rows and policy changes must never reach
+    // a describer. Store errors propagate rather than bypassing this security boundary.
+    if !store.summary_path_allowed(&item.path)? {
         store.delete_queue_item(&item.path)?;
         return Ok(QueueOutcome::Orphaned);
     }
@@ -1565,6 +1568,62 @@ mod incremental_tests {
     }
 
     // ── File skip gate ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sensitive_summary_never_calls_describer_even_for_legacy_queue_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "SYNTHETIC_TEST_VALUE=private").unwrap();
+        let path = path.to_str().unwrap();
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[Entry {
+                path: path.into(),
+                kind: EntryKind::File,
+                size: 28,
+                modified: None,
+                hint: indexa_core::surface::classify_file_by_extension(Path::new(path)),
+                is_binary: false,
+            }])
+            .unwrap();
+        // Bypass enqueue to reproduce rows admitted by older versions.
+        store
+            .db_connection()
+            .execute(
+                "INSERT INTO summary_queue(path,kind,depth,state) VALUES (?1,'file',2,'pending')",
+                [path],
+            )
+            .unwrap();
+        let item = store.next_queue_item().unwrap().unwrap();
+        let (describer, file_calls, _) = CountingDescriber::new();
+        process_queue_item_with_passes(
+            &mut store,
+            &describer,
+            &StubEmbedder,
+            &item,
+            &DescriberConfig::default(),
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        // Also exercise direct callers that do not drain the queue.
+        let _ = summarize_file(
+            &mut store,
+            &describer,
+            &StubEmbedder,
+            path,
+            "stub",
+            1,
+            false,
+            None,
+        )
+        .await;
+        assert_eq!(file_calls.load(Ordering::SeqCst), 0);
+        assert!(store.summary_by_path(path).unwrap().is_none());
+        assert!(store.queue_state(path).unwrap().is_none());
+    }
 
     #[tokio::test]
     async fn unchanged_file_skips_the_describer_entirely() {

@@ -4,6 +4,23 @@ use super::{FailedQueueItem, QueueItem, QueueStats, Store};
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 
+fn summary_path_allowed(
+    conn: &rusqlite::Connection,
+    path: &str,
+    has_entries: bool,
+) -> Result<bool> {
+    let p = std::path::Path::new(path);
+    // Entry-less summarize workflows still need the filename/directory security boundary.
+    if crate::walker::is_sensitive_file(p) || p.ancestors().any(crate::walker::is_sensitive_dir) {
+        return Ok(false);
+    }
+    let allowed: Option<bool> = conn.query_row(
+        "SELECT deep_policy IS NULL OR deep_policy NOT IN ('Skip', 'Sensitive') FROM entries WHERE path = ?1",
+        [path], |r| r.get(0),
+    ).optional()?;
+    Ok(allowed.unwrap_or(!has_entries))
+}
+
 /// The atomic claim behind [`Store::next_queue_item`]. The inner `ORDER BY depth DESC LIMIT 1`
 /// is served by `idx_summary_queue_claim (state, depth DESC)` — no per-claim sort of every
 /// pending row. A named constant so the EXPLAIN QUERY PLAN test checks this exact statement.
@@ -28,6 +45,12 @@ pub(super) const SUBTREE_HAS_UNFINISHED_SQL: &str = "SELECT EXISTS(
 impl Store {
     // ── Summary queue ────────────────────────────────────────────────────────
 
+    /// Whether a path may be summarized: excludes Skip/Sensitive entries and secrets even
+    /// without a scan. Missing entries are allowed only in an entry-less index.
+    pub fn summary_path_allowed(&self, path: &str) -> Result<bool> {
+        summary_path_allowed(&self.conn, path, self.entry_count()? > 0)
+    }
+
     /// Enqueue (path, kind, depth) items; ignores duplicates.
     ///
     /// Paths that are not a live `entries` row are skipped (when the index has entries):
@@ -39,13 +62,12 @@ impl Store {
         let has_entries = self.entry_count()? > 0;
         let tx = self.conn.transaction()?;
         {
-            let mut is_entry = tx.prepare_cached("SELECT 1 FROM entries WHERE path = ?1")?;
             let mut stmt = tx.prepare_cached(
                 "INSERT OR IGNORE INTO summary_queue (path, kind, depth, state)
                  VALUES (?1, ?2, ?3, 'pending')",
             )?;
             for (path, kind, depth) in items {
-                if has_entries && !is_entry.exists(params![path])? {
+                if !summary_path_allowed(&tx, path, has_entries)? {
                     continue; // not a live entry — don't queue un-processable work
                 }
                 stmt.execute(params![path, kind, depth])?;
@@ -181,7 +203,7 @@ impl Store {
         // Don't (re-)queue a path that isn't a live entry — e.g. a watch event for a file
         // under a skipped build/VCS dir. Such a row could never summarize and would only
         // inflate the queue. Bypassed for an entry-less index (entries are optional).
-        if !self.entry_exists(path)? && self.entry_count()? > 0 {
+        if !self.summary_path_allowed(path)? {
             return Ok(());
         }
         self.conn.execute(
@@ -201,6 +223,7 @@ impl Store {
     /// incremental re-summarize path to re-pend changed files + their stale ancestor
     /// roll-ups in one shot.
     pub fn mark_for_resummary_batch(&mut self, items: &[(String, String, i64)]) -> Result<()> {
+        let has_entries = self.entry_count()? > 0;
         let tx = self.conn.transaction()?;
         {
             let mut stmt = tx.prepare_cached(
@@ -211,6 +234,9 @@ impl Store {
                      WHERE summary_queue.state <> 'in_flight'",
             )?;
             for (path, kind, depth) in items {
+                if !summary_path_allowed(&tx, path, has_entries)? {
+                    continue;
+                }
                 stmt.execute(params![path, kind, depth])?;
             }
         }
