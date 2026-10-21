@@ -2,14 +2,14 @@
 
 Where Indexa sits, who's nearby, and what makes it defensible. Honest, with the gaps named.
 
-> **Snapshot updated 2026-09-06 (v0.80.3).** Competitor capabilities drift; for what Indexa has
+> **Snapshot updated 2026-10-21 (v0.81.0).** Competitor capabilities drift; for what Indexa has
 > shipped since this date, [CHANGELOG.md](../CHANGELOG.md) is canonical, not this file. Shipped
-> since the previous (v0.77.0) snapshot and not re-analyzed below: agent-session transcript
-> indexing with `category:agent-session` scoping, the plugin directory and `plugin list
-> --refresh`, `indexa eval --judge` and `--save-run`, Cerebras as an opt-in provider, Context
-> Pack per-item inclusion modes with `--dry-run` and typed redaction labels, and durable
-> patch-id-anchored `record_decision` ledger annotations. None of them changes a competitor
-> comparison on this page.
+> since the previous (v0.80.3) snapshot and not re-analyzed below: video audio-track
+> transcription (`[parsers.video] transcribe`), an operator-verified memory store with the MCP
+> `memory_record` / `memory_search` / `memory_update` tools and an opt-in RECORDED MEMORY context
+> block, and a cross-language HTTP/FFI boundary scanner (scanner only, not yet wired into
+> indexing). None of them changes a competitor comparison on this page; the memory tools are
+> Indexa's concrete entry into the "Agent memory" trend listed at the end.
 
 ## The one-line position
 
