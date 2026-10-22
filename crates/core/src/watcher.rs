@@ -12,7 +12,7 @@ use notify::{
     event::{CreateKind, ModifyKind, RemoveKind, RenameMode},
     EventKind, RecursiveMode,
 };
-use notify_debouncer_full::{new_debouncer, DebounceEventResult};
+use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, NoCache};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -73,27 +73,35 @@ pub fn watch<P: AsRef<Path>>(roots: &[P], cfg: &WatcherConfig) -> Result<WatchSe
 
     // The debouncer batches all events that arrive within `debounce` of each other
     // and delivers them once the burst settles — coalescing editor save dances.
-    let mut debouncer =
-        new_debouncer(
-            cfg.debounce,
-            None,
-            move |result: DebounceEventResult| match result {
-                Ok(events) => {
-                    for ev in events {
-                        for event in change_events(&ev.event) {
-                            debug!("fs event {:?}: {}", event.kind, event.path.display());
-                            let _ = tx.send(event);
-                        }
-                    }
+    //
+    // `NoCache` instead of the platform-recommended file-ID cache: on macOS FSEvents reports a
+    // sticky `ItemCreated` flag on a recently created directory, so the cache-backed debouncer
+    // stitched its rename as "created, then renamed" and moved the queue to the destination —
+    // the source path got no event at all and its subtree stayed in the index. Without the
+    // cache each side of the rename arrives on its own and `change_events` resolves direction by
+    // existence. Linux already uses `NoCache` (inotify cookies still pair renames); it also
+    // skips the cache's full recursive scan of every watched root.
+    let mut debouncer = new_debouncer_opt::<_, notify::RecommendedWatcher, NoCache>(
+        cfg.debounce,
+        None,
+        move |result: DebounceEventResult| match result {
+            Ok(events) => {
+                let events = events.iter().flat_map(|ev| change_events(&ev.event));
+                for event in expand_directory_upserts(events) {
+                    debug!("fs event {:?}: {}", event.kind, event.path.display());
+                    let _ = tx.send(event);
                 }
-                Err(errors) => {
-                    for e in errors {
-                        warn!("watch error: {e}");
-                    }
+            }
+            Err(errors) => {
+                for e in errors {
+                    warn!("watch error: {e}");
                 }
-            },
-        )
-        .context("creating debounced filesystem watcher")?;
+            }
+        },
+        NoCache,
+        notify::Config::default(),
+    )
+    .context("creating debounced filesystem watcher")?;
 
     for root in roots {
         let root = root.as_ref();
@@ -137,6 +145,7 @@ fn change_events(event: &notify::Event) -> Vec<ChangeEvent> {
                     }
                 }
                 EventKind::Create(CreateKind::File)
+                | EventKind::Create(CreateKind::Folder)
                 | EventKind::Create(CreateKind::Any)
                 | EventKind::Modify(ModifyKind::Data(_))
                 | EventKind::Modify(ModifyKind::Any) => ChangeKind::Upsert,
@@ -151,6 +160,54 @@ fn change_events(event: &notify::Event) -> Vec<ChangeEvent> {
             })
         })
         .collect()
+}
+
+/// Follow every directory `Upsert` with an `Upsert` for each file beneath it.
+///
+/// A rename or move-in of a directory is reported for the directory alone, never for its
+/// children, and consumers skip directory events — so without this the files under a renamed
+/// directory were removed from their old paths but never indexed at their new ones. The walk
+/// prunes the same build-artifact / VCS directories the scanner skips and does not follow
+/// symlinks; consumers still apply their per-file indexing policy to every emitted path.
+fn expand_directory_upserts(events: impl IntoIterator<Item = ChangeEvent>) -> Vec<ChangeEvent> {
+    let mut out = Vec::new();
+    for event in events {
+        let expand = event.kind == ChangeKind::Upsert
+            && std::fs::symlink_metadata(&event.path).is_ok_and(|m| m.is_dir())
+            && !crate::walker::is_skip_dir(&event.path);
+        let dir = expand.then(|| event.path.clone());
+        out.push(event);
+        if let Some(dir) = dir {
+            push_descendant_files(&dir, &mut out);
+        }
+    }
+    out
+}
+
+fn push_descendant_files(dir: &Path, out: &mut Vec<ChangeEvent>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            warn!("watch: could not list {}: {e}", dir.display());
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if file_type.is_dir() {
+            if !crate::walker::is_skip_dir(&path) {
+                push_descendant_files(&path, out);
+            }
+        } else if file_type.is_file() {
+            out.push(ChangeEvent {
+                path,
+                kind: ChangeKind::Upsert,
+            });
+        }
+    }
 }
 
 /// How often the cooperative-stop loop wakes to re-check its `stop` flag while idle.
@@ -321,6 +378,43 @@ mod rename_tests {
     }
 
     #[test]
+    fn directory_upsert_expands_to_descendant_files_pruning_skip_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let moved = dir.path().join("moved");
+        std::fs::create_dir_all(moved.join("sub")).unwrap();
+        std::fs::create_dir_all(moved.join(".git")).unwrap();
+        std::fs::write(moved.join("a.txt"), "a").unwrap();
+        std::fs::write(moved.join("sub/b.txt"), "b").unwrap();
+        std::fs::write(moved.join(".git/HEAD"), "ref").unwrap();
+        let gone = dir.path().join("gone");
+
+        let out = expand_directory_upserts([
+            ChangeEvent {
+                path: gone.clone(),
+                kind: ChangeKind::Remove,
+            },
+            ChangeEvent {
+                path: moved.clone(),
+                kind: ChangeKind::Upsert,
+            },
+        ]);
+        let mut got: Vec<_> = out.into_iter().map(|e| (e.path, e.kind)).collect();
+        // The original events keep their order; descendants follow their directory.
+        assert_eq!(got[0], (gone, ChangeKind::Remove));
+        assert_eq!(got[1], (moved.clone(), ChangeKind::Upsert));
+        got.drain(..2);
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            got,
+            vec![
+                (moved.join("a.txt"), ChangeKind::Upsert),
+                (moved.join("sub").join("b.txt"), ChangeKind::Upsert),
+            ],
+            "every file under the directory, but nothing under .git"
+        );
+    }
+
+    #[test]
     fn ambiguous_rename_checks_whether_the_path_survived() {
         let dir = tempfile::tempdir().unwrap();
         let old = dir.path().join("old.txt");
@@ -332,6 +426,158 @@ mod rename_tests {
                 &[old.to_str().unwrap(), new.to_str().unwrap()]
             ),
             vec![(old, ChangeKind::Remove), (new, ChangeKind::Upsert)]
+        );
+    }
+}
+
+/// Real-filesystem regression for a directory rename. Unlike `rename_tests`, this drives the
+/// OS backend (FSEvents / inotify / ReadDirectoryChangesW) through [`watch`], so it proves the
+/// event stream a consumer actually receives is enough to converge the index.
+///
+/// It applies each event the way both consumers (`indexa watch` and the web watch handler) do —
+/// `Remove` → `delete_subtree`, a file `Upsert` → `upsert_entries` + `replace_file_chunks`, and
+/// a directory `Upsert` is dropped — rather than invoking them, because they need an embedder
+/// and parser registry. The fix lives in the event stream, so that is the level under test.
+/// Only the final store state is asserted: backends differ in event kinds and order.
+#[cfg(test)]
+mod fs_rename_tests {
+    use super::*;
+    use crate::store::{ChunkRecord, Store};
+    use crate::walker::{Entry, EntryKind};
+    use std::time::Instant;
+
+    fn canonical_root(p: &Path) -> PathBuf {
+        // notify reports FSEvents paths canonicalized (`/var` → `/private/var`); on Windows
+        // `canonicalize` adds a `\\?\` prefix that the event paths built from the root lack.
+        let c = std::fs::canonicalize(p).unwrap();
+        #[cfg(windows)]
+        {
+            if let Some(s) = c.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+                return PathBuf::from(s);
+            }
+        }
+        c
+    }
+
+    fn index_file(store: &mut Store, path: &Path) {
+        let p = path.to_string_lossy().into_owned();
+        store
+            .upsert_entries(&[Entry {
+                path: path.to_path_buf(),
+                kind: EntryKind::File,
+                size: 1,
+                modified: None,
+                hint: None,
+                is_binary: false,
+            }])
+            .unwrap();
+        store
+            .replace_file_chunks(
+                &p,
+                &[ChunkRecord {
+                    entry_path: p.clone(),
+                    seq: 0,
+                    heading: String::new(),
+                    text: format!("content of {p}"),
+                    language: None,
+                    embedding: None,
+                    embed_model: None,
+                    content_hash: None,
+                }],
+            )
+            .unwrap();
+    }
+
+    fn apply(store: &mut Store, event: &ChangeEvent) {
+        if event.path.is_dir() {
+            return;
+        }
+        match event.kind {
+            ChangeKind::Remove => {
+                store.delete_subtree(&event.path.to_string_lossy()).unwrap();
+            }
+            ChangeKind::Upsert => {
+                if event.path.is_file() {
+                    index_file(store, &event.path);
+                }
+            }
+        }
+    }
+
+    fn indexed(store: &Store, path: &Path) -> bool {
+        let p = path.to_string_lossy();
+        store.entry_exists(&p).unwrap() && store.first_chunk_text(&p).unwrap().is_some()
+    }
+
+    #[test]
+    fn renaming_a_directory_reindexes_its_descendants_at_the_new_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = canonical_root(tmp.path());
+        let old = root.join("old");
+        let new = root.join("new");
+        std::fs::create_dir_all(old.join("sub")).unwrap();
+        let rel = ["a.txt", "sub/b.txt"];
+        for r in rel {
+            std::fs::write(old.join(r), format!("body of {r}")).unwrap();
+        }
+
+        // The index lives outside the watched root so its own writes don't add events.
+        let db_dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&db_dir.path().join("index.db")).unwrap();
+        for r in rel {
+            index_file(&mut store, &old.join(r));
+        }
+
+        let session = watch(
+            &[&root],
+            &WatcherConfig {
+                debounce: Duration::from_millis(150),
+            },
+        )
+        .unwrap();
+        // Wait until the backend is armed (FSEvents has a startup latency of ~1s): touch a
+        // probe until its event arrives, then drain, so the rename is never lost to arming.
+        let probe = root.join("probe.txt");
+        let arm_deadline = Instant::now() + Duration::from_secs(10);
+        let mut armed = false;
+        while !armed && Instant::now() < arm_deadline {
+            std::fs::write(&probe, "probe").unwrap();
+            while let Ok(event) = session.rx.recv_timeout(Duration::from_millis(300)) {
+                armed |= event.path == probe;
+            }
+        }
+        assert!(armed, "watcher never delivered the probe event");
+        std::fs::rename(&old, &new).unwrap();
+
+        let converged = |store: &Store| {
+            rel.iter()
+                .all(|r| !indexed(store, &old.join(r)) && indexed(store, &new.join(r)))
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = Vec::new();
+        while !converged(&store) && Instant::now() < deadline {
+            if let Ok(event) = session.rx.recv_timeout(Duration::from_millis(200)) {
+                apply(&mut store, &event);
+                seen.push(event);
+            }
+        }
+
+        let state: Vec<_> = rel
+            .iter()
+            .map(|r| {
+                (
+                    *r,
+                    indexed(&store, &old.join(r)),
+                    indexed(&store, &new.join(r)),
+                )
+            })
+            .collect();
+        assert!(
+            converged(&store),
+            "index did not converge after renaming {} → {}; \
+             (file, still indexed at old path, indexed at new path) = {state:?}; events = {seen:?}",
+            old.display(),
+            new.display()
         );
     }
 }
