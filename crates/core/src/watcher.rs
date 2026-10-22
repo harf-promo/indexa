@@ -71,9 +71,13 @@ pub struct WatchSession {
 /// ```
 pub fn watch<P: AsRef<Path>>(roots: &[P], cfg: &WatcherConfig) -> Result<WatchSession> {
     let (tx, rx) = mpsc::channel::<ChangeEvent>();
-    // Canonical roots, so the skip-dir ancestor check in `translate_batch` matches the
-    // canonical paths backends report (FSEvents: `/var` → `/private/var`).
-    let watched: Vec<PathBuf> = roots.iter().map(|r| canonical_root(r.as_ref())).collect();
+    // Each root as given *and* canonicalized, so the skip-dir ancestor check in
+    // `translate_batch` matches both the canonical paths FSEvents reports (`/var` →
+    // `/private/var`) and the given-root paths inotify / ReadDirectoryChangesW build.
+    let watched: Vec<PathBuf> = roots
+        .iter()
+        .flat_map(|r| [r.as_ref().to_path_buf(), canonical_root(r.as_ref())])
+        .collect();
 
     // The debouncer batches all events that arrive within `debounce` of each other
     // and delivers them once the burst settles — coalescing editor save dances.
