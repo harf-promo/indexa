@@ -13,6 +13,7 @@ use notify::{
     EventKind, RecursiveMode,
 };
 use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, NoCache};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -70,6 +71,7 @@ pub struct WatchSession {
 /// ```
 pub fn watch<P: AsRef<Path>>(roots: &[P], cfg: &WatcherConfig) -> Result<WatchSession> {
     let (tx, rx) = mpsc::channel::<ChangeEvent>();
+    let watched: Vec<PathBuf> = roots.iter().map(|r| r.as_ref().to_path_buf()).collect();
 
     // The debouncer batches all events that arrive within `debounce` of each other
     // and delivers them once the burst settles — coalescing editor save dances.
@@ -86,8 +88,7 @@ pub fn watch<P: AsRef<Path>>(roots: &[P], cfg: &WatcherConfig) -> Result<WatchSe
         None,
         move |result: DebounceEventResult| match result {
             Ok(events) => {
-                let events = events.iter().flat_map(|ev| change_events(&ev.event));
-                for event in expand_directory_upserts(events) {
+                for event in translate_batch(events.iter().map(|ev| &ev.event), &watched) {
                     debug!("fs event {:?}: {}", event.kind, event.path.display());
                     let _ = tx.send(event);
                 }
@@ -162,29 +163,76 @@ fn change_events(event: &notify::Event) -> Vec<ChangeEvent> {
         .collect()
 }
 
-/// Follow every directory `Upsert` with an `Upsert` for each file beneath it.
+/// Translate one debounced batch into consumer events.
 ///
 /// A rename or move-in of a directory is reported for the directory alone, never for its
-/// children, and consumers skip directory events — so without this the files under a renamed
-/// directory were removed from their old paths but never indexed at their new ones. The walk
-/// prunes the same build-artifact / VCS directories the scanner skips and does not follow
-/// symlinks; consumers still apply their per-file indexing policy to every emitted path.
-fn expand_directory_upserts(events: impl IntoIterator<Item = ChangeEvent>) -> Vec<ChangeEvent> {
-    let mut out = Vec::new();
+/// children, and consumers skip directory events — so without expansion the files under a
+/// renamed directory were removed from their old paths but never indexed at their new ones.
+/// Every directory that a *structural* event (create or rename) leaves in place is therefore
+/// followed by an `Upsert` per file beneath it. Content/metadata events on a directory (Windows
+/// reports `Modify(Any)` on a parent whenever an entry in it changes) are not expanded, nor is a
+/// directory inside a scanner skip dir, and each file is emitted at most once per batch.
+///
+/// A directory reached by a rename is also removed first: without the file-ID cache, rename
+/// direction on macOS is decided by existence, so `mv proj proj.old; mkdir proj` in one window
+/// reports `proj` as an upsert and its stale subtree would otherwise survive. Removes are
+/// ordered before upserts — an upsert of a path that is gone is a no-op for consumers, while a
+/// remove after an upsert would delete what was just re-indexed.
+fn translate_batch<'a>(
+    events: impl IntoIterator<Item = &'a notify::Event>,
+    roots: &[PathBuf],
+) -> Vec<ChangeEvent> {
+    let mut removes = Vec::new();
+    let mut upserts = Vec::new();
+    let mut expanded: HashSet<PathBuf> = HashSet::new();
+    let mut emitted: HashSet<PathBuf> = HashSet::new();
     for event in events {
-        let expand = event.kind == ChangeKind::Upsert
-            && std::fs::symlink_metadata(&event.path).is_ok_and(|m| m.is_dir())
-            && !crate::walker::is_skip_dir(&event.path);
-        let dir = expand.then(|| event.path.clone());
-        out.push(event);
-        if let Some(dir) = dir {
-            push_descendant_files(&dir, &mut out);
+        let renamed = matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)));
+        let structural = renamed || matches!(event.kind, EventKind::Create(_));
+        for change in change_events(event) {
+            if change.kind == ChangeKind::Remove {
+                removes.push(change);
+                continue;
+            }
+            let dir = change.path.clone();
+            let expand = structural
+                && std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir())
+                && !in_skip_dir(&dir, roots);
+            upserts.push(change);
+            if !expand {
+                continue;
+            }
+            if renamed {
+                removes.push(ChangeEvent {
+                    path: dir.clone(),
+                    kind: ChangeKind::Remove,
+                });
+            }
+            // A directory under one already walked in this batch has nothing new to add.
+            if dir.ancestors().any(|a| expanded.contains(a)) {
+                continue;
+            }
+            push_descendant_files(&dir, &mut upserts, &mut emitted);
+            expanded.insert(dir);
         }
     }
-    out
+    removes.extend(upserts);
+    removes
 }
 
-fn push_descendant_files(dir: &Path, out: &mut Vec<ChangeEvent>) {
+/// `path` or one of its ancestors below its watch root is a directory the scanner prunes
+/// (`.git`, `node_modules`, `target`, …). Mirrors the walker, which never descends into one.
+fn in_skip_dir(path: &Path, roots: &[PathBuf]) -> bool {
+    match roots.iter().find(|r| path.starts_with(r)) {
+        Some(root) => path
+            .ancestors()
+            .take_while(|a| *a != root.as_path())
+            .any(crate::walker::is_skip_dir),
+        None => crate::walker::is_skip_dir(path),
+    }
+}
+
+fn push_descendant_files(dir: &Path, out: &mut Vec<ChangeEvent>, emitted: &mut HashSet<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
@@ -199,9 +247,9 @@ fn push_descendant_files(dir: &Path, out: &mut Vec<ChangeEvent>) {
         let path = entry.path();
         if file_type.is_dir() {
             if !crate::walker::is_skip_dir(&path) {
-                push_descendant_files(&path, out);
+                push_descendant_files(&path, out, emitted);
             }
-        } else if file_type.is_file() {
+        } else if file_type.is_file() && emitted.insert(path.clone()) {
             out.push(ChangeEvent {
                 path,
                 kind: ChangeKind::Upsert,
@@ -377,40 +425,104 @@ mod rename_tests {
         );
     }
 
+    fn raw(kind: EventKind, path: &Path) -> notify::Event {
+        let mut event = notify::Event::new(kind);
+        event.paths = vec![path.to_path_buf()];
+        event
+    }
+
     #[test]
-    fn directory_upsert_expands_to_descendant_files_pruning_skip_dirs() {
+    fn structural_directory_events_expand_to_descendant_files_once() {
         let dir = tempfile::tempdir().unwrap();
-        let moved = dir.path().join("moved");
+        let root = dir.path().to_path_buf();
+        let moved = root.join("moved");
         std::fs::create_dir_all(moved.join("sub")).unwrap();
         std::fs::create_dir_all(moved.join(".git")).unwrap();
         std::fs::write(moved.join("a.txt"), "a").unwrap();
         std::fs::write(moved.join("sub/b.txt"), "b").unwrap();
         std::fs::write(moved.join(".git/HEAD"), "ref").unwrap();
-        let gone = dir.path().join("gone");
+        let gone = root.join("gone");
 
-        let out = expand_directory_upserts([
-            ChangeEvent {
-                path: gone.clone(),
-                kind: ChangeKind::Remove,
-            },
-            ChangeEvent {
-                path: moved.clone(),
-                kind: ChangeKind::Upsert,
-            },
-        ]);
-        let mut got: Vec<_> = out.into_iter().map(|e| (e.path, e.kind)).collect();
-        // The original events keep their order; descendants follow their directory.
-        assert_eq!(got[0], (gone, ChangeKind::Remove));
-        assert_eq!(got[1], (moved.clone(), ChangeKind::Upsert));
-        got.drain(..2);
-        got.sort_by(|a, b| a.0.cmp(&b.0));
+        let batch = [
+            // The child directory's own create (nested `cp -r`) must not re-emit its files.
+            raw(EventKind::Create(CreateKind::Folder), &moved),
+            raw(EventKind::Create(CreateKind::Folder), &moved.join("sub")),
+            raw(EventKind::Remove(RemoveKind::Folder), &gone),
+        ];
+        let got: Vec<_> = translate_batch(&batch, std::slice::from_ref(&root))
+            .into_iter()
+            .map(|e| (e.path, e.kind))
+            .collect();
+        assert_eq!(got[0], (gone, ChangeKind::Remove), "removes come first");
+        let mut files: Vec<_> = got[1..]
+            .iter()
+            .filter(|(p, _)| p.is_file())
+            .cloned()
+            .collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
-            got,
+            files,
             vec![
                 (moved.join("a.txt"), ChangeKind::Upsert),
                 (moved.join("sub").join("b.txt"), ChangeKind::Upsert),
             ],
-            "every file under the directory, but nothing under .git"
+            "every file under the directory exactly once, nothing under .git"
+        );
+    }
+
+    #[test]
+    fn content_events_and_skip_dirs_do_not_expand() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let parent = root.join("parent");
+        let deps = root.join("node_modules").join("pkg");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&deps).unwrap();
+        std::fs::write(parent.join("a.txt"), "a").unwrap();
+        std::fs::write(deps.join("index.js"), "x").unwrap();
+
+        // Windows reports `Modify(Any)` on a directory whenever an entry in it changes.
+        let batch = [
+            raw(EventKind::Modify(ModifyKind::Any), &parent),
+            raw(EventKind::Create(CreateKind::Folder), &deps),
+        ];
+        let got: Vec<_> = translate_batch(&batch, std::slice::from_ref(&root))
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
+        assert_eq!(
+            got,
+            vec![parent, deps],
+            "only the directory events themselves"
+        );
+    }
+
+    #[test]
+    fn a_directory_reached_by_rename_is_cleared_before_reindexing() {
+        // `mv proj proj.old; mkdir proj` in one window: without the file-ID cache, `proj`'s
+        // rename resolves to an upsert because the path exists again. Its stale subtree must
+        // still be removed — before the fresh files are upserted.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let proj = root.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("new.txt"), "n").unwrap();
+
+        let batch = [raw(
+            EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+            &proj,
+        )];
+        let got: Vec<_> = translate_batch(&batch, std::slice::from_ref(&root))
+            .into_iter()
+            .map(|e| (e.path, e.kind))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (proj.clone(), ChangeKind::Remove),
+                (proj.clone(), ChangeKind::Upsert),
+                (proj.join("new.txt"), ChangeKind::Upsert),
+            ]
         );
     }
 
@@ -538,7 +650,8 @@ mod fs_rename_tests {
         // Wait until the backend is armed (FSEvents has a startup latency of ~1s): touch a
         // probe until its event arrives, then drain, so the rename is never lost to arming.
         let probe = root.join("probe.txt");
-        let arm_deadline = Instant::now() + Duration::from_secs(10);
+        // Generous deadlines: they only bound a failure; a passing run converges in under 1s.
+        let arm_deadline = Instant::now() + Duration::from_secs(30);
         let mut armed = false;
         while !armed && Instant::now() < arm_deadline {
             std::fs::write(&probe, "probe").unwrap();
@@ -547,13 +660,19 @@ mod fs_rename_tests {
             }
         }
         assert!(armed, "watcher never delivered the probe event");
-        std::fs::rename(&old, &new).unwrap();
+        // Windows runners' indexer/antivirus can briefly hold the directory open.
+        let mut attempt = 0;
+        while let Err(e) = std::fs::rename(&old, &new) {
+            attempt += 1;
+            assert!(attempt < 20, "rename kept failing: {e}");
+            std::thread::sleep(Duration::from_millis(250));
+        }
 
         let converged = |store: &Store| {
             rel.iter()
                 .all(|r| !indexed(store, &old.join(r)) && indexed(store, &new.join(r)))
         };
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
         let mut seen = Vec::new();
         while !converged(&store) && Instant::now() < deadline {
             if let Ok(event) = session.rx.recv_timeout(Duration::from_millis(200)) {
