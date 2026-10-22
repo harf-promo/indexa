@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Watch: a renamed directory's files are re-indexed at their new paths.** Renaming or
+  moving a directory inside a watched root used to drop its files from the old paths without
+  indexing them at the new ones, because a directory rename is reported for the directory alone.
+  The watcher now follows a directory create/rename with an update per file beneath it (skipping
+  the scanner's prune dirs, once per file per batch). On macOS the old paths could also stay
+  indexed: FSEvents' sticky "created" flag made the debouncer's file-ID cache fold the rename
+  into a create at the destination, so the cache is no longer used.
+
 ## [0.81.0] — 2026-10-21
 
 ### Added
@@ -201,14 +211,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   follow-up, not part of this change.
 
 ### Fixed
-
-- **Watch: a renamed directory's files are re-indexed at their new paths.** Renaming or
-  moving a directory inside a watched root used to drop its files from the old paths without
-  indexing them at the new ones, because a directory rename is reported for the directory alone.
-  The watcher now follows a directory create/rename with an update per file beneath it (skipping
-  the scanner's prune dirs, once per file per batch). On macOS the old paths could also stay
-  indexed: FSEvents' sticky "created" flag made the debouncer's file-ID cache fold the rename
-  into a create at the destination, so the cache is no longer used.
 
 - **The web scan job's prune warning reports every swept count, and `indexa rm` finds
   canonicalized paths.** The scan job's self-heal prune printed only chunks and summaries, so a
