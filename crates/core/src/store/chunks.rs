@@ -110,6 +110,55 @@ impl Store {
         Ok(())
     }
 
+    /// Replace one file's chunks, including a successful empty extraction.
+    pub fn replace_file_chunks(&mut self, path: &str, chunks: &[ChunkRecord]) -> Result<()> {
+        anyhow::ensure!(
+            chunks.iter().all(|c| c.entry_path == path),
+            "chunk path mismatch"
+        );
+        if !chunks.is_empty() {
+            return self.upsert_chunks(chunks);
+        }
+        // An empty parse is a successful replacement, not a parse failure. Clear every
+        // content-derived artifact while preserving the entry and its history/weights.
+        let mut rollups = vec![(
+            path.to_owned(),
+            "file".to_owned(),
+            crate::pathutil::path_depth(path),
+        )];
+        let mut parent = std::path::Path::new(path).parent();
+        while let Some(dir) = parent {
+            if dir.as_os_str().is_empty() {
+                break;
+            }
+            let dir = dir.to_string_lossy().into_owned();
+            rollups.push((
+                dir.clone(),
+                "dir".to_owned(),
+                crate::pathutil::path_depth(&dir),
+            ));
+            parent = parent.and_then(std::path::Path::parent);
+        }
+        let tx = self.conn.transaction()?;
+        for (table, column) in [
+            ("chunks_fts", "entry_path"),
+            ("chunks", "entry_path"),
+            ("edges", "from_path"),
+            ("symbols", "path"),
+            ("note_anchors", "note_path"),
+            ("classifications", "path"),
+            ("directory_apps", "path"),
+        ] {
+            tx.execute(&format!("DELETE FROM {table} WHERE {column} = ?1"), [path])?;
+        }
+        // Old file and directory summaries can also expose the removed text.
+        for (path, _, _) in &rollups {
+            tx.execute("DELETE FROM summaries WHERE path = ?1", [path])?;
+        }
+        tx.commit()?;
+        self.mark_for_resummary_batch(&rollups)
+    }
+
     /// Returns a map of `content_hash → embedding` for chunks already stored under
     /// `entry_path`.  Only rows where BOTH `content_hash` and `embedding` are non-NULL
     /// are returned — a NULL embedding means the previous deep run failed to embed that

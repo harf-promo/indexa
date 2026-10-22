@@ -175,8 +175,8 @@ async fn persist_completed_file(
     }
     // `summaries-only` never persists chunk rows — that's the entire ~100× size win;
     // `summarize_file` re-parses the file itself when no chunks are stored.
-    if !skip_embed_work {
-        match store.upsert_chunks(&chunk_records) {
+    if !skip_embed_work || chunks.is_empty() {
+        match store.replace_file_chunks(path_str, &chunk_records) {
             Ok(()) => chunks_written += chunk_records.len() as u64,
             Err(e) => {
                 push(
@@ -1096,8 +1096,23 @@ pub(crate) async fn run_deep_phase(
                     }
                 }
             } else {
-                // No chunks were extracted for this file at all (e.g. binary/empty) — nothing
-                // to persist, so this is already "done" the moment we know that.
+                // Successful empty extraction replaces old searchable content in every mode.
+                let (e, c, h) = persist_completed_file(
+                    state,
+                    handle,
+                    (**entry).clone(),
+                    &path_str,
+                    &[],
+                    Vec::new(),
+                    &[],
+                    Vec::new(),
+                    None,
+                    false,
+                )
+                .await;
+                entries_written += e;
+                chunks_written += c;
+                hard_errors += h;
                 record_file_progress(handle, &path_str, &mut done, &mut samples, n_files);
             }
         }
@@ -1285,6 +1300,55 @@ mod tests {
         }
         fn dim(&self) -> usize {
             8
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_deep_extraction_replaces_previous_content_in_every_mode() {
+        for mode in [SummaryMode::Augment, SummaryMode::SummariesOnly] {
+            for body in ["", " \n\t"] {
+                let dir = tempfile::tempdir().unwrap();
+                let mut entry = write_test_file(dir.path(), "empty.txt", "old-content");
+                let path = entry.path.to_string_lossy().into_owned();
+                let mut store = Store::open_in_memory().unwrap();
+                store.upsert_entries(&[entry.clone()]).unwrap();
+                store
+                    .upsert_chunks(&[ChunkRecord {
+                        entry_path: path.clone(),
+                        seq: 0,
+                        heading: String::new(),
+                        text: "obsolete searchable content".into(),
+                        language: None,
+                        embedding: None,
+                        embed_model: None,
+                        content_hash: None,
+                    }])
+                    .unwrap();
+                std::fs::write(&entry.path, body).unwrap();
+                entry.size = body.len() as u64;
+                let handle = Arc::new(JobHandle::new("deep", path.clone()));
+                let mut state = build_state(
+                    store,
+                    default_machine_spec(),
+                    Arc::new(MarkingEmbedder {
+                        handle: handle.clone(),
+                    }),
+                );
+                Arc::make_mut(&mut state.config).describer.mode = mode.clone();
+                assert!(
+                    run_deep_phase(&state, dir.path().to_str().unwrap(), &[entry], &handle).await
+                );
+                let store = state.store.lock().await;
+                assert!(store.entry_exists(&path).unwrap());
+                assert!(
+                    store.chunks_for_path(&path, 10).unwrap().is_empty(),
+                    "{mode:?}, body={body:?}"
+                );
+                assert_eq!(
+                    store.queue_state(&path).unwrap().as_deref(),
+                    Some("pending")
+                );
+            }
         }
     }
 

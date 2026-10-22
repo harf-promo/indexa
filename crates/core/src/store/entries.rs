@@ -140,8 +140,8 @@ fn delete_path_artifacts_exact(tx: &Transaction, paths: &[String]) -> rusqlite::
 }
 
 /// Delete every artifact (the same set as [`delete_path_artifacts_exact`] — see
-/// [`ENTRY_CHILD_TABLES`]) for `entries` rows under a root subtree whose `scan_generation` is NOT
-/// the current scan's — either an older generation or NULL (a watch upsert, or a pre-D5-migration
+/// [`ENTRY_CHILD_TABLES`]) for `entries` rows under a root subtree whose `scan_generation` is older
+/// than the current scan's, or NULL (a watch upsert, or a pre-D5-migration
 /// row this scan did not re-see). The streaming-scan (D5) analogue of `delete_path_artifacts_exact`:
 /// subquery-based (no materialized ghost-path list held in memory), so a mostly-deleted root stays
 /// bounded-memory regardless of how many ghost rows it has. Returns the number of `entries` rows
@@ -158,7 +158,7 @@ fn delete_generation_ghosts(
     // regardless of how many times `?N` appears in the statement text).
     const GHOST_PATHS: &str = "SELECT path FROM entries \
          WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\') \
-           AND (scan_generation IS NULL OR scan_generation != ?3)";
+           AND (scan_generation IS NULL OR scan_generation < ?3)";
     for (table, col) in ENTRY_CHILD_TABLES {
         tx.execute(
             &format!("DELETE FROM {table} WHERE {col} IN ({GHOST_PATHS})"),
@@ -176,7 +176,7 @@ fn delete_generation_ghosts(
     tx.execute(
         "DELETE FROM entries \
          WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\') \
-           AND (scan_generation IS NULL OR scan_generation != ?3)",
+           AND (scan_generation IS NULL OR scan_generation < ?3)",
         params![exact, child_pattern, generation],
     )
 }
@@ -227,7 +227,9 @@ impl Store {
                      hint_cat        = excluded.hint_cat,
                      deep_policy     = excluded.deep_policy,
                      scan_generation = COALESCE(excluded.scan_generation, scan_generation),
-                     indexed_at      = unixepoch()",
+                     indexed_at      = unixepoch()
+                 WHERE excluded.scan_generation IS NULL OR entries.scan_generation IS NULL
+                    OR excluded.scan_generation >= entries.scan_generation",
             )?;
 
             for e in entries {
@@ -267,13 +269,31 @@ impl Store {
         Ok(())
     }
 
+    /// Acquire an index-wide scan lease. Hold the returned connection until every root has
+    /// finished reconciliation. SQLite's process-safe write lock is released on drop/crash;
+    /// a separate sidecar leaves ordinary index writes available during a long filesystem walk.
+    /// Contention fails closed after five seconds, before any scan batch or prune runs.
+    pub fn scan_lease(&self) -> Result<rusqlite::Connection> {
+        let conn = if self.db_path == std::path::Path::new(":memory:") {
+            rusqlite::Connection::open_in_memory()?
+        } else {
+            let mut lock_path = std::fs::canonicalize(&self.db_path)?.into_os_string();
+            lock_path.push(".scan-lock");
+            rusqlite::Connection::open(std::path::PathBuf::from(lock_path))?
+        };
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        Ok(conn)
+    }
+
     /// The generation id to stamp on the next scan run: one past the max already stored (0 on an
     /// empty/fresh index, so the first scan stamps generation 1). Call once at the start of a scan
     /// run and reuse the same value across every `upsert_entries_with_generation` +
     /// `reconcile_by_generation` call in that run, so files re-seen this run carry it and ghosts
     /// keep whatever older value (or NULL) they had.
     ///
-    /// **INVARIANT: one call per scan run, shared by every root that run scans** — never call this
+    /// **INVARIANT: hold [`Store::scan_lease`] while allocating, writing and reconciling; one
+    /// call per scan run, shared by every root that run scans** — never call this
     /// again per-root within the same run. `MAX(scan_generation)` is computed over the WHOLE table,
     /// not scoped to a root, so calling it a second time mid-run would hand root 2 a HIGHER
     /// generation than root 1 already used. Nothing breaks immediately (each `reconcile_by_generation`
@@ -291,14 +311,15 @@ impl Store {
     }
 
     /// Prune ghost rows under `root_prefix`: entries (and all their artifacts) whose
-    /// `scan_generation` is not `generation` — i.e. everything the just-completed scan of this root
+    /// `scan_generation` is older than `generation` (or NULL) — everything the scan of this root
     /// did NOT re-stamp. The generation-based, bounded-memory replacement for
     /// [`Store::reconcile_entries`]'s live-path `HashSet` diff — no live-path set is held here, so
     /// this stays cheap even under a whole-computer scan. Also **interruption-safe**: a scan killed
     /// mid-way leaves rows stamped at its generation but never calls this, so the survivors just
     /// look stale to the NEXT full scan's `reconcile_by_generation`, which then prunes them —
     /// self-healing without any separate crash-recovery logic. Subtree-scoped via `subtree_match`
-    /// so `/proj` never prunes `/projector`. Returns the count of `entries` rows removed.
+    /// so `/proj` never prunes `/projector`. Newer rows are never ghosts, even if an older
+    /// caller finishes late. Returns the count of `entries` rows removed.
     pub fn reconcile_by_generation(&mut self, root_prefix: &str, generation: i64) -> Result<usize> {
         let (exact, child_pattern) = subtree_match(root_prefix);
         let tx = self.conn.transaction()?;

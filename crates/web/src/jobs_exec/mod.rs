@@ -5,7 +5,6 @@
 use crate::jobs::{broadcast_only, push, JobEvent, JobHandle, JobStatus, Jobs};
 use crate::AppState;
 use indexa_core::{
-    decisions::detectors::expire_vanished_decisions,
     resource::WatchdogState,
     walker::{walk, WalkConfig},
 };
@@ -17,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod deep;
+mod scan;
 mod watchdog;
 
 // The deep phase + memory watchdog live in submodules (v0.61 split). Re-export the
@@ -149,20 +149,9 @@ pub(crate) async fn run_index_job(
     model_override: Option<(String, String, u32)>,
 ) {
     // Phase 1: scan
-    let Some(entries) = walk_for_job(
-        &path,
-        &handle,
-        &state.walk_semaphore,
-        scan_walk_config(&state.config.scan),
-    )
-    .await
-    else {
+    let Some(entries) = scan::run_scan_phase(&state, &path, &handle).await else {
         return;
     };
-
-    if !run_scan_phase_with_entries(&state, &path, &entries, &handle).await {
-        return;
-    }
     // Cancellation requested during/after scan — stop before the expensive phases.
     if handle.is_cancelled() {
         finalize_cancelled(&handle, 0);
@@ -192,17 +181,7 @@ pub(crate) async fn run_scan_phase_standalone(
     path: &str,
     handle: &Arc<JobHandle>,
 ) {
-    let Some(entries) = walk_for_job(
-        path,
-        handle,
-        &state.walk_semaphore,
-        scan_walk_config(&state.config.scan),
-    )
-    .await
-    else {
-        return;
-    };
-    if run_scan_phase_with_entries(state, path, &entries, handle).await {
+    if let Some(entries) = scan::run_scan_phase(state, path, handle).await {
         let n = entries.len() as u64;
         finalize_done(handle, &format!("{n} entries scanned"));
     }
@@ -216,118 +195,6 @@ pub(crate) async fn run_scan_phase_standalone(
 /// [`OrphanCounts::summary`]: indexa_core::store::OrphanCounts::summary
 fn orphan_prune_message(orphans: &indexa_core::store::OrphanCounts) -> String {
     format!("pruned {}", orphans.summary())
-}
-
-async fn run_scan_phase_with_entries(
-    state: &AppState,
-    path: &str,
-    entries: &[indexa_core::walker::Entry],
-    handle: &Arc<JobHandle>,
-) -> bool {
-    // The walk is fail-open, so a missing/unreadable root yields nothing — and reconciling that
-    // would delete everything indexed under it. Fail the job and leave the index untouched.
-    if let Err(e) =
-        indexa_core::walker::ensure_walked_root_present(std::path::Path::new(path), entries.len())
-    {
-        let e = e.context("scan skipped — this root's existing index was left untouched");
-        finalize_failed(handle, "scan", &e);
-        return false;
-    }
-    let n = entries.len() as u64;
-    push(
-        handle,
-        JobEvent::Start {
-            kind: "scan".into(),
-            path: path.to_owned(),
-            total: Some(n),
-        },
-    );
-
-    let live_paths: std::collections::HashSet<String> = entries
-        .iter()
-        .map(|e| e.path.to_string_lossy().into_owned())
-        .collect();
-
-    let mut store = state.store.lock().await;
-    if let Err(e) = store.upsert_entries(entries) {
-        finalize_failed(handle, "scan", &e);
-        return false;
-    }
-    if let Err(e) = store.reconcile_entries(path, &live_paths) {
-        push(
-            handle,
-            JobEvent::Warning {
-                stage: "scan".to_owned(),
-                item_path: None,
-                message: format!("{e:#}"),
-                pressure: None,
-            },
-        );
-    }
-    // Self-heal: drop chunks/summaries left orphaned (no entry row) — e.g. build artifacts
-    // indexed by an older version. `reconcile_entries` only cleans ghost *entries*, not
-    // orphans, so without this the index can carry stale junk until a manual `indexa prune`.
-    match store.prune_orphans() {
-        Ok(orphans) if !orphans.is_empty() => push(
-            handle,
-            JobEvent::Warning {
-                stage: "scan".to_owned(),
-                item_path: None,
-                message: orphan_prune_message(&orphans),
-                pressure: None,
-            },
-        ),
-        Ok(_) => {}
-        Err(e) => push(
-            handle,
-            JobEvent::Warning {
-                stage: "scan".to_owned(),
-                item_path: None,
-                message: format!("orphan prune skipped: {e:#}"),
-                pressure: None,
-            },
-        ),
-    }
-    // H1: expire open Review questions whose subject left the index. Only the CLI's
-    // `indexa index`/`indexa review` ran this (via run_detectors) — a web-only "Build
-    // context" workflow, or a subject later excluded by a `[scan] ignore` edit, could
-    // leave a stale question in the inbox forever. Runs alongside prune_orphans above:
-    // same "index hygiene after a scan" concern, same natural cadence.
-    match expire_vanished_decisions(&mut store, state.config.review.max_open) {
-        Ok(n) if n > 0 => push(
-            handle,
-            JobEvent::Warning {
-                stage: "scan".to_owned(),
-                item_path: None,
-                message: format!("expired {n} Review question(s) whose subject left the index"),
-                pressure: None,
-            },
-        ),
-        Ok(_) => {}
-        Err(e) => push(
-            handle,
-            JobEvent::Warning {
-                stage: "scan".to_owned(),
-                item_path: None,
-                message: format!("decision-expiry sweep skipped: {e:#}"),
-                pressure: None,
-            },
-        ),
-    }
-    drop(store);
-
-    push(
-        handle,
-        JobEvent::Progress {
-            current: n,
-            total: n,
-            note: Some(format!("{n} entries scanned")),
-            current_path: None,
-            items_per_sec: None,
-            eta_secs: None,
-        },
-    );
-    true
 }
 
 pub(crate) async fn run_summarize_phase(

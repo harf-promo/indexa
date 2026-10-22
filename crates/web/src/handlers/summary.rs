@@ -88,6 +88,11 @@ pub(crate) async fn api_summarize_enqueue(
         "file"
     };
     let mut store = state.store.lock().await;
+    match store.summary_path_allowed(&path) {
+        Ok(false) => return err_json(StatusCode::FORBIDDEN, "path is excluded from summarization"),
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        Ok(true) => {}
+    }
     match store.enqueue_summary_items(&[(path.clone(), kind.into(), depth)]) {
         Ok(()) => Json(serde_json::json!({"queued":true,"path":path})).into_response(),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),

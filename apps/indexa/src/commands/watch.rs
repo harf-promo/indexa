@@ -110,7 +110,10 @@ pub(crate) async fn cmd_watch(
 
         watcher::run_watch_loop(session, |event| {
             let path = &event.path;
-            if path.is_dir() {
+            // A directory upsert carries no content (the watcher follows it with one event per
+            // file), but a directory *remove* must still clear its subtree: the watcher emits one
+            // for a directory that a rename swapped out while the path exists again.
+            if event.kind == ChangeKind::Upsert && path.is_dir() {
                 return;
             }
             if path
@@ -139,9 +142,9 @@ pub(crate) async fn cmd_watch(
                         let path_str = path.to_string_lossy().into_owned();
                         // Full removal — `delete_chunks_for` left the file's summary, queue,
                         // and entry rows behind, so search/browse kept returning a file that
-                        // no longer exists. `delete_entry` clears chunks + FTS + summary +
-                        // queue + classification + entry in one transaction.
-                        if let Err(e) = store.delete_entry(&path_str) {
+                        // no longer exists. `delete_subtree` also covers a renamed directory's
+                        // descendants, clearing every child table in one transaction.
+                        if let Err(e) = store.delete_subtree(&path_str) {
                             tracing::warn!("failed to remove {path_str}: {e}");
                         } else {
                             // The dead file's ancestor roll-ups must refresh without it.
@@ -175,9 +178,6 @@ pub(crate) async fn cmd_watch(
                         Ok(e) => e,
                         Err(_) => return,
                     };
-                    if extracted.chunks.is_empty() {
-                        return;
-                    }
 
                     let (chunk_records, degraded) = rt.block_on(build_chunk_records(
                         embedder.as_ref(),
@@ -219,7 +219,9 @@ pub(crate) async fn cmd_watch(
                         if let Err(e) = store.upsert_entries(&[entry]) {
                             tracing::warn!("failed to upsert entry for {}: {e}", path.display());
                         }
-                        if let Err(e) = store.upsert_chunks(&chunk_records) {
+                        if let Err(e) =
+                            store.replace_file_chunks(&path.to_string_lossy(), &chunk_records)
+                        {
                             tracing::warn!("failed to upsert chunks for {}: {e}", path.display());
                         } else {
                             // Re-embedding alone leaves the summary stale. Re-queue this file

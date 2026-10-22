@@ -128,7 +128,10 @@ pub(crate) async fn api_watch_start(
         tokio::task::spawn_blocking(move || {
             watcher::run_watch_loop_until(session, &stop2, |event| {
                 let path = &event.path;
-                if path.is_dir() {
+                // A directory upsert carries no content (the watcher follows it with one event per
+                // file), but a directory *remove* must still clear its subtree: the watcher emits one
+                // for a directory that a rename swapped out while the path exists again.
+                if event.kind == ChangeKind::Upsert && path.is_dir() {
                     return;
                 }
                 if path
@@ -146,7 +149,7 @@ pub(crate) async fn api_watch_start(
                     ChangeKind::Remove => {
                         if let Ok(mut store) = Store::open(&db_path) {
                             let s = path.to_string_lossy().into_owned();
-                            if let Err(e) = store.delete_entry(&s) {
+                            if let Err(e) = store.delete_subtree(&s) {
                                 tracing::warn!("watch: remove {s}: {e}");
                             } else {
                                 for dir in
@@ -179,9 +182,6 @@ pub(crate) async fn api_watch_start(
                             Ok(e) => e,
                             Err(_) => return,
                         };
-                        if extracted.chunks.is_empty() {
-                            return;
-                        }
 
                         // `block_on` is safe here: this closure runs on a `spawn_blocking`
                         // thread (not an async executor thread), so driving the embed futures
@@ -238,7 +238,7 @@ pub(crate) async fn api_watch_start(
                             if let Err(e) = store.upsert_entries(&[entry]) {
                                 tracing::warn!(path = %path.display(), error = %e, "watch: failed to upsert entry");
                             }
-                            if store.upsert_chunks(&chunk_records).is_ok() {
+                            if store.replace_file_chunks(&path.to_string_lossy(), &chunk_records).is_ok() {
                                 let s = path.to_string_lossy().into_owned();
                                 let depth = path_depth(&s);
                                 if let Err(e) = store.mark_for_resummary(&s, "file", depth) {
