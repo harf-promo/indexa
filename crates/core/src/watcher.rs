@@ -683,6 +683,13 @@ mod fs_rename_tests {
         seen
     }
 
+    /// `base` joined with a `/`-separated relative path, one component at a time: a literal
+    /// `join("sub/b.txt")` keeps the `/` on Windows, so it never equals the `\`-separated paths
+    /// the backend reports.
+    fn at(base: &Path, rel: &str) -> PathBuf {
+        rel.split('/').fold(base.to_path_buf(), |p, c| p.join(c))
+    }
+
     #[test]
     fn renaming_a_directory_reindexes_its_descendants_at_the_new_paths() {
         let tmp = tempfile::tempdir().unwrap();
@@ -692,14 +699,14 @@ mod fs_rename_tests {
         std::fs::create_dir_all(old.join("sub")).unwrap();
         let rel = ["a.txt", "sub/b.txt"];
         for r in rel {
-            std::fs::write(old.join(r), format!("body of {r}")).unwrap();
+            std::fs::write(at(&old, r), format!("body of {r}")).unwrap();
         }
 
         // The index lives outside the watched root so its own writes don't add events.
         let db_dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&db_dir.path().join("index.db")).unwrap();
         for r in rel {
-            index_file(&mut store, &old.join(r));
+            index_file(&mut store, &at(&old, r));
         }
 
         let session = armed_watch(&root);
@@ -707,7 +714,7 @@ mod fs_rename_tests {
 
         let converged = |store: &Store| {
             rel.iter()
-                .all(|r| !indexed(store, &old.join(r)) && indexed(store, &new.join(r)))
+                .all(|r| !indexed(store, &at(&old, r)) && indexed(store, &at(&new, r)))
         };
         let seen = apply_until(&session, &mut store, converged);
 
@@ -716,8 +723,8 @@ mod fs_rename_tests {
             .map(|r| {
                 (
                     *r,
-                    indexed(&store, &old.join(r)),
-                    indexed(&store, &new.join(r)),
+                    indexed(&store, &at(&old, r)),
+                    indexed(&store, &at(&new, r)),
                 )
             })
             .collect();
