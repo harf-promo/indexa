@@ -71,7 +71,9 @@ pub struct WatchSession {
 /// ```
 pub fn watch<P: AsRef<Path>>(roots: &[P], cfg: &WatcherConfig) -> Result<WatchSession> {
     let (tx, rx) = mpsc::channel::<ChangeEvent>();
-    let watched: Vec<PathBuf> = roots.iter().map(|r| r.as_ref().to_path_buf()).collect();
+    // Canonical roots, so the skip-dir ancestor check in `translate_batch` matches the
+    // canonical paths backends report (FSEvents: `/var` → `/private/var`).
+    let watched: Vec<PathBuf> = roots.iter().map(|r| canonical_root(r.as_ref())).collect();
 
     // The debouncer batches all events that arrive within `debounce` of each other
     // and delivers them once the burst settles — coalescing editor save dances.
@@ -218,6 +220,21 @@ fn translate_batch<'a>(
     }
     removes.extend(upserts);
     removes
+}
+
+/// `path` canonicalized without Windows' `\\?\` verbatim prefix (which event paths built from
+/// the watched root lack); `path` itself if it cannot be resolved.
+fn canonical_root(path: &Path) -> PathBuf {
+    let Ok(c) = std::fs::canonicalize(path) else {
+        return path.to_path_buf();
+    };
+    #[cfg(windows)]
+    {
+        if let Some(s) = c.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+            return PathBuf::from(s);
+        }
+    }
+    c
 }
 
 /// `path` or one of its ancestors below its watch root is a directory the scanner prunes
@@ -558,19 +575,6 @@ mod fs_rename_tests {
     use crate::walker::{Entry, EntryKind};
     use std::time::Instant;
 
-    fn canonical_root(p: &Path) -> PathBuf {
-        // notify reports FSEvents paths canonicalized (`/var` → `/private/var`); on Windows
-        // `canonicalize` adds a `\\?\` prefix that the event paths built from the root lack.
-        let c = std::fs::canonicalize(p).unwrap();
-        #[cfg(windows)]
-        {
-            if let Some(s) = c.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
-                return PathBuf::from(s);
-            }
-        }
-        c
-    }
-
     fn index_file(store: &mut Store, path: &Path) {
         let p = path.to_string_lossy().into_owned();
         store
@@ -601,7 +605,7 @@ mod fs_rename_tests {
     }
 
     fn apply(store: &mut Store, event: &ChangeEvent) {
-        if event.path.is_dir() {
+        if event.kind == ChangeKind::Upsert && event.path.is_dir() {
             return;
         }
         match event.kind {
@@ -619,6 +623,60 @@ mod fs_rename_tests {
     fn indexed(store: &Store, path: &Path) -> bool {
         let p = path.to_string_lossy();
         store.entry_exists(&p).unwrap() && store.first_chunk_text(&p).unwrap().is_some()
+    }
+
+    /// Start a watch on `root` and return once the backend is armed (FSEvents has a startup
+    /// latency of ~1s): touch a probe until its event arrives, then drain, so the change under
+    /// test is never lost to arming.
+    fn armed_watch(root: &Path) -> WatchSession {
+        let session = watch(
+            &[root],
+            &WatcherConfig {
+                debounce: Duration::from_millis(150),
+            },
+        )
+        .unwrap();
+        let probe = root.join("probe.txt");
+        let deadline = Instant::now() + DEADLINE;
+        let mut armed = false;
+        while !armed && Instant::now() < deadline {
+            std::fs::write(&probe, "probe").unwrap();
+            while let Ok(event) = session.rx.recv_timeout(Duration::from_millis(300)) {
+                armed |= event.path == probe;
+            }
+        }
+        assert!(armed, "watcher never delivered the probe event");
+        session
+    }
+
+    /// Generous: it only bounds a failure; a passing run converges in under 1s.
+    const DEADLINE: Duration = Duration::from_secs(30);
+
+    fn rename_with_retry(from: &Path, to: &Path) {
+        // Windows runners' indexer/antivirus can briefly hold the directory open.
+        let mut attempt = 0;
+        while let Err(e) = std::fs::rename(from, to) {
+            attempt += 1;
+            assert!(attempt < 20, "rename kept failing: {e}");
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    /// Apply events until `converged` holds or the deadline passes; returns what was applied.
+    fn apply_until(
+        session: &WatchSession,
+        store: &mut Store,
+        converged: impl Fn(&Store) -> bool,
+    ) -> Vec<ChangeEvent> {
+        let deadline = Instant::now() + DEADLINE;
+        let mut seen = Vec::new();
+        while !converged(store) && Instant::now() < deadline {
+            if let Ok(event) = session.rx.recv_timeout(Duration::from_millis(200)) {
+                apply(store, &event);
+                seen.push(event);
+            }
+        }
+        seen
     }
 
     #[test]
@@ -640,46 +698,14 @@ mod fs_rename_tests {
             index_file(&mut store, &old.join(r));
         }
 
-        let session = watch(
-            &[&root],
-            &WatcherConfig {
-                debounce: Duration::from_millis(150),
-            },
-        )
-        .unwrap();
-        // Wait until the backend is armed (FSEvents has a startup latency of ~1s): touch a
-        // probe until its event arrives, then drain, so the rename is never lost to arming.
-        let probe = root.join("probe.txt");
-        // Generous deadlines: they only bound a failure; a passing run converges in under 1s.
-        let arm_deadline = Instant::now() + Duration::from_secs(30);
-        let mut armed = false;
-        while !armed && Instant::now() < arm_deadline {
-            std::fs::write(&probe, "probe").unwrap();
-            while let Ok(event) = session.rx.recv_timeout(Duration::from_millis(300)) {
-                armed |= event.path == probe;
-            }
-        }
-        assert!(armed, "watcher never delivered the probe event");
-        // Windows runners' indexer/antivirus can briefly hold the directory open.
-        let mut attempt = 0;
-        while let Err(e) = std::fs::rename(&old, &new) {
-            attempt += 1;
-            assert!(attempt < 20, "rename kept failing: {e}");
-            std::thread::sleep(Duration::from_millis(250));
-        }
+        let session = armed_watch(&root);
+        rename_with_retry(&old, &new);
 
         let converged = |store: &Store| {
             rel.iter()
                 .all(|r| !indexed(store, &old.join(r)) && indexed(store, &new.join(r)))
         };
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let mut seen = Vec::new();
-        while !converged(&store) && Instant::now() < deadline {
-            if let Ok(event) = session.rx.recv_timeout(Duration::from_millis(200)) {
-                apply(&mut store, &event);
-                seen.push(event);
-            }
-        }
+        let seen = apply_until(&session, &mut store, converged);
 
         let state: Vec<_> = rel
             .iter()
@@ -697,6 +723,43 @@ mod fs_rename_tests {
              (file, still indexed at old path, indexed at new path) = {state:?}; events = {seen:?}",
             old.display(),
             new.display()
+        );
+    }
+
+    #[test]
+    fn swapping_a_directory_out_clears_the_stale_subtree() {
+        // `mv proj proj.old; mkdir proj` inside one debounce window. `proj` exists again by the
+        // time its rename is translated, so it must be cleared rather than read as an upsert.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = canonical_root(tmp.path());
+        let proj = root.join("proj");
+        let moved = root.join("proj.old");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("old.txt"), "old").unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&db_dir.path().join("index.db")).unwrap();
+        index_file(&mut store, &proj.join("old.txt"));
+
+        let session = armed_watch(&root);
+        rename_with_retry(&proj, &moved);
+        std::fs::create_dir(&proj).unwrap();
+        std::fs::write(proj.join("new.txt"), "new").unwrap();
+
+        let converged = |store: &Store| {
+            !indexed(store, &proj.join("old.txt"))
+                && indexed(store, &moved.join("old.txt"))
+                && indexed(store, &proj.join("new.txt"))
+        };
+        let seen = apply_until(&session, &mut store, converged);
+        assert!(
+            converged(&store),
+            "index did not converge after swapping {} out: stale={}, moved={}, new={}; \
+             events = {seen:?}",
+            proj.display(),
+            indexed(&store, &proj.join("old.txt")),
+            indexed(&store, &moved.join("old.txt")),
+            indexed(&store, &proj.join("new.txt")),
         );
     }
 }

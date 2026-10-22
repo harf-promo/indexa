@@ -110,7 +110,10 @@ pub(crate) async fn cmd_watch(
 
         watcher::run_watch_loop(session, |event| {
             let path = &event.path;
-            if path.is_dir() {
+            // A directory upsert carries no content (the watcher follows it with one event per
+            // file), but a directory *remove* must still clear its subtree: the watcher emits one
+            // for a directory that a rename swapped out while the path exists again.
+            if event.kind == ChangeKind::Upsert && path.is_dir() {
                 return;
             }
             if path
