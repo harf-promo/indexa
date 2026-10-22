@@ -133,17 +133,18 @@ jobs:
       # Sign each CLI binary with the SAME minisign key the desktop app bundle uses, so
       # `indexa update` / the desktop CLI-refresh can verify the download before self-replace
       # (crates/update::verify_asset_signature). Produces `<asset>.sig` next to each binary, which
-      # the release upload below picks up via `files: artifacts/*`. Guarded in-script (not a step
-      # `if:` — secrets in `if:` parse-fail the workflow): a missing key skips signing, and the
-      # client's signature check is fail-open for unsigned/pre-signature releases.
+      # the release upload below picks up via `files: artifacts/*`. Checked in-script (not a step
+      # `if:` — secrets in `if:` parse-fail the workflow): a missing key FAILS the release, because
+      # clients fail closed on a missing signature for every release since v0.77.0, so an unsigned
+      # release could not be installed by `indexa update` at all.
       - name: Sign CLI binaries (minisign)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "::warning::TAURI_SIGNING_PRIVATE_KEY not set — CLI assets unsigned (self-update verifies fail-open)."
-            exit 0
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY not set — refusing to publish unsigned CLI assets (self-update fails closed on a missing signature)."
+            exit 1
           fi
           npm install -g @tauri-apps/cli@2
           for f in artifacts/indexa-*; do

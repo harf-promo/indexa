@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.81.0] — 2026-10-21
+
 ### Added
 
 - **Video audio-track transcription — `[parsers.video] transcribe` (opt-in).** A video's
@@ -168,6 +170,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contract, GC of resolved rows, a candidate list), and an agent that learned "memory lives in
   the ledger" would start *answering* memories as if they were open questions.
   `SCHEMA_VERSION` 10 → 11; existing databases migrate in place on the next open.
+
 ### Changed
 
 - **`indexa weight apply` and `indexa pack create --auto` now require `--yes` in a
@@ -248,7 +251,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `competitive_snapshot_stamp_tracks_the_workspace_minor_version` asserts that stamp matches the
   workspace version at minor precision — a patch release won't force a competitive re-read, but a
   minor bump means features shipped and the page is worth re-checking.
-### Fixed
 
 - **Two web handlers no longer stall the entire local server while they run.** The web server
   shares one `Arc<Mutex<Store>>`, and `GET /api/packs/{name}/export` held it across a freshness
@@ -351,6 +353,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fragments.
 
 ### Security
+
+- **Self-update fails closed.** For any signed release (v0.77.0 and later) a missing, unreachable or
+  empty `.sig` now aborts `indexa update` and the desktop CLI refresh instead of installing the
+  binary unverified. A pinned tag must be strict semver (a path-like `--pin` can no longer point the
+  download at another repository), a downgrade needs `INDEXA_UPDATE_ALLOW_DOWNGRADE=1`, downloads are
+  size-capped, and an update no longer leaves a temp copy of the binary next to it. The release
+  job now fails instead of publishing unsigned CLI assets when the signing key is missing, since
+  every client would refuse them.
 
 - **`pack add-url`'s SSRF guard can no longer be bypassed by DNS rebinding, and blocks more
   non-public ranges.** The guard used to resolve the host once to check it and let reqwest
