@@ -38,6 +38,43 @@ fn code_graph_links_callers_to_definers() {
 }
 
 #[test]
+fn replacing_a_file_graph_with_no_edges_clears_its_edges_and_symbols() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .replace_file_code_graph(
+            "/p/a.rs",
+            &[edge("/p/a.rs", "defines", "old_fn")],
+            &[SymbolRecord {
+                path: "/p/a.rs".into(),
+                name: "old_fn".into(),
+                kind: "fn".into(),
+                start_line: 1,
+                end_line: 2,
+            }],
+        )
+        .unwrap();
+    store
+        .replace_file_code_graph(
+            "/p/b.rs",
+            &[edge("/p/b.rs", "defines", "kept_fn")],
+            &[SymbolRecord {
+                path: "/p/b.rs".into(),
+                name: "kept_fn".into(),
+                kind: "fn".into(),
+                start_line: 4,
+                end_line: 5,
+            }],
+        )
+        .unwrap();
+    store.replace_file_code_graph("/p/a.rs", &[], &[]).unwrap();
+
+    assert!(store.edges_from("/p/a.rs").unwrap().is_empty());
+    assert!(store.symbols_in_file("/p/a.rs").unwrap().is_empty());
+    assert_eq!(store.edges_from("/p/b.rs").unwrap().len(), 1);
+    assert_eq!(store.symbols_in_file("/p/b.rs").unwrap().len(), 1);
+}
+
+#[test]
 fn code_graph_pagerank_ranks_hub_highest() {
     let mut store = Store::open_in_memory().unwrap();
     // app, lib, util all call into /src/core.rs (the hub); app also calls lib.

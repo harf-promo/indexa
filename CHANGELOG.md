@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Deep: refresh empty code graphs.** Re-deeping a file whose new parse has no imports or
+  definitions now removes its previous graph edges and symbols instead of keeping stale results.
 - **Watch: a renamed directory's files are re-indexed at their new paths.** Renaming or
   moving a directory inside a watched root used to drop its files from the old paths without
   indexing them at the new ones, because a directory rename is reported for the directory alone.
