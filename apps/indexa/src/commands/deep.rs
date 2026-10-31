@@ -166,47 +166,32 @@ fn persist_completed_file(
         chunk_records.len()
     };
 
-    // Persist the file's code-graph edges (imports/defines) keyed on the same entry-path
-    // string as its chunks, so `edges_from(path)` lines up with search. Best-effort: a
-    // failure warns rather than aborting the scan.
-    if !edges.is_empty() {
-        let edge_records: Vec<EdgeRecord> = edges
-            .iter()
-            .map(|e| EdgeRecord {
-                from_path: path_str.to_owned(),
-                kind: e.kind.to_owned(),
-                to_ref: e.to.clone(),
+    // Replace the graph even when parsing produced no edges or symbols; an empty result is
+    // meaningful for this file and must remove rows left by an earlier deep pass.
+    let edge_records: Vec<EdgeRecord> = edges
+        .iter()
+        .map(|e| EdgeRecord {
+            from_path: path_str.to_owned(),
+            kind: e.kind.to_owned(),
+            to_ref: e.to.clone(),
+        })
+        .collect();
+    let symbol_records: Vec<SymbolRecord> = edges
+        .iter()
+        .filter(|e| e.kind == "defines")
+        .filter_map(|e| {
+            let (start, end) = e.line_range?;
+            Some(SymbolRecord {
+                path: path_str.to_owned(),
+                name: e.to.clone(),
+                kind: e.symbol_kind.unwrap_or("other").to_owned(),
+                start_line: start as i64,
+                end_line: end as i64,
             })
-            .collect();
-        if let Err(e) = store.upsert_edges(&edge_records) {
-            eprintln!(
-                "  ⚠  {path_str}: failed to store {} code-graph edge(s): {e:#}",
-                edge_records.len()
-            );
-        }
-        // Symbols (2.1): kind + line range, extracted alongside `defines` edges.
-        let symbol_records: Vec<SymbolRecord> = edges
-            .iter()
-            .filter(|e| e.kind == "defines")
-            .filter_map(|e| {
-                let (start, end) = e.line_range?;
-                Some(SymbolRecord {
-                    path: path_str.to_owned(),
-                    name: e.to.clone(),
-                    kind: e.symbol_kind.unwrap_or("other").to_owned(),
-                    start_line: start as i64,
-                    end_line: end as i64,
-                })
-            })
-            .collect();
-        if !symbol_records.is_empty() {
-            if let Err(e) = store.upsert_symbols(&symbol_records) {
-                eprintln!(
-                    "  ⚠  {path_str}: failed to store {} symbol(s): {e:#}",
-                    symbol_records.len()
-                );
-            }
-        }
+        })
+        .collect();
+    if let Err(e) = store.replace_file_code_graph(path_str, &edge_records, &symbol_records) {
+        eprintln!("  ⚠  {path_str}: failed to replace code-graph rows: {e:#}");
     }
     Ok(written)
 }

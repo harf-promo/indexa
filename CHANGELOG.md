@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security: update pulldown-cmark to 0.13.5.** This resolves RUSTSEC-2026-0414, an
+  exponential event-growth vulnerability in wikilink parsing.
+- **Deep: refresh empty code graphs.** Re-deeping a file whose new parse has no imports or
+  definitions now removes its previous graph edges and symbols instead of keeping stale results.
 - **Watch: a renamed directory's files are re-indexed at their new paths.** Renaming or
   moving a directory inside a watched root used to drop its files from the old paths without
   indexing them at the new ones, because a directory rename is reported for the directory alone.

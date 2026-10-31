@@ -23,7 +23,7 @@ indexa-http-util = { path = "../http-util" }
 # workspace-pinned and in the tree (crates/query uses it), so this adds an edge, not a crate.
 regex = { workspace = true }
 # Markdown parsing
-pulldown-cmark = "0.13"
+pulldown-cmark = "0.13.5"
 # Mime type detection
 mime_guess = "2"
 # Code parsing via tree-sitter

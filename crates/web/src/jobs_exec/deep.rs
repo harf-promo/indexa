@@ -192,56 +192,40 @@ async fn persist_completed_file(
             }
         }
     }
-    // Persist the file's code-graph edges (imports/defines), keyed on the same entry-path
-    // string as its chunks. Best-effort: a failure only warns.
-    if !edges.is_empty() {
-        let edge_records: Vec<EdgeRecord> = edges
-            .iter()
-            .map(|e| EdgeRecord {
-                from_path: path_str.to_owned(),
-                kind: e.kind.to_owned(),
-                to_ref: e.to.clone(),
+    // Replace the graph even when parsing produced no edges or symbols; an empty result is
+    // meaningful for this file and must remove rows left by an earlier deep pass.
+    let edge_records: Vec<EdgeRecord> = edges
+        .iter()
+        .map(|e| EdgeRecord {
+            from_path: path_str.to_owned(),
+            kind: e.kind.to_owned(),
+            to_ref: e.to.clone(),
+        })
+        .collect();
+    let symbol_records: Vec<SymbolRecord> = edges
+        .iter()
+        .filter(|e| e.kind == "defines")
+        .filter_map(|e| {
+            let (start, end) = e.line_range?;
+            Some(SymbolRecord {
+                path: path_str.to_owned(),
+                name: e.to.clone(),
+                kind: e.symbol_kind.unwrap_or("other").to_owned(),
+                start_line: start as i64,
+                end_line: end as i64,
             })
-            .collect();
-        if let Err(e) = store.upsert_edges(&edge_records) {
-            push(
-                handle,
-                JobEvent::Warning {
-                    stage: "deep".to_owned(),
-                    item_path: Some(path_str.to_owned()),
-                    message: format!("upsert_edges failed: {e:#}"),
-                    pressure: None,
-                },
-            );
-        }
-        // Symbols (2.1): kind + line range, extracted alongside `defines` edges.
-        let symbol_records: Vec<SymbolRecord> = edges
-            .iter()
-            .filter(|e| e.kind == "defines")
-            .filter_map(|e| {
-                let (start, end) = e.line_range?;
-                Some(SymbolRecord {
-                    path: path_str.to_owned(),
-                    name: e.to.clone(),
-                    kind: e.symbol_kind.unwrap_or("other").to_owned(),
-                    start_line: start as i64,
-                    end_line: end as i64,
-                })
-            })
-            .collect();
-        if !symbol_records.is_empty() {
-            if let Err(e) = store.upsert_symbols(&symbol_records) {
-                push(
-                    handle,
-                    JobEvent::Warning {
-                        stage: "deep".to_owned(),
-                        item_path: Some(path_str.to_owned()),
-                        message: format!("upsert_symbols failed: {e:#}"),
-                        pressure: None,
-                    },
-                );
-            }
-        }
+        })
+        .collect();
+    if let Err(e) = store.replace_file_code_graph(path_str, &edge_records, &symbol_records) {
+        push(
+            handle,
+            JobEvent::Warning {
+                stage: "deep".to_owned(),
+                item_path: Some(path_str.to_owned()),
+                message: format!("replace_file_code_graph failed: {e:#}"),
+                pressure: None,
+            },
+        );
     }
     (entries_written, chunks_written, hard_errors)
 }

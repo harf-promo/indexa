@@ -10,6 +10,7 @@
 
 use super::{
     is_project_noise_path, CodeGraph, CodeGraphEdge, CodeGraphNode, EdgeRecord, RelatedFile, Store,
+    SymbolRecord,
 };
 use anyhow::Result;
 use rusqlite::params;
@@ -508,6 +509,54 @@ fn tarjan_scc(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
 }
 
 impl Store {
+    /// Replace all code-graph rows for one file, including a successful extraction with no
+    /// edges or symbols. The explicit path makes empty results distinguishable from an empty
+    /// batch, which means "no files to update" in the general upsert APIs.
+    pub fn replace_file_code_graph(
+        &mut self,
+        path: &str,
+        edges: &[EdgeRecord],
+        symbols: &[SymbolRecord],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            edges.iter().all(|e| e.from_path == path),
+            "edge path mismatch"
+        );
+        anyhow::ensure!(
+            symbols.iter().all(|s| s.path == path),
+            "symbol path mismatch"
+        );
+
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM edges WHERE from_path = ?1", [path])?;
+        tx.execute("DELETE FROM symbols WHERE path = ?1", [path])?;
+        {
+            let mut insert = tx.prepare_cached(
+                "INSERT OR IGNORE INTO edges (from_path, kind, to_ref) VALUES (?1, ?2, ?3)",
+            )?;
+            for edge in edges {
+                insert.execute(params![edge.from_path, edge.kind, edge.to_ref])?;
+            }
+        }
+        {
+            let mut insert = tx.prepare_cached(
+                "INSERT OR IGNORE INTO symbols (path, name, kind, start_line, end_line)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for symbol in symbols {
+                insert.execute(params![
+                    symbol.path,
+                    symbol.name,
+                    symbol.kind,
+                    symbol.start_line,
+                    symbol.end_line
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// A `defines` symbol present in more than this many files is treated as a generic
     /// name (`new`/`from`/`default`) and excluded from [`Self::code_graph`] — it bounds the
     /// resolution work's worst case and removes low-signal noise.
