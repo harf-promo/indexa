@@ -260,6 +260,11 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
+        // macOS can spend longer than the 300ms cap on the first exec of a
+        // just-written temp script. Warm it so that cost is not a timeout.
+        let _ = std::process::Command::new(&script)
+            .arg("warmup.png")
+            .output();
         let pages: Vec<std::path::PathBuf> = (1..=3)
             .map(|i| std::path::PathBuf::from(format!("page-{i}.png")))
             .collect();

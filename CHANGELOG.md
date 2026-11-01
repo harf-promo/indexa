@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security: drop vulnerable `zip` 4.6.1 and 8.6.0 from both lockfiles.** The direct
+  parser dependency moves 9.0.5 → 9.1.3 (above the 9.0.5 fix for GHSA-m665-v7pm-7grj).
+  `candle-core` 0.11.1 replaces the 8.6.0 copy (it requires `zip` ^9.1.3), and
+  `tauri-plugin-updater` 2.14.1 replaces the Windows-only 4.6.1 copy (it requires `zip` ^9).
+  That clears the open critical and high `zip` advisories in `Cargo.lock` and
+  `apps/indexa-desktop/Cargo.lock`.
 - **Security: update pulldown-cmark to 0.13.5.** This resolves RUSTSEC-2026-0414, an
   exponential event-growth vulnerability in wikilink parsing.
 - **Deep: refresh empty code graphs.** Re-deeping a file whose new parse has no imports or
