@@ -447,6 +447,94 @@ mod tests {
     use super::*;
 
     #[test]
+    fn valid_spreadsheet_fixtures_keep_their_baseline_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [
+            (
+                "calamine-any_sheets.xls",
+                "File: calamine-any_sheets.xls\nSheet: Visible\n1\t2\n3\t4\n5\t6\nThis workbook contains 4 sheets: Visible, Hidden, VeryHidden and Chart\nSheet: Chart\n1\t2\n3\t4\n5\t6",
+            ),
+            (
+                "calamine-any_sheets.xlsx",
+                "File: calamine-any_sheets.xlsx\nSheet: Visible\n1\t2\n3\t4\n5\t6\nThis workbook contains 4 sheets: Visible, Hidden, VeryHidden and Chart",
+            ),
+        ];
+        for (name, expected) in cases {
+            let path = dir.path().join(name);
+            std::fs::copy(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures")
+                    .join(name),
+                &path,
+            )
+            .unwrap();
+            assert_eq!(parse_spreadsheet(&path).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn empty_xlsx_parses_without_cells() {
+        use std::io::Write;
+        use zip::write::FileOptions;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.xlsx");
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut archive = zip::ZipWriter::new(cursor);
+        let options =
+            FileOptions::<()>::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, contents) in [
+            (
+                "[Content_Types].xml",
+                "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>",
+            ),
+            (
+                "_rels/.rels",
+                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>",
+            ),
+            (
+                "xl/workbook.xml",
+                "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Empty\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>",
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>",
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData/></worksheet>",
+            ),
+        ] {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(contents.as_bytes()).unwrap();
+        }
+        std::fs::write(&path, archive.finish().unwrap().into_inner()).unwrap();
+
+        assert_eq!(parse_spreadsheet(&path).unwrap(), "File: empty.xlsx");
+        let extracted = OfficeParser.parse(&path).unwrap();
+        assert_eq!(extracted.chunks.len(), 1);
+        assert_eq!(extracted.chunks[0].text, "File: empty.xlsx");
+    }
+
+    #[test]
+    fn corrupt_ole2_spreadsheets_return_errors_quickly() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in [
+            ("truncated.xls", &b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"[..]),
+            (
+                "corrupt.xls",
+                &b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1not a complete OLE2 document"[..],
+            ),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let started = std::time::Instant::now();
+            assert!(parse_spreadsheet(&path).is_err(), "{name} must return Err");
+            assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        }
+    }
+
+    #[test]
     fn office_parser_accepts_known_extensions() {
         let p = OfficeParser;
         assert!(p.accepts_path(Path::new("sheet.xlsx")));
