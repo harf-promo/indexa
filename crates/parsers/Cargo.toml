@@ -41,7 +41,7 @@ kamadak-exif = "0.6"
 # PDF text extraction (pure Rust, text-layer PDFs)
 pdf-extract = "0.12"
 # Office formats
-calamine = { version = "0.37", features = ["dates"] }
+calamine = { version = "0.38", features = ["dates"] }
 # docx extraction (zip-based)
 zip = { version = "9", default-features = false, features = ["deflate"] }
 # Subprocess timeout: kill hung OCR/transcription/ffmpeg children instead of blocking indexing
