@@ -590,9 +590,11 @@ pub(crate) async fn cmd_deep(
                 .map(|d| d.as_secs() as i64);
             let is_current = match mtime_secs {
                 Some(m) => store
-                    .chunks_current_for_mtime(&path_str, m)
+                    .chunks_current_for_mtime_and_model(&path_str, m, &embed_model)
                     .unwrap_or(false),
-                None => store.chunks_are_current(&path_str).unwrap_or(false),
+                None => store
+                    .chunks_are_current_for_model(&path_str, &embed_model)
+                    .unwrap_or(false),
             };
             if is_current {
                 skipped += 1;
@@ -805,7 +807,7 @@ pub(crate) async fn cmd_deep(
                 // Load the cached embedding map for this file (hash → Vec<f32>).
                 // Fail-open: if the lookup errors (e.g. first run, column missing), treat as empty.
                 let hash_cache = store
-                    .cached_embeddings_by_hash(&path_str)
+                    .cached_embeddings_by_hash_for_model(&path_str, &embed_model)
                     .unwrap_or_default();
 
                 // Partition chunks into cache-hits (no embed needed) and misses (must embed).
