@@ -65,6 +65,10 @@ fn scan_with_walk(
             return None;
         }
     };
+    // Taken before the walk/upsert so this run's own rows don't count as previously indexed.
+    let indexed_below = store
+        .count_descendants(&path.to_string_lossy())
+        .unwrap_or(0);
     let entries = match walk(path, walk_cfg) {
         Ok(entries) => entries,
         Err(e) => {
@@ -74,7 +78,11 @@ fn scan_with_walk(
     };
     // The walk is fail-open, so a missing/unreadable root yields nothing — and reconciling that
     // would delete everything indexed under it. Fail the job and leave the index untouched.
-    if let Err(e) = indexa_core::walker::ensure_walked_root_present(path, entries.len()) {
+    if let Err(e) =
+        indexa_core::walker::ensure_walked_root_present(path, entries.len()).and_then(|()| {
+            indexa_core::walker::ensure_walked_root_not_emptied(path, entries.len(), indexed_below)
+        })
+    {
         let e = e.context("scan skipped — this root's existing index was left untouched");
         finalize_failed(handle, "scan", &e);
         return None;

@@ -328,6 +328,18 @@ impl Store {
         Ok(removed)
     }
 
+    /// Count of indexed entries strictly below `root_prefix` (the root's own row excluded).
+    /// Lets a scan tell "this root was non-empty in the index" before it prunes.
+    pub fn count_descendants(&self, root_prefix: &str) -> Result<usize> {
+        let (_, child_pattern) = subtree_match(root_prefix);
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM entries WHERE path LIKE ?1 ESCAPE '\\'",
+            params![child_pattern],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
     // ── Queries ───────────────────────────────────────────────────────────────
 
     /// Count of all indexed entries.
