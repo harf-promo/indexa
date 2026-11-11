@@ -1085,3 +1085,28 @@ fn subtree_has_unfinished_range_matches_only_true_descendants() {
         "depth filter still applies"
     );
 }
+
+#[test]
+fn subtree_has_unfinished_follows_backslash_paths() {
+    // INDEXA1-9: the guard's range was hardcoded to `/`, so a native Windows child
+    // (`C:\proj\f.txt`) fell outside it and the parent could roll up from unfinished children.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .enqueue_summary_items(&[
+            (r"C:\proj".into(), "dir".into(), 1),
+            (r"C:\proj\sub\f.txt".into(), "file".into(), 3),
+            (r"C:\projector\x.txt".into(), "file".into(), 2),
+        ])
+        .unwrap();
+    assert!(
+        store.subtree_has_unfinished(r"C:\proj", 1).unwrap(),
+        "pending backslash child"
+    );
+    store
+        .mark_queue_state(r"C:\proj\sub\f.txt", "done", None)
+        .unwrap();
+    assert!(
+        !store.subtree_has_unfinished(r"C:\proj", 1).unwrap(),
+        "a prefix-sibling (`C:\\projector`) must not count"
+    );
+}
