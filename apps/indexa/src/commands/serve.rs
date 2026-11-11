@@ -10,6 +10,7 @@ pub(crate) async fn cmd_serve(
     embed_model_flag: Option<String>,
     llm_model_flag: Option<String>,
     cfg: &Config,
+    config_path: &std::path::Path,
 ) -> Result<()> {
     // Enable the web "Update now" button for CLI serve users.
     // The update replaces the binary on disk; the user must restart `indexa serve` manually
@@ -31,5 +32,15 @@ pub(crate) async fn cmd_serve(
     let llm: Arc<dyn indexa_llm::Generator + Send + Sync + 'static> =
         Arc::from(build_llm(cfg, llm_model_flag.as_deref())?);
 
-    indexa_web::serve(port, &host, store, embedder, llm, cfg.clone()).await
+    // Save through the same file the settings were read from (`--config`), not the default.
+    indexa_web::serve_with_config_path(
+        port,
+        &host,
+        store,
+        embedder,
+        llm,
+        cfg.clone(),
+        config_path.to_path_buf(),
+    )
+    .await
 }

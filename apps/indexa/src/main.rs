@@ -82,11 +82,7 @@ async fn main() -> Result<()> {
 
     // Resolve the effective config path once (respecting --config) so commands that WRITE config
     // (e.g. `multimodal --enable`) round-trip the same file they read.
-    let cfg_path = if let Some(path) = &cli.config {
-        std::path::PathBuf::from(shellexpand::tilde(path).into_owned())
-    } else {
-        config::default_config_path()
-    };
+    let cfg_path = resolve_config_path(cli.config.as_deref());
     let cfg = config::load(&cfg_path)?;
 
     let result = match cli.command {
@@ -437,7 +433,7 @@ async fn main() -> Result<()> {
             host,
             embed_model,
             llm_model,
-        } => commands::cmd_serve(port, host, embed_model, llm_model, &cfg).await,
+        } => commands::cmd_serve(port, host, embed_model, llm_model, &cfg, &cfg_path).await,
         // Bare `indexa mcp` must keep running the stdio server — every client
         // config written by `mcp install` points at exactly that invocation.
         Commands::Mcp {
@@ -500,4 +496,29 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// The effective config path: `--config` (with `~` expanded) or the platform default.
+fn resolve_config_path(flag: Option<&str>) -> std::path::PathBuf {
+    match flag {
+        Some(path) => std::path::PathBuf::from(shellexpand::tilde(path).into_owned()),
+        None => config::default_config_path(),
+    }
+}
+
+#[cfg(test)]
+mod config_path_tests {
+    use super::resolve_config_path;
+
+    #[test]
+    fn config_flag_overrides_the_default_path() {
+        assert_eq!(
+            resolve_config_path(Some("/tmp/custom.toml")),
+            std::path::PathBuf::from("/tmp/custom.toml")
+        );
+        assert_eq!(
+            resolve_config_path(None),
+            indexa_core::config::default_config_path()
+        );
+    }
 }
