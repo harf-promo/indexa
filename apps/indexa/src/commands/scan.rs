@@ -37,7 +37,7 @@ pub(crate) async fn cmd_scan(paths: Vec<String>, all: bool, yes: bool, cfg: &Con
     if !skipped.is_empty() {
         let list: Vec<String> = skipped.iter().map(|r| r.display().to_string()).collect();
         anyhow::bail!(
-            "{} root(s) skipped because they are missing or unreadable (index left untouched): {}",
+            "{} root(s) skipped because they are missing, unreadable, or walked empty while the index still holds entries under them (index left untouched): {}",
             skipped.len(),
             list.join(", ")
         );
