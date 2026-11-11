@@ -35,10 +35,9 @@ use anyhow::Result;
 use rmcp::{
     handler::server::router::tool::ToolRouter,
     model::{
-        CallToolResult, ContentBlock, GetPromptRequestParams, GetPromptResult, Implementation,
-        ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
-        PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, ServerCapabilities,
-        ServerInfo,
+        CallToolResult, ContentBlock, GetPromptRequestParams, Implementation, ListPromptsResult,
+        ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
+        ReadResourceRequestParams, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool_handler, ErrorData, RoleServer, ServerHandler, ServiceExt,
@@ -413,7 +412,7 @@ fn core_instructions() -> String {
 
 #[tool_handler(router = self.active_tool_router())]
 impl ServerHandler for IndexaMcp {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         // Identify as "indexa" (from_build_env() bakes in rmcp's own name/version).
         let mut server_info = Implementation::from_build_env();
         server_info.name = "indexa".to_owned();
@@ -425,7 +424,7 @@ impl ServerHandler for IndexaMcp {
             ToolProfile::Full => FULL_INSTRUCTIONS.to_owned(),
             ToolProfile::Core => core_instructions(),
         };
-        ServerInfo::new(
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -465,8 +464,9 @@ impl ServerHandler for IndexaMcp {
         &self,
         request: ReadResourceRequestParams,
         _ctx: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, ErrorData> {
-        self.read_resource_inner(&request.uri)
+    ) -> Result<rmcp::model::ReadResourceResponse, ErrorData> {
+        // rmcp 3: a response may also be `InputRequired`; every Indexa resource is complete.
+        self.read_resource_inner(&request.uri).map(Into::into)
     }
 
     // ── Prompts (reusable, index-backed templates) ─────────────────────────────
@@ -483,8 +483,9 @@ impl ServerHandler for IndexaMcp {
         &self,
         request: GetPromptRequestParams,
         _ctx: RequestContext<RoleServer>,
-    ) -> Result<GetPromptResult, ErrorData> {
+    ) -> Result<rmcp::model::GetPromptResponse, ErrorData> {
         self.get_prompt_inner(&request.name, request.arguments.as_ref())
+            .map(Into::into)
     }
 }
 
