@@ -119,7 +119,14 @@ fn git_state_hash(root: &Path) -> Option<String> {
     let raw = std::process::Command::new("git")
         .arg("-C")
         .arg(root_str)
-        .args(["status", "--porcelain", "-z", "--untracked-files=no"])
+        .args([
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=no",
+            "--",
+            ".",
+        ])
         .output()
         .ok()
         .filter(|o| o.status.success())
