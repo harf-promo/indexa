@@ -3,7 +3,6 @@ use indexa_core::{
     config::{parse_reindex_interval, Config},
     store::Store,
 };
-use indexa_embed::OllamaEmbedder;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -270,12 +269,9 @@ pub(crate) async fn cmd_worker(concurrency: usize, auto_reindex: bool, cfg: &Con
             cfg.describer.num_ctx,
             &cfg.describer.claude_bin,
         )?);
-    let embed_base = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
-    let embedder: Arc<dyn indexa_embed::Embedder + Send + Sync> = Arc::new(OllamaEmbedder::new(
-        &embed_base,
-        &cfg.embedding.model,
-        cfg.embedding.dim,
-    ));
+    // Provider-aware (openai/google/llamacpp too), not a hardcoded Ollama client.
+    let embedder: Arc<dyn indexa_embed::Embedder + Send + Sync> =
+        Arc::from(super::helpers::build_embedder(cfg, None)?);
 
     let store = Arc::new(tokio::sync::Mutex::new(Store::open(&db_path)?));
 
