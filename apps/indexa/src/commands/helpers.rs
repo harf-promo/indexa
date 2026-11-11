@@ -812,6 +812,24 @@ mod tests {
     use indexa_core::config::Config;
     use std::path::PathBuf;
 
+    #[test]
+    fn build_embedder_follows_the_configured_provider() {
+        // The CLI summarize/worker paths used to construct OllamaEmbedder directly, so an
+        // `openai` provider with no key silently still "worked" against Ollama. Through the
+        // provider-aware factory it must be honoured: openai without a key is refused, an
+        // unknown provider is refused, and ollama still builds.
+        let mut cfg = Config::default();
+        cfg.embedding.provider = "ollama".into();
+        assert!(super::build_embedder(&cfg, None).is_ok());
+        cfg.embedding.provider = "no-such-provider".into();
+        let err = super::build_embedder(&cfg, None)
+            .err()
+            .expect("unknown provider");
+        assert!(format!("{err:#}").contains("unknown embedding provider"));
+        cfg.embedding.provider = "llamacpp".into();
+        assert!(super::build_embedder(&cfg, None).is_ok());
+    }
+
     /// Build a sink that writes to `output` with all extras off; tests flip individual fields.
     fn sink_to(output: Option<String>) -> ExportSink {
         ExportSink {
