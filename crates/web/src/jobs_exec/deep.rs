@@ -134,6 +134,21 @@ async fn persist_completed_file(
     embed_model: Option<&str>,
     skip_embed_work: bool,
 ) -> (u64, u64, u64) {
+    // The file may have been edited while it was parsed/embedded: writing now would stamp the old
+    // content as newer than that edit. Leave the previous rows (older than the new mtime) so the
+    // next pass picks the file up again.
+    if indexa_core::walker::entry_changed_since_walk(&entry) {
+        push(
+            handle,
+            JobEvent::Warning {
+                stage: "deep".to_owned(),
+                item_path: Some(path_str.to_owned()),
+                message: "changed while being indexed — will be re-indexed next pass".to_owned(),
+                pressure: None,
+            },
+        );
+        return (0, 0, 0);
+    }
     let mut chunk_records = Vec::with_capacity(chunks.len());
     for ((chunk, embedding), hash) in chunks.iter().zip(embeddings).zip(chunk_hashes) {
         chunk_records.push(ChunkRecord {
@@ -537,6 +552,8 @@ pub(crate) async fn run_deep_phase(
             skipped += 1;
             record_file_progress(handle, &path_str, &mut done, &mut samples, n_files);
         } else {
+            // Snapshot size/mtime now so only edits during this file's own parse/embed count as changed.
+            let fresh_entry = indexa_core::walker::refresh_entry(entry);
             let ep = entry.path.clone();
             let sz = entry.size;
             let reg = registry.clone();
@@ -862,7 +879,7 @@ pub(crate) async fn run_deep_phase(
                     let (e, c, h) = persist_completed_file(
                         state,
                         handle,
-                        (**entry).clone(),
+                        fresh_entry.clone(),
                         &path_str,
                         &extracted.chunks,
                         chunk_hashes,
@@ -1007,7 +1024,7 @@ pub(crate) async fn run_deep_phase(
                     let miss_texts: Vec<(usize, String)> =
                         miss_indices.into_iter().zip(miss_embed_texts).collect();
                     let meta = PendingFile {
-                        entry: (**entry).clone(),
+                        entry: fresh_entry.clone(),
                         path_str: path_str.clone(),
                         chunks: extracted.chunks,
                         chunk_hashes,
@@ -1086,7 +1103,7 @@ pub(crate) async fn run_deep_phase(
                 let (e, c, h) = persist_completed_file(
                     state,
                     handle,
-                    (**entry).clone(),
+                    fresh_entry.clone(),
                     &path_str,
                     &[],
                     Vec::new(),
@@ -1312,6 +1329,8 @@ mod tests {
                     .unwrap();
                 std::fs::write(&entry.path, body).unwrap();
                 entry.size = body.len() as u64;
+                // As a real walk would record: the entry must match the file on disk.
+                entry.modified = std::fs::metadata(&entry.path).unwrap().modified().ok();
                 let handle = Arc::new(JobHandle::new("deep", path.clone()));
                 let mut state = build_state(
                     store,

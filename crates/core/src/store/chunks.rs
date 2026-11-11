@@ -416,6 +416,19 @@ impl Store {
         Ok(map)
     }
 
+    /// True when `path` has stored chunks and every one was written at or after `mtime_secs`
+    /// (the file's on-disk mtime), i.e. they describe the file's current bytes. Unlike
+    /// [`chunks_current_for_mtime`](Self::chunks_current_for_mtime) it ignores embeddings: it
+    /// answers "is this stored text the current text", for callers that only read the text.
+    pub fn chunks_text_not_older_than(&self, path: &str, mtime_secs: i64) -> Result<bool> {
+        let fresh: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 AND MIN(indexed_at) >= ?2 FROM chunks WHERE entry_path = ?1",
+            params![path, mtime_secs],
+            |r| r.get(0),
+        )?;
+        Ok(fresh)
+    }
+
     /// Text of the first chunk for a given file path (used as description input).
     pub fn first_chunk_text(&self, entry_path: &str) -> Result<Option<String>> {
         let text: Option<String> = self
