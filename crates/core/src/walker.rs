@@ -654,6 +654,30 @@ pub fn ensure_walked_root_present(root: &Path, entries_seen: usize) -> anyhow::R
     Ok(())
 }
 
+/// Second prune guard, for a root that exists and lists fine but walked (almost) empty while the
+/// index holds rows beneath it — e.g. an unmounted drive whose empty mount-point directory is
+/// still there. [`ensure_walked_root_present`] passes that case (the root itself is yielded), so
+/// pruning would wipe the whole subtree. `indexed_descendants` is
+/// `Store::count_descendants(root)` taken before the prune.
+///
+/// `Err` when `root` is a directory, the walk saw only the root itself (`entries_seen <= 1`), and
+/// the index still has rows below it. A genuinely emptied directory is refused too: drop it
+/// explicitly with `indexa rm -r`.
+pub fn ensure_walked_root_not_emptied(
+    root: &Path,
+    entries_seen: usize,
+    indexed_descendants: usize,
+) -> anyhow::Result<()> {
+    if entries_seen <= 1 && indexed_descendants > 0 && root.is_dir() {
+        anyhow::bail!(
+            "{} walked empty but the index holds {indexed_descendants} entries under it — \
+             it may be an unmounted drive's empty mount point",
+            root.display()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1307,6 +1331,20 @@ mod tests {
         assert!(entry_changed_since_walk(&entry), "mtime changed");
         std::fs::remove_file(&f).unwrap();
         assert!(entry_changed_since_walk(&entry), "removed");
+    }
+
+    #[test]
+    fn emptied_guard_rejects_empty_walk_over_non_empty_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = ensure_walked_root_not_emptied(dir.path(), 1, 5).unwrap_err();
+        assert!(format!("{err:#}").contains("walked empty"), "{err:#}");
+        // Nothing indexed below, or a real walk: fine.
+        ensure_walked_root_not_emptied(dir.path(), 1, 0).unwrap();
+        ensure_walked_root_not_emptied(dir.path(), 4, 5).unwrap();
+        // A file root has no descendants to lose.
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "x").unwrap();
+        ensure_walked_root_not_emptied(&file, 1, 5).unwrap();
     }
 
     #[test]
