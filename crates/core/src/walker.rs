@@ -602,6 +602,18 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
     Ok(all)
 }
 
+/// `entry` with its size/mtime re-read from disk. The deep phase takes this snapshot just before
+/// it parses a file, so [`entry_changed_since_walk`] only flags edits made *during* that file's
+/// own parse/embed, not edits made between the walk and the file's turn (those are parsed fresh).
+pub fn refresh_entry(entry: &Entry) -> Entry {
+    let mut fresh = entry.clone();
+    if let Ok(meta) = std::fs::metadata(&entry.path) {
+        fresh.size = meta.len();
+        fresh.modified = meta.modified().ok();
+    }
+    fresh
+}
+
 /// True when the file behind `entry` no longer matches the size/mtime the walk recorded (or has
 /// vanished). The deep phase parses and embeds a file long after the walk saw it; persisting that
 /// result stamps chunks with the *persist* time, which would read as newer than an edit made

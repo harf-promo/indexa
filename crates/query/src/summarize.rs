@@ -271,16 +271,21 @@ pub async fn summarize_file(
             let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
             crate::contextual::build_doc_context(&texts)
         }
-        _ => match sample_via_parse(path) {
-            Some(text) => text,
-            None => match std::fs::read(path) {
-                Ok(bytes) => {
-                    let n = bytes.len().min(4096);
-                    String::from_utf8_lossy(&bytes[..n]).into_owned()
-                }
-                Err(_) => return Ok(SummaryWrite::NoContent), // unreadable file
+        // Stored chunks are redacted at index time; text parsed straight from disk is not, so
+        // scrub it before it can reach a (possibly cloud) describer.
+        _ => crate::redact::chunk_text_for_store(
+            &match sample_via_parse(path) {
+                Some(text) => text,
+                None => match std::fs::read(path) {
+                    Ok(bytes) => {
+                        let n = bytes.len().min(4096);
+                        String::from_utf8_lossy(&bytes[..n]).into_owned()
+                    }
+                    Err(_) => return Ok(SummaryWrite::NoContent), // unreadable file
+                },
             },
-        },
+            true,
+        ),
     };
     if let Some(api) = api_surface(store, path) {
         sample_text = format!("// API surface (symbols this file defines): {api}\n\n{sample_text}");

@@ -550,6 +550,8 @@ pub(crate) async fn run_deep_phase(
             skipped += 1;
             record_file_progress(handle, &path_str, &mut done, &mut samples, n_files);
         } else {
+            // Snapshot size/mtime now so only edits during this file's own parse/embed count as changed.
+            let fresh_entry = indexa_core::walker::refresh_entry(entry);
             let ep = entry.path.clone();
             let sz = entry.size;
             let reg = registry.clone();
@@ -875,7 +877,7 @@ pub(crate) async fn run_deep_phase(
                     let (e, c, h) = persist_completed_file(
                         state,
                         handle,
-                        (**entry).clone(),
+                        fresh_entry.clone(),
                         &path_str,
                         &extracted.chunks,
                         chunk_hashes,
@@ -1020,7 +1022,7 @@ pub(crate) async fn run_deep_phase(
                     let miss_texts: Vec<(usize, String)> =
                         miss_indices.into_iter().zip(miss_embed_texts).collect();
                     let meta = PendingFile {
-                        entry: (**entry).clone(),
+                        entry: fresh_entry.clone(),
                         path_str: path_str.clone(),
                         chunks: extracted.chunks,
                         chunk_hashes,
@@ -1099,7 +1101,7 @@ pub(crate) async fn run_deep_phase(
                 let (e, c, h) = persist_completed_file(
                     state,
                     handle,
-                    (**entry).clone(),
+                    fresh_entry.clone(),
                     &path_str,
                     &[],
                     Vec::new(),

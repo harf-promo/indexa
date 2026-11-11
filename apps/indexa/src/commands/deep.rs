@@ -606,6 +606,9 @@ pub(crate) async fn cmd_deep(
                 continue;
             }
 
+            // Snapshot size/mtime now so only edits during this file's own parse/embed count as changed.
+            let fresh_entry = indexa_core::walker::refresh_entry(entry);
+
             let mut extracted =
                 match registry.parse_guarded(&entry.path, entry.size, max_parse_bytes) {
                     Ok(e) => e,
@@ -764,7 +767,7 @@ pub(crate) async fn cmd_deep(
             if extracted.chunks.is_empty() {
                 persist_completed_file(
                     &mut store,
-                    (**entry).clone(),
+                    fresh_entry.clone(),
                     &path_str,
                     &[],
                     Vec::new(),
@@ -798,7 +801,7 @@ pub(crate) async fn cmd_deep(
                 let all_embeddings: Vec<Option<Vec<f32>>> = vec![None; extracted.chunks.len()];
                 total_chunks += persist_completed_file(
                     &mut store,
-                    (**entry).clone(),
+                    fresh_entry.clone(),
                     &path_str,
                     &extracted.chunks,
                     chunk_hashes,
@@ -911,7 +914,7 @@ pub(crate) async fn cmd_deep(
                 let miss_texts: Vec<(usize, String)> =
                     miss_indices.into_iter().zip(miss_embed_texts).collect();
                 let meta = PendingFile {
-                    entry: (**entry).clone(),
+                    entry: fresh_entry.clone(),
                     path_str,
                     chunks: extracted.chunks,
                     chunk_hashes,
