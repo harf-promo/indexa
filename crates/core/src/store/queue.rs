@@ -128,9 +128,9 @@ impl Store {
         // `subtree_match` does) so the range bounds follow it. `hi` swaps the separator for the
         // byte right after it (`'/'`→`'0'`, `'\\'`→`']'`).
         let trimmed = dir_path.trim_end_matches(['/', '\\']);
-        let sep = dir_path
-            .rfind(['/', '\\'])
-            .map_or('/', |i| dir_path.as_bytes()[i] as char);
+        // A path containing `/` is a Unix-style path (a backslash there is part of a name), so
+        // only a slash-free path is treated as native Windows.
+        let sep = if dir_path.contains('/') { '/' } else { '\\' };
         let next = (sep as u8 + 1) as char;
         let lo = format!("{trimmed}{sep}");
         let hi = format!("{trimmed}{next}");

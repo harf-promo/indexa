@@ -1110,3 +1110,15 @@ fn subtree_has_unfinished_follows_backslash_paths() {
         "a prefix-sibling (`C:\\projector`) must not count"
     );
 }
+
+#[test]
+fn subtree_has_unfinished_unix_dir_name_containing_a_backslash() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .enqueue_summary_items(&[
+            (r"/data/a\b".into(), "dir".into(), 2),
+            (r"/data/a\b/x.md".into(), "file".into(), 3),
+        ])
+        .unwrap();
+    assert!(store.subtree_has_unfinished(r"/data/a\b", 2).unwrap());
+}
