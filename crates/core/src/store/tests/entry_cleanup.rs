@@ -686,6 +686,44 @@ fn guarded_scan_of_missing_root_keeps_entries_and_children() {
 }
 
 #[test]
+fn guarded_scan_of_empty_mount_point_keeps_entries() {
+    // An unmounted drive can leave its mount-point directory behind: it exists, lists, and the
+    // walk yields the root itself — so `ensure_walked_root_present` passes. The second guard must
+    // trip because the index still holds rows below the root.
+    use crate::walker::{ensure_walked_root_not_emptied, walk_streaming, WalkConfig};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("drive");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("a.rs"), "fn run() {}").unwrap();
+    let root_str = root.to_string_lossy().into_owned();
+    let cfg = WalkConfig::default();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let scan = |store: &mut Store| -> anyhow::Result<usize> {
+        let below = store.count_descendants(&root_str)?;
+        let gen = store.next_scan_generation()?;
+        let mut seen = 0usize;
+        walk_streaming(&root, &cfg, |batch| {
+            seen += batch.len();
+            store.upsert_entries_with_generation(&batch, Some(gen))
+        })?;
+        ensure_walked_root_not_emptied(&root, seen, below)?;
+        store.reconcile_by_generation(&root_str, gen)?;
+        Ok(seen)
+    };
+
+    assert_eq!(scan(&mut store).unwrap(), 2, "root dir + a.rs");
+    assert_eq!(store.count_descendants(&root_str).unwrap(), 1);
+    let entries = store.entry_count().unwrap();
+
+    std::fs::remove_file(root.join("a.rs")).unwrap();
+    let err = scan(&mut store).unwrap_err();
+    assert!(format!("{err:#}").contains("walked empty"), "{err:#}");
+    assert_eq!(store.entry_count().unwrap(), entries);
+}
+
+#[test]
 fn prune_clears_every_entry_child_table() {
     // F15: `prune_orphans` skipped `note_anchors` and `co_change` (both cleared by the entry-delete
     // paths), and `OrphanCounts` omitted `edges` even though prune deleted them. Orphan a fully

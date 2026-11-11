@@ -4,7 +4,9 @@ use anyhow::Result;
 use indexa_core::{
     config::Config,
     store::Store,
-    walker::{ensure_walked_root_present, walk_streaming, WalkConfig},
+    walker::{
+        ensure_walked_root_not_emptied, ensure_walked_root_present, walk_streaming, WalkConfig,
+    },
 };
 
 use super::helpers::{check_huge_root_guard, index_db_path, resolve_target_roots};
@@ -61,6 +63,8 @@ fn scan_roots(store: &mut Store, roots: &[PathBuf], walk_cfg: &WalkConfig) -> Re
         // (stamped with this run's generation) as it arrives, instead of collecting every entry
         // into one Vec before writing anything.
         let mut count = 0usize;
+        // Taken before the walk so this run's own upserts don't count as "previously indexed".
+        let indexed_below = store.count_descendants(&root.to_string_lossy())?;
         walk_streaming(root, walk_cfg, |batch| {
             count += batch.len();
             store.upsert_entries_with_generation(&batch, Some(generation))
@@ -68,7 +72,9 @@ fn scan_roots(store: &mut Store, roots: &[PathBuf], walk_cfg: &WalkConfig) -> Re
 
         // The walk is fail-open, so a missing/unreadable root yields nothing — and pruning on
         // that would delete everything indexed under it. Skip the prune for this root instead.
-        if let Err(e) = ensure_walked_root_present(root, count) {
+        if let Err(e) = ensure_walked_root_present(root, count)
+            .and_then(|()| ensure_walked_root_not_emptied(root, count, indexed_below))
+        {
             eprintln!("  skipped: {e:#}");
             eprintln!(
                 "  its existing index was left untouched — remount it or fix permissions and \
