@@ -135,6 +135,13 @@ fn persist_completed_file(
     summaries_only: bool,
     redact_at_index: bool,
 ) -> Result<usize> {
+    // The file may have been edited while it was parsed/embedded: writing now would stamp the old
+    // content as newer than that edit. Leave the previous rows (older than the new mtime) so the
+    // next pass picks the file up again.
+    if indexa_core::walker::entry_changed_since_walk(&entry) {
+        eprintln!("  ⚠  {path_str}: changed while being indexed — will be re-indexed next pass");
+        return Ok(0);
+    }
     let mut chunk_records = Vec::with_capacity(chunks.len());
     for ((chunk, embedding), hash) in chunks.iter().zip(embeddings).zip(chunk_hashes) {
         // Redact obvious secrets before writing to the searchable store (shared choke point so
@@ -1334,5 +1341,65 @@ mod watchdog_tests {
             0,
             "watchdog must not unload the embedder when pressure is Ok"
         );
+    }
+}
+
+#[cfg(test)]
+mod persist_guard_tests {
+    use super::persist_completed_file;
+    use indexa_core::store::Store;
+    use indexa_core::walker::{walk, WalkConfig};
+
+    #[test]
+    fn a_file_edited_after_the_walk_is_not_persisted() {
+        // INDEXA1-4: the parse/embed result of an old version must not be stamped as newer than
+        // an edit made meanwhile.
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "old").unwrap();
+        let entry = walk(&f, &WalkConfig::default()).unwrap().remove(0);
+        let path = f.to_string_lossy().into_owned();
+        let chunk = indexa_parsers::types::Chunk {
+            source: f.clone(),
+            seq: 0,
+            heading: String::new(),
+            text: "old".into(),
+            language: None,
+        };
+        let mut store = Store::open_in_memory().unwrap();
+
+        std::fs::write(&f, "edited while embedding").unwrap();
+        let written = persist_completed_file(
+            &mut store,
+            entry.clone(),
+            &path,
+            std::slice::from_ref(&chunk),
+            vec!["h".into()],
+            &[],
+            vec![None],
+            Some("m"),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(written, 0);
+        assert!(store.chunks_for_path(&path, 0).unwrap().is_empty());
+
+        // A fresh walk sees the edited file, and that one is persisted.
+        let entry = walk(&f, &WalkConfig::default()).unwrap().remove(0);
+        let written = persist_completed_file(
+            &mut store,
+            entry,
+            &path,
+            std::slice::from_ref(&chunk),
+            vec!["h".into()],
+            &[],
+            vec![None],
+            Some("m"),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(written, 1);
     }
 }

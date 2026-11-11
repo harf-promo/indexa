@@ -602,6 +602,18 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
     Ok(all)
 }
 
+/// True when the file behind `entry` no longer matches the size/mtime the walk recorded (or has
+/// vanished). The deep phase parses and embeds a file long after the walk saw it; persisting that
+/// result stamps chunks with the *persist* time, which would read as newer than an edit made
+/// meanwhile and hide it from every later freshness check. Callers skip the write instead, so the
+/// old rows stay older than the new mtime and the next pass re-indexes the file.
+pub fn entry_changed_since_walk(entry: &Entry) -> bool {
+    match std::fs::metadata(&entry.path) {
+        Ok(meta) => meta.len() != entry.size || meta.modified().ok() != entry.modified,
+        Err(_) => true,
+    }
+}
+
 /// Check that a finished walk of `root` can be trusted as the complete live set under it, before
 /// a caller prunes the index rows the walk didn't re-see.
 ///
@@ -1259,6 +1271,30 @@ mod tests {
         ensure_walked_root_present(dir.path(), entries.len()).unwrap();
         let entries = walk(&file, &WalkConfig::default()).unwrap();
         ensure_walked_root_present(&file, entries.len()).unwrap();
+    }
+
+    #[test]
+    fn entry_changed_since_walk_detects_edits_and_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "one").unwrap();
+        let entry = walk(&f, &WalkConfig::default()).unwrap().remove(0);
+        assert!(!entry_changed_since_walk(&entry));
+        std::fs::write(&f, "longer content").unwrap();
+        assert!(entry_changed_since_walk(&entry), "size changed");
+        let entry = walk(&f, &WalkConfig::default()).unwrap().remove(0);
+        // Same size, later mtime.
+        std::fs::write(&f, "LONGER CONTENT").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert!(entry_changed_since_walk(&entry), "mtime changed");
+        std::fs::remove_file(&f).unwrap();
+        assert!(entry_changed_since_walk(&entry), "removed");
     }
 
     #[test]
