@@ -541,9 +541,11 @@ pub(crate) async fn run_deep_phase(
             let store = state.store.lock().await;
             match mtime_secs {
                 Some(m) => store
-                    .chunks_current_for_mtime(&path_str, m)
+                    .chunks_current_for_mtime_and_model(&path_str, m, &embed_model)
                     .unwrap_or(false),
-                None => store.chunks_are_current(&path_str).unwrap_or(false),
+                None => store
+                    .chunks_are_current_for_model(&path_str, &embed_model)
+                    .unwrap_or(false),
             }
         };
         if is_current {
@@ -896,7 +898,7 @@ pub(crate) async fn run_deep_phase(
                     let hash_cache = {
                         let store = state.store.lock().await;
                         store
-                            .cached_embeddings_by_hash(&path_str)
+                            .cached_embeddings_by_hash_for_model(&path_str, &embed_model)
                             .unwrap_or_default()
                     };
 

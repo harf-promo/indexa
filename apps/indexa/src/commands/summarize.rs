@@ -1,10 +1,10 @@
 use anyhow::Result;
 use indexa_core::{config::Config, store::Store};
-use indexa_embed::OllamaEmbedder;
 use indexa_query::summarize_subtree_sync;
 
 use super::helpers::{
-    require_index_db, resolve_summary_mode, resolve_target_roots, select_summary_models,
+    build_embedder, require_index_db, resolve_summary_mode, resolve_target_roots,
+    select_summary_models,
 };
 
 pub(crate) async fn cmd_summarize(
@@ -47,8 +47,8 @@ pub(crate) async fn cmd_summarize(
         cfg.describer.num_ctx,
         &cfg.describer.claude_bin,
     )?;
-    let embed_base = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
-    let embedder = OllamaEmbedder::new(&embed_base, &cfg.embedding.model, cfg.embedding.dim);
+    // Provider-aware (openai/google/llamacpp too), not a hardcoded Ollama client.
+    let embedder = build_embedder(cfg, None)?;
 
     let mut store = Store::open(&db_path)?;
 
@@ -57,7 +57,7 @@ pub(crate) async fn cmd_summarize(
         let (done, skipped) = summarize_subtree_sync(
             &mut store,
             describer.as_ref(),
-            &embedder,
+            embedder.as_ref(),
             root,
             &summary_cfg,
             passes,

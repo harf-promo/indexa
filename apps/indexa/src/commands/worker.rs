@@ -3,7 +3,6 @@ use indexa_core::{
     config::{parse_reindex_interval, Config},
     store::Store,
 };
-use indexa_embed::OllamaEmbedder;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -113,7 +112,52 @@ fn git_state_hash(root: &Path) -> Option<String> {
     // inside a git work tree with at least one commit — fails cleanly otherwise.
     let head = run(&["rev-parse", "HEAD"])?;
     let dirty = run(&["status", "--porcelain", "--untracked-files=no"]).unwrap_or_default();
-    Some(format!("{head}:{dirty}"))
+    // The status text alone is identical for a second edit to an already-dirty file (` M a.txt`
+    // before and after), which would hide it indefinitely: fold each dirty file's size + mtime in.
+    let top = run(&["rev-parse", "--show-toplevel"]).unwrap_or_default();
+    let raw = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root_str)
+        .args([
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=no",
+            "--",
+            ".",
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let content = dirty_content_fingerprint(Path::new(&top), &raw);
+    Some(format!("{head}:{dirty}:{content}"))
+}
+
+/// Size + mtime of every path named by `git status --porcelain -z` output, relative to the repo
+/// top-level `top`. A rename/copy entry is followed by its source path, which is skipped. A
+/// missing file (deleted) contributes just its name.
+fn dirty_content_fingerprint(top: &Path, porcelain_z: &str) -> String {
+    let mut out = String::new();
+    let mut fields = porcelain_z.split('\0').filter(|f| !f.is_empty());
+    while let Some(field) = fields.next() {
+        let (status, path) = field.split_at(field.len().min(3));
+        if status.starts_with(['R', 'C']) || status[..status.len().min(2)].ends_with(['R', 'C']) {
+            fields.next(); // original path of the rename/copy
+        }
+        out.push_str(path);
+        if let Ok(meta) = std::fs::metadata(top.join(path)) {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            out.push_str(&format!("@{}:{mtime}", meta.len()));
+        }
+        out.push(';');
+    }
+    out
 }
 
 /// Whether `root`'s indexed content hasn't been refreshed within the default staleness
@@ -270,12 +314,9 @@ pub(crate) async fn cmd_worker(concurrency: usize, auto_reindex: bool, cfg: &Con
             cfg.describer.num_ctx,
             &cfg.describer.claude_bin,
         )?);
-    let embed_base = OllamaEmbedder::resolve_base_url(Some(&cfg.embedding.base_url));
-    let embedder: Arc<dyn indexa_embed::Embedder + Send + Sync> = Arc::new(OllamaEmbedder::new(
-        &embed_base,
-        &cfg.embedding.model,
-        cfg.embedding.dim,
-    ));
+    // Provider-aware (openai/google/llamacpp too), not a hardcoded Ollama client.
+    let embedder: Arc<dyn indexa_embed::Embedder + Send + Sync> =
+        Arc::from(super::helpers::build_embedder(cfg, None)?);
 
     let store = Arc::new(tokio::sync::Mutex::new(Store::open(&db_path)?));
 
@@ -382,6 +423,35 @@ mod tests {
 
         // A clean tree at a stable commit is deterministic across repeated calls.
         assert_eq!(git_state_hash(root).unwrap(), after_second);
+    }
+
+    #[test]
+    fn git_state_hash_changes_on_a_second_edit_to_an_already_dirty_file() {
+        // INDEXA1-8: ` M a.txt` is identical before and after the second edit, so the hash
+        // (HEAD + status text) never changed and the second edit was never reindexed.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        run(root, &["init", "-q"]);
+        run(root, &["config", "user.email", "t@example.com"]);
+        run(root, &["config", "user.name", "t"]);
+        run(root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("a.txt"), "1").unwrap();
+        run(root, &["add", "a.txt"]);
+        run(root, &["commit", "-q", "-m", "init"]);
+
+        std::fs::write(root.join("a.txt"), "two").unwrap();
+        let first_dirty = git_state_hash(root).unwrap();
+        assert_eq!(
+            git_state_hash(root).unwrap(),
+            first_dirty,
+            "stable if untouched"
+        );
+        std::fs::write(root.join("a.txt"), "three!").unwrap();
+        assert_ne!(
+            first_dirty,
+            git_state_hash(root).unwrap(),
+            "a further edit to the same dirty file must change the hash"
+        );
     }
 
     #[test]
