@@ -251,8 +251,23 @@ pub async fn summarize_file(
     // corrupt format) or the file can't be read at all. For code files, prepend the API
     // surface — the symbols this file defines, from the code graph — so the summary can
     // name the functions/types it exports; that part reuses existing data (no extra call).
+    //
+    // Stored chunks are used only while they are not older than the file on disk. After an edit
+    // + `scan` (no `deep` yet) they still hold the previous version's text, and summarizing them
+    // while stamping the NEW content's hash would certify a stale summary as current.
+    // An unreadable mtime can't prove the chunks stale, so it keeps the old behavior (use them).
+    let chunks_describe_current_file = match std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+    {
+        Some(mtime) => store
+            .chunks_text_not_older_than(path, mtime.as_secs() as i64)
+            .unwrap_or(false),
+        None => true,
+    };
     let mut sample_text: String = match store.chunks_for_path(path, 64) {
-        Ok(chunks) if !chunks.is_empty() => {
+        Ok(chunks) if !chunks.is_empty() && chunks_describe_current_file => {
             let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
             crate::contextual::build_doc_context(&texts)
         }
@@ -1657,6 +1672,85 @@ mod incremental_tests {
             file_calls.load(Ordering::SeqCst),
             1,
             "an unchanged file must not re-pay the LLM"
+        );
+    }
+
+    /// Records the sample text each describe call receives.
+    struct CapturingDescriber(Arc<std::sync::Mutex<Vec<String>>>);
+    #[async_trait::async_trait]
+    impl Describer for CapturingDescriber {
+        async fn describe(
+            &self,
+            _p: &str,
+            c: &[u8],
+            _prev: Option<&str>,
+        ) -> anyhow::Result<String> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(c).into_owned());
+            Ok("file summary".into())
+        }
+        async fn summarize_dir(
+            &self,
+            _d: &str,
+            _children: &[ChildSummary],
+            _prev: Option<&str>,
+        ) -> anyhow::Result<String> {
+            Ok("dir summary".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn summarize_ignores_stored_chunks_older_than_the_file() {
+        // INDEXA1-5: after an edit + scan (no deep), stored chunks hold the previous version.
+        // They must not feed the describer, or the summary of version A gets stored with
+        // version B's hash and later looks current.
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("f.txt");
+        std::fs::write(&f, "version B of the file").unwrap();
+        let path = f.to_string_lossy().into_owned();
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_chunks(&[indexa_core::store::ChunkRecord {
+                entry_path: path.clone(),
+                seq: 0,
+                heading: String::new(),
+                text: "stale stored text from version A".into(),
+                language: None,
+                embedding: None,
+                embed_model: None,
+                content_hash: None,
+            }])
+            .unwrap();
+        let set_indexed_at = |store: &Store, at: i64| {
+            store
+                .db_connection()
+                .execute("UPDATE chunks SET indexed_at = ?1", [at])
+                .unwrap();
+        };
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dsc = CapturingDescriber(seen.clone());
+
+        set_indexed_at(&store, 1); // long before the file's mtime
+        summarize_file(&mut store, &dsc, &StubEmbedder, &path, "m", 1, false, None)
+            .await
+            .unwrap();
+        {
+            let samples = seen.lock().unwrap();
+            assert!(samples[0].contains("version B"), "{samples:?}");
+            assert!(!samples[0].contains("version A"), "{samples:?}");
+        }
+
+        // Chunks written after the file's mtime are still used (the cheap, normal path).
+        std::fs::write(&f, "version C of the file").unwrap();
+        set_indexed_at(&store, i64::MAX / 2);
+        summarize_file(&mut store, &dsc, &StubEmbedder, &path, "m", 1, false, None)
+            .await
+            .unwrap();
+        assert!(
+            seen.lock().unwrap()[1].contains("version A"),
+            "fresh stored chunks should still be the sample source"
         );
     }
 
