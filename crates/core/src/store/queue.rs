@@ -116,15 +116,24 @@ impl Store {
     /// read-only check that does NOT touch the atomic claim in
     /// [`next_queue_item`](Self::next_queue_item).
     ///
-    /// "Inside the subtree" is the half-open range `[dir_path + "/", dir_path + "0")`: under
+    /// "Inside the subtree" is the half-open range `[dir_path + sep, dir_path + next(sep))` (`sep`
+    /// is `/`, or `\\` for a native Windows path): for `/` that is `[dir + "/", dir + "0")`; under
     /// BINARY collation (bytewise) that is exactly the set of paths starting with
     /// `dir_path + "/"`, because `'0'` is the byte right after `'/'`. The trailing slash guards
     /// prefix-siblings (`/proj` must not match `/projector/x`). Unlike the former
     /// `substr(path, 1, length(?1) + 1) = ?1 || '/'`, a plain range on `path` is sargable, so
     /// the planner can seek an index instead of evaluating `substr` on every unfinished row.
     pub fn subtree_has_unfinished(&self, dir_path: &str, dir_depth: i64) -> Result<bool> {
-        let lo = format!("{dir_path}/");
-        let hi = format!("{dir_path}0");
+        // Native Windows paths use `\\`; derive the separator from the path itself (as
+        // `subtree_match` does) so the range bounds follow it. `hi` swaps the separator for the
+        // byte right after it (`'/'`→`'0'`, `'\\'`→`']'`).
+        let trimmed = dir_path.trim_end_matches(['/', '\\']);
+        // A path containing `/` is a Unix-style path (a backslash there is part of a name), so
+        // only a slash-free path is treated as native Windows.
+        let sep = if dir_path.contains('/') { '/' } else { '\\' };
+        let next = (sep as u8 + 1) as char;
+        let lo = format!("{trimmed}{sep}");
+        let hi = format!("{trimmed}{next}");
         let unfinished: bool = self.conn.query_row(
             SUBTREE_HAS_UNFINISHED_SQL,
             params![lo, hi, dir_depth],
