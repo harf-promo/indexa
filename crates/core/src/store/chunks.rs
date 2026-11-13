@@ -50,6 +50,47 @@ impl Store {
         Ok(current)
     }
 
+    /// [`chunks_current_for_mtime`](Self::chunks_current_for_mtime) plus embedding identity: a
+    /// file whose chunks were embedded by a *different* model than `embed_model` is not current,
+    /// so switching models and re-running `deep` re-embeds instead of skipping (INDEXA1-3).
+    /// Chunks with no recorded model (`embed_model IS NULL`, written before the column was
+    /// populated) are treated as compatible rather than forcing a full re-embed on upgrade.
+    pub fn chunks_current_for_mtime_and_model(
+        &self,
+        path: &str,
+        mtime_secs: i64,
+        embed_model: &str,
+    ) -> Result<bool> {
+        let current: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 AND COUNT(*) = COUNT(embedding)
+                    AND COALESCE(SUM(embed_model IS NOT NULL AND embed_model <> ?3), 0) = 0
+             FROM chunks
+             WHERE entry_path = ?1
+               AND indexed_at >= ?2",
+            params![path, mtime_secs, embed_model],
+            |r| r.get(0),
+        )?;
+        Ok(current)
+    }
+
+    /// [`chunks_are_current`](Self::chunks_are_current) plus embedding identity (see
+    /// [`chunks_current_for_mtime_and_model`](Self::chunks_current_for_mtime_and_model)). Used
+    /// when the walk gave no mtime.
+    pub fn chunks_are_current_for_model(&self, path: &str, embed_model: &str) -> Result<bool> {
+        Ok(self.chunks_are_current(path)?
+            && !self.chunks_embedded_by_other_model(path, embed_model)?)
+    }
+
+    fn chunks_embedded_by_other_model(&self, path: &str, embed_model: &str) -> Result<bool> {
+        let other: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chunks
+                           WHERE entry_path = ?1 AND embed_model IS NOT NULL AND embed_model <> ?2)",
+            params![path, embed_model],
+            |r| r.get(0),
+        )?;
+        Ok(other)
+    }
+
     // ── Deep-scan writes ──────────────────────────────────────────────────────
 
     /// Re-index a batch of chunks (text + optional embedding), making the operation
@@ -177,6 +218,34 @@ impl Store {
                 AND embedding IS NOT NULL",
         )?;
         let rows = stmt.query_map(params![entry_path], |r| {
+            let hash: String = r.get(0)?;
+            let blob: Vec<u8> = r.get(1)?;
+            Ok((hash, blob))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (hash, blob) = row?;
+            map.insert(hash, blob_to_embedding(&blob));
+        }
+        Ok(map)
+    }
+
+    /// [`cached_embeddings_by_hash`](Self::cached_embeddings_by_hash), restricted to vectors
+    /// produced by `embed_model` (or by an unrecorded model, `embed_model IS NULL`). Reusing a
+    /// vector from another model by text hash alone would store it under the new model's name.
+    pub fn cached_embeddings_by_hash_for_model(
+        &self,
+        entry_path: &str,
+        embed_model: &str,
+    ) -> Result<std::collections::HashMap<String, Vec<f32>>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT content_hash, embedding FROM chunks
+              WHERE entry_path = ?1
+                AND content_hash IS NOT NULL
+                AND embedding IS NOT NULL
+                AND (embed_model IS NULL OR embed_model = ?2)",
+        )?;
+        let rows = stmt.query_map(params![entry_path, embed_model], |r| {
             let hash: String = r.get(0)?;
             let blob: Vec<u8> = r.get(1)?;
             Ok((hash, blob))
@@ -347,6 +416,19 @@ impl Store {
         Ok(map)
     }
 
+    /// True when `path` has stored chunks and every one was written at or after `mtime_secs`
+    /// (the file's on-disk mtime), i.e. they describe the file's current bytes. Unlike
+    /// [`chunks_current_for_mtime`](Self::chunks_current_for_mtime) it ignores embeddings: it
+    /// answers "is this stored text the current text", for callers that only read the text.
+    pub fn chunks_text_not_older_than(&self, path: &str, mtime_secs: i64) -> Result<bool> {
+        let fresh: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 AND MIN(indexed_at) >= ?2 FROM chunks WHERE entry_path = ?1",
+            params![path, mtime_secs],
+            |r| r.get(0),
+        )?;
+        Ok(fresh)
+    }
+
     /// Text of the first chunk for a given file path (used as description input).
     pub fn first_chunk_text(&self, entry_path: &str) -> Result<Option<String>> {
         let text: Option<String> = self
@@ -447,6 +529,71 @@ mod chunk_cache_tests {
         for (a, b) in vec.iter().zip(cached_vec.iter()) {
             assert!((a - b).abs() < 1e-6, "embedding mismatch: {a} vs {b}");
         }
+    }
+
+    #[test]
+    fn model_switch_makes_chunks_stale_and_hides_foreign_vectors() {
+        // INDEXA1-3: freshness and the hash cache must key on the embedding model.
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_chunks(&[ChunkRecord {
+                entry_path: "/t/m.rs".to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: "hello".to_owned(),
+                language: None,
+                embedding: Some(vec![0.1, 0.2]),
+                embed_model: Some("model-a".to_owned()),
+                content_hash: Some("h1".to_owned()),
+            }])
+            .unwrap();
+        assert!(store
+            .chunks_current_for_mtime_and_model("/t/m.rs", 0, "model-a")
+            .unwrap());
+        assert!(
+            !store
+                .chunks_current_for_mtime_and_model("/t/m.rs", 0, "model-b")
+                .unwrap(),
+            "chunks from model-a are not current for model-b"
+        );
+        assert!(!store
+            .chunks_are_current_for_model("/t/m.rs", "model-b")
+            .unwrap());
+        assert!(store
+            .cached_embeddings_by_hash_for_model("/t/m.rs", "model-a")
+            .unwrap()
+            .contains_key("h1"));
+        assert!(
+            store
+                .cached_embeddings_by_hash_for_model("/t/m.rs", "model-b")
+                .unwrap()
+                .is_empty(),
+            "a model-a vector must not be reused under model-b"
+        );
+    }
+
+    #[test]
+    fn legacy_chunks_without_a_recorded_model_stay_compatible() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_chunks(&[ChunkRecord {
+                entry_path: "/t/l.rs".to_owned(),
+                seq: 0,
+                heading: String::new(),
+                text: "old".to_owned(),
+                language: None,
+                embedding: Some(vec![0.5]),
+                embed_model: None,
+                content_hash: Some("hl".to_owned()),
+            }])
+            .unwrap();
+        assert!(store
+            .chunks_current_for_mtime_and_model("/t/l.rs", 0, "any")
+            .unwrap());
+        assert!(store
+            .cached_embeddings_by_hash_for_model("/t/l.rs", "any")
+            .unwrap()
+            .contains_key("hl"));
     }
 
     #[test]

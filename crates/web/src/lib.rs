@@ -72,8 +72,8 @@ pub struct AppState {
     pub(crate) db_path: Arc<std::path::PathBuf>,
     /// The config.toml path every config-write handler reads and saves through — mirrors
     /// `db_path`'s pattern of routing handlers through `AppState` instead of a global
-    /// resolver. In production this is `indexa_core::config::default_config_path()` (set in
-    /// `serve()`, below); the test constructor points it at a unique scratch path per
+    /// resolver. In production this is `indexa_core::config::default_config_path()`, or the CLI's
+    /// `--config` path (set in `serve_with_config_path()`, below); the test constructor points it at a unique scratch path per
     /// `AppState` so `cargo test` can never read, chmod, or overwrite the developer's real
     /// `~/Library/Application Support/dev.indexa.Indexa/config.toml` (or platform
     /// equivalent). Before this field existed, every config-write handler called
@@ -212,13 +212,37 @@ pub(crate) const UI_JS: &str = concat!(
 pub async fn serve(
     port: u16,
     host: &str,
-    mut store: Store,
+    store: Store,
     embedder: Arc<dyn Embedder + Send + Sync + 'static>,
     llm: Arc<dyn Generator + Send + Sync + 'static>,
     config: Config,
 ) -> Result<()> {
+    serve_with_config_path(
+        port,
+        host,
+        store,
+        embedder,
+        llm,
+        config,
+        indexa_core::config::default_config_path(),
+    )
+    .await
+}
+
+/// [`serve`], but the config-write handlers save to `config_path` instead of the default
+/// location. `indexa --config /path/custom.toml serve` must pass its resolved path here, or the
+/// UI reads one file and silently writes another.
+pub async fn serve_with_config_path(
+    port: u16,
+    host: &str,
+    mut store: Store,
+    embedder: Arc<dyn Embedder + Send + Sync + 'static>,
+    llm: Arc<dyn Generator + Send + Sync + 'static>,
+    config: Config,
+    config_path: std::path::PathBuf,
+) -> Result<()> {
     let db_path = Arc::new(store.db_path().to_path_buf());
-    let config_path = Arc::new(indexa_core::config::default_config_path());
+    let config_path = Arc::new(config_path);
     let log_dir = Arc::new(
         indexa_core::config::default_data_dir()
             .map(|d| d.join("logs"))

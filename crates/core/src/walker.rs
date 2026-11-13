@@ -602,6 +602,30 @@ pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
     Ok(all)
 }
 
+/// `entry` with its size/mtime re-read from disk. The deep phase takes this snapshot just before
+/// it parses a file, so [`entry_changed_since_walk`] only flags edits made *during* that file's
+/// own parse/embed, not edits made between the walk and the file's turn (those are parsed fresh).
+pub fn refresh_entry(entry: &Entry) -> Entry {
+    let mut fresh = entry.clone();
+    if let Ok(meta) = std::fs::metadata(&entry.path) {
+        fresh.size = meta.len();
+        fresh.modified = meta.modified().ok();
+    }
+    fresh
+}
+
+/// True when the file behind `entry` no longer matches the size/mtime the walk recorded (or has
+/// vanished). The deep phase parses and embeds a file long after the walk saw it; persisting that
+/// result stamps chunks with the *persist* time, which would read as newer than an edit made
+/// meanwhile and hide it from every later freshness check. Callers skip the write instead, so the
+/// old rows stay older than the new mtime and the next pass re-indexes the file.
+pub fn entry_changed_since_walk(entry: &Entry) -> bool {
+    match std::fs::metadata(&entry.path) {
+        Ok(meta) => meta.len() != entry.size || meta.modified().ok() != entry.modified,
+        Err(_) => true,
+    }
+}
+
 /// Check that a finished walk of `root` can be trusted as the complete live set under it, before
 /// a caller prunes the index rows the walk didn't re-see.
 ///
@@ -624,6 +648,30 @@ pub fn ensure_walked_root_present(root: &Path, entries_seen: usize) -> anyhow::R
     if entries_seen == 0 {
         anyhow::bail!(
             "walking {} yielded nothing, not even the root itself — it was unreadable during the walk",
+            root.display()
+        );
+    }
+    Ok(())
+}
+
+/// Second prune guard, for a root that exists and lists fine but walked (almost) empty while the
+/// index holds rows beneath it — e.g. an unmounted drive whose empty mount-point directory is
+/// still there. [`ensure_walked_root_present`] passes that case (the root itself is yielded), so
+/// pruning would wipe the whole subtree. `indexed_descendants` is
+/// `Store::count_descendants(root)` taken before the prune.
+///
+/// `Err` when `root` is a directory, the walk saw only the root itself (`entries_seen <= 1`), and
+/// the index still has rows below it. A genuinely emptied directory is refused too: drop it
+/// explicitly with `indexa rm -r`.
+pub fn ensure_walked_root_not_emptied(
+    root: &Path,
+    entries_seen: usize,
+    indexed_descendants: usize,
+) -> anyhow::Result<()> {
+    if entries_seen <= 1 && indexed_descendants > 0 && root.is_dir() {
+        anyhow::bail!(
+            "{} walked empty but the index holds {indexed_descendants} entries under it — \
+             it may be an unmounted drive's empty mount point",
             root.display()
         );
     }
@@ -1259,6 +1307,44 @@ mod tests {
         ensure_walked_root_present(dir.path(), entries.len()).unwrap();
         let entries = walk(&file, &WalkConfig::default()).unwrap();
         ensure_walked_root_present(&file, entries.len()).unwrap();
+    }
+
+    #[test]
+    fn entry_changed_since_walk_detects_edits_and_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "one").unwrap();
+        let entry = walk(&f, &WalkConfig::default()).unwrap().remove(0);
+        assert!(!entry_changed_since_walk(&entry));
+        std::fs::write(&f, "longer content").unwrap();
+        assert!(entry_changed_since_walk(&entry), "size changed");
+        let entry = walk(&f, &WalkConfig::default()).unwrap().remove(0);
+        // Same size, later mtime.
+        std::fs::write(&f, "LONGER CONTENT").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert!(entry_changed_since_walk(&entry), "mtime changed");
+        std::fs::remove_file(&f).unwrap();
+        assert!(entry_changed_since_walk(&entry), "removed");
+    }
+
+    #[test]
+    fn emptied_guard_rejects_empty_walk_over_non_empty_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = ensure_walked_root_not_emptied(dir.path(), 1, 5).unwrap_err();
+        assert!(format!("{err:#}").contains("walked empty"), "{err:#}");
+        // Nothing indexed below, or a real walk: fine.
+        ensure_walked_root_not_emptied(dir.path(), 1, 0).unwrap();
+        ensure_walked_root_not_emptied(dir.path(), 4, 5).unwrap();
+        // A file root has no descendants to lose.
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "x").unwrap();
+        ensure_walked_root_not_emptied(&file, 1, 5).unwrap();
     }
 
     #[test]

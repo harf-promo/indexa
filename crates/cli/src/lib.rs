@@ -753,6 +753,7 @@ Kinds, most to least trusted:
         embed_model: Option<String>,
     },
 
+    #[allow(rustdoc::invalid_html_tags)] // help text, not rustdoc: `<port>` is a placeholder
     /// Start the local web UI at http://localhost:<port>.
     #[command(after_help = "Examples:
   indexa serve
@@ -1020,6 +1021,7 @@ Kinds, most to least trusted:
         pin: Option<String>,
     },
 
+    #[allow(rustdoc::broken_intra_doc_links)] // help text, not rustdoc: `${fpath[1]}` is shell
     /// Print a shell-completion script for your shell.
     ///
     /// Pipe it into the right place for your shell, e.g.:
