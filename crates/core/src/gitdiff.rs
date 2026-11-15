@@ -68,7 +68,7 @@ pub fn changed_hunks(root: &Path, scope: &DiffScope) -> Result<Vec<ChangedHunk>>
     let Some(root_str) = root.to_str() else {
         return Ok(Vec::new());
     };
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::gitcmd::git_command();
     // `--no-ext-diff`/`--no-textconv`: never run a repo-configured external diff or textconv
     // program for what is meant to be a read-only hunk listing.
     cmd.arg("-C").arg(root_str).args([
@@ -388,6 +388,60 @@ new file mode 100644
         assert!(changed_hunks(root, &DiffScope::parse("no-such-ref"))
             .unwrap()
             .is_empty());
+    }
+
+    /// H1 (second pass): a repo's own `.git/config` can name programs that git runs during
+    /// `diff`/`status` (`core.fsmonitor`, hooks). `changed_hunks` must never run them. The
+    /// fixture first proves, with a plain `git diff`, that the hostile config does fire.
+    #[cfg(unix)]
+    #[test]
+    fn changed_hunks_does_not_run_a_repo_configured_fsmonitor_program() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "t"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("f.rs"), "fn a() {}\n").unwrap();
+        run(&["add", "f.rs"]);
+        run(&["commit", "-q", "-m", "init"]);
+
+        let marker = tmp.path().join("fsmonitor-ran");
+        let script = tmp.path().join("fsmonitor.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        run(&["config", "core.fsmonitor", script.to_str().unwrap()]);
+        std::fs::write(root.join("f.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+
+        // Control: a bare `git diff` in this fixture does execute the configured program.
+        run(&["diff", "--unified=0", "--no-color"]);
+        assert!(
+            marker.exists(),
+            "fixture invalid: plain git did not run core.fsmonitor"
+        );
+        std::fs::remove_file(&marker).unwrap();
+
+        let hunks = changed_hunks(&root, &DiffScope::Unstaged).unwrap();
+        assert_eq!(hunks.len(), 1, "the real edit must still be reported");
+        assert!(
+            !marker.exists(),
+            "changed_hunks ran the repo's core.fsmonitor program"
+        );
     }
 
     #[test]

@@ -22,6 +22,7 @@ pub mod cochange;
 pub mod config;
 pub mod decisions;
 pub mod fingerprint;
+pub mod gitcmd;
 pub mod gitdiff;
 pub mod memory;
 pub mod models_catalog;

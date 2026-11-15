@@ -248,6 +248,14 @@ pub fn should_index_file(
     if path.is_symlink() {
         return false;
     }
+    // Regular files only: opening a FIFO with no writer blocks the watch loop forever, and a
+    // character device yields unbounded bytes. A path that has vanished (`Err`) keeps the
+    // previous behaviour; the parse that follows fails on it cleanly.
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if !meta.is_file() {
+            return false;
+        }
+    }
     if let Some(cap) = max_filesize {
         if let Ok(meta) = std::fs::metadata(path) {
             if meta.len() > cap {
@@ -524,10 +532,17 @@ pub fn walk_streaming(
                             Err(_) => return WalkState::Continue,
                         };
 
+                        // Regular files and directories only. A FIFO, socket or device node
+                        // would otherwise be recorded as a size-0 `File` (so the size cap never
+                        // trips) and the deep phase would `open()` it: a FIFO with no writer
+                        // blocks forever, a device yields unbounded bytes. (Symlinks were
+                        // already skipped above.)
                         let kind = if meta.is_dir() {
                             EntryKind::Dir
-                        } else {
+                        } else if meta.is_file() {
                             EntryKind::File
+                        } else {
+                            return WalkState::Continue;
                         };
 
                         // Reuse the directory classification computed above; classify files here
@@ -1398,6 +1413,65 @@ mod tests {
         assert!(!is_sensitive_path(
             Path::new("/home/u/proj/talks/deck.key"),
             &roots
+        ));
+    }
+
+    /// M1 (second pass): a FIFO in an indexed tree must be skipped, not recorded as a size-0
+    /// `File` that the deep phase would later `open()` (blocking forever without a writer). The
+    /// walk runs on a thread with a timeout so a regression fails rather than hangs.
+    #[cfg(unix)]
+    #[test]
+    fn walk_and_should_index_file_skip_fifos() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let real = root.join("real.txt");
+        std::fs::write(&real, "hello").unwrap();
+        let fifo = root.join("pipe.txt");
+        let st = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo is available on unix");
+        assert!(st.success());
+
+        for sniff_binary in [false, true] {
+            let cfg = WalkConfig {
+                sniff_binary,
+                ..WalkConfig::default()
+            };
+            let (tx, rx) = std::sync::mpsc::channel();
+            let walk_root = root.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(walk(&walk_root, &cfg));
+            });
+            let entries = rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("walk hung on a FIFO")
+                .unwrap();
+            assert!(
+                entries.iter().any(|e| e.path == real),
+                "the regular file must still be walked"
+            );
+            assert!(
+                !entries.iter().any(|e| e.path == fifo),
+                "a FIFO must not be recorded as a file entry (sniff_binary={sniff_binary})"
+            );
+        }
+
+        let roots = vec![root.clone()];
+        let matchers = build_scan_matchers(&roots, false, &[], true);
+        let cap = Some(DEFAULT_MAX_FILESIZE);
+        assert!(should_index_file(&real, &roots, false, cap, &matchers));
+        assert!(
+            !should_index_file(&fifo, &roots, false, cap, &matchers),
+            "a watcher event on a FIFO must not be indexed"
+        );
+        // A path that vanished keeps the previous (permissive) answer; the parse fails cleanly.
+        assert!(should_index_file(
+            &root.join("gone.txt"),
+            &roots,
+            false,
+            cap,
+            &matchers
         ));
     }
 }

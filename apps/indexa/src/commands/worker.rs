@@ -97,7 +97,7 @@ fn git_poll_interval_secs(entry_count: u64) -> u64 {
 fn git_state_hash(root: &Path) -> Option<String> {
     let root_str = root.to_str()?;
     let run = |args: &[&str]| -> Option<String> {
-        let out = std::process::Command::new("git")
+        let out = indexa_core::gitcmd::git_command()
             .arg("-C")
             .arg(root_str)
             .args(args)
@@ -115,7 +115,7 @@ fn git_state_hash(root: &Path) -> Option<String> {
     // The status text alone is identical for a second edit to an already-dirty file (` M a.txt`
     // before and after), which would hide it indefinitely: fold each dirty file's size + mtime in.
     let top = run(&["rev-parse", "--show-toplevel"]).unwrap_or_default();
-    let raw = std::process::Command::new("git")
+    let raw = indexa_core::gitcmd::git_command()
         .arg("-C")
         .arg(root_str)
         .args([
@@ -388,6 +388,52 @@ mod tests {
     fn git_state_hash_is_none_for_a_non_repo_dir() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(git_state_hash(tmp.path()).is_none());
+    }
+
+    /// H1 (second pass): the git-poll loop runs `git status` on every indexed root. A repo's own
+    /// `.git/config` must not be able to make that run a program (`core.fsmonitor`).
+    #[cfg(unix)]
+    #[test]
+    fn git_state_hash_does_not_run_a_repo_configured_fsmonitor_program() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        run(&root, &["init", "-q"]);
+        run(&root, &["config", "user.email", "t@example.com"]);
+        run(&root, &["config", "user.name", "t"]);
+        run(&root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("a.txt"), "1").unwrap();
+        run(&root, &["add", "a.txt"]);
+        run(&root, &["commit", "-q", "-m", "init"]);
+
+        let marker = tmp.path().join("fsmonitor-ran");
+        let script = tmp.path().join("fsmonitor.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        run(
+            &root,
+            &["config", "core.fsmonitor", script.to_str().unwrap()],
+        );
+        std::fs::write(root.join("a.txt"), "2").unwrap();
+
+        // Control: a bare `git status` in this fixture does execute the configured program.
+        run(&root, &["status", "--porcelain", "--untracked-files=no"]);
+        assert!(
+            marker.exists(),
+            "fixture invalid: plain git did not run core.fsmonitor"
+        );
+        std::fs::remove_file(&marker).unwrap();
+
+        assert!(git_state_hash(&root).is_some());
+        assert!(
+            !marker.exists(),
+            "git_state_hash ran the repo's core.fsmonitor program"
+        );
     }
 
     #[test]
