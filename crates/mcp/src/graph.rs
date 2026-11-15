@@ -959,8 +959,20 @@ impl IndexaMcp {
                     )),
                 },
             };
+        // `root` and `scope` come straight from the MCP caller, which is often a model that has
+        // read untrusted text. Confine the diff to an indexed root (as `read_file` does) and
+        // refuse a scope git could read as an option, before anything is spawned.
+        let indexed = store.root_paths().map_err(mcp_err)?;
+        if !root_is_indexed(&root, &indexed) {
+            return Err(mcp_invalid(format!(
+                "root is not within an indexed root: {root}"
+            )));
+        }
         let scope_str = params.0.scope.clone().unwrap_or_default();
         let scope = DiffScope::parse(&scope_str);
+        if let DiffScope::Ref(r) = &scope {
+            gitdiff::validate_ref(r).map_err(mcp_invalid)?;
+        }
         let hunks = gitdiff::changed_hunks(Path::new(&root), &scope).map_err(mcp_err)?;
         if hunks.is_empty() {
             return Ok(ok_text(format!(
@@ -1115,6 +1127,18 @@ fn notes_section(store: &Store, anchor: &str) -> String {
 }
 
 /// Human label for a [`DiffScope`], for `changed_impact` output.
+/// True when `root` resolves (symlinks and `..` collapsed) to a path at or under one of the
+/// indexed roots. Mirrors `read_file`'s confinement; a root that does not exist is refused.
+fn root_is_indexed(root: &str, indexed: &[String]) -> bool {
+    let Ok(requested) = std::fs::canonicalize(root) else {
+        return false;
+    };
+    indexed
+        .iter()
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .any(|r| requested.starts_with(r))
+}
+
 fn scope_label(scope: &DiffScope) -> String {
     match scope {
         DiffScope::Unstaged => "unstaged".to_owned(),

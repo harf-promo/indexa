@@ -47,6 +47,46 @@ pub(crate) async fn api_watch_status(State(state): State<AppState>) -> Response 
     Json(list).into_response()
 }
 
+/// Persist one re-parsed file: entry row, chunks, code graph, then re-queue its summary and
+/// ancestor roll-ups. Split out of the watch closure (which needs a live notify debouncer) so
+/// the persistence contract is testable.
+fn persist_upsert(
+    store: &mut Store,
+    path: &std::path::Path,
+    watch_root: &std::path::Path,
+    entry: Entry,
+    chunk_records: &[ChunkRecord],
+    edges: &[indexa_parsers::types::Edge],
+) {
+    let s = path.to_string_lossy().into_owned();
+    // A newly-created file has no `entries` row (only `scan` writes those), so without this
+    // its chunks are orphans: never summarized and wiped by the next `prune`. Idempotent
+    // upsert also refreshes size/mtime on edits.
+    if let Err(e) = store.upsert_entries(&[entry]) {
+        tracing::warn!(path = %s, error = %e, "watch: failed to upsert entry");
+    }
+    let chunks_ok = store.replace_file_chunks(&s, chunk_records).is_ok();
+    // `deep` skips a file whose chunks are current, so a watcher that re-chunks without
+    // refreshing the code graph leaves `symbols`/`edges` stale until the file changes again
+    // with watch off. Refresh the graph in the same pass, as `deep` does.
+    if let Err(e) = indexa_query::code_graph::refresh_file_code_graph(store, &s, edges) {
+        tracing::warn!(path = %s, error = %e, "watch: failed to refresh code graph");
+    }
+    if chunks_ok {
+        let depth = path_depth(&s);
+        if let Err(e) = store.mark_for_resummary(&s, "file", depth) {
+            tracing::warn!(path = %s, error = %e, "watch: failed to mark changed file for re-summary");
+        }
+        for dir in ancestor_dirs_to_root(path, std::slice::from_ref(&watch_root.to_path_buf())) {
+            let d = dir.to_string_lossy().into_owned();
+            let dd = path_depth(&d);
+            if let Err(e) = store.mark_for_resummary(&d, "dir", dd) {
+                tracing::warn!(dir = %d, error = %e, "watch: failed to mark ancestor dir for re-summary after upsert");
+            }
+        }
+    }
+}
+
 pub(crate) async fn api_watch_start(
     State(state): State<AppState>,
     Query(params): Query<PathQuery>,
@@ -224,9 +264,6 @@ pub(crate) async fn api_watch_start(
                         });
 
                         if let Ok(mut store) = Store::open(&db_path) {
-                            // A newly-created file has no `entries` row (only `scan` writes those),
-                            // so without this its chunks are orphans: never summarized and wiped by
-                            // the next `prune`. Idempotent upsert also refreshes size/mtime on edits.
                             let entry = Entry {
                                 path: path.to_path_buf(),
                                 kind: EntryKind::File,
@@ -235,25 +272,14 @@ pub(crate) async fn api_watch_start(
                                 hint: indexa_core::surface::classify(path).or_else(|| indexa_core::surface::classify_file_by_extension(path)),
                                 is_binary: false,
                             };
-                            if let Err(e) = store.upsert_entries(&[entry]) {
-                                tracing::warn!(path = %path.display(), error = %e, "watch: failed to upsert entry");
-                            }
-                            if store.replace_file_chunks(&path.to_string_lossy(), &chunk_records).is_ok() {
-                                let s = path.to_string_lossy().into_owned();
-                                let depth = path_depth(&s);
-                                if let Err(e) = store.mark_for_resummary(&s, "file", depth) {
-                                    tracing::warn!(path = %s, error = %e, "watch: failed to mark changed file for re-summary");
-                                }
-                                for dir in
-                                    ancestor_dirs_to_root(path, std::slice::from_ref(&watch_root2))
-                                {
-                                    let d = dir.to_string_lossy().into_owned();
-                                    let dd = path_depth(&d);
-                                    if let Err(e) = store.mark_for_resummary(&d, "dir", dd) {
-                                        tracing::warn!(dir = %d, error = %e, "watch: failed to mark ancestor dir for re-summary after upsert");
-                                    }
-                                }
-                            }
+                            persist_upsert(
+                                &mut store,
+                                path,
+                                &watch_root2,
+                                entry,
+                                &chunk_records,
+                                &extracted.edges,
+                            );
                         }
                     }
                 }
@@ -312,5 +338,65 @@ pub(crate) async fn api_watch_stop(
             StatusCode::NOT_FOUND,
             format!("no active watch session for '{path}'"),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn defines(name: &str, range: (usize, usize)) -> indexa_parsers::types::Edge {
+        indexa_parsers::types::Edge {
+            from: PathBuf::from("/r/a.rs"),
+            kind: "defines",
+            to: name.to_owned(),
+            symbol_kind: Some("fn"),
+            line_range: Some(range),
+        }
+    }
+
+    /// H3: a watch upsert must refresh the code graph, not just the chunks. `deep` skips a
+    /// file whose chunks are current, so without this the stale symbol range was permanent.
+    #[test]
+    fn watch_upsert_refreshes_the_code_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let file = root.join("a.rs");
+        std::fs::write(&file, "fn run() {}\n").unwrap();
+        let mut store = Store::open(&dir.path().join("idx.db")).unwrap();
+        let entry = || Entry {
+            path: file.clone(),
+            kind: EntryKind::File,
+            size: 12,
+            modified: None,
+            hint: None,
+            is_binary: false,
+        };
+        let path_str = file.to_string_lossy().into_owned();
+
+        persist_upsert(
+            &mut store,
+            &file,
+            &root,
+            entry(),
+            &[],
+            &[defines("run", (1, 3))],
+        );
+        let syms = store.symbols_in_file(&path_str).unwrap();
+        assert_eq!((syms[0].start_line, syms[0].end_line), (1, 3));
+
+        persist_upsert(
+            &mut store,
+            &file,
+            &root,
+            entry(),
+            &[],
+            &[defines("run", (10, 14)), defines("other", (16, 18))],
+        );
+        let mut syms = store.symbols_in_file(&path_str).unwrap();
+        syms.sort_by_key(|s| s.start_line);
+        assert_eq!(syms.len(), 2, "stale rows replaced, not appended: {syms:?}");
+        assert_eq!((syms[0].name.as_str(), syms[0].start_line), ("run", 10));
+        assert_eq!((syms[1].name.as_str(), syms[1].start_line), ("other", 16));
     }
 }

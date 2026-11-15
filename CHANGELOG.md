@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security: MCP `changed_impact` and `trigger_index` no longer pass caller input to a
+  command line as an option.** `changed_impact` refused nothing before: a `scope` such as
+  `--output=<file>` made `git diff` rewrite that file, and `root` could be any directory. It now
+  rejects a ref that starts with `-`, passes it after `--end-of-options`, and requires `root` to be
+  inside an indexed root. `trigger_index` could be handed `--config=<file>` as its `path`, which
+  the `indexa index` child parsed as the global config flag; it now requires an existing absolute
+  path and spawns the child with `--` before it.
+- **Watch: a changed file's code graph is refreshed with its chunks.** `indexa watch` and the
+  web watch sessions re-chunked an edited file but left its `edges` and `symbols` rows alone, and
+  `deep` then skipped the file because its chunks were current, so `blast_radius`, `who_imports`
+  and `changed_impact` answered from the pre-edit graph. Both paths now call
+  `replace_file_code_graph` through a shared helper.
+- **CI: pin the `release.yml` actions to full commit SHAs.** The release jobs that hold the
+  updater signing key no longer run third-party actions from mutable tags.
 - **Security: drop vulnerable `zip` 4.6.1 and 8.6.0 from both lockfiles.** The direct
   parser dependency moves 9.0.5 → 9.1.3 (above the 9.0.5 fix for GHSA-m665-v7pm-7grj).
   `candle-core` 0.11.1 replaces the 8.6.0 copy (it requires `zip` ^9.1.3), and

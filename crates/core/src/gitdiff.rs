@@ -58,21 +58,36 @@ impl DiffScope {
 /// path resolved to an absolute path under `root`. Empty (not an error) when `root` isn't
 /// inside a git repo, there's no `git` binary on `PATH`, or there are no changes —
 /// `changed_impact` treats all three identically ("nothing changed here").
+///
+/// Errors (rather than failing open) when `scope` is a ref that could be read by git as an
+/// option — see [`validate_ref`]. The scope comes from an MCP caller, so it is untrusted.
 pub fn changed_hunks(root: &Path, scope: &DiffScope) -> Result<Vec<ChangedHunk>> {
+    if let DiffScope::Ref(r) = scope {
+        validate_ref(r)?;
+    }
     let Some(root_str) = root.to_str() else {
         return Ok(Vec::new());
     };
     let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(root_str)
-        .args(["diff", "--unified=0", "--no-color"]);
+    // `--no-ext-diff`/`--no-textconv`: never run a repo-configured external diff or textconv
+    // program for what is meant to be a read-only hunk listing.
+    cmd.arg("-C").arg(root_str).args([
+        "diff",
+        "--unified=0",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+    ]);
     match scope {
         DiffScope::Unstaged => {}
         DiffScope::Staged => {
             cmd.arg("--staged");
         }
+        // `--end-of-options` makes git treat the ref as a revision even if it were to begin
+        // with `-` (belt and braces with `validate_ref`); the trailing `--` stops git from
+        // reading it as a pathspec.
         DiffScope::Ref(r) => {
-            cmd.arg(r);
+            cmd.arg("--end-of-options").arg(r).arg("--");
         }
     }
     let Ok(output) = run_capped(cmd, GIT_DIFF_TIMEOUT) else {
@@ -84,6 +99,22 @@ pub fn changed_hunks(root: &Path, scope: &DiffScope) -> Result<Vec<ChangedHunk>>
     }
     let diff = String::from_utf8_lossy(&output.stdout);
     Ok(parse_unified_diff(&diff, root))
+}
+
+/// Refuse a ref that git could parse as an option (`--output=<path>` truncates and rewrites an
+/// arbitrary file) or that cannot be a ref at all. Real refs never start with `-`
+/// (`git check-ref-format` forbids it) and never contain NUL or newlines.
+pub fn validate_ref(r: &str) -> Result<()> {
+    anyhow::ensure!(!r.is_empty(), "diff scope ref is empty");
+    anyhow::ensure!(
+        !r.starts_with('-'),
+        "invalid diff scope {r:?}: a git ref must not start with '-'"
+    );
+    anyhow::ensure!(
+        !r.contains(['\0', '\n', '\r']),
+        "invalid diff scope: a git ref must not contain NUL or line breaks"
+    );
+    Ok(())
 }
 
 /// Parse `git diff --unified=0` output into per-file changed line ranges on the new side.
@@ -287,6 +318,74 @@ new file mode 100644
         run(&["add", "f.rs"]);
         run(&["commit", "-q", "-m", "second"]);
         assert!(changed_hunks(root, &DiffScope::Unstaged)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// H1: a `scope` that git would read as an option must be refused, never executed.
+    /// `git diff --output=<path>` truncates and rewrites `<path>`.
+    #[cfg(unix)]
+    #[test]
+    fn changed_hunks_refuses_an_option_shaped_ref_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let victim = tmp.path().join("victim.txt");
+        std::fs::write(&victim, "precious").unwrap();
+
+        for bad in [
+            format!("--output={}", victim.display()),
+            "-p".to_owned(),
+            "--".to_owned(),
+            "main\nother".to_owned(),
+        ] {
+            let scope = DiffScope::parse(&bad);
+            assert!(
+                changed_hunks(&root, &scope).is_err(),
+                "scope {bad:?} must be refused"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "precious",
+            "the option-shaped scope must not have reached git"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_hunks_still_diffs_against_a_real_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "t"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("f.rs"), "fn a() {}\n").unwrap();
+        run(&["add", "f.rs"]);
+        run(&["commit", "-q", "-m", "init"]);
+        std::fs::write(root.join("f.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        let hunks = changed_hunks(root, &DiffScope::parse("HEAD")).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!((hunks[0].start_line, hunks[0].end_line), (2, 2));
+        // An unknown ref still fails open (empty), as before.
+        assert!(changed_hunks(root, &DiffScope::parse("no-such-ref"))
             .unwrap()
             .is_empty());
     }

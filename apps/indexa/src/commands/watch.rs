@@ -60,6 +60,53 @@ async fn build_chunk_records(
     (records, degraded)
 }
 
+/// Persist one re-parsed file: entry row, chunks, code graph, then (when the chunks landed)
+/// re-queue its summary and every ancestor roll-up. Split out of the watch closure (which
+/// needs a live notify debouncer) so the persistence contract is testable. Returns the
+/// chunk-replacement error, if any; entry and graph failures are logged and do not abort.
+fn persist_upsert(
+    store: &mut Store,
+    path: &std::path::Path,
+    watch_roots: &[std::path::PathBuf],
+    entry: Entry,
+    chunk_records: &[ChunkRecord],
+    edges: &[indexa_parsers::types::Edge],
+) -> Result<()> {
+    let path_str = path.to_string_lossy().into_owned();
+    // A newly-created file has no `entries` row (only `scan` writes those), so without this
+    // its chunks are orphans: never summarized (mark_for_resummary skips entry-less paths)
+    // and wiped by the next `prune`. upsert_entries is an idempotent ON-CONFLICT upsert, so
+    // it also refreshes size/mtime on edits.
+    if let Err(e) = store.upsert_entries(&[entry]) {
+        tracing::warn!("failed to upsert entry for {}: {e}", path.display());
+    }
+    let chunks = store.replace_file_chunks(&path_str, chunk_records);
+    // `deep` skips a file whose chunks are current, so a watcher that re-chunks without
+    // refreshing the code graph leaves `symbols`/`edges` stale until the file changes again
+    // with watch off. Refresh the graph in the same pass, as `deep` does.
+    if let Err(e) = indexa_query::code_graph::refresh_file_code_graph(store, &path_str, edges) {
+        tracing::warn!("failed to refresh code graph for {}: {e}", path.display());
+    }
+    chunks?;
+    // Re-embedding alone leaves the summary stale. Re-queue this file and every ancestor
+    // roll-up so the background worker refreshes them. `watch` itself only embeds + enqueues
+    // — run `indexa worker` (or click "Regenerate" / "Rebuild all" in the web UI) to drain the
+    // queue and actually regenerate the summaries. `indexa serve` does NOT drain the queue
+    // automatically; only explicit jobs do. (`mark_for_resummary` skips an item a worker is
+    // already summarizing, so an edit landing during that window is picked up by the next
+    // edit or a later `deep`/`summarize` rather than double-claimed.)
+    if let Err(e) = store.mark_for_resummary(&path_str, "file", path_depth(&path_str)) {
+        tracing::warn!("failed to re-queue summary for {path_str}: {e}");
+    }
+    for dir in ancestor_dirs_to_root(path, watch_roots) {
+        let dir_str = dir.to_string_lossy().into_owned();
+        if let Err(e) = store.mark_for_resummary(&dir_str, "dir", path_depth(&dir_str)) {
+            tracing::warn!("failed to re-queue roll-up for {dir_str}: {e}");
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn cmd_watch(
     paths: Vec<String>,
     embed_model_flag: Option<String>,
@@ -203,10 +250,6 @@ pub(crate) async fn cmd_watch(
                         }
                     };
                     {
-                        // A newly-created file has no `entries` row (only `scan` writes those), so
-                        // without this its chunks are orphans: never summarized (mark_for_resummary
-                        // skips entry-less paths) and wiped by the next `prune`. upsert_entries is an
-                        // idempotent ON-CONFLICT upsert, so it also refreshes size/mtime on edits.
                         let entry = Entry {
                             path: path.to_path_buf(),
                             kind: EntryKind::File,
@@ -216,37 +259,16 @@ pub(crate) async fn cmd_watch(
                                 .or_else(|| indexa_core::surface::classify_file_by_extension(path)),
                             is_binary: false,
                         };
-                        if let Err(e) = store.upsert_entries(&[entry]) {
-                            tracing::warn!("failed to upsert entry for {}: {e}", path.display());
-                        }
-                        if let Err(e) =
-                            store.replace_file_chunks(&path.to_string_lossy(), &chunk_records)
-                        {
+                        if let Err(e) = persist_upsert(
+                            &mut store,
+                            path,
+                            &watch_roots,
+                            entry,
+                            &chunk_records,
+                            &extracted.edges,
+                        ) {
                             tracing::warn!("failed to upsert chunks for {}: {e}", path.display());
                         } else {
-                            // Re-embedding alone leaves the summary stale. Re-queue this file
-                            // and every ancestor roll-up so the background worker refreshes them.
-                            // `watch` itself only embeds + enqueues — run `indexa worker` (or
-                            // click "Regenerate" / "Rebuild all" in the web UI) to drain the queue
-                            // and actually regenerate the summaries. `indexa serve` does NOT
-                            // drain the queue automatically; only explicit jobs do.
-                            // (`mark_for_resummary` skips an item a worker is already summarizing,
-                            // so an edit landing during that window is picked up by the next edit
-                            // or a later `deep`/`summarize` rather than double-claimed.)
-                            let path_str = path.to_string_lossy().into_owned();
-                            if let Err(e) =
-                                store.mark_for_resummary(&path_str, "file", path_depth(&path_str))
-                            {
-                                tracing::warn!("failed to re-queue summary for {path_str}: {e}");
-                            }
-                            for dir in ancestor_dirs_to_root(path, &watch_roots) {
-                                let dir_str = dir.to_string_lossy().into_owned();
-                                if let Err(e) =
-                                    store.mark_for_resummary(&dir_str, "dir", path_depth(&dir_str))
-                                {
-                                    tracing::warn!("failed to re-queue roll-up for {dir_str}: {e}");
-                                }
-                            }
                             // The degraded count is reported per file rather than as a
                             // session total: `run_watch_loop` blocks until the process is
                             // signalled, so a "totals on shutdown" line would never print.
@@ -385,5 +407,64 @@ mod tests {
             "redact_at_index must scrub before the record is stored: {}",
             records[0].text
         );
+    }
+
+    fn defines(name: &str, range: (usize, usize)) -> indexa_parsers::types::Edge {
+        indexa_parsers::types::Edge {
+            from: std::path::PathBuf::from("/r/a.rs"),
+            kind: "defines",
+            to: name.to_owned(),
+            symbol_kind: Some("fn"),
+            line_range: Some(range),
+        }
+    }
+
+    /// H3: a watch upsert must refresh the code graph, not just the chunks. `deep` skips a
+    /// file whose chunks are current, so without this the stale symbol range was permanent.
+    #[test]
+    fn watch_upsert_refreshes_the_code_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let file = root.join("a.rs");
+        std::fs::write(&file, "fn run() {}\n").unwrap();
+        let mut store = Store::open(&dir.path().join("idx.db")).unwrap();
+        let entry = || Entry {
+            path: file.clone(),
+            kind: EntryKind::File,
+            size: 12,
+            modified: None,
+            hint: None,
+            is_binary: false,
+        };
+        let path_str = file.to_string_lossy().into_owned();
+        let roots = vec![root.clone()];
+
+        persist_upsert(
+            &mut store,
+            &file,
+            &roots,
+            entry(),
+            &[],
+            &[defines("run", (1, 3))],
+        )
+        .unwrap();
+        let syms = store.symbols_in_file(&path_str).unwrap();
+        assert_eq!((syms[0].start_line, syms[0].end_line), (1, 3));
+
+        // The symbol moves and a second one appears.
+        persist_upsert(
+            &mut store,
+            &file,
+            &roots,
+            entry(),
+            &[],
+            &[defines("run", (10, 14)), defines("other", (16, 18))],
+        )
+        .unwrap();
+        let mut syms = store.symbols_in_file(&path_str).unwrap();
+        syms.sort_by_key(|s| s.start_line);
+        assert_eq!(syms.len(), 2, "stale rows replaced, not appended: {syms:?}");
+        assert_eq!((syms[0].name.as_str(), syms[0].start_line), ("run", 10));
+        assert_eq!((syms[1].name.as_str(), syms[1].start_line), ("other", 16));
     }
 }
