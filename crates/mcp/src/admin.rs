@@ -6,7 +6,7 @@ use rmcp::{
 };
 use serde::Deserialize;
 
-use crate::{mcp_err, ok_text, IndexaMcp};
+use crate::{mcp_err, mcp_invalid, ok_text, IndexaMcp};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TriggerIndexParams {
@@ -41,6 +41,36 @@ fn indexa_exe() -> Result<std::path::PathBuf, ErrorData> {
     let exe = std::env::current_exe()
         .map_err(|e| mcp_err(format!("cannot resolve the running indexa executable: {e}")))?;
     Ok(exe.canonicalize().unwrap_or(exe))
+}
+
+/// Reject a `trigger_index` path that is not a plain absolute path to something that exists.
+/// `indexa index` takes global flags (`--config=<file>`, which can register a parser
+/// preprocessor command to run) anywhere on its command line, so a caller-supplied path that
+/// starts with `-` would be parsed as a flag instead of a path.
+fn validate_index_path(path: &str) -> Result<(), String> {
+    if path.is_empty() || path.starts_with('-') {
+        return Err(format!(
+            "invalid path {path:?}: must be a non-empty absolute path and must not start with '-'"
+        ));
+    }
+    if path.contains('\0') {
+        return Err("invalid path: contains a NUL byte".to_owned());
+    }
+    let p = std::path::Path::new(path);
+    if !p.is_absolute() {
+        return Err(format!("path must be absolute: {path}"));
+    }
+    if !p.exists() {
+        return Err(format!("path does not exist: {path}"));
+    }
+    Ok(())
+}
+
+/// Argument vector for the `indexa index` child. The `--` ends option parsing, so whatever
+/// follows is a path even if it looks like a flag (defence in depth behind
+/// [`validate_index_path`]).
+fn index_args(path: &str) -> [&str; 3] {
+    ["index", "--", path]
 }
 
 #[tool_router(router = router_admin, vis = "pub(crate)")]
@@ -221,11 +251,14 @@ impl IndexaMcp {
         params: Parameters<TriggerIndexParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let path = params.0.path;
+        // `path` comes from the MCP caller (often a model that has read untrusted text) and is
+        // handed to a CLI whose parser accepts global flags like `--config=<file>` anywhere.
+        validate_index_path(&path).map_err(mcp_invalid)?;
         // Spawn `indexa index <path>` as a subprocess, using THIS server's own binary (not a
         // bare PATH lookup) so we re-invoke the exact `indexa` serving this MCP session. Both
         // processes open the same DB via WAL + 5s busy_timeout, which handles contention safely.
         let output = tokio::process::Command::new(indexa_exe()?)
-            .args(["index", &path])
+            .args(index_args(&path))
             .output()
             .await
             .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))?;
@@ -332,7 +365,7 @@ impl IndexaMcp {
         let notes_dir = data_dir.join("notes");
         let notes_dir_str = notes_dir.to_string_lossy().into_owned();
         let index_result = tokio::process::Command::new(indexa_exe()?)
-            .args(["index", &notes_dir_str])
+            .args(index_args(&notes_dir_str))
             .output()
             .await;
 
@@ -506,5 +539,136 @@ mod tests {
         );
         let store = Store::open(&dbpath).unwrap();
         assert!(store.count_orphans().unwrap().is_empty());
+    }
+
+    /// H2: `trigger_index` must not let its `path` become an `indexa index` flag. The
+    /// argument vector ends option parsing before the path, and an option-shaped, relative or
+    /// missing path is refused before any child is spawned.
+    #[test]
+    fn trigger_index_path_cannot_become_a_flag() {
+        use super::{index_args, validate_index_path};
+        assert_eq!(
+            index_args("--config=/tmp/x.toml"),
+            ["index", "--", "--config=/tmp/x.toml"]
+        );
+        assert!(validate_index_path("--config=/tmp/x.toml").is_err());
+        assert!(validate_index_path("-h").is_err());
+        assert!(validate_index_path("").is_err());
+        assert!(validate_index_path("relative/dir").is_err());
+        assert!(validate_index_path("/definitely/not/a/real/dir-xyz").is_err());
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_index_path(tmp.path().to_str().unwrap()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn trigger_index_refuses_an_option_shaped_path_before_spawning() {
+        use crate::TriggerIndexParams;
+        let dbdir = tempfile::tempdir().unwrap();
+        let mcp = IndexaMcp::new(
+            dbdir.path().join("idx.db"),
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+        let err = mcp
+            .trigger_index(rmcp::handler::server::wrapper::Parameters(
+                TriggerIndexParams {
+                    path: "--config=/tmp/x.toml".to_owned(),
+                },
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("invalid path"),
+            "expected a validation refusal, got: {err:?}"
+        );
+    }
+
+    /// H1: `changed_impact` must refuse an option-shaped `scope` (`--output=<path>` makes
+    /// `git diff` overwrite that file) and a `root` outside every indexed root — and must not
+    /// reach git in either case.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn changed_impact_refuses_option_scope_and_unindexed_root() {
+        use crate::ChangedImpactParams;
+        use indexa_core::walker::{Entry, EntryKind};
+        use rmcp::handler::server::wrapper::Parameters;
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        for dir in [&repo, &outside] {
+            let st = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["init", "-q"])
+                .status()
+                .unwrap();
+            assert!(st.success());
+        }
+        let victim = tmp.path().join("victim.txt");
+        std::fs::write(&victim, "precious").unwrap();
+
+        let dbpath = tmp.path().join("idx.db");
+        {
+            let mut store = Store::open(&dbpath).unwrap();
+            store
+                .upsert_entries(&[Entry {
+                    path: repo.clone(),
+                    kind: EntryKind::Dir,
+                    size: 0,
+                    modified: None,
+                    hint: None,
+                    is_binary: false,
+                }])
+                .unwrap();
+        }
+        let mcp = IndexaMcp::new(
+            dbpath,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+        let params = |root: &std::path::Path, scope: String| {
+            Parameters(ChangedImpactParams {
+                root: Some(root.to_string_lossy().into_owned()),
+                scope: Some(scope),
+                strict: false,
+                depth: None,
+                include_heritage: false,
+            })
+        };
+
+        let err = mcp
+            .changed_impact(params(&repo, format!("--output={}", victim.display())))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("must not start with '-'"),
+            "expected the option-shaped scope to be refused, got: {err:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "precious",
+            "git must never have been run with the injected --output"
+        );
+
+        let err = mcp
+            .changed_impact(params(&outside, "unstaged".to_owned()))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("not within an indexed root"),
+            "expected the unindexed root to be refused, got: {err:?}"
+        );
+
+        // The legitimate call still works (clean repo ⇒ no changes).
+        let ok = tool_text(
+            mcp.changed_impact(params(&repo, "unstaged".to_owned()))
+                .await
+                .unwrap(),
+        );
+        assert!(ok.contains("No changes found"), "got: {ok}");
     }
 }

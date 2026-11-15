@@ -19,7 +19,7 @@ jobs:
     name: CHANGELOG has this release
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Require a CHANGELOG section matching the tag
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -36,7 +36,7 @@ jobs:
     name: Cargo.toml version matches the tag
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Require both Cargo.toml version fields to equal the tag
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -80,10 +80,10 @@ jobs:
             artifact: indexa-x86_64-windows.exe
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -113,7 +113,7 @@ jobs:
         run: |
           cp target/${{ matrix.target }}/release/indexa.exe ${{ matrix.artifact }}
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
@@ -125,7 +125,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           merge-multiple: true
           path: artifacts/
@@ -155,7 +155,7 @@ jobs:
           ls -la artifacts/
 
       - name: Create release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           files: artifacts/*
           generate_release_notes: true
@@ -167,20 +167,20 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           # Both Apple targets — the desktop bundle is built as a universal
           # (Intel + Apple-Silicon) binary via --target universal-apple-darwin.
           targets: aarch64-apple-darwin, x86_64-apple-darwin
 
-      - uses: swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: apps/indexa-desktop -> target
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
 
@@ -229,7 +229,7 @@ jobs:
           fi
 
       - name: Build + bundle desktop app
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Tauri updater signature (for the .sig the in-app updater verifies).
@@ -322,10 +322,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
 
       - name: Install Tauri v2 Linux dependencies
         # The documented Tauri v2 Ubuntu prerequisite list, plus:
@@ -347,11 +347,11 @@ jobs:
             wget \
             file
 
-      - uses: swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: apps/indexa-desktop -> target
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
 
@@ -359,7 +359,7 @@ jobs:
         run: npm install -g @tauri-apps/cli@^2
 
       - name: Build + bundle desktop app
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # tauri.conf.json sets createUpdaterArtifacts: true, so the bundler insists on
