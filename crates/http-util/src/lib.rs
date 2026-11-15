@@ -871,6 +871,94 @@ mod tests {
         );
     }
 
+    /// Text of `err` plus every source, so an [`SsrfBlocked`] message nested in a reqwest error
+    /// is visible to assertions.
+    fn error_chain(err: &dyn std::error::Error) -> String {
+        let mut out = err.to_string();
+        let mut cur = err.source();
+        while let Some(e) = cur {
+            out.push(' ');
+            out.push_str(&e.to_string());
+            cur = e.source();
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn add_url_guard_rechecks_redirect_hops_to_private_loopback_and_link_local() {
+        // `pack add-url` accepts a public URL (`validate_public_url_str`) and fetches it with
+        // `ssrf_guarded_client`. That client's redirect policy runs `validate_public_url` on
+        // every hop, and its resolver vets every hostname it is about to connect to — there is
+        // no hop that skips the check (the only other branch is the 5-hop cap).
+        //
+        // The listener is the in-process stand-in for the public host. The first request is an
+        // IP literal so it reaches this process without DNS; a public hostname that resolved to
+        // the listener would itself be an SSRF block, and dialing a real public address is out
+        // of bounds for this test. The public URL add-url would accept is asserted here, and
+        // each 302 below is the hop the guard must refuse.
+        assert!(
+            validate_public_url_str("https://example.com/docs").is_ok(),
+            "a public URL is what pack add-url accepts before the hop check"
+        );
+
+        // (label, host or IP placed in the Location, true when `host` is an IP literal).
+        // The listener's port is included so a hop the guard failed to refuse, and that
+        // landed on 127.0.0.1, would be accepted by `listener` below.
+        let hops: &[(&str, &str, bool)] = &[
+            ("private literal", "10.0.0.5", true),
+            ("loopback literal", "127.0.0.1", true),
+            ("link-local literal", "169.254.169.254", true),
+            ("private name", "10.0.0.5", false),
+            ("loopback name", "127.0.0.1", false),
+            ("link-local name", "169.254.169.254", false),
+        ];
+        let names = ["internal.test", "loopback.test", "metadata.test"];
+
+        for (i, (label, blocked_ip, literal)) in hops.iter().enumerate() {
+            let name_idx = i.saturating_sub(3);
+            let (listener, port, server) = redirect_once(|port| {
+                if *literal {
+                    format!("http://{blocked_ip}:{port}/secret")
+                } else {
+                    format!("http://{}:{port}/secret", names[name_idx])
+                }
+            });
+            let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let answers: Vec<Vec<&str>> = if *literal {
+                vec![vec![]]
+            } else {
+                vec![vec![blocked_ip]]
+            };
+            let client = ssrf_guarded_client_with_lookup(5, stub_lookup(answers, calls.clone()));
+            let url = format!("http://127.0.0.1:{port}/start");
+            let err = send_with_retry(|| client.get(&url), 3).await.unwrap_err();
+            assert!(
+                server.join().unwrap().starts_with("GET /start "),
+                "{label}: the public-stand-in server was not fetched"
+            );
+            assert!(
+                is_ssrf_block(&err),
+                "{label}: expected an SSRF refusal, got: {err:?}"
+            );
+            let chain = error_chain(&err);
+            assert!(
+                chain.contains(blocked_ip),
+                "{label}: refusal did not name {blocked_ip}: {chain}"
+            );
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                if *literal { 0 } else { 1 },
+                "{label}: an IP-literal hop needs no DNS, a named hop is resolved once and not retried"
+            );
+            listener.set_nonblocking(true).unwrap();
+            assert_eq!(
+                listener.accept().map(|_| ()).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "{label}: the guarded client must not open the redirect hop"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn only_a_failure_to_reach_any_server_counts_as_a_direct_connect_failure() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
