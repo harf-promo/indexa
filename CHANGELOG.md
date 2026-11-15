@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security: git run inside an indexed directory no longer executes that repo's own config.**
+  `changed_impact`, the worker's git-poll, co-change history and decision patch-ids ran plain
+  `git`, so a `.git/config` with `core.fsmonitor = <command>` (an extracted archive or a shared
+  project folder) made `git diff` or `git status` run that command. Every git child now goes
+  through `indexa_core::gitcmd::git_command()`, which sets `core.fsmonitor=false` and
+  `core.hooksPath=/dev/null` on the command line.
+- **A FIFO, socket or device node in an indexed tree no longer hangs indexing.** The walker
+  recorded it as a size-0 file and the deep phase or a watch event then `open()`ed it, blocking
+  the job or watch loop forever. The walker, `should_index_file` and `parse_guarded` now accept
+  regular files only (symlink handling is unchanged).
+- **Web: `/api/*` requests the browser marks `Sec-Fetch-Site: cross-site` are refused on a
+  loopback bind.** A page on another site could make the local server do work (update check,
+  export, Ollama calls) with a plain GET; CORS only hid the reply. Same-origin, same-site,
+  `none` and header-less (curl, scripts) requests are unchanged.
 - **Security: MCP `changed_impact` and `trigger_index` no longer pass caller input to a
   command line as an option.** `changed_impact` refused nothing before: a `scope` such as
   `--output=<file>` made `git diff` rewrite that file, and `root` could be any directory. It now

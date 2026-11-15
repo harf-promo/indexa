@@ -15,7 +15,7 @@
 
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use wait_timeout::ChildExt;
@@ -39,7 +39,7 @@ pub fn compute_patch_id(anchor_dir: &Path, subject_path: &Path) -> Option<String
     let subject = subject_path.to_str()?;
 
     // Leg 1: the file's whole current content as one patch (diff against the empty tree).
-    let mut diff_cmd = Command::new("git");
+    let mut diff_cmd = crate::gitcmd::git_command();
     diff_cmd
         .arg("-C")
         .arg(anchor)
@@ -51,7 +51,7 @@ pub fn compute_patch_id(anchor_dir: &Path, subject_path: &Path) -> Option<String
 
     // Leg 2: patch-id hashes that patch's content — piped directly from leg 1's stdout via the
     // OS pipe, never buffered through this process.
-    let mut id_cmd = Command::new("git");
+    let mut id_cmd = crate::gitcmd::git_command();
     id_cmd
         .arg("-C")
         .arg(anchor)
@@ -102,6 +102,7 @@ pub fn compute_patch_id(anchor_dir: &Path, subject_path: &Path) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn init_repo(root: &Path) {
         let run = |args: &[&str]| {

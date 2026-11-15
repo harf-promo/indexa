@@ -163,6 +163,7 @@ impl Registry {
                 path.display()
             );
         }
+        ensure_regular_file(path)?;
         // Dispatch against THIS registry (not the free `parse`) so custom parsers are
         // honoured on the guarded path too. catch_unwind isolates a panicking parser.
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.parse(path))) {
@@ -289,6 +290,20 @@ fn looks_like_text(path: &Path) -> bool {
     }
 }
 
+/// Refuse anything that exists but is not a regular file (FIFO, socket, device, directory)
+/// before a parser opens it: `open()` on a FIFO with no writer blocks forever and a device
+/// yields unbounded bytes, and neither is stopped by the size cap or `catch_unwind`. Follows
+/// symlinks (`fs::metadata`), so the symlink policy stays with the walker and watchers. A path
+/// that cannot be stat'ed falls through so the parser reports the real error.
+fn ensure_regular_file(path: &Path) -> Result<()> {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if !meta.is_file() {
+            bail!("skipping {}: not a regular file", path.display());
+        }
+    }
+    Ok(())
+}
+
 /// Parse a file with two safety guards, returning `Err` (never panicking, never
 /// reading an oversized file) so one bad file can't abort a whole scan:
 ///
@@ -306,6 +321,7 @@ pub fn parse_guarded(path: &Path, size_bytes: u64, max_bytes: u64) -> Result<Ext
             path.display()
         );
     }
+    ensure_regular_file(path)?;
     let path2 = path.to_path_buf();
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse(&path2))) {
         Ok(result) => result,
@@ -522,5 +538,55 @@ mod tests {
         reg.register(Box::new(MyDataParser));
         let ex = reg.parse_guarded(&p, size, 0).unwrap();
         assert_eq!(ex.chunks[0].text, "CUSTOM-PARSED");
+    }
+
+    /// M1 (second pass): `open()` on a FIFO with no writer blocks forever, and neither the size
+    /// cap nor `catch_unwind` can stop it. Both guarded entry points must refuse a non-regular
+    /// file up front. Each call runs on a thread with a timeout so a regression fails, not hangs.
+    #[cfg(unix)]
+    #[test]
+    fn parse_guarded_refuses_a_fifo_instead_of_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe.txt");
+        let st = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo is available on unix");
+        assert!(st.success());
+
+        fn bounded(
+            fifo: &Path,
+            label: &str,
+            f: impl FnOnce(std::path::PathBuf) -> Result<Extracted> + Send + 'static,
+        ) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let p = fifo.to_path_buf();
+            std::thread::spawn(move || {
+                let _ = tx.send(f(p).is_err());
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(is_err) => assert!(is_err, "{label} must refuse a FIFO"),
+                Err(_) => {
+                    // Release the blocked reader (a read-write open counts as a writer) so the
+                    // test process does not leak a stuck thread, then fail.
+                    let _ = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(fifo);
+                    panic!("{label} hung opening a FIFO");
+                }
+            }
+        }
+        bounded(&fifo, "free parse_guarded", |p| parse_guarded(&p, 0, 0));
+        bounded(&fifo, "Registry::parse_guarded", |p| {
+            Registry::new().parse_guarded(&p, 0, 0)
+        });
+    }
+
+    #[test]
+    fn parse_guarded_refuses_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(parse_guarded(dir.path(), 0, 0).is_err());
+        assert!(Registry::new().parse_guarded(dir.path(), 0, 0).is_err());
     }
 }

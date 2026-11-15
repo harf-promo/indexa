@@ -5,7 +5,6 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
 
 /// Default commit-history depth: enough to be a meaningful signal without an unbounded
 /// `git log` parse on a large repo.
@@ -27,7 +26,7 @@ fn repo_toplevel(root: &Path) -> std::path::PathBuf {
     let Some(root_str) = root.to_str() else {
         return root.to_owned();
     };
-    Command::new("git")
+    crate::gitcmd::git_command()
         .arg("-C")
         .arg(root_str)
         .args(["rev-parse", "--show-toplevel"])
@@ -51,7 +50,7 @@ pub fn co_change_pairs(root: &Path, commit_limit: usize) -> Result<Vec<(String, 
         return Ok(Vec::new());
     };
     let toplevel = repo_toplevel(root);
-    let Ok(output) = Command::new("git")
+    let Ok(output) = crate::gitcmd::git_command()
         .arg("-C")
         .arg(root_str)
         .args([

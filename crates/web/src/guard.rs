@@ -12,8 +12,10 @@
 //!
 //! This middleware closes both:
 //!   - **Loopback bind (default):** reject any request whose `Host` header is present but NOT a
-//!     loopback literal (a rebind arrives with the attacker's domain in `Host`), and reject
-//!     state-changing methods whose `Origin`/`Referer` is present but cross-site. Absent
+//!     loopback literal (a rebind arrives with the attacker's domain in `Host`), reject
+//!     `/api/*` requests the browser marks `Sec-Fetch-Site: cross-site` (any method, so a
+//!     drive-by GET cannot make the server do work), and reject state-changing methods whose
+//!     `Origin`/`Referer` is present but cross-site. Absent
 //!     `Host`/`Origin` (non-browser local tools like curl) is allowed — every browser drive-by /
 //!     rebind vector carries both headers, so "validate if present" is complete for that threat
 //!     model while leaving local scripts and the existing test suite working.
@@ -81,6 +83,12 @@ pub(crate) async fn request_guard(
                 "request Host is not a loopback address (possible DNS-rebinding)",
             );
         }
+        if req.uri().path().starts_with("/api/") && is_cross_site_fetch(req.headers()) {
+            return deny(
+                StatusCode::FORBIDDEN,
+                "cross-site request to the API rejected (Sec-Fetch-Site: cross-site)",
+            );
+        }
         if is_state_changing(req.method()) && !origin_ok(req.headers()) {
             return deny(
                 StatusCode::FORBIDDEN,
@@ -98,6 +106,20 @@ pub(crate) async fn request_guard(
 
 fn deny(code: StatusCode, msg: &str) -> Response {
     (code, msg.to_owned()).into_response()
+}
+
+/// `Sec-Fetch-Site: cross-site` marks a request a page on another site caused (an `<img>`,
+/// `<script>`, `fetch`, form or navigation to the local server). CORS only stops such a page from
+/// *reading* the reply; the handler still runs, so a drive-by GET could make the server hit
+/// GitHub, render the whole export or call Ollama. Browsers set the header on every request and a
+/// page cannot forge or strip it. `same-origin`, `same-site` and `none` (typed URL, bookmark) are
+/// fine, and an absent header is allowed for curl, scripts and older browsers, matching the
+/// "validate if present" rule of the Host and Origin checks above.
+fn is_cross_site_fetch(headers: &HeaderMap) -> bool {
+    headers
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("cross-site"))
 }
 
 fn is_state_changing(m: &Method) -> bool {
@@ -263,7 +285,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loopback_rejects_cross_origin_mutations_only() {
+    async fn loopback_rejects_cross_origin_mutations_and_origin_less_gets_pass() {
         // Cross-Origin POST (CSRF) → 403.
         assert_eq!(
             status(
@@ -290,13 +312,76 @@ mod tests {
             .await,
             StatusCode::OK
         );
-        // Cross-Origin GET is safe (not state-changing) → OK.
+        // A GET whose browser marks it cross-site is refused too (see
+        // `loopback_rejects_cross_site_api_requests_by_fetch_metadata`); a GET with a foreign
+        // Origin but NO fetch metadata (an old browser, a script) is still allowed, since only
+        // the header can tell a drive-by from a local tool.
         assert_eq!(
             status(
                 GuardConfig::loopback(),
                 Request::get("/api/x")
                     .header("host", "127.0.0.1:7620")
                     .header("origin", "http://evil.com")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
+    fn api_get(site: Option<&str>) -> Request<Body> {
+        let mut b = Request::get("/api/x").header("host", "127.0.0.1:7620");
+        if let Some(v) = site {
+            b = b.header("sec-fetch-site", v);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// L1: browsers label every request with `Sec-Fetch-Site`. A page on another site that makes
+    /// the local server do work (`<img src="http://127.0.0.1:7620/api/export">`) arrives as
+    /// `cross-site` and is refused even though it is a GET; everything else keeps working.
+    #[tokio::test]
+    async fn loopback_rejects_cross_site_api_requests_by_fetch_metadata() {
+        // Drive-by GET from another site -> 403.
+        assert_eq!(
+            status(GuardConfig::loopback(), api_get(Some("cross-site"))).await,
+            StatusCode::FORBIDDEN
+        );
+        // Header values are case-insensitive tokens; stay robust to a differently cased or padded one.
+        assert_eq!(
+            status(GuardConfig::loopback(), api_get(Some(" Cross-Site "))).await,
+            StatusCode::FORBIDDEN
+        );
+        // Cross-site POST is refused (also by the Origin check; this one has no Origin).
+        assert_eq!(
+            status(
+                GuardConfig::loopback(),
+                Request::post("/api/x")
+                    .header("host", "127.0.0.1:7620")
+                    .header("sec-fetch-site", "cross-site")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        // The UI itself (same-origin), a sibling on the same site, a typed URL / bookmark
+        // (`none`), and a CLI client with no header at all all keep working.
+        for ok in [Some("same-origin"), Some("same-site"), Some("none"), None] {
+            assert_eq!(
+                status(GuardConfig::loopback(), api_get(ok)).await,
+                StatusCode::OK,
+                "Sec-Fetch-Site {ok:?} must be allowed"
+            );
+        }
+        // Only `/api/*` is guarded: a cross-site page may still load the static shell.
+        assert_eq!(
+            status(
+                GuardConfig::loopback(),
+                Request::get("/")
+                    .header("host", "127.0.0.1:7620")
+                    .header("sec-fetch-site", "cross-site")
                     .body(Body::empty())
                     .unwrap()
             )
