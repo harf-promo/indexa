@@ -871,17 +871,18 @@ mod tests {
         );
     }
 
-    /// Text of `err` plus every source, so an [`SsrfBlocked`] message nested in a reqwest error
-    /// is visible to assertions.
-    fn error_chain(err: &dyn std::error::Error) -> String {
-        let mut out = err.to_string();
-        let mut cur = err.source();
+    /// The [`SsrfBlocked`] reason inside `err`, not reqwest's own text. The client error's
+    /// `Display` always names the first request (`http://127.0.0.1:…/start`), so searching
+    /// that string cannot prove a loopback hop was the address that was refused.
+    fn ssrf_reason(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+        let mut cur = Some(err);
         while let Some(e) = cur {
-            out.push(' ');
-            out.push_str(&e.to_string());
+            if let Some(blocked) = e.downcast_ref::<SsrfBlocked>() {
+                return Some(blocked.0.clone());
+            }
             cur = e.source();
         }
-        out
+        None
     }
 
     #[tokio::test]
@@ -940,10 +941,10 @@ mod tests {
                 is_ssrf_block(&err),
                 "{label}: expected an SSRF refusal, got: {err:?}"
             );
-            let chain = error_chain(&err);
+            let reason = ssrf_reason(&err).unwrap_or_default();
             assert!(
-                chain.contains(blocked_ip),
-                "{label}: refusal did not name {blocked_ip}: {chain}"
+                reason.contains(blocked_ip),
+                "{label}: SSRF reason did not name {blocked_ip}: {reason}"
             );
             assert_eq!(
                 calls.load(std::sync::atomic::Ordering::SeqCst),
