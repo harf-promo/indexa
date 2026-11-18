@@ -206,8 +206,10 @@ fn trigger_index_access_path(path: &Path) -> std::path::PathBuf {
     ) else {
         return path.to_path_buf();
     };
-    let access = Path::new(&access);
-    let display = Path::new(&display);
+    trigger_index_access_path_for(path, Path::new(&access), Path::new(&display))
+}
+
+fn trigger_index_access_path_for(path: &Path, access: &Path, display: &Path) -> std::path::PathBuf {
     match path.strip_prefix(display) {
         Ok(relative) if relative.as_os_str().is_empty() => access.to_path_buf(),
         Ok(relative) => access.join(relative),
@@ -943,7 +945,25 @@ pub async fn summarize_subtree_sync(
 
 #[cfg(test)]
 mod tests {
-    use super::strip_summary_preamble;
+    use super::{strip_summary_preamble, trigger_index_access_path_for};
+
+    #[test]
+    fn trigger_index_summary_reads_map_display_paths_to_the_held_access_root() {
+        let access = std::path::Path::new("/proc/self/fd/42/.");
+        let display = std::path::Path::new("/indexed/project");
+        assert_eq!(
+            trigger_index_access_path_for(
+                std::path::Path::new("/indexed/project/src/main.rs"),
+                access,
+                display,
+            ),
+            std::path::Path::new("/proc/self/fd/42/./src/main.rs")
+        );
+        assert_eq!(
+            trigger_index_access_path_for(std::path::Path::new("/elsewhere/file"), access, display,),
+            std::path::Path::new("/elsewhere/file")
+        );
+    }
 
     #[test]
     fn strips_here_is_refined_summary() {

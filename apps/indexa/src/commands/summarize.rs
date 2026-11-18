@@ -53,12 +53,13 @@ pub(crate) async fn cmd_summarize(
     let mut store = Store::open(&db_path)?;
 
     for root in &roots {
-        println!("Summarizing {} …", root.display());
+        let display_root = super::helpers::index_display_path(root);
+        println!("Summarizing {} …", display_root.display());
         let (done, skipped) = summarize_subtree_sync(
             &mut store,
             describer.as_ref(),
             embedder.as_ref(),
-            root,
+            &display_root,
             &summary_cfg,
             passes,
         )

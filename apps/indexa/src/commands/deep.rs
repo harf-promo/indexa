@@ -125,7 +125,7 @@ async fn check_deep_watchdog(
 #[allow(clippy::too_many_arguments)] // one flat finalize; grouping would just move fields around
 fn persist_completed_file(
     store: &mut Store,
-    entry: indexa_core::walker::Entry,
+    mut entry: indexa_core::walker::Entry,
     path_str: &str,
     chunks: &[indexa_parsers::types::Chunk],
     chunk_hashes: Vec<String>,
@@ -142,6 +142,7 @@ fn persist_completed_file(
         eprintln!("  ⚠  {path_str}: changed while being indexed — will be re-indexed next pass");
         return Ok(0);
     }
+    entry.path = std::path::PathBuf::from(path_str);
     let mut chunk_records = Vec::with_capacity(chunks.len());
     for ((chunk, embedding), hash) in chunks.iter().zip(embeddings).zip(chunk_hashes) {
         // Redact obvious secrets before writing to the searchable store (shared choke point so
@@ -610,8 +611,7 @@ pub(crate) async fn cmd_deep(
             }
 
             // Snapshot size/mtime now so only edits during this file's own parse/embed count as changed.
-            let mut fresh_entry = indexa_core::walker::refresh_entry(entry);
-            fresh_entry.path = display_path;
+            let fresh_entry = indexa_core::walker::refresh_entry(entry);
 
             let mut extracted =
                 match registry.parse_guarded(&entry.path, entry.size, max_parse_bytes) {

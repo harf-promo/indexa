@@ -177,11 +177,7 @@ pub(crate) async fn cmd_index(
 
     // ── Phase 3: hierarchical summaries ───────────────────────────────────────
     println!("\n── Phase 3 / 3 · Summaries ─────────────────────────────────");
-    let summary_paths = validated_target
-        .as_ref()
-        .map(|target| vec![target.display_path.to_string_lossy().into_owned()])
-        .unwrap_or(paths);
-    cmd_summarize(summary_paths, mode, passes, cfg).await?;
+    cmd_summarize(paths, mode, passes, cfg).await?;
 
     // ── Phase 4 (quiet): decision detectors ───────────────────────────────────
     // An inbox question is a bonus, never a gate — a detector failure must not
