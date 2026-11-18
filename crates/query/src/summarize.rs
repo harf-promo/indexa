@@ -197,6 +197,24 @@ fn sample_via_parse(path: &str) -> Option<String> {
     Some(crate::contextual::build_doc_context(&texts))
 }
 
+/// For the internal MCP `trigger_index` child, keep content reads on the validated descriptor
+/// path while summary rows continue to use the stable canonical path stored in the index.
+fn trigger_index_access_path(path: &Path) -> std::path::PathBuf {
+    let (Some(access), Some(display)) = (
+        std::env::var_os("INDEXA_TRIGGER_INDEX_ACCESS_PREFIX"),
+        std::env::var_os("INDEXA_TRIGGER_INDEX_DISPLAY_PATH"),
+    ) else {
+        return path.to_path_buf();
+    };
+    let access = Path::new(&access);
+    let display = Path::new(&display);
+    match path.strip_prefix(display) {
+        Ok(relative) if relative.as_os_str().is_empty() => access.to_path_buf(),
+        Ok(relative) => access.join(relative),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
 /// Summarise one file and persist the row. Returns true if successful.
 ///
 /// When `on_fragment` is `Some`, each generated token is forwarded to the
@@ -226,7 +244,8 @@ pub async fn summarize_file(
     // the summary describes, so an edit landing during the (seconds-to-minutes)
     // LLM run still reads as modified_s >= generated_at on the next refresh.
     let generated_at = now_secs();
-    let source_hash = file_source_hash(Path::new(path));
+    let read_path = trigger_index_access_path(Path::new(path));
+    let source_hash = file_source_hash(&read_path);
     // One fetch serves both the freshness gate and the drift comparison after
     // the regeneration. A read error degrades to "not summarized yet"
     // (re-summarize), never a skip.
@@ -256,7 +275,7 @@ pub async fn summarize_file(
     // + `scan` (no `deep` yet) they still hold the previous version's text, and summarizing them
     // while stamping the NEW content's hash would certify a stale summary as current.
     // An unreadable mtime can't prove the chunks stale, so it keeps the old behavior (use them).
-    let chunks_describe_current_file = match std::fs::metadata(path)
+    let chunks_describe_current_file = match std::fs::metadata(&read_path)
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
@@ -274,9 +293,9 @@ pub async fn summarize_file(
         // Stored chunks are redacted at index time; text parsed straight from disk is not, so
         // scrub it before it can reach a (possibly cloud) describer.
         _ => crate::redact::chunk_text_for_store(
-            &match sample_via_parse(path) {
+            &match sample_via_parse(&read_path.to_string_lossy()) {
                 Some(text) => text,
-                None => match std::fs::read(path) {
+                None => match std::fs::read(&read_path) {
                     Ok(bytes) => {
                         let n = bytes.len().min(4096);
                         String::from_utf8_lossy(&bytes[..n]).into_owned()
@@ -332,7 +351,7 @@ pub async fn summarize_file(
     let parent_path = Path::new(path)
         .parent()
         .map(|p| p.to_string_lossy().into_owned());
-    let meta = std::fs::metadata(path).ok();
+    let meta = std::fs::metadata(&read_path).ok();
     let byte_size = meta.as_ref().map(|m| m.len() as i64).unwrap_or(0);
     let mtime_secs = meta
         .and_then(|m| m.modified().ok())

@@ -578,7 +578,8 @@ pub(crate) async fn cmd_deep(
                 eprint!("\r\x1b[K  [{done}/{total_files}] {rate:.0}/s · ETA {eta} · {name:.40}");
                 let _ = std::io::stderr().flush();
             }
-            let path_str = entry.path.to_string_lossy().into_owned();
+            let display_path = super::helpers::index_display_path(&entry.path);
+            let path_str = display_path.to_string_lossy().into_owned();
 
             // Skip-if-unchanged: re-embedding is expensive; skip files whose chunks
             // are already indexed at or after the file's last modification time.
@@ -609,7 +610,8 @@ pub(crate) async fn cmd_deep(
             }
 
             // Snapshot size/mtime now so only edits during this file's own parse/embed count as changed.
-            let fresh_entry = indexa_core::walker::refresh_entry(entry);
+            let mut fresh_entry = indexa_core::walker::refresh_entry(entry);
+            fresh_entry.path = display_path;
 
             let mut extracted =
                 match registry.parse_guarded(&entry.path, entry.size, max_parse_bytes) {
