@@ -7,7 +7,7 @@ use super::{cmd_deep, cmd_scan, cmd_summarize};
 
 struct ValidatedTriggerTarget {
     _handle: std::fs::File,
-    _snapshot: Option<tempfile::NamedTempFile>,
+    _snapshot: Option<tempfile::TempDir>,
     access_path: std::path::PathBuf,
     display_path: std::path::PathBuf,
 }
@@ -70,16 +70,21 @@ fn validate_trigger_index_child_target(
         (access_path, None)
     } else {
         use std::io::Write;
-        let suffix = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| format!(".{ext}"))
-            .unwrap_or_default();
-        let mut snapshot = tempfile::Builder::new().suffix(&suffix).tempfile()?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("trigger_index file has no basename"))?;
+        let snapshot = tempfile::Builder::new()
+            .prefix("indexa-trigger-")
+            .tempdir()?;
+        let snapshot_path = snapshot.path().join(name);
+        let mut snapshot_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&snapshot_path)?;
         let mut source = opened.try_clone()?;
-        std::io::copy(&mut source, &mut snapshot)?;
-        snapshot.flush()?;
-        let access_path = snapshot.path().to_path_buf();
+        std::io::copy(&mut source, &mut snapshot_file)?;
+        snapshot_file.flush()?;
+        let access_path = snapshot_path;
         (access_path, Some(snapshot))
     };
     Ok(ValidatedTriggerTarget {
@@ -258,6 +263,35 @@ fn trigger_index_reads_through_validated_directory_handle_after_path_swap() {
     assert_eq!(
         std::fs::read_to_string(target.join("marker.txt")).unwrap(),
         "outside"
+    );
+}
+
+#[cfg(all(test, unix, target_os = "linux"))]
+#[test]
+fn trigger_index_file_snapshot_preserves_the_full_original_basename() {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("indexed");
+    std::fs::create_dir(&root).unwrap();
+    let target = root.join("bundle.tar.gz");
+    std::fs::write(&target, b"snapshot bytes").unwrap();
+    let metadata = target.metadata().unwrap();
+    let validated = validate_trigger_index_child_target(
+        &target,
+        std::slice::from_ref(&root),
+        metadata.dev(),
+        metadata.ino(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        validated.access_path.file_name().unwrap(),
+        target.file_name().unwrap()
+    );
+    assert_eq!(
+        std::fs::read(&validated.access_path).unwrap(),
+        b"snapshot bytes"
     );
 }
 
