@@ -10,7 +10,7 @@ use crate::{mcp_err, mcp_invalid, ok_text, IndexaMcp};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TriggerIndexParams {
-    /// Absolute path to scan, deep-index, and summarize.
+    /// Absolute path inside an already-indexed root to scan, deep-index, and summarize.
     pub path: String,
 }
 
@@ -47,7 +47,10 @@ fn indexa_exe() -> Result<std::path::PathBuf, ErrorData> {
 /// `indexa index` takes global flags (`--config=<file>`, which can register a parser
 /// preprocessor command to run) anywhere on its command line, so a caller-supplied path that
 /// starts with `-` would be parsed as a flag instead of a path.
-fn validate_index_path(path: &str) -> Result<(), String> {
+fn validate_index_path(
+    path: &str,
+    indexed_roots: &[std::path::PathBuf],
+) -> Result<std::path::PathBuf, String> {
     if path.is_empty() || path.starts_with('-') {
         return Err(format!(
             "invalid path {path:?}: must be a non-empty absolute path and must not start with '-'"
@@ -63,7 +66,210 @@ fn validate_index_path(path: &str) -> Result<(), String> {
     if !p.exists() {
         return Err(format!("path does not exist: {path}"));
     }
-    Ok(())
+    let canonical = p
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve path {path}: {e}"))?;
+    let inside = indexed_roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| canonical.starts_with(root));
+    if !inside {
+        return Err(format!(
+            "path is outside every indexed root: {}",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
+}
+
+#[cfg(unix)]
+fn open_validated_index_path(
+    canonical_path: &std::path::Path,
+    indexed_roots: &[std::path::PathBuf],
+) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let before = canonical_path
+        .metadata()
+        .map_err(|e| format!("cannot inspect path {}: {e}", canonical_path.display()))?;
+    if !before.is_dir() && !before.is_file() {
+        return Err("trigger_index requires a regular file or directory".into());
+    }
+    let flags = libc::O_NOFOLLOW
+        | libc::O_CLOEXEC
+        | if before.is_dir() {
+            libc::O_DIRECTORY
+        } else {
+            0
+        };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(canonical_path)
+        .map_err(|e| format!("cannot safely open path {}: {e}", canonical_path.display()))?;
+    let opened = file.metadata().map_err(|e| e.to_string())?;
+    if (opened.is_dir() != before.is_dir())
+        || (!opened.is_dir() && !opened.is_file())
+        || (opened.dev(), opened.ino()) != (before.dev(), before.ino())
+    {
+        return Err("path changed while it was being validated".into());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let fd_path = std::path::PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+        let opened_path = fd_path
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve opened directory: {e}"))?;
+        if !indexed_roots
+            .iter()
+            .filter_map(|root| root.canonicalize().ok())
+            .any(|root| opened_path.starts_with(root))
+        {
+            return Err("opened path is outside every indexed root".into());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        let fd_path = std::path::PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()));
+        let opened_path = fd_path
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve opened directory: {e}"))?;
+        if !indexed_roots
+            .iter()
+            .filter_map(|root| root.canonicalize().ok())
+            .any(|root| opened_path.starts_with(root))
+        {
+            return Err("opened path is outside every indexed root".into());
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = indexed_roots;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_validated_index_path(
+    canonical_path: &std::path::Path,
+    indexed_roots: &[std::path::PathBuf],
+) -> Result<std::fs::File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, GetFinalPathNameByHandleW, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        VOLUME_NAME_DOS,
+    };
+
+    fn normalized(path: &str) -> String {
+        let path = path.strip_prefix(r"\\?\UNC\").map_or_else(
+            || path.strip_prefix(r"\\?\").unwrap_or(path).to_owned(),
+            |unc| format!(r"\\{unc}"),
+        );
+        path.trim_end_matches(['\\', '/']).to_lowercase()
+    }
+
+    fn final_path(file: &std::fs::File) -> Result<std::path::PathBuf, String> {
+        let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        let mut buffer = vec![0u16; 512];
+        loop {
+            let len = unsafe {
+                GetFinalPathNameByHandleW(
+                    handle,
+                    buffer.as_mut_ptr(),
+                    buffer.len() as u32,
+                    FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+                )
+            } as usize;
+            if len == 0 {
+                return Err(format!(
+                    "cannot resolve opened path: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if len < buffer.len() {
+                buffer.truncate(len);
+                let path = String::from_utf16(&buffer)
+                    .map_err(|e| format!("opened path is not valid UTF-16: {e}"))?;
+                return Ok(std::path::PathBuf::from(path));
+            }
+            buffer.resize(len + 1, 0);
+        }
+    }
+
+    let before = canonical_path
+        .metadata()
+        .map_err(|e| format!("cannot inspect path {}: {e}", canonical_path.display()))?;
+    if !before.is_dir() && !before.is_file() {
+        return Err("trigger_index requires a regular file or directory".into());
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(canonical_path)
+        .map_err(|e| format!("cannot safely open path {}: {e}", canonical_path.display()))?;
+
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    let ok = unsafe {
+        GetFileInformationByHandle(
+            file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+            &mut info,
+        )
+    };
+    if ok == 0 {
+        return Err(format!(
+            "cannot inspect opened path: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err("trigger_index refuses symlinks and junctions".into());
+    }
+    let is_dir = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+    if is_dir != before.is_dir() || (!is_dir && !before.is_file()) {
+        return Err("path changed while it was being validated".into());
+    }
+
+    let opened_path = normalized(
+        final_path(&file)?
+            .to_str()
+            .ok_or_else(|| "opened path is not valid Unicode".to_owned())?,
+    );
+    let expected_path = normalized(
+        canonical_path
+            .to_str()
+            .ok_or_else(|| "validated path is not valid Unicode".to_owned())?,
+    );
+    if opened_path != expected_path {
+        return Err("opened path changed while it was being validated".into());
+    }
+    let within_indexed_root = indexed_roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| {
+            root.to_str().is_some_and(|root| {
+                opened_path.starts_with(&normalized(root))
+                    && (opened_path.len() == normalized(root).len()
+                        || opened_path.as_bytes().get(normalized(root).len()) == Some(&b'\\'))
+            })
+        });
+    if !within_indexed_root {
+        return Err("opened path is outside every indexed root".into());
+    }
+    // The handle deliberately denies FILE_SHARE_DELETE and remains alive in the caller
+    // until the child exits, so the validated directory cannot be renamed or removed.
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_validated_index_path(
+    _canonical_path: &std::path::Path,
+    _indexed_roots: &[std::path::PathBuf],
+) -> Result<std::fs::File, String> {
+    Err("safe trigger_index directory handles are unsupported on this non-Unix, non-Windows platform".into())
 }
 
 /// Argument vector for the `indexa index` child. The `--` ends option parsing, so whatever
@@ -240,7 +446,7 @@ impl IndexaMcp {
 
     /// Trigger a full scan → deep-index → summarize pipeline on a path.
     #[tool(
-        description = "Start an `indexa index <path>` run: scan files, compute embeddings, \
+        description = "Start an `indexa index <path>` run for a path inside an already-indexed root: scan files, compute embeddings, \
                        and generate summaries. Runs as a background subprocess and returns \
                        when indexing is complete. Use before asking questions about new or \
                        changed files.",
@@ -253,12 +459,39 @@ impl IndexaMcp {
         let path = params.0.path;
         // `path` comes from the MCP caller (often a model that has read untrusted text) and is
         // handed to a CLI whose parser accepts global flags like `--config=<file>` anywhere.
-        validate_index_path(&path).map_err(mcp_invalid)?;
+        let roots = self
+            .store()?
+            .root_paths()
+            .map_err(mcp_err)?
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>();
+        let canonical_path = validate_index_path(&path, &roots).map_err(mcp_invalid)?;
+        let _validated_handle =
+            open_validated_index_path(&canonical_path, &roots).map_err(mcp_invalid)?;
+        #[cfg(unix)]
+        let (expected_dev, expected_ino) = {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = _validated_handle.metadata().map_err(mcp_err)?;
+            (metadata.dev().to_string(), metadata.ino().to_string())
+        };
+        let roots_json = serde_json::to_string(&roots).map_err(mcp_err)?;
         // Spawn `indexa index <path>` as a subprocess, using THIS server's own binary (not a
         // bare PATH lookup) so we re-invoke the exact `indexa` serving this MCP session. Both
         // processes open the same DB via WAL + 5s busy_timeout, which handles contention safely.
-        let output = tokio::process::Command::new(indexa_exe()?)
-            .args(index_args(&path))
+        let mut child = tokio::process::Command::new(indexa_exe()?);
+        child
+            .args(index_args(
+                canonical_path
+                    .to_str()
+                    .ok_or_else(|| mcp_invalid("path is not valid UTF-8"))?,
+            ))
+            .env("INDEXA_TRIGGER_INDEX_ROOTS", roots_json);
+        #[cfg(unix)]
+        child
+            .env("INDEXA_TRIGGER_INDEX_DEV", expected_dev)
+            .env("INDEXA_TRIGGER_INDEX_INO", expected_ino);
+        let output = child
             .output()
             .await
             .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))?;
@@ -551,13 +784,97 @@ mod tests {
             index_args("--config=/tmp/x.toml"),
             ["index", "--", "--config=/tmp/x.toml"]
         );
-        assert!(validate_index_path("--config=/tmp/x.toml").is_err());
-        assert!(validate_index_path("-h").is_err());
-        assert!(validate_index_path("").is_err());
-        assert!(validate_index_path("relative/dir").is_err());
-        assert!(validate_index_path("/definitely/not/a/real/dir-xyz").is_err());
+        let roots = Vec::new();
+        assert!(validate_index_path("--config=/tmp/x.toml", &roots).is_err());
+        assert!(validate_index_path("-h", &roots).is_err());
+        assert!(validate_index_path("", &roots).is_err());
+        assert!(validate_index_path("relative/dir", &roots).is_err());
+        assert!(validate_index_path("/definitely/not/a/real/dir-xyz", &roots).is_err());
         let tmp = tempfile::tempdir().unwrap();
-        assert!(validate_index_path(tmp.path().to_str().unwrap()).is_ok());
+        assert!(validate_index_path(tmp.path().to_str().unwrap(), &roots).is_err());
+        assert!(
+            validate_index_path(tmp.path().to_str().unwrap(), &[tmp.path().to_owned()]).is_ok()
+        );
+        let outside = tempfile::tempdir().unwrap();
+        assert!(
+            validate_index_path(outside.path().to_str().unwrap(), &[tmp.path().to_owned()])
+                .is_err()
+        );
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("outside-link");
+            std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+            assert!(validate_index_path(link.to_str().unwrap(), &[tmp.path().to_owned()]).is_err());
+        }
+        let traversal = tmp
+            .path()
+            .join("..")
+            .join(outside.path().file_name().unwrap());
+        assert!(
+            validate_index_path(traversal.to_str().unwrap(), &[tmp.path().to_owned()]).is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trigger_index_rejects_directory_replaced_by_junction_after_validation() {
+        use super::{open_validated_index_path, validate_index_path};
+        use std::process::Command;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let indexed = tmp.path().join("indexed");
+        let target = indexed.join("target");
+        let moved = indexed.join("moved-target");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let roots = vec![indexed.clone()];
+        let canonical = validate_index_path(target.to_str().unwrap(), &roots).unwrap();
+
+        std::fs::rename(&target, &moved).unwrap();
+        let junction = Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&target)
+            .arg(&outside)
+            .output()
+            .expect("Windows runner provides cmd.exe");
+        assert!(
+            junction.status.success(),
+            "could not create junction for the reparse-point race test: {}",
+            String::from_utf8_lossy(&junction.stderr)
+        );
+
+        let result = open_validated_index_path(&canonical, &roots);
+        assert!(
+            result.is_err(),
+            "trigger_index accepted a junction swapped in after validation"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trigger_index_holds_a_validated_directory_for_indexing() {
+        use super::{open_validated_index_path, validate_index_path};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("indexed");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("marker.txt"), "indexed content").unwrap();
+        let roots = vec![root.clone()];
+        let canonical = validate_index_path(root.to_str().unwrap(), &roots).unwrap();
+        let handle = open_validated_index_path(&canonical, &roots)
+            .expect("a normal indexed directory remains supported on Windows");
+
+        assert!(handle.metadata().unwrap().is_dir());
+        let moved = tmp.path().join("moved-indexed");
+        assert!(
+            std::fs::rename(&root, &moved).is_err(),
+            "the held directory handle must deny rename/delete while indexing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("marker.txt")).unwrap(),
+            "indexed content"
+        );
     }
 
     #[tokio::test]
@@ -581,6 +898,48 @@ mod tests {
         assert!(
             format!("{err:?}").contains("invalid path"),
             "expected a validation refusal, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn trigger_index_uses_roots_from_the_open_index() {
+        use crate::TriggerIndexParams;
+        use indexa_core::walker::{Entry, EntryKind};
+        use rmcp::handler::server::wrapper::Parameters;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("indexed");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let db = tmp.path().join("idx.db");
+        {
+            let mut store = Store::open(&db).unwrap();
+            store
+                .upsert_entries(&[Entry {
+                    path: root,
+                    kind: EntryKind::Dir,
+                    size: 0,
+                    modified: None,
+                    hint: None,
+                    is_binary: false,
+                }])
+                .unwrap();
+        }
+        let mcp = IndexaMcp::new(
+            db,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+        let err = mcp
+            .trigger_index(Parameters(TriggerIndexParams {
+                path: outside.to_string_lossy().into_owned(),
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("outside every indexed root"),
+            "unexpected trigger_index result: {err:?}"
         );
     }
 

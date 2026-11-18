@@ -2159,6 +2159,7 @@ dependencies = [
  "indexa-query",
  "indexa-update",
  "indexa-web",
+ "libc",
  "rusqlite",
  "semver",
  "serde",
@@ -2171,6 +2172,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "wait-timeout",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2268,6 +2270,7 @@ dependencies = [
  "indexa-parsers",
  "indexa-query",
  "indexa-update",
+ "libc",
  "rmcp",
  "rusqlite",
  "schemars",
@@ -2276,6 +2279,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

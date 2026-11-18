@@ -58,15 +58,19 @@ fn scan_roots(store: &mut Store, roots: &[PathBuf], walk_cfg: &WalkConfig) -> Re
     let generation = store.next_scan_generation()?;
     let mut skipped = Vec::new();
     for root in roots {
+        let display_root = super::helpers::index_display_path(root);
         println!("Scanning {}", root.display());
         // Stream the walk so a whole-computer scan stays bounded-memory: upsert each batch
         // (stamped with this run's generation) as it arrives, instead of collecting every entry
         // into one Vec before writing anything.
         let mut count = 0usize;
         // Taken before the walk so this run's own upserts don't count as "previously indexed".
-        let indexed_below = store.count_descendants(&root.to_string_lossy())?;
-        walk_streaming(root, walk_cfg, |batch| {
+        let indexed_below = store.count_descendants(&display_root.to_string_lossy())?;
+        walk_streaming(root, walk_cfg, |mut batch| {
             count += batch.len();
+            for entry in &mut batch {
+                entry.path = super::helpers::index_display_path(&entry.path);
+            }
             store.upsert_entries_with_generation(&batch, Some(generation))
         })?;
 
@@ -88,7 +92,7 @@ fn scan_roots(store: &mut Store, roots: &[PathBuf], walk_cfg: &WalkConfig) -> Re
         // Ghost-row cleanup: prune entries this scan did NOT re-stamp (removed from disk, or a
         // stale generation left by an interrupted prior scan) — a cheap SQL sweep, no live-path
         // set held.
-        let root_str = root.to_string_lossy().into_owned();
+        let root_str = display_root.to_string_lossy().into_owned();
         let removed = store.reconcile_by_generation(&root_str, generation)?;
         if removed > 0 {
             println!("  {count} entries, removed {removed} ghost rows");
