@@ -10,7 +10,7 @@ use crate::{mcp_err, mcp_invalid, ok_text, IndexaMcp};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TriggerIndexParams {
-    /// Absolute path to scan, deep-index, and summarize.
+    /// Absolute path inside an already-indexed root to scan, deep-index, and summarize.
     pub path: String,
 }
 
@@ -47,7 +47,10 @@ fn indexa_exe() -> Result<std::path::PathBuf, ErrorData> {
 /// `indexa index` takes global flags (`--config=<file>`, which can register a parser
 /// preprocessor command to run) anywhere on its command line, so a caller-supplied path that
 /// starts with `-` would be parsed as a flag instead of a path.
-fn validate_index_path(path: &str) -> Result<(), String> {
+fn validate_index_path(
+    path: &str,
+    indexed_roots: &[std::path::PathBuf],
+) -> Result<std::path::PathBuf, String> {
     if path.is_empty() || path.starts_with('-') {
         return Err(format!(
             "invalid path {path:?}: must be a non-empty absolute path and must not start with '-'"
@@ -63,7 +66,20 @@ fn validate_index_path(path: &str) -> Result<(), String> {
     if !p.exists() {
         return Err(format!("path does not exist: {path}"));
     }
-    Ok(())
+    let canonical = p
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve path {path}: {e}"))?;
+    let inside = indexed_roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| canonical.starts_with(root));
+    if !inside {
+        return Err(format!(
+            "path is outside every indexed root: {}",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
 }
 
 /// Argument vector for the `indexa index` child. The `--` ends option parsing, so whatever
@@ -240,7 +256,7 @@ impl IndexaMcp {
 
     /// Trigger a full scan → deep-index → summarize pipeline on a path.
     #[tool(
-        description = "Start an `indexa index <path>` run: scan files, compute embeddings, \
+        description = "Start an `indexa index <path>` run for a path inside an already-indexed root: scan files, compute embeddings, \
                        and generate summaries. Runs as a background subprocess and returns \
                        when indexing is complete. Use before asking questions about new or \
                        changed files.",
@@ -253,12 +269,23 @@ impl IndexaMcp {
         let path = params.0.path;
         // `path` comes from the MCP caller (often a model that has read untrusted text) and is
         // handed to a CLI whose parser accepts global flags like `--config=<file>` anywhere.
-        validate_index_path(&path).map_err(mcp_invalid)?;
+        let roots = self
+            .store()?
+            .root_paths()
+            .map_err(mcp_err)?
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>();
+        let canonical_path = validate_index_path(&path, &roots).map_err(mcp_invalid)?;
         // Spawn `indexa index <path>` as a subprocess, using THIS server's own binary (not a
         // bare PATH lookup) so we re-invoke the exact `indexa` serving this MCP session. Both
         // processes open the same DB via WAL + 5s busy_timeout, which handles contention safely.
         let output = tokio::process::Command::new(indexa_exe()?)
-            .args(index_args(&path))
+            .args(index_args(
+                canonical_path
+                    .to_str()
+                    .ok_or_else(|| mcp_invalid("path is not valid UTF-8"))?,
+            ))
             .output()
             .await
             .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))?;
@@ -551,13 +578,35 @@ mod tests {
             index_args("--config=/tmp/x.toml"),
             ["index", "--", "--config=/tmp/x.toml"]
         );
-        assert!(validate_index_path("--config=/tmp/x.toml").is_err());
-        assert!(validate_index_path("-h").is_err());
-        assert!(validate_index_path("").is_err());
-        assert!(validate_index_path("relative/dir").is_err());
-        assert!(validate_index_path("/definitely/not/a/real/dir-xyz").is_err());
+        let roots = Vec::new();
+        assert!(validate_index_path("--config=/tmp/x.toml", &roots).is_err());
+        assert!(validate_index_path("-h", &roots).is_err());
+        assert!(validate_index_path("", &roots).is_err());
+        assert!(validate_index_path("relative/dir", &roots).is_err());
+        assert!(validate_index_path("/definitely/not/a/real/dir-xyz", &roots).is_err());
         let tmp = tempfile::tempdir().unwrap();
-        assert!(validate_index_path(tmp.path().to_str().unwrap()).is_ok());
+        assert!(validate_index_path(tmp.path().to_str().unwrap(), &roots).is_err());
+        assert!(
+            validate_index_path(tmp.path().to_str().unwrap(), &[tmp.path().to_owned()]).is_ok()
+        );
+        let outside = tempfile::tempdir().unwrap();
+        assert!(
+            validate_index_path(outside.path().to_str().unwrap(), &[tmp.path().to_owned()])
+                .is_err()
+        );
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("outside-link");
+            std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+            assert!(validate_index_path(link.to_str().unwrap(), &[tmp.path().to_owned()]).is_err());
+        }
+        let traversal = tmp
+            .path()
+            .join("..")
+            .join(outside.path().file_name().unwrap());
+        assert!(
+            validate_index_path(traversal.to_str().unwrap(), &[tmp.path().to_owned()]).is_err()
+        );
     }
 
     #[tokio::test]
@@ -581,6 +630,48 @@ mod tests {
         assert!(
             format!("{err:?}").contains("invalid path"),
             "expected a validation refusal, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn trigger_index_uses_roots_from_the_open_index() {
+        use crate::TriggerIndexParams;
+        use indexa_core::walker::{Entry, EntryKind};
+        use rmcp::handler::server::wrapper::Parameters;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("indexed");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let db = tmp.path().join("idx.db");
+        {
+            let mut store = Store::open(&db).unwrap();
+            store
+                .upsert_entries(&[Entry {
+                    path: root,
+                    kind: EntryKind::Dir,
+                    size: 0,
+                    modified: None,
+                    hint: None,
+                    is_binary: false,
+                }])
+                .unwrap();
+        }
+        let mcp = IndexaMcp::new(
+            db,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+        let err = mcp
+            .trigger_index(Parameters(TriggerIndexParams {
+                path: outside.to_string_lossy().into_owned(),
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("outside every indexed root"),
+            "unexpected trigger_index result: {err:?}"
         );
     }
 

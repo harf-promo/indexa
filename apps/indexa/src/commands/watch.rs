@@ -63,7 +63,8 @@ async fn build_chunk_records(
 /// Persist one re-parsed file: entry row, chunks, code graph, then (when the chunks landed)
 /// re-queue its summary and every ancestor roll-up. Split out of the watch closure (which
 /// needs a live notify debouncer) so the persistence contract is testable. Returns the
-/// chunk-replacement error, if any; entry and graph failures are logged and do not abort.
+/// Any chunk/graph persistence error aborts before summary queue updates; entry-upsert failures
+/// retain the existing warning behavior.
 fn persist_upsert(
     store: &mut Store,
     path: &std::path::Path,
@@ -80,14 +81,11 @@ fn persist_upsert(
     if let Err(e) = store.upsert_entries(&[entry]) {
         tracing::warn!("failed to upsert entry for {}: {e}", path.display());
     }
-    let chunks = store.replace_file_chunks(&path_str, chunk_records);
-    // `deep` skips a file whose chunks are current, so a watcher that re-chunks without
-    // refreshing the code graph leaves `symbols`/`edges` stale until the file changes again
-    // with watch off. Refresh the graph in the same pass, as `deep` does.
-    if let Err(e) = indexa_query::code_graph::refresh_file_code_graph(store, &path_str, edges) {
-        tracing::warn!("failed to refresh code graph for {}: {e}", path.display());
-    }
-    chunks?;
+    // `deep` skips a file whose chunks are current, so watch must replace chunks and graph
+    // together. Any failure in either half rolls the transaction back before summary work.
+    let (edge_records, symbol_records) =
+        indexa_query::code_graph::code_graph_records(&path_str, edges);
+    store.replace_file_watch_content(&path_str, chunk_records, &edge_records, &symbol_records)?;
     // Re-embedding alone leaves the summary stale. Re-queue this file and every ancestor
     // roll-up so the background worker refreshes them. `watch` itself only embeds + enqueues
     // — run `indexa worker` (or click "Regenerate" / "Rebuild all" in the web UI) to drain the
@@ -466,5 +464,85 @@ mod tests {
         assert_eq!(syms.len(), 2, "stale rows replaced, not appended: {syms:?}");
         assert_eq!((syms[0].name.as_str(), syms[0].start_line), ("run", 10));
         assert_eq!((syms[1].name.as_str(), syms[1].start_line), ("other", 16));
+    }
+
+    #[test]
+    fn watch_chunk_and_graph_replacement_rolls_back_after_injected_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("idx.db")).unwrap();
+        let file = dir.path().join("a.rs");
+        std::fs::write(&file, "fn old() {}\n").unwrap();
+        let path = file.to_string_lossy().into_owned();
+        let roots = vec![dir.path().to_owned()];
+        let old = ChunkRecord {
+            entry_path: path.clone(),
+            seq: 0,
+            heading: String::new(),
+            text: "old chunk".into(),
+            language: None,
+            embedding: None,
+            embed_model: None,
+            content_hash: None,
+        };
+        let old_edge = indexa_core::store::EdgeRecord {
+            from_path: path.clone(),
+            kind: "defines".into(),
+            to_ref: "old".into(),
+        };
+        let old_symbol = indexa_core::store::SymbolRecord {
+            path: path.clone(),
+            name: "old".into(),
+            kind: "fn".into(),
+            start_line: 1,
+            end_line: 1,
+        };
+        store.upsert_chunks(&[old]).unwrap();
+        store
+            .replace_file_code_graph(&path, &[old_edge], &[old_symbol])
+            .unwrap();
+        let new = ChunkRecord {
+            entry_path: path.clone(),
+            seq: 0,
+            heading: String::new(),
+            text: "new chunk".into(),
+            language: None,
+            embedding: None,
+            embed_model: None,
+            content_hash: None,
+        };
+        let new_graph_edge = indexa_parsers::types::Edge {
+            from: file.clone(),
+            kind: "defines",
+            to: "new".into(),
+            symbol_kind: Some("fn"),
+            line_range: Some((2, 2)),
+        };
+        let entry = || Entry {
+            path: file.clone(),
+            kind: EntryKind::File,
+            size: 12,
+            modified: None,
+            hint: None,
+            is_binary: false,
+        };
+        // This trigger injects a graph-write failure after the chunk write begins.
+        store.db_connection().execute_batch(
+            "CREATE TRIGGER fail_watch_graph BEFORE INSERT ON edges BEGIN SELECT RAISE(ABORT, 'injected graph failure'); END;",
+        ).unwrap();
+        let err = persist_upsert(
+            &mut store,
+            &file,
+            &roots,
+            entry(),
+            &[new],
+            &[new_graph_edge],
+        );
+        assert!(err.is_err());
+        assert_eq!(
+            store.chunks_for_path(&path, 10).unwrap()[0].text,
+            "old chunk"
+        );
+        assert_eq!(store.symbols_in_file(&path).unwrap()[0].name, "old");
+        assert_eq!(store.all_edges().unwrap()[0].to_ref, "old");
     }
 }

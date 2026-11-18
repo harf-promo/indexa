@@ -289,7 +289,7 @@ pub fn should_index_file(
 /// never *classified* binary (so it isn't skipped on the strength of a read failure).
 fn file_is_binary(path: &Path) -> bool {
     use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(path) else {
+    let Ok(mut f) = open_regular_file(path) else {
         return false;
     };
     let mut buf = [0u8; 8192];
@@ -297,6 +297,30 @@ fn file_is_binary(path: &Path) -> bool {
         Ok(n) => crate::text::is_binary(&buf[..n]),
         Err(_) => false,
     }
+}
+
+fn open_regular_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Linux O_NOFOLLOW | O_NONBLOCK: do not follow a swapped symlink or wait on a FIFO.
+        options.custom_flags(0x20000 | 0x800);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x100 | 0x4);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 /// Per-thread flush threshold for [`walk_streaming`]: a worker sends its accumulated entries as a
@@ -696,6 +720,35 @@ pub fn ensure_walked_root_not_emptied(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn binary_sniff_does_not_block_on_fifo_replaced_after_metadata_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("race.fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(file_is_binary(&fifo));
+        });
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(false),
+            "FIFO open/read blocked instead of rejecting the opened non-regular fd"
+        );
+        let binary = dir.path().join("binary.dat");
+        std::fs::write(&binary, [0u8, 1, 2]).unwrap();
+        let symlink = dir.path().join("swapped-link");
+        std::os::unix::fs::symlink(&binary, &symlink).unwrap();
+        assert!(
+            !file_is_binary(&symlink),
+            "binary sniff followed a final-component symlink"
+        );
+    }
 
     #[test]
     fn walks_temp_dir() {

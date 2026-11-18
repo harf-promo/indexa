@@ -2,11 +2,107 @@
 
 use super::entries::delete_chunks_under_prefix;
 use super::search::{blob_to_embedding, embedding_to_blob};
-use super::{ChunkRecord, Store};
+use super::{ChunkRecord, EdgeRecord, Store, SymbolRecord};
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 
 impl Store {
+    /// Atomically replace one file's chunks and graph rows.
+    pub fn replace_file_watch_content(
+        &mut self,
+        path: &str,
+        chunks: &[ChunkRecord],
+        edges: &[EdgeRecord],
+        symbols: &[SymbolRecord],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            chunks.iter().all(|c| c.entry_path == path),
+            "chunk path mismatch"
+        );
+        anyhow::ensure!(
+            edges.iter().all(|e| e.from_path == path),
+            "edge path mismatch"
+        );
+        anyhow::ensure!(
+            symbols.iter().all(|s| s.path == path),
+            "symbol path mismatch"
+        );
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM chunks_fts WHERE entry_path = ?1", [path])?;
+        tx.execute("DELETE FROM chunks WHERE entry_path = ?1", [path])?;
+        if chunks.is_empty() {
+            for (table, column) in [
+                ("note_anchors", "note_path"),
+                ("classifications", "path"),
+                ("directory_apps", "path"),
+            ] {
+                tx.execute(&format!("DELETE FROM {table} WHERE {column} = ?1"), [path])?;
+            }
+            let mut current = Some(std::path::Path::new(path));
+            while let Some(p) = current {
+                if p.as_os_str().is_empty() {
+                    break;
+                }
+                tx.execute(
+                    "DELETE FROM summaries WHERE path = ?1",
+                    [p.to_string_lossy().as_ref()],
+                )?;
+                current = p.parent();
+            }
+        }
+        if !chunks.is_empty() {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO chunks (entry_path, seq, heading, text, language, embedding, embed_model, content_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            let mut fts = tx.prepare_cached(
+                "INSERT INTO chunks_fts(text, heading, entry_path, chunk_id) VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for chunk in chunks {
+                stmt.execute(params![
+                    chunk.entry_path,
+                    chunk.seq as i64,
+                    chunk.heading,
+                    chunk.text,
+                    chunk.language,
+                    chunk.embedding.as_deref().map(embedding_to_blob),
+                    chunk.embed_model,
+                    chunk.content_hash
+                ])?;
+                fts.execute(params![
+                    chunk.text,
+                    chunk.heading,
+                    chunk.entry_path,
+                    tx.last_insert_rowid().to_string()
+                ])?;
+            }
+        }
+        tx.execute("DELETE FROM edges WHERE from_path = ?1", [path])?;
+        tx.execute("DELETE FROM symbols WHERE path = ?1", [path])?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR IGNORE INTO edges (from_path, kind, to_ref) VALUES (?1, ?2, ?3)",
+            )?;
+            for edge in edges {
+                stmt.execute(params![edge.from_path, edge.kind, edge.to_ref])?;
+            }
+        }
+        {
+            let mut stmt = tx.prepare_cached("INSERT OR IGNORE INTO symbols (path, name, kind, start_line, end_line) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+            for symbol in symbols {
+                stmt.execute(params![
+                    symbol.path,
+                    symbol.name,
+                    symbol.kind,
+                    symbol.start_line,
+                    symbol.end_line
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Returns true if the file at `path` already has chunks whose `indexed_at`
     /// timestamp is >= the file's recorded `modified_s` (mtime).  When true,
     /// `cmd_deep` can skip re-parsing and re-embedding the file.
