@@ -129,6 +129,23 @@ fn open_validated_index_path(
             return Err("opened path is outside every indexed root".into());
         }
     }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        let fd_path = std::path::PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()));
+        let opened_path = fd_path
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve opened directory: {e}"))?;
+        if !indexed_roots
+            .iter()
+            .filter_map(|root| root.canonicalize().ok())
+            .any(|root| opened_path.starts_with(root))
+        {
+            return Err("opened path is outside every indexed root".into());
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = indexed_roots;
     Ok(file)
 }
 
