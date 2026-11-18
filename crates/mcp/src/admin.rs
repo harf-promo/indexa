@@ -149,12 +149,127 @@ fn open_validated_index_path(
     Ok(file)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn open_validated_index_path(
+    canonical_path: &std::path::Path,
+    indexed_roots: &[std::path::PathBuf],
+) -> Result<std::fs::File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, GetFinalPathNameByHandleW, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        VOLUME_NAME_DOS,
+    };
+
+    fn normalized(path: &str) -> String {
+        let path = path.strip_prefix(r"\\?\UNC\").map_or_else(
+            || path.strip_prefix(r"\\?\").unwrap_or(path).to_owned(),
+            |unc| format!(r"\\{unc}"),
+        );
+        path.trim_end_matches(['\\', '/']).to_lowercase()
+    }
+
+    fn final_path(file: &std::fs::File) -> Result<std::path::PathBuf, String> {
+        let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        let mut buffer = vec![0u16; 512];
+        loop {
+            let len = unsafe {
+                GetFinalPathNameByHandleW(
+                    handle,
+                    buffer.as_mut_ptr(),
+                    buffer.len() as u32,
+                    FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+                )
+            } as usize;
+            if len == 0 {
+                return Err(format!(
+                    "cannot resolve opened path: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if len < buffer.len() {
+                buffer.truncate(len);
+                let path = String::from_utf16(&buffer)
+                    .map_err(|e| format!("opened path is not valid UTF-16: {e}"))?;
+                return Ok(std::path::PathBuf::from(path));
+            }
+            buffer.resize(len + 1, 0);
+        }
+    }
+
+    let before = canonical_path
+        .metadata()
+        .map_err(|e| format!("cannot inspect path {}: {e}", canonical_path.display()))?;
+    if !before.is_dir() && !before.is_file() {
+        return Err("trigger_index requires a regular file or directory".into());
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(canonical_path)
+        .map_err(|e| format!("cannot safely open path {}: {e}", canonical_path.display()))?;
+
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    let ok = unsafe {
+        GetFileInformationByHandle(
+            file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+            &mut info,
+        )
+    };
+    if ok == 0 {
+        return Err(format!(
+            "cannot inspect opened path: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err("trigger_index refuses symlinks and junctions".into());
+    }
+    let is_dir = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+    if is_dir != before.is_dir() || (!is_dir && !before.is_file()) {
+        return Err("path changed while it was being validated".into());
+    }
+
+    let opened_path = normalized(
+        final_path(&file)?
+            .to_str()
+            .ok_or_else(|| "opened path is not valid Unicode".to_owned())?,
+    );
+    let expected_path = normalized(
+        canonical_path
+            .to_str()
+            .ok_or_else(|| "validated path is not valid Unicode".to_owned())?,
+    );
+    if opened_path != expected_path {
+        return Err("opened path changed while it was being validated".into());
+    }
+    let within_indexed_root = indexed_roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| {
+            root.to_str().is_some_and(|root| {
+                opened_path.starts_with(&normalized(root))
+                    && (opened_path.len() == normalized(root).len()
+                        || opened_path.as_bytes().get(normalized(root).len()) == Some(&b'\\'))
+            })
+        });
+    if !within_indexed_root {
+        return Err("opened path is outside every indexed root".into());
+    }
+    // The handle deliberately denies FILE_SHARE_DELETE and remains alive in the caller
+    // until the child exits, so the validated directory cannot be renamed or removed.
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn open_validated_index_path(
     _canonical_path: &std::path::Path,
     _indexed_roots: &[std::path::PathBuf],
 ) -> Result<std::fs::File, String> {
-    Err("safe trigger_index directory handles are unsupported on this platform".into())
+    Err("safe trigger_index directory handles are unsupported on this non-Unix, non-Windows platform".into())
 }
 
 /// Argument vector for the `indexa index` child. The `--` ends option parsing, so whatever
@@ -697,6 +812,68 @@ mod tests {
             .join(outside.path().file_name().unwrap());
         assert!(
             validate_index_path(traversal.to_str().unwrap(), &[tmp.path().to_owned()]).is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trigger_index_rejects_directory_replaced_by_junction_after_validation() {
+        use super::{open_validated_index_path, validate_index_path};
+        use std::process::Command;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let indexed = tmp.path().join("indexed");
+        let target = indexed.join("target");
+        let moved = indexed.join("moved-target");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let roots = vec![indexed.clone()];
+        let canonical = validate_index_path(target.to_str().unwrap(), &roots).unwrap();
+
+        std::fs::rename(&target, &moved).unwrap();
+        let junction = Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&target)
+            .arg(&outside)
+            .output()
+            .expect("Windows runner provides cmd.exe");
+        assert!(
+            junction.status.success(),
+            "could not create junction for the reparse-point race test: {}",
+            String::from_utf8_lossy(&junction.stderr)
+        );
+
+        let result = open_validated_index_path(&canonical, &roots);
+        assert!(
+            result.is_err(),
+            "trigger_index accepted a junction swapped in after validation"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trigger_index_holds_a_validated_directory_for_indexing() {
+        use super::{open_validated_index_path, validate_index_path};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("indexed");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("marker.txt"), "indexed content").unwrap();
+        let roots = vec![root.clone()];
+        let canonical = validate_index_path(root.to_str().unwrap(), &roots).unwrap();
+        let handle = open_validated_index_path(&canonical, &roots)
+            .expect("a normal indexed directory remains supported on Windows");
+
+        assert!(handle.metadata().unwrap().is_dir());
+        let moved = tmp.path().join("moved-indexed");
+        assert!(
+            std::fs::rename(&root, &moved).is_err(),
+            "the held directory handle must deny rename/delete while indexing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("marker.txt")).unwrap(),
+            "indexed content"
         );
     }
 

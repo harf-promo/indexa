@@ -95,6 +95,108 @@ fn validate_trigger_index_child_target(
     })
 }
 
+#[cfg(windows)]
+fn validate_trigger_index_child_target(
+    path: &std::path::Path,
+    roots: &[std::path::PathBuf],
+) -> Result<ValidatedTriggerTarget> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, GetFinalPathNameByHandleW, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        VOLUME_NAME_DOS,
+    };
+
+    fn normalized(path: &str) -> String {
+        let path = path.strip_prefix(r"\\?\UNC\").map_or_else(
+            || path.strip_prefix(r"\\?\").unwrap_or(path).to_owned(),
+            |unc| format!(r"\\{unc}"),
+        );
+        path.trim_end_matches(['\\', '/']).to_lowercase()
+    }
+
+    fn final_path(file: &std::fs::File) -> Result<std::path::PathBuf> {
+        let mut buffer = vec![0u16; 512];
+        loop {
+            let len = unsafe {
+                GetFinalPathNameByHandleW(
+                    file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+                    buffer.as_mut_ptr(),
+                    buffer.len() as u32,
+                    FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+                )
+            } as usize;
+            if len == 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            if len < buffer.len() {
+                buffer.truncate(len);
+                return Ok(std::path::PathBuf::from(String::from_utf16(&buffer)?));
+            }
+            buffer.resize(len + 1, 0);
+        }
+    }
+
+    let canonical = path.canonicalize()?;
+    if !roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| canonical.starts_with(root))
+    {
+        anyhow::bail!("trigger_index path is outside every indexed root");
+    }
+    let before = path.metadata()?;
+    if !before.is_dir() && !before.is_file() {
+        anyhow::bail!("trigger_index requires a regular file or directory");
+    }
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    let ok = unsafe {
+        GetFileInformationByHandle(
+            opened.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+            &mut info,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        anyhow::bail!("trigger_index refuses symlinks and junctions");
+    }
+    let is_dir = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+    if is_dir != before.is_dir() || (!is_dir && !before.is_file()) {
+        anyhow::bail!("trigger_index path changed after MCP validation");
+    }
+    let opened_path = normalized(
+        final_path(&opened)?
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("opened trigger_index path is not valid Unicode"))?,
+    );
+    let expected_path = normalized(
+        canonical
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("validated trigger_index path is not valid Unicode"))?,
+    );
+    if opened_path != expected_path {
+        anyhow::bail!("trigger_index path changed after MCP validation");
+    }
+
+    // The MCP parent also holds a no-delete-share handle until this child exits. Keeping
+    // this handle open protects the child-side validation through scan/deep/summarize.
+    Ok(ValidatedTriggerTarget {
+        _handle: opened,
+        _snapshot: None,
+        access_path: canonical.clone(),
+        display_path: canonical,
+    })
+}
+
 fn validate_trigger_index_child_env(paths: &[String]) -> Result<Option<ValidatedTriggerTarget>> {
     let roots = std::env::var_os("INDEXA_TRIGGER_INDEX_ROOTS");
     let dev = std::env::var_os("INDEXA_TRIGGER_INDEX_DEV");
@@ -102,11 +204,11 @@ fn validate_trigger_index_child_env(paths: &[String]) -> Result<Option<Validated
     if roots.is_none() && dev.is_none() && ino.is_none() {
         return Ok(None);
     }
-    let (Some(roots), Some(dev), Some(ino)) = (roots, dev, ino) else {
-        anyhow::bail!("incomplete internal trigger_index validation data");
-    };
     #[cfg(unix)]
     {
+        let (Some(roots), Some(dev), Some(ino)) = (roots, dev, ino) else {
+            anyhow::bail!("incomplete internal trigger_index validation data");
+        };
         let roots: Vec<std::path::PathBuf> = serde_json::from_str(&roots.to_string_lossy())?;
         let dev = dev.to_string_lossy().parse::<u64>()?;
         let ino = ino.to_string_lossy().parse::<u64>()?;
@@ -120,10 +222,29 @@ fn validate_trigger_index_child_env(paths: &[String]) -> Result<Option<Validated
             ino,
         )?))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let Some(roots) = roots else {
+            anyhow::bail!("incomplete internal trigger_index validation data");
+        };
+        if dev.is_some() || ino.is_some() {
+            anyhow::bail!("unexpected Unix identity data for Windows trigger_index");
+        }
+        let roots: Vec<std::path::PathBuf> = serde_json::from_str(&roots.to_string_lossy())?;
+        if paths.len() != 1 {
+            anyhow::bail!("invalid internal trigger_index invocation");
+        }
+        Ok(Some(validate_trigger_index_child_target(
+            std::path::Path::new(&paths[0]),
+            &roots,
+        )?))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (paths, roots, dev, ino);
-        anyhow::bail!("safe trigger_index validation is unsupported on this platform");
+        anyhow::bail!(
+            "safe trigger_index validation is unsupported on this non-Unix, non-Windows platform"
+        );
     }
 }
 
@@ -292,6 +413,23 @@ fn trigger_index_file_snapshot_preserves_the_full_original_basename() {
     assert_eq!(
         std::fs::read(&validated.access_path).unwrap(),
         b"snapshot bytes"
+    );
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn trigger_index_child_accepts_and_reads_a_normal_indexed_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("indexed");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("marker.txt"), "indexed content").unwrap();
+
+    let validated = validate_trigger_index_child_target(&root, std::slice::from_ref(&root))
+        .expect("normal indexed directory should be usable by trigger_index on Windows");
+    assert!(validated._handle.metadata().unwrap().is_dir());
+    assert_eq!(
+        std::fs::read_to_string(validated.access_path.join("marker.txt")).unwrap(),
+        "indexed content"
     );
 }
 
