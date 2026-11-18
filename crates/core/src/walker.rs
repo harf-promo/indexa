@@ -287,16 +287,41 @@ pub fn should_index_file(
 /// Fail-open NUL sniff: read a file's first 8 KB and check for a NUL byte (via
 /// [`crate::text::is_binary`]). Returns `false` on any open/read error — an unreadable file is
 /// never *classified* binary (so it isn't skipped on the strength of a read failure).
-fn file_is_binary(path: &Path) -> bool {
+fn file_is_binary(path: &Path) -> std::io::Result<bool> {
     use std::io::Read;
-    let Ok(mut f) = open_regular_file(path) else {
-        return false;
-    };
+    let mut f = open_regular_file(path)?;
     let mut buf = [0u8; 8192];
-    match f.read(&mut buf) {
-        Ok(n) => crate::text::is_binary(&buf[..n]),
-        Err(_) => false,
+    let n = f.read(&mut buf)?;
+    Ok(crate::text::is_binary(&buf[..n]))
+}
+
+fn must_skip_after_safe_open_error(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Unsupported
+    ) {
+        return true;
     }
+    #[cfg(target_os = "linux")]
+    let nofollow_rejection = error.raw_os_error() == Some(40); // ELOOP
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    let nofollow_rejection = error.raw_os_error() == Some(62); // ELOOP
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    let nofollow_rejection = false;
+    nofollow_rejection
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -612,11 +637,21 @@ pub fn walk_streaming(
                             })
                         };
 
-                        // Whole-computer groundwork: when opted in, NUL-sniff files so the deep
-                        // phase can skip binaries without opening them. Fail-open (an unreadable
-                        // file is never flagged). Only files; the entry itself is still recorded
-                        // either way.
-                        let is_binary = sniff_binary && meta.is_file() && file_is_binary(path);
+                        // When opted in, NUL-sniff files so the deep phase can skip binaries.
+                        // Ordinary read/permission failures remain fail-open. A safe-open refusal
+                        // (non-regular file, symlink race, or unsupported platform) skips this
+                        // entry so the deep phase cannot later block opening the rejected path.
+                        let is_binary = if sniff_binary && meta.is_file() {
+                            match file_is_binary(path) {
+                                Ok(is_binary) => is_binary,
+                                Err(e) if must_skip_after_safe_open_error(&e) => {
+                                    return WalkState::Continue;
+                                }
+                                Err(_) => false,
+                            }
+                        } else {
+                            false
+                        };
 
                         sink.local.push(Entry {
                             path: path.to_path_buf(),
@@ -763,19 +798,38 @@ mod tests {
         std::thread::spawn(move || {
             let _ = tx.send(file_is_binary(&fifo));
         });
-        assert_eq!(
-            rx.recv_timeout(std::time::Duration::from_secs(1)),
-            Ok(false),
-            "FIFO open/read blocked instead of rejecting the opened non-regular fd"
-        );
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("FIFO open/read blocked instead of rejecting the opened non-regular fd");
+        assert!(matches!(result, Err(e) if e.kind() == std::io::ErrorKind::InvalidInput));
         let binary = dir.path().join("binary.dat");
         std::fs::write(&binary, [0u8, 1, 2]).unwrap();
         let symlink = dir.path().join("swapped-link");
         std::os::unix::fs::symlink(&binary, &symlink).unwrap();
         assert!(
-            !file_is_binary(&symlink),
+            file_is_binary(&symlink).is_err(),
             "binary sniff followed a final-component symlink"
         );
+    }
+
+    #[test]
+    fn unsafe_safe_open_errors_skip_walk_entries_but_read_errors_remain_fail_open() {
+        assert!(must_skip_after_safe_open_error(&std::io::Error::from(
+            std::io::ErrorKind::InvalidInput
+        )));
+        assert!(must_skip_after_safe_open_error(&std::io::Error::from(
+            std::io::ErrorKind::Unsupported
+        )));
+        assert!(!must_skip_after_safe_open_error(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+        assert!(!must_skip_after_safe_open_error(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+        #[cfg(target_os = "linux")]
+        assert!(must_skip_after_safe_open_error(
+            &std::io::Error::from_raw_os_error(40)
+        ));
     }
 
     #[test]
