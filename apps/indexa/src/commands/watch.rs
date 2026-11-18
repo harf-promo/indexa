@@ -105,6 +105,35 @@ fn persist_upsert(
     Ok(())
 }
 
+/// Parse a stable snapshot of the file opened by the watch event. Individual parsers accept
+/// paths and reopen them, so copy from the no-follow, nonblocking descriptor before dispatching.
+fn parse_watch_file(
+    registry: &indexa_parsers::registry::Registry,
+    path: &std::path::Path,
+    max_parse_bytes: u64,
+) -> Result<(indexa_parsers::types::Extracted, std::fs::Metadata)> {
+    use std::io::Write;
+
+    let mut source = indexa_core::walker::open_regular_file(path)?;
+    let metadata = source.metadata()?;
+    let size = metadata.len();
+    if max_parse_bytes > 0 && size > max_parse_bytes {
+        anyhow::bail!("file exceeds watch parse size limit");
+    }
+    let suffix = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| format!(".{ext}"))
+        .unwrap_or_default();
+    let mut snapshot = tempfile::Builder::new().suffix(&suffix).tempfile()?;
+    std::io::copy(&mut source, &mut snapshot)?;
+    snapshot.flush()?;
+    Ok((
+        registry.parse_guarded(snapshot.path(), size, max_parse_bytes)?,
+        metadata,
+    ))
+}
+
 pub(crate) async fn cmd_watch(
     paths: Vec<String>,
     embed_model_flag: Option<String>,
@@ -217,9 +246,8 @@ pub(crate) async fn cmd_watch(
                     ) {
                         return;
                     }
-                    let meta = std::fs::metadata(path).ok();
-                    let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                    let extracted = match registry.parse_guarded(path, size, max_parse_bytes) {
+                    let (extracted, meta) = match parse_watch_file(&registry, path, max_parse_bytes)
+                    {
                         Ok(e) => e,
                         Err(_) => return,
                     };
@@ -251,8 +279,8 @@ pub(crate) async fn cmd_watch(
                         let entry = Entry {
                             path: path.to_path_buf(),
                             kind: EntryKind::File,
-                            size,
-                            modified: meta.as_ref().and_then(|m| m.modified().ok()),
+                            size: meta.len(),
+                            modified: meta.modified().ok(),
                             hint: indexa_core::surface::classify(path)
                                 .or_else(|| indexa_core::surface::classify_file_by_extension(path)),
                             is_binary: false,
@@ -300,6 +328,31 @@ pub(crate) async fn cmd_watch(
 mod tests {
     use super::*;
     use indexa_parsers::types::{Chunk, Extracted};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn watch_parse_skips_fifo_swapped_after_discovery_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("race.txt");
+        std::fs::write(&path, "regular file discovered first").unwrap();
+        assert!(std::fs::metadata(&path).unwrap().is_file());
+        std::fs::remove_file(&path).unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = parse_watch_file(&indexa_parsers::registry::Registry::new(), &path, 0);
+            let _ = tx.send(result);
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("watch parse blocked on a FIFO swapped in after discovery");
+        assert!(result.is_err(), "FIFO replacement must be skipped");
+    }
 
     /// Embeds nothing, ever — stands in for an Ollama that is down, unreachable, or has had
     /// the model pulled out from under it, which is precisely when a watch quietly stops

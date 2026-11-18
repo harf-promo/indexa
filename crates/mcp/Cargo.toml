@@ -24,6 +24,7 @@ indexa-parsers = { path = "../parsers" }
 indexa-update = { path = "../update" }
 rmcp = { version = "3.9.0", features = ["server", "transport-io", "macros"] }
 schemars = "1"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

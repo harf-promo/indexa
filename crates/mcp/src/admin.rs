@@ -82,6 +82,64 @@ fn validate_index_path(
     Ok(canonical)
 }
 
+#[cfg(unix)]
+fn open_validated_index_path(
+    canonical_path: &std::path::Path,
+    indexed_roots: &[std::path::PathBuf],
+) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let before = canonical_path
+        .metadata()
+        .map_err(|e| format!("cannot inspect path {}: {e}", canonical_path.display()))?;
+    if !before.is_dir() && !before.is_file() {
+        return Err("trigger_index requires a regular file or directory".into());
+    }
+    let flags = libc::O_NOFOLLOW
+        | libc::O_CLOEXEC
+        | if before.is_dir() {
+            libc::O_DIRECTORY
+        } else {
+            0
+        };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(canonical_path)
+        .map_err(|e| format!("cannot safely open path {}: {e}", canonical_path.display()))?;
+    let opened = file.metadata().map_err(|e| e.to_string())?;
+    if (opened.is_dir() != before.is_dir())
+        || (!opened.is_dir() && !opened.is_file())
+        || (opened.dev(), opened.ino()) != (before.dev(), before.ino())
+    {
+        return Err("path changed while it was being validated".into());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let fd_path = std::path::PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+        let opened_path = fd_path
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve opened directory: {e}"))?;
+        if !indexed_roots
+            .iter()
+            .filter_map(|root| root.canonicalize().ok())
+            .any(|root| opened_path.starts_with(root))
+        {
+            return Err("opened path is outside every indexed root".into());
+        }
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_validated_index_path(
+    _canonical_path: &std::path::Path,
+    _indexed_roots: &[std::path::PathBuf],
+) -> Result<std::fs::File, String> {
+    Err("safe trigger_index directory handles are unsupported on this platform".into())
+}
+
 /// Argument vector for the `indexa index` child. The `--` ends option parsing, so whatever
 /// follows is a path even if it looks like a flag (defence in depth behind
 /// [`validate_index_path`]).
@@ -277,15 +335,31 @@ impl IndexaMcp {
             .map(std::path::PathBuf::from)
             .collect::<Vec<_>>();
         let canonical_path = validate_index_path(&path, &roots).map_err(mcp_invalid)?;
+        let _validated_handle =
+            open_validated_index_path(&canonical_path, &roots).map_err(mcp_invalid)?;
+        #[cfg(unix)]
+        let (expected_dev, expected_ino) = {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = _validated_handle.metadata().map_err(mcp_err)?;
+            (metadata.dev().to_string(), metadata.ino().to_string())
+        };
+        let roots_json = serde_json::to_string(&roots).map_err(mcp_err)?;
         // Spawn `indexa index <path>` as a subprocess, using THIS server's own binary (not a
         // bare PATH lookup) so we re-invoke the exact `indexa` serving this MCP session. Both
         // processes open the same DB via WAL + 5s busy_timeout, which handles contention safely.
-        let output = tokio::process::Command::new(indexa_exe()?)
+        let mut child = tokio::process::Command::new(indexa_exe()?);
+        child
             .args(index_args(
                 canonical_path
                     .to_str()
                     .ok_or_else(|| mcp_invalid("path is not valid UTF-8"))?,
             ))
+            .env("INDEXA_TRIGGER_INDEX_ROOTS", roots_json);
+        #[cfg(unix)]
+        child
+            .env("INDEXA_TRIGGER_INDEX_DEV", expected_dev)
+            .env("INDEXA_TRIGGER_INDEX_INO", expected_ino);
+        let output = child
             .output()
             .await
             .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))?;

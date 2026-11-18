@@ -5,6 +5,72 @@ use indexa_core::store::Store;
 use super::helpers::{index_db_path, preflight_ollama};
 use super::{cmd_deep, cmd_scan, cmd_summarize};
 
+#[cfg(unix)]
+fn validate_trigger_index_child_target(
+    path: &std::path::Path,
+    roots: &[std::path::PathBuf],
+    expected_dev: u64,
+    expected_ino: u64,
+) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let canonical = path.canonicalize()?;
+    if !roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| canonical.starts_with(root))
+    {
+        anyhow::bail!("trigger_index path is outside every indexed root");
+    }
+    let before = path.metadata()?;
+    if !before.is_dir() && !before.is_file() {
+        anyhow::bail!("trigger_index target is not a regular file or directory");
+    }
+    let flags = libc::O_NOFOLLOW
+        | libc::O_CLOEXEC
+        | if before.is_dir() {
+            libc::O_DIRECTORY
+        } else {
+            0
+        };
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)?;
+    let metadata = opened.metadata()?;
+    if (!metadata.is_dir() && !metadata.is_file())
+        || (metadata.dev(), metadata.ino()) != (expected_dev, expected_ino)
+    {
+        anyhow::bail!("trigger_index path changed after MCP validation");
+    }
+    Ok(())
+}
+
+fn validate_trigger_index_child_env(paths: &[String]) -> Result<()> {
+    let roots = std::env::var_os("INDEXA_TRIGGER_INDEX_ROOTS");
+    let dev = std::env::var_os("INDEXA_TRIGGER_INDEX_DEV");
+    let ino = std::env::var_os("INDEXA_TRIGGER_INDEX_INO");
+    if roots.is_none() && dev.is_none() && ino.is_none() {
+        return Ok(());
+    }
+    let (Some(roots), Some(dev), Some(ino)) = (roots, dev, ino) else {
+        anyhow::bail!("incomplete internal trigger_index validation data");
+    };
+    #[cfg(unix)]
+    {
+        let roots: Vec<std::path::PathBuf> = serde_json::from_str(&roots.to_string_lossy())?;
+        let dev = dev.to_string_lossy().parse::<u64>()?;
+        let ino = ino.to_string_lossy().parse::<u64>()?;
+        if paths.len() != 1 {
+            anyhow::bail!("invalid internal trigger_index invocation");
+        }
+        validate_trigger_index_child_target(std::path::Path::new(&paths[0]), &roots, dev, ino)?;
+    }
+    #[cfg(not(unix))]
+    anyhow::bail!("safe trigger_index validation is unsupported on this platform");
+    Ok(())
+}
+
 /// One-shot context build: scan → deep embed → summarize.
 ///
 /// Equivalent to running `indexa scan`, `indexa deep`, and `indexa summarize`
@@ -21,6 +87,7 @@ pub(crate) async fn cmd_index(
     yes: bool,
     cfg: &Config,
 ) -> Result<()> {
+    validate_trigger_index_child_env(&paths)?;
     // ── Preflight: confirm Ollama is up and required models are pulled ─────────
     preflight_ollama(cfg).await?;
 
@@ -64,6 +131,31 @@ pub(crate) async fn cmd_index(
         println!("  {questions} question(s) for you — indexa review list");
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn trigger_index_child_rejects_directory_swapped_to_outside_symlink() {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("indexed");
+    let target = root.join("target");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    let validated = target.metadata().unwrap();
+    let expected = (validated.dev(), validated.ino());
+
+    let moved = root.join("moved-target");
+    std::fs::rename(&target, &moved).unwrap();
+    std::os::unix::fs::symlink(&outside, &target).unwrap();
+
+    let result = validate_trigger_index_child_target(&target, &[root], expected.0, expected.1);
+    assert!(
+        result.is_err(),
+        "child accepted an outside symlink swapped after validation"
+    );
 }
 
 /// Run the post-index detector pass; returns how many questions it opened. Also runs the

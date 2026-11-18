@@ -325,7 +325,7 @@ fn must_skip_after_safe_open_error(error: &std::io::Error) -> bool {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-fn open_regular_file(path: &Path) -> std::io::Result<std::fs::File> {
+pub fn open_regular_file(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(target_os = "linux")]
