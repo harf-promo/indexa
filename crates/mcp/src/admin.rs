@@ -49,9 +49,28 @@ async fn run_trigger_child(
     child: &mut tokio::process::Command,
     timeout: std::time::Duration,
 ) -> Result<std::process::Output, ErrorData> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        child.as_std_mut().process_group(0);
+    }
     child.stdin(Stdio::null()).kill_on_drop(true);
-    tokio::time::timeout(timeout, child.output())
-        .await
+    let process = child
+        .spawn()
+        .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))?;
+    #[cfg(unix)]
+    let mut group = process.id().map(|pid| ProcessGroupGuard {
+        pid: pid as i32,
+        armed: true,
+    });
+    let result = tokio::time::timeout(timeout, process.wait_with_output()).await;
+    #[cfg(unix)]
+    if result.is_err() {
+        drop(group); // Drop kills the whole process group, including grandchildren.
+    } else if let Some(group) = &mut group {
+        group.armed = false;
+    }
+    result
         .map_err(|_| {
             mcp_err(format!(
                 "trigger_index child timed out after {}s",
@@ -59,6 +78,28 @@ async fn run_trigger_child(
             ))
         })?
         .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))
+}
+
+/// Unix timeout/cancellation cleanup for the entire spawned process group. Windows descendant
+/// cleanup remains unsupported: Tokio exposes direct-child `kill_on_drop`, while Job Object
+/// assignment requires platform-specific unsafe handle setup and can be rejected when the parent
+/// process is already constrained by an incompatible job. We retain direct-child termination and
+/// document this limitation instead of making `trigger_index` fail to spawn on those hosts.
+#[cfg(unix)]
+struct ProcessGroupGuard {
+    pid: i32,
+    armed: bool,
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            unsafe {
+                libc::kill(-self.pid, libc::SIGKILL);
+            }
+        }
+    }
 }
 
 /// Absolute path to the running `indexa` binary. The MCP server IS `indexa mcp`, so `current_exe`
@@ -1085,6 +1126,40 @@ mod tests {
             .trim()
             .to_owned();
         assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn timed_out_trigger_child_kills_its_grandchild() {
+        let dir = std::env::temp_dir().join(format!(
+            "indexa-trigger-group-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent_file = dir.join("parent");
+        let child_file = dir.join("grandchild");
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(format!(
+            "echo $$ > {}; sleep 30 & echo $! > {}; wait",
+            parent_file.display(),
+            child_file.display()
+        ));
+        let result =
+            super::run_trigger_child(&mut command, std::time::Duration::from_millis(150)).await;
+        assert!(result.is_err());
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        for pid_file in [&parent_file, &child_file] {
+            let pid = std::fs::read_to_string(pid_file).unwrap().trim().to_owned();
+            assert!(
+                !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                "process {pid} survived group timeout"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

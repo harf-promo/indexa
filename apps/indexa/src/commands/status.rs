@@ -8,6 +8,9 @@ use super::helpers::{format_size, format_unix_timestamp, require_index_db};
 struct QueueJson {
     pending: i64,
     in_flight: i64,
+    /// Legacy in-flight rows with no recorded owner; these require explicit recovery.
+    #[serde(skip_serializing_if = "is_zero")]
+    ownerless_stuck: i64,
     failed: i64,
     /// Pending/in-flight rows with no live entry (build artifacts / deleted files) —
     /// not real backlog; `indexa prune` removes them.
@@ -157,6 +160,7 @@ pub(crate) async fn cmd_status(
     let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
     let summary_count = store.summary_count().unwrap_or(0);
     let queue = store.queue_stats().unwrap_or_default();
+    let ownerless_stuck = store.unowned_in_flight()?.len() as i64;
     // Token-savings telemetry (best-effort read; absent = no line printed).
     let usage = store
         .usage_summary(indexa_core::store::USAGE_WEEK_SECS)
@@ -235,6 +239,7 @@ pub(crate) async fn cmd_status(
             queue: QueueJson {
                 pending: queue.pending,
                 in_flight: queue.in_flight,
+                ownerless_stuck,
                 failed: queue.failed,
                 stale: queue.stale,
             },
@@ -295,13 +300,18 @@ pub(crate) async fn cmd_status(
     }
 
     println!(
-        "Summaries: {} (queue: {} pending / {} in-flight / {} failed{})",
+        "Summaries: {} (queue: {} pending / {} in-flight / {} failed{}{})",
         summary_count,
         queue.pending,
         queue.in_flight,
         queue.failed,
         if queue.stale > 0 {
             format!(" · {} stale → run `indexa prune`", queue.stale)
+        } else {
+            String::new()
+        },
+        if ownerless_stuck > 0 {
+            format!(" · {ownerless_stuck} stuck legacy → `indexa queue recover-stuck`")
         } else {
             String::new()
         }
@@ -413,12 +423,17 @@ pub(crate) async fn cmd_status(
                 }
             }
             println!(
-                "  Queue:      {} pending / {} in-flight / {} failed{}",
+                "  Queue:      {} pending / {} in-flight / {} failed{}{}",
                 queue.pending,
                 queue.in_flight,
                 queue.failed,
                 if queue.stale > 0 {
                     format!(" · {} stale → run `indexa prune`", queue.stale)
+                } else {
+                    String::new()
+                },
+                if ownerless_stuck > 0 {
+                    format!(" · {ownerless_stuck} stuck legacy → `indexa queue recover-stuck`")
                 } else {
                     String::new()
                 }

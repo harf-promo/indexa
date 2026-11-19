@@ -2871,6 +2871,7 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "indexa-http-util",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

@@ -22,6 +22,55 @@ use serde::Deserialize;
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::Command;
+
+/// A Unix process group guard kills descendants if the awaiting future is cancelled or times out.
+/// Windows currently retains Tokio's direct-child `kill_on_drop`; it has no process-group
+/// analogue. A Job Object needs platform-specific unsafe handle setup and assignment may be
+/// refused when the parent process is already constrained by an incompatible job, so descendant
+/// cleanup is explicitly unsupported there rather than making CLI invocation fail to spawn.
+#[cfg(unix)]
+struct ProcessGroupGuard {
+    pid: i32,
+    armed: bool,
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        // Negative pid addresses the process group created by process_group(0).
+        if self.armed {
+            unsafe {
+                libc::kill(-self.pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+async fn output_with_timeout(
+    command: &mut Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+    command.kill_on_drop(true);
+    let child = command.spawn()?;
+    #[cfg(unix)]
+    let mut group = child.id().map(|pid| ProcessGroupGuard {
+        pid: pid as i32,
+        armed: true,
+    });
+    let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
+    #[cfg(unix)]
+    if result.is_ok() {
+        if let Some(group) = &mut group {
+            group.armed = false;
+        }
+    }
+    result.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "child timed out"))?
+}
 use tokio::sync::Semaphore;
 
 /// Default cap on concurrent `claude` subprocesses. Each call is heavy (a full
@@ -103,32 +152,31 @@ impl ClaudeCodeLlm {
             .expect("claude-code semaphore never closed");
 
         let timeout_secs = configured_timeout_secs();
-        let run_fut = Command::new(&self.claude_bin)
+        let mut command = Command::new(&self.claude_bin);
+        command
             .arg("-p")
             .arg(prompt)
             .arg("--output-format")
             .arg("json")
             .arg("--model")
             .arg(model)
-            // Belt-and-suspenders: never let an inherited API key silently switch
-            // this off the subscription and onto metered billing.
             .env_remove("ANTHROPIC_API_KEY")
-            .stdin(Stdio::null())
-            // Kill the child if we drop the future on timeout, so a hung `claude` can't
-            // leak as a zombie holding the concurrency permit.
-            .kill_on_drop(true)
-            .output();
-        let output = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), run_fut)
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("claude CLI timed out after {timeout_secs}s (model {model})")
-            })?
-            .with_context(|| {
-                format!(
-                    "failed to spawn `{}` — is the Claude Code CLI installed and on PATH?",
-                    self.claude_bin
-                )
-            })?;
+            .stdin(Stdio::null());
+        let output =
+            output_with_timeout(&mut command, std::time::Duration::from_secs(timeout_secs))
+                .await
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::TimedOut {
+                        anyhow::anyhow!(
+                            "claude CLI timed out after {timeout_secs}s (model {model})"
+                        )
+                    } else {
+                        anyhow::Error::new(error).context(format!(
+                            "failed to spawn `{}` — is the Claude Code CLI installed and on PATH?",
+                            self.claude_bin
+                        ))
+                    }
+                })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -385,6 +433,47 @@ mod tests {
             "probe subprocess pid {pid} was not killed when the timeout dropped its future"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn timed_out_command_kills_child_and_grandchild() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "indexa-claude-group-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("claude");
+        let parent_file = dir.join("parent");
+        let child_file = dir.join("grandchild");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho $$ > {}\nsleep 30 & echo $! > {}\nwait\n",
+                parent_file.display(),
+                child_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut command = Command::new(&script);
+        let error = output_with_timeout(&mut command, std::time::Duration::from_millis(150))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        for pid_file in [&parent_file, &child_file] {
+            let pid = std::fs::read_to_string(pid_file).unwrap().trim().to_owned();
+            assert!(
+                !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                "process {pid} survived group timeout"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -187,8 +187,8 @@ fn host_ok(headers: &HeaderMap) -> bool {
     }
 }
 
-/// Origin (or, failing that, Referer) must be same-origin loopback when present. Absent → allow
-/// (same-origin navigations and non-browser tools omit it; a cross-site fetch/form always sends it).
+/// Origin (or, failing that, Referer) must be same-origin when present. Mutations with neither
+/// usable header fail closed; no non-browser client calls these endpoints directly.
 fn origin_ok(headers: &HeaderMap, allowed_origins: &[String]) -> bool {
     let val = headers
         .get(header::ORIGIN)
@@ -198,7 +198,7 @@ fn origin_ok(headers: &HeaderMap, allowed_origins: &[String]) -> bool {
         Some(o) => allowed_origins
             .iter()
             .any(|expected| exact_same_origin(o, expected)),
-        None => true,
+        None => false,
     }
 }
 
@@ -411,6 +411,29 @@ mod tests {
             status(cfg, request("http://127.0.0.1:7620")).await,
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn mutation_without_usable_origin_or_referer_is_rejected() {
+        let cfg = GuardConfig::loopback_origin("http://127.0.0.1:7620".into());
+        for request in [
+            Request::post("/api/x")
+                .header("host", "127.0.0.1:7620")
+                .body(Body::empty())
+                .unwrap(),
+            Request::post("/api/x")
+                .header("host", "127.0.0.1:7620")
+                .header("origin", "not an origin")
+                .body(Body::empty())
+                .unwrap(),
+            Request::post("/api/x")
+                .header("host", "127.0.0.1:7620")
+                .header("referer", "not a referer")
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            assert_eq!(status(cfg.clone(), request).await, StatusCode::FORBIDDEN);
+        }
     }
 
     fn api_get(site: Option<&str>) -> Request<Body> {

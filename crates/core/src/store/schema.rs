@@ -241,7 +241,8 @@ impl Store {
                 enqueued_at INTEGER NOT NULL DEFAULT (unixepoch()),
                 updated_at  INTEGER NOT NULL DEFAULT (unixepoch()),
                 error       TEXT,
-                owner_pid   INTEGER
+                owner_pid   INTEGER,
+                owner_start_time INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_summary_queue_state ON summary_queue(state);
             -- Backs the claim in `next_queue_item` (`WHERE state='pending' ORDER BY depth DESC
@@ -904,6 +905,12 @@ impl Store {
             "summary_queue",
             "owner_pid",
             "ALTER TABLE summary_queue ADD COLUMN owner_pid INTEGER;",
+        )?;
+        add_column_if_missing(
+            &mut self.conn,
+            "summary_queue",
+            "owner_start_time",
+            "ALTER TABLE summary_queue ADD COLUMN owner_start_time INTEGER;",
         )?;
 
         // Referential integrity for chunks/summaries/edges → entries is maintained by

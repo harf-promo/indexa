@@ -1165,7 +1165,49 @@ fn config_file_lock(path: &Path) -> Result<std::fs::File> {
 }
 
 fn atomic_write_config(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
+    atomic_write_config_with(path, bytes, &mut FilesystemConfigWriter)
+}
+
+trait ConfigWriter {
+    fn write(&mut self, file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()>;
+    fn sync(&mut self, file: &std::fs::File) -> std::io::Result<()>;
+    fn replace(&mut self, temp: &Path, dest: &Path) -> std::io::Result<()>;
+}
+
+struct FilesystemConfigWriter;
+
+impl ConfigWriter for FilesystemConfigWriter {
+    fn write(&mut self, file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        file.write_all(bytes)
+    }
+
+    fn sync(&mut self, file: &std::fs::File) -> std::io::Result<()> {
+        file.sync_all()
+    }
+
+    fn replace(&mut self, temp: &Path, dest: &Path) -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            replace_config_windows(temp, dest).map_err(|error| {
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .cloned()
+                    .unwrap_or_else(|| std::io::Error::other(error.to_string()))
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            std::fs::rename(temp, dest)
+        }
+    }
+}
+
+fn atomic_write_config_with(
+    path: &Path,
+    bytes: &[u8],
+    writer: &mut impl ConfigWriter,
+) -> Result<()> {
     static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -1181,7 +1223,10 @@ fn atomic_write_config(path: &Path, bytes: &[u8]) -> Result<()> {
         }
         match options.open(&candidate) {
             Ok(mut file) => {
-                if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+                if let Err(e) = writer
+                    .write(&mut file, bytes)
+                    .and_then(|()| writer.sync(&file))
+                {
                     drop(file);
                     let _ = std::fs::remove_file(&candidate);
                     return Err(e).with_context(|| {
@@ -1198,11 +1243,10 @@ fn atomic_write_config(path: &Path, bytes: &[u8]) -> Result<()> {
         }
     };
 
-    #[cfg(windows)]
-    replace_config_windows(&temp_path, path)?;
-    #[cfg(not(windows))]
-    std::fs::rename(&temp_path, path)
-        .with_context(|| format!("replacing config: {}", path.display()))?;
+    if let Err(error) = writer.replace(&temp_path, path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error).with_context(|| format!("replacing config: {}", path.display()));
+    }
 
     #[cfg(unix)]
     std::fs::File::open(parent)
@@ -1271,17 +1315,66 @@ mod tests {
         assert_eq!(saved.describer.passes_first, 4);
     }
 
+    #[derive(Clone, Copy)]
+    enum FailAt {
+        Write,
+        Sync,
+        Replace,
+    }
+
+    struct FailingConfigWriter(FailAt);
+
+    impl ConfigWriter for FailingConfigWriter {
+        fn write(&mut self, file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+            use std::io::Write;
+            if matches!(self.0, FailAt::Write) {
+                file.write_all(&bytes[..bytes.len() / 2])?;
+                return Err(std::io::Error::other("injected partial write failure"));
+            }
+            file.write_all(bytes)
+        }
+
+        fn sync(&mut self, file: &std::fs::File) -> std::io::Result<()> {
+            if matches!(self.0, FailAt::Sync) {
+                return Err(std::io::Error::other("injected fsync failure"));
+            }
+            file.sync_all()
+        }
+
+        fn replace(&mut self, _temp: &Path, _dest: &Path) -> std::io::Result<()> {
+            if matches!(self.0, FailAt::Replace) {
+                return Err(std::io::Error::other("injected rename failure"));
+            }
+            unreachable!("failure writer only runs in failure tests")
+        }
+    }
+
     #[test]
-    fn incomplete_staged_write_leaves_previous_config_intact() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        let mut original = Config::default();
-        original.describer.passes_first = 2;
-        save(&original, &path).unwrap();
-        let temp = dir.path().join(".config.toml.interrupted.tmp");
-        std::fs::write(&temp, "[describer]\npasses_first = ").unwrap();
-        assert_eq!(load(&path).unwrap().describer.passes_first, 2);
-        let _ = std::fs::remove_file(temp);
+    fn interrupted_atomic_config_writes_preserve_original_at_each_stage() {
+        for (index, stage) in [FailAt::Write, FailAt::Sync, FailAt::Replace]
+            .into_iter()
+            .enumerate()
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let original_bytes = b"[describer]\npasses_first = 2\n";
+            std::fs::write(&path, original_bytes).unwrap();
+            let mut writer = FailingConfigWriter(stage);
+            let result =
+                atomic_write_config_with(&path, b"[describer]\npasses_first = 9\n", &mut writer);
+            assert!(result.is_err(), "failure stage {index} should be injected");
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                original_bytes,
+                "stage {index} replaced original config"
+            );
+            assert_eq!(load(&path).unwrap().describer.passes_first, 2);
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                1,
+                "stage {index} left a partial temp file"
+            );
+        }
     }
 
     #[test]

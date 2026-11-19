@@ -498,6 +498,62 @@ fn startup_sweep_keeps_items_owned_by_a_live_process() {
 }
 
 #[test]
+fn startup_sweep_recovers_reused_pid_with_different_start_time() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .enqueue_summary_items(&[("/reused".into(), "file".into(), 1)])
+        .unwrap();
+    let item = store.next_queue_item().unwrap().unwrap();
+    let pid = std::process::id();
+    let system = sysinfo::System::new_all();
+    let actual_start = system
+        .process(sysinfo::Pid::from_u32(pid))
+        .unwrap()
+        .start_time();
+    store
+        .conn
+        .execute(
+            "UPDATE summary_queue SET owner_pid=?2, owner_start_time=?3 WHERE path=?1",
+            rusqlite::params![item.path, pid, (actual_start.saturating_sub(1)) as i64],
+        )
+        .unwrap();
+
+    assert_eq!(store.requeue_stale_in_flight(3).unwrap(), (1, 0));
+    assert_eq!(
+        store.queue_state(&item.path).unwrap().as_deref(),
+        Some("pending")
+    );
+}
+
+#[test]
+fn ownerless_in_flight_is_listed_and_only_recovered_explicitly() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .enqueue_summary_items(&[("/legacy".into(), "file".into(), 1)])
+        .unwrap();
+    let item = store.next_queue_item().unwrap().unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE summary_queue SET owner_pid=NULL, owner_start_time=NULL WHERE path=?1",
+            [&item.path],
+        )
+        .unwrap();
+
+    assert_eq!(store.requeue_stale_in_flight(3).unwrap(), (0, 0));
+    assert_eq!(store.unowned_in_flight().unwrap(), vec![item.path.clone()]);
+    assert_eq!(
+        store.queue_state(&item.path).unwrap().as_deref(),
+        Some("in_flight")
+    );
+    assert_eq!(store.recover_unowned_in_flight(3).unwrap(), (1, 0));
+    assert_eq!(
+        store.queue_state(&item.path).unwrap().as_deref(),
+        Some("pending")
+    );
+}
+
+#[test]
 fn summary_cosine_search_returns_boosted_results() {
     let mut store = Store::open_in_memory().unwrap();
     let mut root = dummy_summary("/", "dir", None, 0);
@@ -1042,7 +1098,7 @@ fn claim_query_uses_claim_index_without_sorting() {
     let plan = query_plan(
         &store,
         crate::store::queue::NEXT_QUEUE_ITEM_SQL,
-        [std::process::id()],
+        rusqlite::params![std::process::id() as i64, 0_i64],
     );
     println!(
         "EXPLAIN QUERY PLAN next_queue_item:\n  {}",
