@@ -22,6 +22,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
 if-addrs = { workspace = true }
 uuid = { version = "1", features = ["v4", "serde"] }
+tempfile = "3"
 indexa-core = { path = "../core" }
 indexa-embed = { path = "../embed" }
 indexa-llm = { path = "../llm" }
@@ -46,4 +47,3 @@ async-trait = { workspace = true }
 # desktop app's lockfile (dev-dependency features aren't part of a dependent's build).
 tokio = { workspace = true, features = ["test-util"] }
 rusqlite = { workspace = true }
-tempfile = "3"

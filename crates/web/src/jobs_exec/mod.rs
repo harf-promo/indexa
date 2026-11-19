@@ -2,7 +2,7 @@
 //! plus their finalization and watchdog helpers. Spawned by the `api_job_*`
 //! handlers; no axum routing lives here.
 
-use crate::handlers::path_policy::ValidatedIndexedPath;
+use crate::handlers::path_policy::{confine_walk_entries, ValidatedIndexedPath};
 use crate::jobs::{broadcast_only, push, JobEvent, JobHandle, JobStatus, Jobs};
 use crate::AppState;
 use indexa_core::{
@@ -140,8 +140,25 @@ pub(crate) async fn walk_for_job(
                     e.message
                 ));
             }
+            let mut safe_cfg = walk_cfg.clone();
+            safe_cfg.sniff_binary = false;
+            let before_descend = validated_path.clone();
+            let entries =
+                indexa_core::walker::walk_filtered(&pb, &safe_cfg, move |path, is_dir| {
+                    if is_dir {
+                        before_descend.directory_is_beneath_root(path)
+                    } else {
+                        before_descend.open_file(path).is_ok()
+                    }
+                })?;
+            Ok(confine_walk_entries(
+                entries,
+                &validated_path,
+                walk_cfg.sniff_binary,
+            ))
+        } else {
+            walk(&pb, &walk_cfg)
         }
-        walk(&pb, &walk_cfg)
     })
     .await
     .unwrap_or_else(|e| Err(anyhow::anyhow!(e)));

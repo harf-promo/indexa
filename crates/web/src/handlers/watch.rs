@@ -275,12 +275,27 @@ pub(crate) async fn api_watch_start(
                         if !watch_root_is_valid(&validated_for_events, &watch_root2, &stop2) {
                             return;
                         }
-                        let meta = std::fs::metadata(path).ok();
-                        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                        if !watch_root_is_valid(&validated_for_events, &watch_root2, &stop2) {
+                        let (_snapshot_dir, snapshot, size, modified) =
+                            match validated_for_events.snapshot_file(
+                                path,
+                                indexa_core::walker::DEFAULT_MAX_FILESIZE
+                                    .min(if max_parse_bytes == 0 {
+                                        indexa_core::walker::DEFAULT_MAX_FILESIZE
+                                    } else {
+                                        max_parse_bytes
+                                    }),
+                            ) {
+                                Ok(snapshot) => snapshot,
+                                Err(error) => {
+                                    tracing::warn!(path = %path.display(), %error, "watch: skipping file outside indexed root");
+                                    return;
+                                }
+                            };
+                        if size > indexa_core::walker::DEFAULT_MAX_FILESIZE {
+                            tracing::warn!(path = %path.display(), size, "watch: skipping oversized file");
                             return;
                         }
-                        let extracted = match registry.parse_guarded(path, size, max_parse_bytes) {
+                        let extracted = match registry.parse_guarded(&snapshot, size, max_parse_bytes) {
                             Ok(e) => e,
                             Err(_) => return,
                         };
@@ -330,7 +345,7 @@ pub(crate) async fn api_watch_start(
                                 path: path.to_path_buf(),
                                 kind: EntryKind::File,
                                 size,
-                                modified: meta.as_ref().and_then(|m| m.modified().ok()),
+                                modified,
                                 hint: indexa_core::surface::classify(path).or_else(|| indexa_core::surface::classify_file_by_extension(path)),
                                 is_binary: false,
                             };

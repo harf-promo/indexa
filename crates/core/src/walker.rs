@@ -57,6 +57,8 @@ pub struct WalkConfig {
     pub custom_ignore: bool,
 }
 
+type EntryFilter = dyn Fn(&Path, bool) -> bool + Send + Sync;
+
 /// Default scan-time per-file size cap (8 MiB). Skips blobs that are almost
 /// never useful context and dominate disk/index growth on a broad scan.
 pub const DEFAULT_MAX_FILESIZE: u64 = 8 * 1024 * 1024;
@@ -410,6 +412,17 @@ const STREAM_CHANNEL_BOUND: usize = 4;
 pub fn walk_streaming(
     root: &Path,
     cfg: &WalkConfig,
+    on_batch: impl FnMut(Vec<Entry>) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    walk_streaming_filtered(root, cfg, std::sync::Arc::new(|_, _| true), on_batch)
+}
+
+/// Like [`walk_streaming`], with a predicate run for each non-symlink entry before a directory
+/// is descended into or a file is yielded. A rejected directory is pruned recursively.
+pub fn walk_streaming_filtered(
+    root: &Path,
+    cfg: &WalkConfig,
+    entry_filter: std::sync::Arc<EntryFilter>,
     mut on_batch: impl FnMut(Vec<Entry>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     use ignore::{WalkBuilder, WalkState};
@@ -429,6 +442,7 @@ pub fn walk_streaming(
     let skip_hidden = cfg.skip_hidden;
     let include_sensitive = cfg.include_sensitive;
     let sniff_binary = cfg.sniff_binary;
+    let entry_filter = entry_filter.clone();
 
     // Build a callback-side gitignore matcher.
     //
@@ -510,6 +524,7 @@ pub fn walk_streaming(
             let tx = tx.clone();
             move || {
                 let combined_matcher = combined_matcher.clone();
+                let entry_filter = entry_filter.clone();
                 let mut sink = StreamSink {
                     local: Vec::new(),
                     tx: tx.clone(),
@@ -535,6 +550,17 @@ pub fn walk_streaming(
                         // innocuously-named link would otherwise slip through.
                         if de.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
                             return WalkState::Continue; // don't record; keep walking siblings
+                        }
+
+                        // Security-sensitive callers can validate the opened identity of every
+                        // directory before this walker descends into it, and every file before
+                        // yielding it. The caller still validates file handles again at use.
+                        if !entry_filter(path, is_dir) {
+                            return if is_dir {
+                                WalkState::Skip
+                            } else {
+                                WalkState::Continue
+                            };
                         }
 
                         // Belt-and-suspenders hidden check: WalkBuilder.hidden(true) handles
@@ -698,6 +724,20 @@ pub fn walk_streaming(
 pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
     let mut all = Vec::new();
     walk_streaming(root, cfg, |batch| {
+        all.extend(batch);
+        Ok(())
+    })?;
+    Ok(all)
+}
+
+/// Collect a walk while applying an entry predicate before directory descent and file yield.
+pub fn walk_filtered(
+    root: &Path,
+    cfg: &WalkConfig,
+    entry_filter: impl Fn(&Path, bool) -> bool + Send + Sync + 'static,
+) -> anyhow::Result<Vec<Entry>> {
+    let mut all = Vec::new();
+    walk_streaming_filtered(root, cfg, std::sync::Arc::new(entry_filter), |batch| {
         all.extend(batch);
         Ok(())
     })?;

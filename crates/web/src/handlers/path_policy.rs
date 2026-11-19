@@ -168,6 +168,130 @@ impl ValidatedIndexedPath {
         &self.path
     }
 
+    /// Open a file without following a final symlink, then verify the opened object's real path
+    /// is component-wise beneath this indexed root. Callers must read from the returned handle;
+    /// reopening `path` would reintroduce the check/use race.
+    pub(crate) fn open_file(&self, path: &Path) -> std::io::Result<File> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+            options
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        let file = options.open(path)?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+            if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "reparse points are not indexed",
+                ));
+            }
+        }
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ));
+        }
+        let real = opened_handle_path(&file)?;
+        let root = Path::new(&self.path);
+        if !real.starts_with(root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "opened file is outside indexed root",
+            ));
+        }
+        Ok(file)
+    }
+
+    /// Copy a validated open handle into a private temporary directory for path-based parsers.
+    /// The original file is read only through the checked handle, and the returned directory
+    /// keeps the snapshot alive for any parser or secondary media pass that opens its path.
+    pub(crate) fn snapshot_file(
+        &self,
+        path: &Path,
+        max_bytes: u64,
+    ) -> std::io::Result<(
+        tempfile::TempDir,
+        PathBuf,
+        u64,
+        Option<std::time::SystemTime>,
+    )> {
+        use std::io::Write;
+        let mut source = self.open_file(path)?;
+        let metadata = source.metadata()?;
+        if max_bytes > 0 && metadata.len() > max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("file exceeds {max_bytes}-byte snapshot limit"),
+            ));
+        }
+        let dir = tempfile::tempdir()?;
+        let name = path.file_name().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "file has no name")
+        })?;
+        let snapshot = dir.path().join(name);
+        let mut dest = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&snapshot)?;
+        std::io::copy(&mut source, &mut dest)?;
+        dest.flush()?;
+        Ok((dir, snapshot, metadata.len(), metadata.modified().ok()))
+    }
+
+    /// Open and validate a directory identity before permitting it to contribute entries.
+    pub(crate) fn directory_is_beneath_root(&self, path: &Path) -> bool {
+        let result: std::io::Result<bool> = (|| {
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                use windows_sys::Win32::Storage::FileSystem::{
+                    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+                    FILE_SHARE_WRITE,
+                };
+                options
+                    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                    .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+            }
+            let file = options.open(path)?;
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+                if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    return Ok(false);
+                }
+            }
+            if !file.metadata()?.is_dir() {
+                return Ok(false);
+            }
+            Ok(opened_handle_path(&file)?.starts_with(Path::new(&self.path)))
+        })();
+        result.unwrap_or(false)
+    }
+
     pub(crate) fn revalidate(&self) -> Result<(), IndexedPathError> {
         let path = Path::new(&self.path);
         let canonical = std::fs::canonicalize(path).map_err(|_| {
@@ -190,6 +314,88 @@ impl ValidatedIndexedPath {
         }
         Ok(())
     }
+}
+
+/// Drop entries whose opened file or directory identity no longer resolves beneath the validated
+/// root. The core walker runs with binary sniffing disabled for validated roots; this function
+/// performs that optional read from the already-verified handle.
+pub(crate) fn confine_walk_entries(
+    entries: Vec<indexa_core::walker::Entry>,
+    validated: &ValidatedIndexedPath,
+    sniff_binary: bool,
+) -> Vec<indexa_core::walker::Entry> {
+    use indexa_core::walker::EntryKind;
+    use std::io::Read;
+    entries
+        .into_iter()
+        .filter_map(|mut entry| {
+            if entry.kind == EntryKind::Dir {
+                if !validated.directory_is_beneath_root(&entry.path) {
+                    tracing::warn!(path = %entry.path.display(), "skipping walked directory outside indexed root");
+                    return None;
+                }
+                return Some(entry);
+            }
+            let mut file = match validated.open_file(&entry.path) {
+                Ok(file) => file,
+                Err(error) => {
+                    tracing::warn!(path = %entry.path.display(), %error, "skipping walked file outside indexed root or unavailable");
+                    return None;
+                }
+            };
+            if sniff_binary {
+                let mut sample = [0u8; 8192];
+                match file.read(&mut sample) {
+                    Ok(n) => entry.is_binary = indexa_core::text::is_binary(&sample[..n]),
+                    Err(error) => tracing::warn!(path = %entry.path.display(), %error, "binary sniff failed"),
+                }
+            }
+            Some(entry)
+        })
+        .collect()
+}
+
+/// Resolve the path represented by an already-open handle on supported CI platforms.
+#[cfg(target_os = "linux")]
+fn opened_handle_path(file: &File) -> std::io::Result<PathBuf> {
+    use std::os::fd::AsRawFd;
+    std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+}
+
+#[cfg(target_os = "macos")]
+fn opened_handle_path(file: &File) -> std::io::Result<PathBuf> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let mut buffer = [0i8; libc::PATH_MAX as usize];
+    let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) };
+    if result == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let bytes = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }.to_bytes();
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+}
+
+#[cfg(target_os = "windows")]
+fn opened_handle_path(file: &File) -> std::io::Result<PathBuf> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+    let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+    let mut buffer = vec![0u16; 32768];
+    let len =
+        unsafe { GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, 0) };
+    if len == 0 || len as usize >= buffer.len() {
+        return Err(std::io::Error::last_os_error());
+    }
+    buffer.truncate(len as usize);
+    Ok(PathBuf::from(String::from_utf16_lossy(&buffer)))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn opened_handle_path(_file: &File) -> std::io::Result<PathBuf> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "opened-handle path checks are unsupported",
+    ))
 }
 
 impl IndexedPathError {
@@ -260,5 +466,26 @@ mod tests {
         symlink(&outside, &target).unwrap();
 
         assert!(validated.revalidate().is_err());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn opened_file_outside_root_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("indexed");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let sentinel = outside.join("secret.txt");
+        std::fs::write(&sentinel, "outside sentinel").unwrap();
+        let validated = ValidatedIndexedPath::capture(root).unwrap();
+        assert_eq!(
+            validated.open_file(&sentinel).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
     }
 }

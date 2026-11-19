@@ -585,19 +585,24 @@ pub(crate) async fn run_deep_phase(
                 return false;
             }
             // Snapshot size/mtime now so only edits during this file's own parse/embed count as changed.
-            let fresh_entry = indexa_core::walker::refresh_entry(entry);
-            if !ensure_validated_path(validated_path.as_ref(), handle) {
-                return false;
-            }
             let ep = entry.path.clone();
             let sz = entry.size;
             let reg = registry.clone();
-            let mut extracted = match tokio::task::spawn_blocking(move || {
-                reg.parse_guarded(&ep, sz, max_parse_bytes)
+            let validated_for_parse = validated_path.clone();
+            let parsed = match tokio::task::spawn_blocking(move || {
+                if let Some(validated) = validated_for_parse {
+                    let (dir, snapshot, size, modified) =
+                        validated.snapshot_file(&ep, max_parse_bytes)?;
+                    let extracted = reg.parse_guarded(&snapshot, size, max_parse_bytes)?;
+                    Ok((extracted, Some((dir, snapshot, size, modified))))
+                } else {
+                    reg.parse_guarded(&ep, sz, max_parse_bytes)
+                        .map(|e| (e, None))
+                }
             })
             .await
             {
-                Ok(Ok(e)) => e,
+                Ok(Ok(parsed)) => parsed,
                 Ok(Err(e)) => {
                     push(
                         handle,
@@ -627,6 +632,19 @@ pub(crate) async fn run_deep_phase(
                     continue;
                 }
             };
+            let (mut extracted, safe_snapshot) = parsed;
+            let fresh_entry = if let Some((_, _, size, modified)) = &safe_snapshot {
+                let mut fresh = (**entry).clone();
+                fresh.size = *size;
+                fresh.modified = *modified;
+                fresh
+            } else {
+                indexa_core::walker::refresh_entry(entry)
+            };
+            let parser_path = safe_snapshot
+                .as_ref()
+                .map(|(_, snapshot, _, _)| snapshot)
+                .unwrap_or(&entry.path);
 
             // Image captioning (opt-in): append a vision-model caption chunk alongside the
             // EXIF chunk. Watchdog-gated (the vision model is heavy); failure only warns.
@@ -649,7 +667,7 @@ pub(crate) async fn run_deep_phase(
                         if !ensure_validated_path(validated_path.as_ref(), handle) {
                             return false;
                         }
-                        match indexa_llm::caption_image_file(cap, &caption_model, &entry.path).await
+                        match indexa_llm::caption_image_file(cap, &caption_model, parser_path).await
                         {
                             Ok(text) if !text.trim().is_empty() => {
                                 let seq = extracted.chunks.len();
@@ -685,7 +703,7 @@ pub(crate) async fn run_deep_phase(
                 }
                 let bin = transcribe_binary.clone();
                 let model = transcribe_model.clone();
-                let p = entry.path.clone();
+                let p = parser_path.clone();
                 let res = tokio::task::spawn_blocking(move || {
                     indexa_parsers::media::transcribe_audio(&p, &bin, model.as_deref())
                 })
@@ -733,7 +751,7 @@ pub(crate) async fn run_deep_phase(
                 let ff = video_ffmpeg.clone();
                 let bin = transcribe_binary.clone();
                 let model = transcribe_model.clone();
-                let p = entry.path.clone();
+                let p = parser_path.clone();
                 let res = tokio::task::spawn_blocking(move || {
                     indexa_parsers::media::transcribe_video_audio(&p, &ff, &bin, model.as_deref())
                 })
@@ -785,7 +803,7 @@ pub(crate) async fn run_deep_phase(
                     }
                     let bin = ocr_binary.clone();
                     let lang = ocr_lang.clone();
-                    let p = entry.path.clone();
+                    let p = parser_path.clone();
                     let res = tokio::task::spawn_blocking(move || {
                         indexa_parsers::pdf::ocr_pdf(&p, &bin, lang.as_deref())
                     })
@@ -834,7 +852,7 @@ pub(crate) async fn run_deep_phase(
                 let ff = video_ffmpeg.clone();
                 let fps = video_fps;
                 let max_fr = video_max_frames;
-                let p = entry.path.clone();
+                let p = parser_path.clone();
                 let frames_result = tokio::task::spawn_blocking(move || {
                     indexa_parsers::media::extract_video_frames(&p, &ff, fps, max_fr)
                 })

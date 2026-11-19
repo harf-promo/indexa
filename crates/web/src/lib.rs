@@ -623,11 +623,13 @@ fn build_router_with_guard(state: AppState, port: u16, guard_cfg: guard::GuardCo
                 ])
                 .allow_headers([header::CONTENT_TYPE]),
         )
-        .layer(axum::middleware::from_fn(add_security_headers))
         .layer(axum::middleware::from_fn_with_state(
             guard_cfg,
             guard::request_guard,
         ))
+        // Axum applies the last layer outermost: security headers must wrap the request guard
+        // so its early denial responses receive the same headers as routed responses.
+        .layer(axum::middleware::from_fn(add_security_headers))
 }
 
 fn bind_address(host: &str, port: u16) -> String {
@@ -1061,6 +1063,30 @@ mod tests {
         assert!(csp.contains("default-src 'self'"));
         assert!(csp.contains("object-src 'none'"));
         assert!(csp.contains("frame-ancestors 'none'"));
+        assert_eq!(
+            resp.headers()
+                .get(header::REFERRER_POLICY)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "no-referrer"
+        );
+    }
+
+    #[tokio::test]
+    async fn guard_denial_carries_referrer_policy_header() {
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .header(header::HOST, "attacker.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             resp.headers()
                 .get(header::REFERRER_POLICY)

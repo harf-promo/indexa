@@ -1,7 +1,7 @@
 //! Web scans use a dedicated connection so filesystem work never holds the API store mutex.
 
 use super::{finalize_failed, orphan_prune_message, scan_walk_config};
-use crate::handlers::path_policy::ValidatedIndexedPath;
+use crate::handlers::path_policy::{confine_walk_entries, ValidatedIndexedPath};
 use crate::jobs::{push, JobEvent, JobHandle};
 use crate::AppState;
 use indexa_core::{
@@ -38,7 +38,22 @@ pub(super) async fn run_scan_phase(
             max_open,
             &job,
             validated_path.as_ref(),
-            walk,
+            {
+                let validator = validated_path.clone();
+                move |root, cfg| match validator {
+                    Some(validated) => {
+                        let before_descend = validated.clone();
+                        indexa_core::walker::walk_filtered(root, cfg, move |path, is_dir| {
+                            if is_dir {
+                                before_descend.directory_is_beneath_root(path)
+                            } else {
+                                before_descend.open_file(path).is_ok()
+                            }
+                        })
+                    }
+                    None => walk(root, cfg),
+                }
+            },
         )
     })
     .await
@@ -88,12 +103,21 @@ fn scan_with_walk(
             return None;
         }
     }
-    let entries = match walk(path, walk_cfg) {
+    let mut safe_walk_cfg = walk_cfg.clone();
+    if validated_path.is_some() {
+        // Defer the walker's binary read until the opened handle passes containment.
+        safe_walk_cfg.sniff_binary = false;
+    }
+    let entries = match walk(path, &safe_walk_cfg) {
         Ok(entries) => entries,
         Err(e) => {
             finalize_failed(handle, "walk", &e);
             return None;
         }
+    };
+    let entries = match validated_path {
+        Some(validated) => confine_walk_entries(entries, validated, walk_cfg.sniff_binary),
+        None => entries,
     };
     // The walk is fail-open, so a missing/unreadable root yields nothing — and reconciling that
     // would delete everything indexed under it. Fail the job and leave the index untouched.
@@ -204,7 +228,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rejects_root_swap_after_validation_before_the_blocking_walk() {
+    fn rejects_subdirectory_swap_after_listing_before_open_and_index() {
         use crate::handlers::path_policy::ValidatedIndexedPath;
         use std::os::unix::fs::symlink;
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -215,34 +239,39 @@ mod tests {
         let outside = temp.path().join("outside");
         std::fs::create_dir_all(&target).unwrap();
         std::fs::create_dir(&outside).unwrap();
-        std::fs::write(outside.join("secret.txt"), "outside").unwrap();
-        let validated = ValidatedIndexedPath::capture(target.clone()).unwrap();
-        std::fs::rename(&target, root.join("moved")).unwrap();
-        symlink(&outside, &target).unwrap();
+        std::fs::write(target.join("secret.txt"), "inside-before-swap").unwrap();
+        std::fs::write(outside.join("secret.txt"), "outside-sentinel").unwrap();
+        let validated = ValidatedIndexedPath::capture(root.clone()).unwrap();
 
         let db = temp.path().join("index.db");
         let mut store = Store::open(&db).unwrap();
-        let handle = Arc::new(JobHandle::new("scan", target.to_string_lossy()));
+        let handle = Arc::new(JobHandle::new("scan", root.to_string_lossy()));
         let walked = std::sync::Arc::new(AtomicBool::new(false));
         let walked_in_closure = walked.clone();
         let result = scan_with_walk(
             &mut store,
-            &target,
+            &root,
             &WalkConfig::default(),
             50,
             &handle,
             Some(&validated),
-            move |path, cfg| {
+            |path, cfg| {
                 walked_in_closure.store(true, Ordering::Relaxed);
-                walk(path, cfg)
+                let entries = walk(path, cfg)?;
+                // Deterministic race hook: mutate the directory after the walk lists entries but
+                // before scan opens and validates those entries.
+                std::fs::rename(&target, root.join("moved")).unwrap();
+                symlink(&outside, &target).unwrap();
+                Ok(entries)
             },
         );
-        assert!(result.is_none());
+        assert!(result.is_some());
         assert!(
-            !walked.load(Ordering::Relaxed),
-            "walk must not reach swapped root"
+            walked.load(Ordering::Relaxed),
+            "walk should list before the test swaps the subdirectory"
         );
-        assert_eq!(handle.status(), crate::jobs::JobStatus::Failed);
+        assert_eq!(handle.status(), crate::jobs::JobStatus::Running);
+        assert_eq!(store.count_descendants(&root.to_string_lossy()).unwrap(), 0);
     }
 
     // The CLI's production protocol: one lease/generation before walking, retained through
