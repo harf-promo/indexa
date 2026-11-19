@@ -18,6 +18,21 @@ use indexa_llm::{Describer, OllamaLlm};
 use indexa_query::contextual::{build_doc_context, contextual_embed_texts, ContextualEvent};
 use std::sync::Arc;
 
+fn ensure_validated_path(
+    validated_path: Option<&ValidatedIndexedPath>,
+    handle: &Arc<JobHandle>,
+) -> bool {
+    let Some(validated_path) = validated_path else {
+        return true;
+    };
+    if let Err(e) = validated_path.revalidate() {
+        finalize_failed(handle, "path-validation", &anyhow::anyhow!(e.message));
+        false
+    } else {
+        true
+    }
+}
+
 /// Per-file payload buffered in the cross-file [`MissBatcher`] between registration and the
 /// flush that resolves its cache-miss embeddings — everything [`persist_completed_file`] needs
 /// that isn't already captured in the resolved `embeddings` vector. Closes #367: previously
@@ -564,8 +579,16 @@ pub(crate) async fn run_deep_phase(
             skipped += 1;
             record_file_progress(handle, &path_str, &mut done, &mut samples, n_files);
         } else {
+            // The freshness lookup above awaited the store mutex. Revalidate after that wait,
+            // immediately before metadata and parser opens use entry.path.
+            if !ensure_validated_path(validated_path.as_ref(), handle) {
+                return false;
+            }
             // Snapshot size/mtime now so only edits during this file's own parse/embed count as changed.
             let fresh_entry = indexa_core::walker::refresh_entry(entry);
+            if !ensure_validated_path(validated_path.as_ref(), handle) {
+                return false;
+            }
             let ep = entry.path.clone();
             let sz = entry.size;
             let reg = registry.clone();
@@ -623,6 +646,9 @@ pub(crate) async fn run_deep_phase(
                             Some(cap as &(dyn Describer + Send + Sync)),
                         )
                         .await;
+                        if !ensure_validated_path(validated_path.as_ref(), handle) {
+                            return false;
+                        }
                         match indexa_llm::caption_image_file(cap, &caption_model, &entry.path).await
                         {
                             Ok(text) if !text.trim().is_empty() => {
@@ -654,6 +680,9 @@ pub(crate) async fn run_deep_phase(
             // ffprobe metadata chunk. Blocking subprocess (can take minutes) → spawn_blocking
             // so it never stalls the server's async runtime.
             if transcribe && extracted.mime.starts_with("audio/") {
+                if !ensure_validated_path(validated_path.as_ref(), handle) {
+                    return false;
+                }
                 let bin = transcribe_binary.clone();
                 let model = transcribe_model.clone();
                 let p = entry.path.clone();
@@ -698,6 +727,9 @@ pub(crate) async fn run_deep_phase(
             // whisper it with timestamps. Both are blocking subprocesses → one spawn_blocking
             // so the temp WAV lives until whisper is done. A silent video yields `None`.
             if video_transcribe && extracted.mime.starts_with("video/") {
+                if !ensure_validated_path(validated_path.as_ref(), handle) {
+                    return false;
+                }
                 let ff = video_ffmpeg.clone();
                 let bin = transcribe_binary.clone();
                 let model = transcribe_model.clone();
@@ -748,6 +780,9 @@ pub(crate) async fn run_deep_phase(
                     .map(|c| c.text.split_whitespace().count())
                     .sum();
                 if layer_words < 10 {
+                    if !ensure_validated_path(validated_path.as_ref(), handle) {
+                        return false;
+                    }
                     let bin = ocr_binary.clone();
                     let lang = ocr_lang.clone();
                     let p = entry.path.clone();
@@ -793,6 +828,9 @@ pub(crate) async fn run_deep_phase(
             // each frame with a local vision model, appending the combined caption as a
             // chunk. Blocking ffmpeg subprocess + async vision calls → spawn_blocking.
             if video_caption && extracted.mime.starts_with("video/") {
+                if !ensure_validated_path(validated_path.as_ref(), handle) {
+                    return false;
+                }
                 let ff = video_ffmpeg.clone();
                 let fps = video_fps;
                 let max_fr = video_max_frames;

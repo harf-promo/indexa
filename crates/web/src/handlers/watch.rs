@@ -23,7 +23,7 @@ use std::sync::{atomic::AtomicBool, atomic::AtomicU64, atomic::Ordering, Arc};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::dto::{err_json, require_path, PathQuery};
-use crate::handlers::path_policy::canonical_indexed_path;
+use crate::handlers::path_policy::{canonical_indexed_path, ValidatedIndexedPath};
 use crate::{AppState, WatchTaskInfo};
 
 #[derive(Serialize)]
@@ -32,6 +32,24 @@ pub(crate) struct WatchStatusEntry {
     pub(crate) watching: bool,
     pub(crate) events_count: u64,
     pub(crate) started_at: u64,
+}
+
+fn watch_root_is_valid(
+    validated_path: &ValidatedIndexedPath,
+    watch_root: &std::path::Path,
+    stop: &AtomicBool,
+) -> bool {
+    if let Err(e) = validated_path.revalidate() {
+        tracing::warn!(
+            "watch: stopping after root identity changed for {}: {}",
+            watch_root.display(),
+            e.message
+        );
+        stop.store(true, Ordering::Relaxed);
+        false
+    } else {
+        true
+    }
 }
 
 fn remove_session_if_current(
@@ -181,33 +199,32 @@ pub(crate) async fn api_watch_start(
         // notify accepts a pathname rather than a directory handle. Check the watched
         // directory identity after attachment so a swap between request validation and
         // watcher startup cannot silently attach the watch to an outside directory.
-        if let Err(e) = validated_path.revalidate() {
+        if !watch_root_is_valid(&validated_path, &watch_root, &stop2) {
             tracing::warn!(
-                "watch: refusing changed root {} after watcher startup: {}",
-                watch_root.display(),
-                e.message
+                "watch: refusing changed root {} after watcher startup",
+                watch_root.display()
             );
-            stop2.store(true, Ordering::Relaxed);
             return;
         }
         let rt = tokio::runtime::Handle::current();
         let validated_for_events = validated_path.clone();
         tokio::task::spawn_blocking(move || {
             watcher::run_watch_loop_until(session, &stop2, |event| {
-                if let Err(e) = validated_for_events.revalidate() {
-                    tracing::warn!(
-                        "watch: stopping after root identity changed for {}: {}",
-                        watch_root2.display(),
-                        e.message
-                    );
-                    stop2.store(true, Ordering::Relaxed);
+                if !watch_root_is_valid(&validated_for_events, &watch_root2, &stop2) {
                     return;
                 }
                 let path = &event.path;
                 // A directory upsert carries no content (the watcher follows it with one event per
                 // file), but a directory *remove* must still clear its subtree: the watcher emits one
                 // for a directory that a rename swapped out while the path exists again.
-                if event.kind == ChangeKind::Upsert && path.is_dir() {
+                if event.kind == ChangeKind::Upsert
+                    && {
+                        if !watch_root_is_valid(&validated_for_events, &watch_root2, &stop2) {
+                            return;
+                        }
+                        path.is_dir()
+                    }
+                {
                     return;
                 }
                 if path
@@ -241,6 +258,9 @@ pub(crate) async fn api_watch_start(
                         }
                     }
                     ChangeKind::Upsert => {
+                        if !watch_root_is_valid(&validated_for_events, &watch_root2, &stop2) {
+                            return;
+                        }
                         // Skip build artifacts / sensitive files / oversized blobs / ignored paths,
                         // matching the scan walker so a live watch doesn't pollute the index.
                         if !indexa_core::walker::should_index_file(
@@ -252,8 +272,14 @@ pub(crate) async fn api_watch_start(
                         ) {
                             return;
                         }
+                        if !watch_root_is_valid(&validated_for_events, &watch_root2, &stop2) {
+                            return;
+                        }
                         let meta = std::fs::metadata(path).ok();
                         let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                        if !watch_root_is_valid(&validated_for_events, &watch_root2, &stop2) {
+                            return;
+                        }
                         let extracted = match registry.parse_guarded(path, size, max_parse_bytes) {
                             Ok(e) => e,
                             Err(_) => return,
