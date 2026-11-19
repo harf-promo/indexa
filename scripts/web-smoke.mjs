@@ -475,6 +475,15 @@ try {
       streamed.announcements === 1 && streamed.liveMode === 'polite' && streamed.codeBlockPreserved,
     `htmlMatches=${streamed.html === streamed.expected} codeBlock=${streamed.codeBlockPreserved} announcements=${streamed.announcements}`);
 
+  const nulSentinel = await cdp.eval(`(() => {
+    const sentinel = String.fromCharCode(0) + 'CODEBLOCK0' + String.fromCharCode(0);
+    return renderMarkdown(sentinel);
+  })()`, { awaitPromise: true });
+  check('Markdown renders user-supplied NUL placeholder text without fabricating a code block',
+    nulSentinel === 'CODEBLOCK0<br>' && !nulSentinel.includes('undefined') &&
+      !nulSentinel.includes('<pre class="chat-code">'),
+    `html=${JSON.stringify(nulSentinel)}`);
+
   // Check 6 — generated job cards and warning rows expose button semantics and keyboard actions.
   await cdp.eval(`(() => {
     const priorSelect = selectJob;

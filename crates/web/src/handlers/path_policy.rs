@@ -9,6 +9,35 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+#[cfg(all(test, unix))]
+static OPENED_VALIDATED_PATHS: Mutex<Option<Vec<PathBuf>>> = Mutex::new(None);
+
+#[cfg(all(test, unix))]
+static OPENED_VALIDATED_PATHS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(all(test, unix))]
+pub(crate) fn lock_opened_validated_path_recording() -> std::sync::MutexGuard<'static, ()> {
+    OPENED_VALIDATED_PATHS_TEST_LOCK
+        .lock()
+        .expect("opened-path recorder test lock poisoned")
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn begin_opened_validated_path_recording() {
+    *OPENED_VALIDATED_PATHS
+        .lock()
+        .expect("opened-path recorder poisoned") = Some(Vec::new());
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn take_opened_validated_paths() -> Vec<PathBuf> {
+    OPENED_VALIDATED_PATHS
+        .lock()
+        .expect("opened-path recorder poisoned")
+        .take()
+        .unwrap_or_default()
+}
+
 use crate::{dto::err_json, AppState};
 
 pub(crate) struct IndexedPathError {
@@ -226,6 +255,14 @@ impl ValidatedIndexedPath {
         }
         self.ensure_root_identity()?;
         let real = opened_handle_path(&file)?;
+        #[cfg(all(test, unix))]
+        if let Some(paths) = OPENED_VALIDATED_PATHS
+            .lock()
+            .expect("opened-path recorder poisoned")
+            .as_mut()
+        {
+            paths.push(real.clone());
+        }
         if !real.starts_with(&self.real_path) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
