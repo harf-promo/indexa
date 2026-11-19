@@ -4,6 +4,7 @@
 
 use super::watchdog::run_watchdog_check;
 use super::{finalize_cancelled, finalize_done, finalize_failed, walk_for_job};
+use crate::handlers::path_policy::ValidatedIndexedPath;
 use crate::jobs::{broadcast_only, push, JobEvent, JobHandle};
 use crate::AppState;
 use indexa_core::{
@@ -16,6 +17,21 @@ use indexa_embed::{AddOutcome, MissBatcher};
 use indexa_llm::{Describer, OllamaLlm};
 use indexa_query::contextual::{build_doc_context, contextual_embed_texts, ContextualEvent};
 use std::sync::Arc;
+
+fn ensure_validated_path(
+    validated_path: Option<&ValidatedIndexedPath>,
+    handle: &Arc<JobHandle>,
+) -> bool {
+    let Some(validated_path) = validated_path else {
+        return true;
+    };
+    if let Err(e) = validated_path.revalidate() {
+        finalize_failed(handle, "path-validation", &anyhow::anyhow!(e.message));
+        false
+    } else {
+        true
+    }
+}
 
 /// Per-file payload buffered in the cross-file [`MissBatcher`] between registration and the
 /// flush that resolves its cache-miss embeddings — everything [`persist_completed_file`] needs
@@ -337,19 +353,21 @@ pub(crate) async fn run_deep_phase_standalone(
     state: &AppState,
     path: &str,
     handle: &Arc<JobHandle>,
+    validated_path: Option<ValidatedIndexedPath>,
 ) {
     let Some(entries) = walk_for_job(
         path,
         handle,
         &state.walk_semaphore,
         super::scan_walk_config(&state.config.scan),
+        validated_path.clone(),
     )
     .await
     else {
         return;
     };
     let n_files = entries.iter().filter(|e| e.kind == EntryKind::File).count();
-    if run_deep_phase(state, path, &entries, handle).await {
+    if run_deep_phase(state, path, &entries, handle, validated_path).await {
         finalize_done(handle, &format!("Deep index complete: {n_files} files"));
     }
 }
@@ -362,6 +380,7 @@ pub(crate) async fn run_deep_phase(
     path: &str,
     entries: &[indexa_core::walker::Entry],
     handle: &Arc<JobHandle>,
+    validated_path: Option<ValidatedIndexedPath>,
 ) -> bool {
     // Secret files (`.env`, keys, `.pem`/keystores) are recorded by scan but not embedded unless
     // `[scan] include_sensitive` — redaction can't scrub a raw key, so their contents stay out of
@@ -497,6 +516,14 @@ pub(crate) async fn run_deep_phase(
         MissBatcher::new(state.config.embedding.dim, indexa_embed::EMBED_BATCH_SIZE);
 
     for entry in &files {
+        // Revalidate for each file after previous asynchronous work; the path is used by
+        // parsers and optional media subprocesses below.
+        if let Some(validated_path) = &validated_path {
+            if let Err(e) = validated_path.revalidate() {
+                finalize_failed(handle, "path-validation", &anyhow::anyhow!(e.message));
+                return false;
+            }
+        }
         // Honor cancellation requested via DELETE /api/jobs/:id. Flush first: files already
         // buffered here were fully parsed (and, for contextual retrieval, already paid for an
         // LLM blurb call) — finalizing them rather than discarding keeps that work instead of
@@ -552,17 +579,30 @@ pub(crate) async fn run_deep_phase(
             skipped += 1;
             record_file_progress(handle, &path_str, &mut done, &mut samples, n_files);
         } else {
+            // The freshness lookup above awaited the store mutex. Revalidate after that wait,
+            // immediately before metadata and parser opens use entry.path.
+            if !ensure_validated_path(validated_path.as_ref(), handle) {
+                return false;
+            }
             // Snapshot size/mtime now so only edits during this file's own parse/embed count as changed.
-            let fresh_entry = indexa_core::walker::refresh_entry(entry);
             let ep = entry.path.clone();
             let sz = entry.size;
             let reg = registry.clone();
-            let mut extracted = match tokio::task::spawn_blocking(move || {
-                reg.parse_guarded(&ep, sz, max_parse_bytes)
+            let validated_for_parse = validated_path.clone();
+            let parsed = match tokio::task::spawn_blocking(move || {
+                if let Some(validated) = validated_for_parse {
+                    let (dir, snapshot, size, modified) =
+                        validated.snapshot_file(&ep, max_parse_bytes)?;
+                    let extracted = reg.parse_guarded(&snapshot, size, max_parse_bytes)?;
+                    Ok((extracted, Some((dir, snapshot, size, modified))))
+                } else {
+                    reg.parse_guarded(&ep, sz, max_parse_bytes)
+                        .map(|e| (e, None))
+                }
             })
             .await
             {
-                Ok(Ok(e)) => e,
+                Ok(Ok(parsed)) => parsed,
                 Ok(Err(e)) => {
                     push(
                         handle,
@@ -592,6 +632,19 @@ pub(crate) async fn run_deep_phase(
                     continue;
                 }
             };
+            let (mut extracted, safe_snapshot) = parsed;
+            let fresh_entry = if let Some((_, _, size, modified)) = &safe_snapshot {
+                let mut fresh = (**entry).clone();
+                fresh.size = *size;
+                fresh.modified = *modified;
+                fresh
+            } else {
+                indexa_core::walker::refresh_entry(entry)
+            };
+            let parser_path = safe_snapshot
+                .as_ref()
+                .map(|(_, snapshot, _, _)| snapshot)
+                .unwrap_or(&entry.path);
 
             // Image captioning (opt-in): append a vision-model caption chunk alongside the
             // EXIF chunk. Watchdog-gated (the vision model is heavy); failure only warns.
@@ -611,7 +664,10 @@ pub(crate) async fn run_deep_phase(
                             Some(cap as &(dyn Describer + Send + Sync)),
                         )
                         .await;
-                        match indexa_llm::caption_image_file(cap, &caption_model, &entry.path).await
+                        if !ensure_validated_path(validated_path.as_ref(), handle) {
+                            return false;
+                        }
+                        match indexa_llm::caption_image_file(cap, &caption_model, parser_path).await
                         {
                             Ok(text) if !text.trim().is_empty() => {
                                 let seq = extracted.chunks.len();
@@ -642,9 +698,12 @@ pub(crate) async fn run_deep_phase(
             // ffprobe metadata chunk. Blocking subprocess (can take minutes) → spawn_blocking
             // so it never stalls the server's async runtime.
             if transcribe && extracted.mime.starts_with("audio/") {
+                if !ensure_validated_path(validated_path.as_ref(), handle) {
+                    return false;
+                }
                 let bin = transcribe_binary.clone();
                 let model = transcribe_model.clone();
-                let p = entry.path.clone();
+                let p = parser_path.clone();
                 let res = tokio::task::spawn_blocking(move || {
                     indexa_parsers::media::transcribe_audio(&p, &bin, model.as_deref())
                 })
@@ -686,10 +745,13 @@ pub(crate) async fn run_deep_phase(
             // whisper it with timestamps. Both are blocking subprocesses → one spawn_blocking
             // so the temp WAV lives until whisper is done. A silent video yields `None`.
             if video_transcribe && extracted.mime.starts_with("video/") {
+                if !ensure_validated_path(validated_path.as_ref(), handle) {
+                    return false;
+                }
                 let ff = video_ffmpeg.clone();
                 let bin = transcribe_binary.clone();
                 let model = transcribe_model.clone();
-                let p = entry.path.clone();
+                let p = parser_path.clone();
                 let res = tokio::task::spawn_blocking(move || {
                     indexa_parsers::media::transcribe_video_audio(&p, &ff, &bin, model.as_deref())
                 })
@@ -736,9 +798,12 @@ pub(crate) async fn run_deep_phase(
                     .map(|c| c.text.split_whitespace().count())
                     .sum();
                 if layer_words < 10 {
+                    if !ensure_validated_path(validated_path.as_ref(), handle) {
+                        return false;
+                    }
                     let bin = ocr_binary.clone();
                     let lang = ocr_lang.clone();
-                    let p = entry.path.clone();
+                    let p = parser_path.clone();
                     let res = tokio::task::spawn_blocking(move || {
                         indexa_parsers::pdf::ocr_pdf(&p, &bin, lang.as_deref())
                     })
@@ -781,10 +846,13 @@ pub(crate) async fn run_deep_phase(
             // each frame with a local vision model, appending the combined caption as a
             // chunk. Blocking ffmpeg subprocess + async vision calls → spawn_blocking.
             if video_caption && extracted.mime.starts_with("video/") {
+                if !ensure_validated_path(validated_path.as_ref(), handle) {
+                    return false;
+                }
                 let ff = video_ffmpeg.clone();
                 let fps = video_fps;
                 let max_fr = video_max_frames;
-                let p = entry.path.clone();
+                let p = parser_path.clone();
                 let frames_result = tokio::task::spawn_blocking(move || {
                     indexa_parsers::media::extract_video_frames(&p, &ff, fps, max_fr)
                 })
@@ -1341,7 +1409,14 @@ mod tests {
                 );
                 Arc::make_mut(&mut state.config).describer.mode = mode.clone();
                 assert!(
-                    run_deep_phase(&state, dir.path().to_str().unwrap(), &[entry], &handle).await
+                    run_deep_phase(
+                        &state,
+                        dir.path().to_str().unwrap(),
+                        &[entry],
+                        &handle,
+                        None
+                    )
+                    .await
                 );
                 let store = state.store.lock().await;
                 assert!(store.entry_exists(&path).unwrap());
@@ -1391,7 +1466,7 @@ mod tests {
         // captured in true send order.
         let mut rx = handle.tx.subscribe();
 
-        let ok = run_deep_phase(&state, &path_str, &entries, &handle).await;
+        let ok = run_deep_phase(&state, &path_str, &entries, &handle, None).await;
         assert!(ok, "deep phase should succeed against fresh temp files");
 
         let mut timeline = Vec::new();
@@ -1452,7 +1527,7 @@ mod tests {
             }),
         );
 
-        run_deep_phase(&state, &path_str, &entries, &handle).await;
+        run_deep_phase(&state, &path_str, &entries, &handle, None).await;
 
         let history = handle.history.lock().unwrap().clone();
         let watchdog_checks = history

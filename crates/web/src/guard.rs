@@ -15,10 +15,8 @@
 //!     loopback literal (a rebind arrives with the attacker's domain in `Host`), reject
 //!     `/api/*` requests the browser marks `Sec-Fetch-Site: cross-site` (any method, so a
 //!     drive-by GET cannot make the server do work), and reject state-changing methods whose
-//!     `Origin`/`Referer` is present but cross-site. Absent
-//!     `Host`/`Origin` (non-browser local tools like curl) is allowed — every browser drive-by /
-//!     rebind vector carries both headers, so "validate if present" is complete for that threat
-//!     model while leaving local scripts and the existing test suite working.
+//!     `Origin`/`Referer` is present but cross-site. Missing Host is allowed for non-browser local
+//!     tools, while mutations require a usable same-origin Origin or Referer.
 //!   - **Non-loopback bind (LAN):** require a shared bearer token on the private `/api/*` routes
 //!     (the static shell carries no private data and loads freely). The token — generated and
 //!     printed at startup, or `INDEXA_WEB_TOKEN` — defeats both vectors since an attacker never
@@ -83,6 +81,15 @@ impl GuardConfig {
         let mut cfg = Self::lan(token);
         cfg.allowed_origins.push(bound_origin);
         cfg.allowed_origins.push(format!("http://localhost:{port}"));
+        if let Ok(ifaces) = if_addrs::get_if_addrs() {
+            cfg.allowed_origins.extend(
+                ifaces
+                    .into_iter()
+                    .map(|iface| iface.ip())
+                    .filter(|ip| !ip.is_loopback())
+                    .map(|ip| format!("http://{}", std::net::SocketAddr::new(ip, port))),
+            );
+        }
         cfg
     }
 }
@@ -187,19 +194,22 @@ fn host_ok(headers: &HeaderMap) -> bool {
     }
 }
 
-/// Origin (or, failing that, Referer) must be same-origin when present. Mutations with neither
-/// usable header fail closed; no non-browser client calls these endpoints directly.
+/// Origin (or, failing that, Referer) must be same-origin when present. A present but malformed
+/// Origin is rejected instead of being treated as absent or falling back to Referer.
 fn origin_ok(headers: &HeaderMap, allowed_origins: &[String]) -> bool {
-    let val = headers
-        .get(header::ORIGIN)
-        .or_else(|| headers.get(header::REFERER))
-        .and_then(|v| v.to_str().ok());
-    match val {
-        Some(o) => allowed_origins
-            .iter()
-            .any(|expected| exact_same_origin(o, expected)),
-        None => false,
-    }
+    let value = match headers.get(header::ORIGIN) {
+        Some(origin) => match origin.to_str() {
+            Ok(origin) => origin,
+            Err(_) => return false,
+        },
+        None => match headers.get(header::REFERER).and_then(|v| v.to_str().ok()) {
+            Some(referer) => referer,
+            None => return false,
+        },
+    };
+    allowed_origins
+        .iter()
+        .any(|expected| exact_same_origin(value, expected))
 }
 
 fn exact_same_origin(candidate: &str, expected: &str) -> bool {

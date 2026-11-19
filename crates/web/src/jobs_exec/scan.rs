@@ -1,6 +1,9 @@
 //! Web scans use a dedicated connection so filesystem work never holds the API store mutex.
 
 use super::{finalize_failed, orphan_prune_message, scan_walk_config};
+use crate::handlers::path_policy::{
+    confine_walk_entries, ValidatedIndexedPath, ValidatedWalkFilter,
+};
 use crate::jobs::{push, JobEvent, JobHandle};
 use crate::AppState;
 use indexa_core::{
@@ -14,6 +17,7 @@ pub(super) async fn run_scan_phase(
     state: &AppState,
     path: &str,
     handle: &Arc<JobHandle>,
+    validated_path: Option<ValidatedIndexedPath>,
 ) -> Option<Vec<Entry>> {
     let _permit = state.walk_semaphore.acquire().await.ok()?;
     let db_path = state.db_path.clone();
@@ -29,7 +33,26 @@ pub(super) async fn run_scan_phase(
                 return None;
             }
         };
-        scan_with_walk(&mut store, &path, &walk_cfg, max_open, &job, walk)
+        scan_with_walk(
+            &mut store,
+            &path,
+            &walk_cfg,
+            max_open,
+            &job,
+            validated_path.as_ref(),
+            {
+                let validator = validated_path.clone();
+                move |root, cfg| match validator {
+                    Some(validated) => {
+                        let filter = ValidatedWalkFilter::new(validated, cfg.clone());
+                        indexa_core::walker::walk_filtered(root, cfg, move |path, is_dir| {
+                            filter.allows(path, is_dir)
+                        })
+                    }
+                    None => walk(root, cfg),
+                }
+            },
+        )
     })
     .await
     {
@@ -47,6 +70,7 @@ fn scan_with_walk(
     walk_cfg: &WalkConfig,
     max_open: usize,
     handle: &Arc<JobHandle>,
+    validated_path: Option<&ValidatedIndexedPath>,
     walk: impl FnOnce(&Path, &WalkConfig) -> anyhow::Result<Vec<Entry>>,
 ) -> Option<Vec<Entry>> {
     // Use the same index-wide lease as CLI scans. Acquire it before allocating the
@@ -69,12 +93,29 @@ fn scan_with_walk(
     let indexed_below = store
         .count_descendants(&path.to_string_lossy())
         .unwrap_or(0);
-    let entries = match walk(path, walk_cfg) {
+    // Re-check after semaphore, database, and lease work, immediately before the walk
+    // resolves this pathname. This is the point where a replaced directory could escape.
+    if let Some(validated_path) = validated_path {
+        if let Err(e) = validated_path.revalidate() {
+            finalize_failed(handle, "path-validation", &anyhow::anyhow!(e.message));
+            return None;
+        }
+    }
+    let mut safe_walk_cfg = walk_cfg.clone();
+    if validated_path.is_some() {
+        // Defer the walker's binary read until the opened handle passes containment.
+        safe_walk_cfg.sniff_binary = false;
+    }
+    let entries = match walk(path, &safe_walk_cfg) {
         Ok(entries) => entries,
         Err(e) => {
             finalize_failed(handle, "walk", &e);
             return None;
         }
+    };
+    let entries = match validated_path {
+        Some(validated) => confine_walk_entries(entries, validated, walk_cfg.sniff_binary),
+        None => entries,
     };
     // The walk is fail-open, so a missing/unreadable root yields nothing — and reconciling that
     // would delete everything indexed under it. Fail the job and leave the index untouched.
@@ -183,6 +224,65 @@ mod tests {
     use indexa_core::walker::walk_streaming;
     use std::sync::{mpsc, Barrier};
 
+    #[cfg(unix)]
+    #[test]
+    fn rejects_subdirectory_swap_after_listing_before_open_and_index() {
+        use crate::handlers::path_policy::ValidatedIndexedPath;
+        use std::os::unix::fs::symlink;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("indexed");
+        let target = root.join("replace-me");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(target.join("secret.txt"), "inside-before-swap").unwrap();
+        std::fs::write(outside.join("secret.txt"), "outside-sentinel").unwrap();
+        let validated = ValidatedIndexedPath::capture(root.clone()).unwrap();
+
+        let db = temp.path().join("index.db");
+        let mut store = Store::open(&db).unwrap();
+        let handle = Arc::new(JobHandle::new("scan", root.to_string_lossy()));
+        let swapped = std::sync::Arc::new(AtomicBool::new(false));
+        let swapped_in_closure = swapped.clone();
+        let target_for_swap = target.clone();
+        let outside_for_swap = outside.clone();
+        let root_for_swap = root.clone();
+        let validated_for_walk = validated.clone();
+        let result = scan_with_walk(
+            &mut store,
+            &root,
+            &WalkConfig::default(),
+            50,
+            &handle,
+            Some(&validated),
+            move |path, cfg| {
+                let filter = ValidatedWalkFilter::new(validated_for_walk, cfg.clone());
+                let entries =
+                    indexa_core::walker::walk_filtered(path, cfg, move |path, is_dir| {
+                        // filter_entry runs after the parent lists this name and before the
+                        // walker queues it for read_dir. Replace it here to exercise that race.
+                        if path == target_for_swap
+                            && !swapped_in_closure.swap(true, Ordering::Relaxed)
+                        {
+                            std::fs::rename(&target_for_swap, root_for_swap.join("moved")).unwrap();
+                            symlink(&outside_for_swap, &target_for_swap).unwrap();
+                        }
+                        filter.allows(path, is_dir)
+                    })?;
+                Ok(entries)
+            },
+        );
+        assert!(result.is_some());
+        assert!(
+            swapped.load(Ordering::Relaxed),
+            "walk should list the directory before the test swaps it"
+        );
+        assert_eq!(handle.status(), crate::jobs::JobStatus::Running);
+        assert_eq!(store.count_descendants(&root.to_string_lossy()).unwrap(), 0);
+    }
+
     // The CLI's production protocol: one lease/generation before walking, retained through
     // streaming writes, reconciliation and orphan cleanup. No CLI environment/global DB paths.
     fn cli_scan(store: &mut Store, root: &Path) {
@@ -228,6 +328,7 @@ mod tests {
                     &WalkConfig::default(),
                     50,
                     &handle,
+                    None,
                     |root, cfg| {
                         let entries = walk(root, cfg)?;
                         snapshot_ready.wait();
@@ -276,6 +377,7 @@ mod tests {
                         &WalkConfig::default(),
                         50,
                         &handle,
+                        None,
                         walk,
                     )
                     .is_some());

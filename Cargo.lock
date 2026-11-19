@@ -2381,16 +2381,19 @@ dependencies = [
  "directories",
  "futures-util",
  "if-addrs",
+ "ignore",
  "indexa-core",
  "indexa-embed",
  "indexa-llm",
  "indexa-parsers",
  "indexa-query",
  "indexa-update",
+ "libc",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
+ "socket2",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -2398,6 +2401,7 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

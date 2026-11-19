@@ -23,6 +23,7 @@ use std::sync::{atomic::AtomicBool, atomic::AtomicU64, atomic::Ordering, Arc};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::dto::{err_json, require_path, PathQuery};
+use crate::handlers::path_policy::{canonical_indexed_path, ValidatedIndexedPath};
 use crate::{AppState, WatchTaskInfo};
 
 #[derive(Serialize)]
@@ -31,6 +32,40 @@ pub(crate) struct WatchStatusEntry {
     pub(crate) watching: bool,
     pub(crate) events_count: u64,
     pub(crate) started_at: u64,
+}
+
+fn watch_root_is_valid(
+    validated_path: &ValidatedIndexedPath,
+    watch_root: &std::path::Path,
+    stop: &AtomicBool,
+) -> bool {
+    if let Err(e) = validated_path.revalidate() {
+        tracing::warn!(
+            "watch: stopping after root identity changed for {}: {}",
+            watch_root.display(),
+            e.message
+        );
+        stop.store(true, Ordering::Relaxed);
+        false
+    } else {
+        true
+    }
+}
+
+fn remove_session_if_current(
+    sessions: &mut std::collections::HashMap<String, WatchTaskInfo>,
+    path: &str,
+    session_id: uuid::Uuid,
+) -> bool {
+    if sessions
+        .get(path)
+        .is_some_and(|info| info.session_id == session_id)
+    {
+        sessions.remove(path);
+        true
+    } else {
+        false
+    }
 }
 
 pub(crate) async fn api_watch_status(State(state): State<AppState>) -> Response {
@@ -91,19 +126,15 @@ pub(crate) async fn api_watch_start(
     State(state): State<AppState>,
     Query(params): Query<PathQuery>,
 ) -> Response {
-    let path = match require_path(params) {
+    let requested = match require_path(params) {
         Ok(p) => p,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
-
-    // Reject absurdly long paths before they hit the filesystem watcher. 4096 is the common
-    // PATH_MAX; a real watch root is far shorter, so anything past this is malformed input.
-    if path.len() > 4096 {
-        return err_json(
-            StatusCode::BAD_REQUEST,
-            "watch path is too long (max 4096 bytes)",
-        );
-    }
+    let validated_path = match canonical_indexed_path(&state, &requested).await {
+        Ok(path) => path,
+        Err(err) => return err.into_response(),
+    };
+    let path = validated_path.as_str().to_owned();
 
     let mut sessions = state.watch_sessions.lock().await;
     if sessions.contains_key(&path) {
@@ -153,6 +184,7 @@ pub(crate) async fn api_watch_start(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    let session_id = uuid::Uuid::new_v4();
     let task = tokio::spawn(async move {
         let session = match watcher::watch(&[&watch_root], &WatcherConfig::default()) {
             Ok(s) => s,
@@ -164,14 +196,35 @@ pub(crate) async fn api_watch_start(
                 return;
             }
         };
+        // notify accepts a pathname rather than a directory handle. Check the watched
+        // directory identity after attachment so a swap between request validation and
+        // watcher startup cannot silently attach the watch to an outside directory.
+        if !watch_root_is_valid(&validated_path, &watch_root, &stop2) {
+            tracing::warn!(
+                "watch: refusing changed root {} after watcher startup",
+                watch_root.display()
+            );
+            return;
+        }
         let rt = tokio::runtime::Handle::current();
+        let validated_for_events = validated_path.clone();
         tokio::task::spawn_blocking(move || {
             watcher::run_watch_loop_until(session, &stop2, |event| {
+                if !watch_root_is_valid(&validated_for_events, &watch_root2, &stop2) {
+                    return;
+                }
                 let path = &event.path;
                 // A directory upsert carries no content (the watcher follows it with one event per
                 // file), but a directory *remove* must still clear its subtree: the watcher emits one
                 // for a directory that a rename swapped out while the path exists again.
-                if event.kind == ChangeKind::Upsert && path.is_dir() {
+                if event.kind == ChangeKind::Upsert
+                    && {
+                        if !watch_root_is_valid(&validated_for_events, &watch_root2, &stop2) {
+                            return;
+                        }
+                        path.is_dir()
+                    }
+                {
                     return;
                 }
                 if path
@@ -205,6 +258,9 @@ pub(crate) async fn api_watch_start(
                         }
                     }
                     ChangeKind::Upsert => {
+                        if !watch_root_is_valid(&validated_for_events, &watch_root2, &stop2) {
+                            return;
+                        }
                         // Skip build artifacts / sensitive files / oversized blobs / ignored paths,
                         // matching the scan walker so a live watch doesn't pollute the index.
                         if !indexa_core::walker::should_index_file(
@@ -216,9 +272,30 @@ pub(crate) async fn api_watch_start(
                         ) {
                             return;
                         }
-                        let meta = std::fs::metadata(path).ok();
-                        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                        let extracted = match registry.parse_guarded(path, size, max_parse_bytes) {
+                        if !watch_root_is_valid(&validated_for_events, &watch_root2, &stop2) {
+                            return;
+                        }
+                        let (_snapshot_dir, snapshot, size, modified) =
+                            match validated_for_events.snapshot_file(
+                                path,
+                                indexa_core::walker::DEFAULT_MAX_FILESIZE
+                                    .min(if max_parse_bytes == 0 {
+                                        indexa_core::walker::DEFAULT_MAX_FILESIZE
+                                    } else {
+                                        max_parse_bytes
+                                    }),
+                            ) {
+                                Ok(snapshot) => snapshot,
+                                Err(error) => {
+                                    tracing::warn!(path = %path.display(), %error, "watch: skipping file outside indexed root");
+                                    return;
+                                }
+                            };
+                        if size > indexa_core::walker::DEFAULT_MAX_FILESIZE {
+                            tracing::warn!(path = %path.display(), size, "watch: skipping oversized file");
+                            return;
+                        }
+                        let extracted = match registry.parse_guarded(&snapshot, size, max_parse_bytes) {
                             Ok(e) => e,
                             Err(_) => return,
                         };
@@ -268,7 +345,7 @@ pub(crate) async fn api_watch_start(
                                 path: path.to_path_buf(),
                                 kind: EntryKind::File,
                                 size,
-                                modified: meta.as_ref().and_then(|m| m.modified().ok()),
+                                modified,
                                 hint: indexa_core::surface::classify(path).or_else(|| indexa_core::surface::classify_file_by_extension(path)),
                                 is_binary: false,
                             };
@@ -293,6 +370,7 @@ pub(crate) async fn api_watch_start(
     sessions.insert(
         path.clone(),
         WatchTaskInfo {
+            session_id,
             abort,
             stop,
             events_count,
@@ -308,8 +386,9 @@ pub(crate) async fn api_watch_start(
         let cleanup_path = path.clone();
         tokio::spawn(async move {
             let _ = task.await; // await completion/panic/abort
-            sessions_weak.lock().await.remove(&cleanup_path);
-            tracing::debug!("watch: session cleaned up for {cleanup_path}");
+            let mut sessions = sessions_weak.lock().await;
+            remove_session_if_current(&mut sessions, &cleanup_path, session_id);
+            tracing::debug!("watch: session cleanup checked for {cleanup_path}");
         });
     }
 
@@ -320,10 +399,15 @@ pub(crate) async fn api_watch_stop(
     State(state): State<AppState>,
     Query(params): Query<PathQuery>,
 ) -> Response {
-    let path = match require_path(params) {
+    let requested = match require_path(params) {
         Ok(p) => p,
         Err(resp) => return resp,
     };
+    // Session keys use canonical paths; this also lets a caller stop the same watch through a
+    // lexical `.`/`..` spelling. A removed root can still be stopped by its original path.
+    let path = std::fs::canonicalize(&requested)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or(requested);
 
     let mut sessions = state.watch_sessions.lock().await;
     if let Some(info) = sessions.remove(&path) {
@@ -344,6 +428,42 @@ pub(crate) async fn api_watch_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn late_stop_cleanup_keeps_immediately_restarted_session() {
+        fn info(session_id: uuid::Uuid) -> (WatchTaskInfo, tokio::task::JoinHandle<()>) {
+            let task = tokio::spawn(std::future::pending::<()>());
+            let info = WatchTaskInfo {
+                session_id,
+                abort: task.abort_handle(),
+                stop: Arc::new(AtomicBool::new(false)),
+                events_count: Arc::new(AtomicU64::new(0)),
+                started_at: 0,
+            };
+            (info, task)
+        }
+
+        let path = "/indexed/root".to_owned();
+        let old_id = uuid::Uuid::new_v4();
+        let new_id = uuid::Uuid::new_v4();
+        let (old, old_task) = info(old_id);
+        let (new, new_task) = info(new_id);
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert(path.clone(), old);
+
+        // `stop` removes the old map entry, and the next `start` inserts the replacement before
+        // the old watchdog necessarily wakes from its aborted wrapper.
+        let stopped = sessions.remove(&path).unwrap();
+        stopped.stop.store(true, Ordering::Relaxed);
+        stopped.abort.abort();
+        sessions.insert(path.clone(), new);
+
+        assert!(!remove_session_if_current(&mut sessions, &path, old_id));
+        assert_eq!(sessions.get(&path).unwrap().session_id, new_id);
+        sessions.remove(&path).unwrap().abort.abort();
+        old_task.abort();
+        new_task.abort();
+    }
 
     fn defines(name: &str, range: (usize, usize)) -> indexa_parsers::types::Edge {
         indexa_parsers::types::Edge {

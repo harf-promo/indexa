@@ -764,7 +764,8 @@ Kinds, most to least trusted:
     #[command(after_help = "Examples:
   indexa serve
   indexa serve --port 8080
-  indexa serve --host 0.0.0.0          # LAN access (⚠ exposes all indexed files on network)")]
+  indexa serve --host 0.0.0.0          # LAN access (⚠ exposes all indexed files on network)
+  indexa serve --host ::               # IPv6 wildcard only; does not accept IPv4")]
     #[command(display_order = 14)]
     Serve {
         #[arg(short, long, default_value_t = 7620)]
@@ -772,6 +773,7 @@ Kinds, most to least trusted:
 
         /// Bind host address. Default 127.0.0.1 (localhost only).
         /// Use 0.0.0.0 to expose on all interfaces (LAN access).
+        /// The IPv6 wildcard :: is explicitly IPv6-only.
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
 

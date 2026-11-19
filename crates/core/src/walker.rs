@@ -57,6 +57,8 @@ pub struct WalkConfig {
     pub custom_ignore: bool,
 }
 
+type EntryFilter = dyn Fn(&Path, bool) -> bool + Send + Sync;
+
 /// Default scan-time per-file size cap (8 MiB). Skips blobs that are almost
 /// never useful context and dominate disk/index growth on a broad scan.
 pub const DEFAULT_MAX_FILESIZE: u64 = 8 * 1024 * 1024;
@@ -410,6 +412,27 @@ const STREAM_CHANNEL_BOUND: usize = 4;
 pub fn walk_streaming(
     root: &Path,
     cfg: &WalkConfig,
+    on_batch: impl FnMut(Vec<Entry>) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    walk_streaming_internal(root, cfg, std::sync::Arc::new(|_, _| true), true, on_batch)
+}
+
+/// Like [`walk_streaming`], with a predicate run for each non-symlink entry before a directory
+/// is descended into or a file is yielded. A rejected directory is pruned recursively.
+fn walk_streaming_filtered(
+    root: &Path,
+    cfg: &WalkConfig,
+    entry_filter: std::sync::Arc<EntryFilter>,
+    on_batch: impl FnMut(Vec<Entry>) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    walk_streaming_internal(root, cfg, entry_filter, false, on_batch)
+}
+
+fn walk_streaming_internal(
+    root: &Path,
+    cfg: &WalkConfig,
+    entry_filter: std::sync::Arc<EntryFilter>,
+    load_ignore_files: bool,
     mut on_batch: impl FnMut(Vec<Entry>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     use ignore::{WalkBuilder, WalkState};
@@ -429,6 +452,7 @@ pub fn walk_streaming(
     let skip_hidden = cfg.skip_hidden;
     let include_sensitive = cfg.include_sensitive;
     let sniff_binary = cfg.sniff_binary;
+    let entry_filter = entry_filter.clone();
 
     // Build a callback-side gitignore matcher.
     //
@@ -447,9 +471,12 @@ pub fn walk_streaming(
     //     user's config, anchored at root.
     // Root `.gitignore` + `[scan] ignore` patterns, anchored at root — shared with the watchers'
     // per-event `should_index_file` so a scan and a live watch select the same files.
-    let combined_matcher: Option<Arc<ignore::gitignore::Gitignore>> =
+    let combined_matcher: Option<Arc<ignore::gitignore::Gitignore>> = if load_ignore_files {
         build_ignore_matcher(root, cfg.respect_gitignore, &cfg.ignore, cfg.custom_ignore)
-            .map(Arc::new);
+            .map(Arc::new)
+    } else {
+        None
+    };
 
     let mut b = WalkBuilder::new(root);
     b.threads(threads)
@@ -457,12 +484,24 @@ pub fn walk_streaming(
         // Honor .gitignore files found during the walk (root AND nested) plus global
         // gitignore and .git/info/exclude. All gated on respect_gitignore.
         // For non-git directories, the root .gitignore is handled by combined_matcher.
-        .git_ignore(cfg.respect_gitignore)
-        .git_global(cfg.respect_gitignore)
-        .git_exclude(cfg.respect_gitignore)
-        .parents(cfg.respect_gitignore)
+        .git_ignore(load_ignore_files && cfg.respect_gitignore)
+        .git_global(load_ignore_files && cfg.respect_gitignore)
+        .git_exclude(load_ignore_files && cfg.respect_gitignore)
+        .parents(load_ignore_files && cfg.respect_gitignore)
         // Also honor .ignore files (gitignore-style, not git-specific).
-        .ignore(cfg.respect_gitignore)
+        .ignore(load_ignore_files && cfg.respect_gitignore)
+        // This runs after a parent lists a child but before that child is queued for read_dir.
+        // Confined walks validate the opened identity here so swapped directories are pruned.
+        .filter_entry({
+            let entry_filter = entry_filter.clone();
+            move |entry| {
+                let kind = entry.file_type();
+                let is_symlink =
+                    entry.path_is_symlink() || kind.is_some_and(|kind| kind.is_symlink());
+                let is_dir = kind.is_some_and(|kind| kind.is_dir());
+                !is_symlink && entry_filter(entry.path(), is_dir)
+            }
+        })
         // WalkBuilder.hidden(true) skips dot-prefixed files/dirs natively.
         .hidden(cfg.skip_hidden)
         // Scan-time size cap: files above this are not yielded by the walker.
@@ -470,7 +509,7 @@ pub fn walk_streaming(
 
     // `.indexaignore` — highest-precedence ignore layer, nested per directory (see
     // CUSTOM_IGNORE_FILENAME doc comment). Gated on respect_gitignore, matching `.ignore`.
-    if cfg.respect_gitignore && cfg.custom_ignore {
+    if load_ignore_files && cfg.respect_gitignore && cfg.custom_ignore {
         b.add_custom_ignore_filename(CUSTOM_IGNORE_FILENAME);
     }
 
@@ -510,6 +549,7 @@ pub fn walk_streaming(
             let tx = tx.clone();
             move || {
                 let combined_matcher = combined_matcher.clone();
+                let entry_filter = entry_filter.clone();
                 let mut sink = StreamSink {
                     local: Vec::new(),
                     tx: tx.clone(),
@@ -535,6 +575,13 @@ pub fn walk_streaming(
                         // innocuously-named link would otherwise slip through.
                         if de.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
                             return WalkState::Continue; // don't record; keep walking siblings
+                        }
+
+                        // Recheck a directory after the walker has opened/listed it and before
+                        // it queues any children. This closes a swap between filter_entry and
+                        // run_one's path-based read_dir from producing descendant work items.
+                        if is_dir && !entry_filter(path, true) {
+                            return WalkState::Skip;
                         }
 
                         // Belt-and-suspenders hidden check: WalkBuilder.hidden(true) handles
@@ -698,6 +745,20 @@ pub fn walk_streaming(
 pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
     let mut all = Vec::new();
     walk_streaming(root, cfg, |batch| {
+        all.extend(batch);
+        Ok(())
+    })?;
+    Ok(all)
+}
+
+/// Collect a walk while applying an entry predicate before directory descent and file yield.
+pub fn walk_filtered(
+    root: &Path,
+    cfg: &WalkConfig,
+    entry_filter: impl Fn(&Path, bool) -> bool + Send + Sync + 'static,
+) -> anyhow::Result<Vec<Entry>> {
+    let mut all = Vec::new();
+    walk_streaming_filtered(root, cfg, std::sync::Arc::new(entry_filter), |batch| {
         all.extend(batch);
         Ok(())
     })?;

@@ -41,8 +41,8 @@ pub use qa::{
     SourceCitation, AGENTIC_MAX_STEPS_CAP,
 };
 pub use summarize::{
-    cleanup_chunks_for_mode, enqueue_subtree, process_queue_item_with_passes, requeue_subtree,
-    summarize_subtree_sync, QueueOutcome,
+    cleanup_chunks_for_mode, enqueue_subtree, process_queue_item_with_passes,
+    process_queue_item_with_read_path, requeue_subtree, summarize_subtree_sync, QueueOutcome,
 };
 pub use worker::run_worker;
 
