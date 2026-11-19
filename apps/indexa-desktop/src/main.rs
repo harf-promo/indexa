@@ -350,6 +350,7 @@ async fn install_update(app: tauri::AppHandle, update: tauri_plugin_updater::Upd
     // window forward so it's visible. The webview replies via POST /api/update/control, waking
     // `wait_for_update_command` below. (The webview loads a remote URL with no Tauri IPC, so both
     // directions are bridged through the embedded server.)
+    indexa_web::begin_update_prompt();
     report_update_progress(UpdateProgress::available(version.clone(), notes));
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();

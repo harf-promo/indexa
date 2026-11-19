@@ -14,6 +14,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
 use crate::dto::{err_json, EstimateResponse, JobListEntry, JobPathQuery, JobStartResponse};
+use crate::handlers::path_policy::canonical_indexed_path;
 use crate::jobs::{JobEvent, JobHandle, JobStatus, Jobs};
 use crate::jobs_exec::{
     run_deep_phase_standalone, run_index_job, run_scan_phase_standalone, run_summarize_phase,
@@ -80,13 +81,17 @@ pub(crate) async fn api_job_scan(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
 ) -> Response {
-    let (id, handle) = match try_register_job(&s.jobs, "scan", q.path.clone()).await {
+    let path = match canonical_indexed_path(&s, &q.path).await {
+        Ok(path) => path,
+        Err(err) => return err.into_response(),
+    };
+    let (id, handle) = match try_register_job(&s.jobs, "scan", path.clone()).await {
         Some(job) => job,
         None => return too_many_jobs(),
     };
     let state = s.clone();
     tokio::spawn(async move {
-        run_scan_phase_standalone(&state, &q.path, &handle).await;
+        run_scan_phase_standalone(&state, &path, &handle).await;
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
     Json(JobStartResponse { job_id: id }).into_response()
@@ -96,13 +101,17 @@ pub(crate) async fn api_job_deep(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
 ) -> Response {
-    let (id, handle) = match try_register_job(&s.jobs, "deep", q.path.clone()).await {
+    let path = match canonical_indexed_path(&s, &q.path).await {
+        Ok(path) => path,
+        Err(err) => return err.into_response(),
+    };
+    let (id, handle) = match try_register_job(&s.jobs, "deep", path.clone()).await {
         Some(job) => job,
         None => return too_many_jobs(),
     };
     let state = s.clone();
     tokio::spawn(async move {
-        run_deep_phase_standalone(&state, &q.path, &handle).await;
+        run_deep_phase_standalone(&state, &path, &handle).await;
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
     Json(JobStartResponse { job_id: id }).into_response()
@@ -112,14 +121,18 @@ pub(crate) async fn api_job_summarize(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
 ) -> Response {
-    let (id, handle) = match try_register_job(&s.jobs, "summarize", q.path.clone()).await {
+    let path = match canonical_indexed_path(&s, &q.path).await {
+        Ok(path) => path,
+        Err(err) => return err.into_response(),
+    };
+    let (id, handle) = match try_register_job(&s.jobs, "summarize", path.clone()).await {
         Some(job) => job,
         None => return too_many_jobs(),
     };
     let model_override = model_override_from(&q, s.config.describer.num_ctx);
     let state = s.clone();
     tokio::spawn(async move {
-        run_summarize_phase(&state, &q.path, q.passes, &handle, model_override, q.force).await;
+        run_summarize_phase(&state, &path, q.passes, &handle, model_override, q.force).await;
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
     Json(JobStartResponse { job_id: id }).into_response()
@@ -129,7 +142,11 @@ pub(crate) async fn api_job_index(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
 ) -> Response {
-    let (id, handle) = match try_register_job(&s.jobs, "index", q.path.clone()).await {
+    let path = match canonical_indexed_path(&s, &q.path).await {
+        Ok(path) => path,
+        Err(err) => return err.into_response(),
+    };
+    let (id, handle) = match try_register_job(&s.jobs, "index", path.clone()).await {
         Some(job) => job,
         None => return too_many_jobs(),
     };
@@ -137,7 +154,7 @@ pub(crate) async fn api_job_index(
     let state = s.clone();
     tokio::spawn(async move {
         let id = handle.id;
-        run_index_job(state.clone(), q.path, handle, model_override).await;
+        run_index_job(state.clone(), path, handle, model_override).await;
         schedule_cleanup(state.jobs.clone(), id);
     });
     Json(JobStartResponse { job_id: id }).into_response()
@@ -148,7 +165,10 @@ pub(crate) async fn api_job_index(
 pub(crate) async fn api_job_estimate(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Err(err) = canonical_indexed_path(&s, &q.path).await {
+        return err.into_response();
+    }
     let cfg = &s.config.describer;
     let headroom = s.config.resource.effective_headroom_bytes();
     let sample = sample_memory_once();
@@ -199,6 +219,7 @@ pub(crate) async fn api_job_estimate(
         chunk_count,
         queue_pending,
     })
+    .into_response()
 }
 
 pub(crate) async fn api_jobs_list(State(s): State<AppState>) -> impl IntoResponse {

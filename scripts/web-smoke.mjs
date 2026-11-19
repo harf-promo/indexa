@@ -18,9 +18,10 @@
 // tree shows the fixture root, search round-trips, zero console errors.
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 
 const INDEXA_BIN = process.env.INDEXA_BIN;
 const CHROME_BIN = process.env.CHROME_BIN;
@@ -42,6 +43,69 @@ function check(name, ok, detail) {
   results.push({ name, ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}: ${name}${detail ? ` — ${detail}` : ''}`);
 }
+
+// Exercise the LAN-token bootstrap independently from the loopback smoke server: the mock
+// captures the actual fetch/EventSource arguments and proves URL cleanup plus origin isolation.
+function checkLanAuthBootstrap() {
+  const fetchCalls = [];
+  const eventSourceUrls = [];
+  const values = new Map();
+  const location = {
+    href: 'http://indexa.test/?token=smoke-secret&keep=1#section',
+    get origin() { return new URL(this.href).origin; },
+  };
+  const context = {
+    URL,
+    Headers,
+    location,
+    history: {
+      state: null,
+      replaceState(_state, _title, url) { location.href = new URL(url, location.href).href; },
+    },
+    localStorage: {
+      setItem(key, value) { values.set(key, value); },
+      getItem(key) { return values.get(key) || null; },
+    },
+    window: {
+      fetch(input, init) { fetchCalls.push({ input, init }); return Promise.resolve(); },
+      EventSource: function MockEventSource(url) { eventSourceUrls.push(String(url)); },
+    },
+  };
+  runInNewContext(readFileSync(new URL('../crates/web/assets/ui/js/00-auth-bootstrap.js', import.meta.url), 'utf8'), context);
+  context.window.fetch('/api/stats');
+  context.window.fetch('https://evil.test/page?next=/api/stats');
+  context.window.fetch('http://indexa.test/not-api?next=/api/stats');
+  context.window.fetch(new URL('/api/stats?from=url-object', location.href));
+  context.window.fetch({
+    url: 'http://indexa.test/api/stats?from=request-object',
+    headers: new Headers({ 'X-Smoke': 'preserved' }),
+  });
+  new context.window.EventSource('/api/update/progress/stream');
+  new context.window.EventSource('https://evil.test/api/events');
+
+  const sameOriginHeaders = new Headers(fetchCalls[0].init.headers);
+  const hostileHeaders = new Headers(fetchCalls[1].init?.headers || {});
+  const queryOnlyHeaders = new Headers(fetchCalls[2].init?.headers || {});
+  const urlObjectHeaders = new Headers(fetchCalls[3].init?.headers || {});
+  const requestObjectHeaders = new Headers(fetchCalls[4].init?.headers || {});
+  const sameOriginStream = new URL(eventSourceUrls[0], location.href);
+  check('LAN token is removed from the address bar after bootstrap',
+    !new URL(location.href).searchParams.has('token') && new URL(location.href).searchParams.get('keep') === '1');
+  check('LAN token is stored for same-origin API calls',
+    values.get('indexa_web_token') === 'smoke-secret' && sameOriginHeaders.get('Authorization') === 'Bearer smoke-secret');
+  check('LAN token is not attached to cross-origin or query-only API lookalikes',
+    !hostileHeaders.has('Authorization') && !queryOnlyHeaders.has('Authorization'));
+  check('LAN token is attached when fetch receives a same-origin URL object',
+    urlObjectHeaders.get('Authorization') === 'Bearer smoke-secret');
+  check('LAN token preserves Request headers when fetch receives a Request object',
+    requestObjectHeaders.get('Authorization') === 'Bearer smoke-secret' &&
+      requestObjectHeaders.get('X-Smoke') === 'preserved');
+  check('LAN token is attached to same-origin EventSource and omitted cross-origin',
+    sameOriginStream.searchParams.get('token') === 'smoke-secret' &&
+    eventSourceUrls[1] === 'https://evil.test/api/events');
+}
+
+checkLanAuthBootstrap();
 
 // ── Throwaway HOME + fixture tree ─────────────────────────────────────────────
 // Isolated HOME keeps the real index/config untouched: indexa resolves its
@@ -298,8 +362,18 @@ try {
     });
   });
   loaded.catch(() => {});
-  await cdp.send('Page.navigate', { url: `${base}/` });
+  await cdp.send('Page.navigate', { url: `${base}/?token=smoke-secret&keep=1` });
   await loaded;
+
+  const bootstrappedAuth = await cdp.eval(`({
+    url: location.href,
+    token: localStorage.getItem('indexa_web_token'),
+  })`);
+  check('browser removes the LAN token from the URL and retains it for API calls',
+    !new URL(bootstrappedAuth.url).searchParams.has('token') &&
+      new URL(bootstrappedAuth.url).searchParams.get('keep') === '1' &&
+      bootstrappedAuth.token === 'smoke-secret',
+    `url=${bootstrappedAuth.url}`);
 
   // Check 1 — app shell loads: title + #stats exists.
   const title = await cdp.eval('document.title');
@@ -377,6 +451,12 @@ try {
   // Check 6 — zero console errors across the whole session.
   check('no console errors during session', consoleErrors.length === 0,
     consoleErrors.length ? consoleErrors.slice(0, 5).join(' | ') : undefined);
+
+  if (process.env.INDEXA_SCREENSHOT_PATH) {
+    const { data } = await cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+    writeFileSync(process.env.INDEXA_SCREENSHOT_PATH, Buffer.from(data, 'base64'));
+    check('browser preview screenshot captured', true, process.env.INDEXA_SCREENSHOT_PATH);
+  }
 
   cdp.ws.close();
 

@@ -6,7 +6,10 @@
 //! `install_update` task — waiting on [`wait_for_command`] — wakes and proceeds. Same process, so a
 //! process-global `watch<Option<UpdateCommand>>` carries the signal (mirrors `update_progress`).
 
-use std::sync::LazyLock;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    LazyLock,
+};
 use tokio::sync::watch;
 
 /// What the user chose in the in-app "update available" modal.
@@ -18,30 +21,70 @@ pub enum UpdateCommand {
     Dismiss,
 }
 
-type ControlChannel = (
-    watch::Sender<Option<UpdateCommand>>,
-    watch::Receiver<Option<UpdateCommand>>,
-);
-static CHANNEL: LazyLock<ControlChannel> = LazyLock::new(|| watch::channel(None));
-
-/// Publish the user's choice from the webview (called by the `/api/update/control` handler).
-pub fn send_command(cmd: UpdateCommand) {
-    let _ = CHANNEL.0.send(Some(cmd));
+struct ControlChannel {
+    tx: watch::Sender<Option<UpdateCommand>>,
+    rx: watch::Receiver<Option<UpdateCommand>>,
+    pending: AtomicBool,
 }
 
-/// Await the next user choice, then reset the channel to `None` so a subsequent call blocks again.
-///
-/// The desktop's update task calls this once per "update available" cycle. Returns when the value
-/// transitions to `Some(cmd)`; the reset-to-`None` is what makes the next cycle wait afresh (without
-/// it, a stale command would resolve immediately).
+impl ControlChannel {
+    fn new() -> Self {
+        let (tx, rx) = watch::channel(None);
+        Self {
+            tx,
+            rx,
+            pending: AtomicBool::new(false),
+        }
+    }
+
+    fn begin_prompt(&self) {
+        let _ = self.tx.send(None);
+        self.pending.store(true, Ordering::Release);
+    }
+
+    fn send(&self, cmd: UpdateCommand) -> bool {
+        if self
+            .pending
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        self.tx.send(Some(cmd)).is_ok()
+    }
+}
+
+static CHANNEL: LazyLock<ControlChannel> = LazyLock::new(ControlChannel::new);
+
+struct PendingPromptGuard;
+
+impl Drop for PendingPromptGuard {
+    fn drop(&mut self) {
+        CHANNEL.pending.store(false, Ordering::Release);
+        let _ = CHANNEL.tx.send(None);
+    }
+}
+
+/// Mark the update-choice prompt active before publishing it to the webview.
+pub fn begin_update_prompt() {
+    CHANNEL.begin_prompt();
+}
+
+/// Publish the user's choice from the webview (called by the `/api/update/control` handler).
+pub fn send_command(cmd: UpdateCommand) -> bool {
+    CHANNEL.send(cmd)
+}
+
+/// Await the user choice for the active prompt, then reset the channel to `None`.
 pub async fn wait_for_command() -> UpdateCommand {
-    let mut rx = CHANNEL.1.clone();
+    let _pending_guard = PendingPromptGuard;
+    let mut rx = CHANNEL.rx.clone();
     loop {
         // Copy the value out and DROP the borrow guard before sending — holding a watch read
         // guard across `send` on the same task would deadlock (send needs the write lock).
         let current = *rx.borrow_and_update();
         if let Some(cmd) = current {
-            let _ = CHANNEL.0.send(None);
+            let _ = CHANNEL.tx.send(None);
             return cmd;
         }
         if rx.changed().await.is_err() {
@@ -59,11 +102,41 @@ mod tests {
     #[tokio::test]
     async fn wait_resolves_to_sent_command_then_resets() {
         // Send before waiting — wait_for_command should pick it up immediately.
-        send_command(UpdateCommand::Start);
+        begin_update_prompt();
+        assert!(send_command(UpdateCommand::Start));
         let cmd = wait_for_command().await;
         assert_eq!(cmd, UpdateCommand::Start);
         // After consuming, the channel is reset to None (a fresh wait would block) — verify the
         // latest value is None so a stale Start can't re-trigger.
-        assert!(CHANNEL.1.borrow().is_none());
+        assert!(CHANNEL.rx.borrow().is_none());
+    }
+
+    #[tokio::test]
+    async fn command_without_pending_prompt_is_dropped() {
+        let channel = ControlChannel::new();
+        assert!(!channel.send(UpdateCommand::Start));
+        channel.begin_prompt();
+        assert!(
+            channel.rx.borrow().is_none(),
+            "stale command must be cleared"
+        );
+        let mut rx = channel.rx.clone();
+        let waiting = tokio::spawn(async move {
+            loop {
+                if let Some(cmd) = *rx.borrow_and_update() {
+                    break cmd;
+                }
+                if rx.changed().await.is_err() {
+                    break UpdateCommand::Dismiss;
+                }
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "the rejected stale command must not answer the prompt"
+        );
+        assert!(channel.send(UpdateCommand::Dismiss));
+        assert_eq!(waiting.await.unwrap(), UpdateCommand::Dismiss);
     }
 }

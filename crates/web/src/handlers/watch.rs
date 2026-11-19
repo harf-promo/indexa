@@ -23,6 +23,7 @@ use std::sync::{atomic::AtomicBool, atomic::AtomicU64, atomic::Ordering, Arc};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::dto::{err_json, require_path, PathQuery};
+use crate::handlers::path_policy::canonical_indexed_path;
 use crate::{AppState, WatchTaskInfo};
 
 #[derive(Serialize)]
@@ -31,6 +32,22 @@ pub(crate) struct WatchStatusEntry {
     pub(crate) watching: bool,
     pub(crate) events_count: u64,
     pub(crate) started_at: u64,
+}
+
+fn remove_session_if_current(
+    sessions: &mut std::collections::HashMap<String, WatchTaskInfo>,
+    path: &str,
+    session_id: uuid::Uuid,
+) -> bool {
+    if sessions
+        .get(path)
+        .is_some_and(|info| info.session_id == session_id)
+    {
+        sessions.remove(path);
+        true
+    } else {
+        false
+    }
 }
 
 pub(crate) async fn api_watch_status(State(state): State<AppState>) -> Response {
@@ -91,19 +108,14 @@ pub(crate) async fn api_watch_start(
     State(state): State<AppState>,
     Query(params): Query<PathQuery>,
 ) -> Response {
-    let path = match require_path(params) {
+    let requested = match require_path(params) {
         Ok(p) => p,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
-
-    // Reject absurdly long paths before they hit the filesystem watcher. 4096 is the common
-    // PATH_MAX; a real watch root is far shorter, so anything past this is malformed input.
-    if path.len() > 4096 {
-        return err_json(
-            StatusCode::BAD_REQUEST,
-            "watch path is too long (max 4096 bytes)",
-        );
-    }
+    let path = match canonical_indexed_path(&state, &requested).await {
+        Ok(path) => path,
+        Err(err) => return err.into_response(),
+    };
 
     let mut sessions = state.watch_sessions.lock().await;
     if sessions.contains_key(&path) {
@@ -153,6 +165,7 @@ pub(crate) async fn api_watch_start(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    let session_id = uuid::Uuid::new_v4();
     let task = tokio::spawn(async move {
         let session = match watcher::watch(&[&watch_root], &WatcherConfig::default()) {
             Ok(s) => s,
@@ -293,6 +306,7 @@ pub(crate) async fn api_watch_start(
     sessions.insert(
         path.clone(),
         WatchTaskInfo {
+            session_id,
             abort,
             stop,
             events_count,
@@ -308,8 +322,9 @@ pub(crate) async fn api_watch_start(
         let cleanup_path = path.clone();
         tokio::spawn(async move {
             let _ = task.await; // await completion/panic/abort
-            sessions_weak.lock().await.remove(&cleanup_path);
-            tracing::debug!("watch: session cleaned up for {cleanup_path}");
+            let mut sessions = sessions_weak.lock().await;
+            remove_session_if_current(&mut sessions, &cleanup_path, session_id);
+            tracing::debug!("watch: session cleanup checked for {cleanup_path}");
         });
     }
 
@@ -320,10 +335,15 @@ pub(crate) async fn api_watch_stop(
     State(state): State<AppState>,
     Query(params): Query<PathQuery>,
 ) -> Response {
-    let path = match require_path(params) {
+    let requested = match require_path(params) {
         Ok(p) => p,
         Err(resp) => return resp,
     };
+    // Session keys use canonical paths; this also lets a caller stop the same watch through a
+    // lexical `.`/`..` spelling. A removed root can still be stopped by its original path.
+    let path = std::fs::canonicalize(&requested)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or(requested);
 
     let mut sessions = state.watch_sessions.lock().await;
     if let Some(info) = sessions.remove(&path) {
@@ -344,6 +364,42 @@ pub(crate) async fn api_watch_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn late_stop_cleanup_keeps_immediately_restarted_session() {
+        fn info(session_id: uuid::Uuid) -> (WatchTaskInfo, tokio::task::JoinHandle<()>) {
+            let task = tokio::spawn(std::future::pending::<()>());
+            let info = WatchTaskInfo {
+                session_id,
+                abort: task.abort_handle(),
+                stop: Arc::new(AtomicBool::new(false)),
+                events_count: Arc::new(AtomicU64::new(0)),
+                started_at: 0,
+            };
+            (info, task)
+        }
+
+        let path = "/indexed/root".to_owned();
+        let old_id = uuid::Uuid::new_v4();
+        let new_id = uuid::Uuid::new_v4();
+        let (old, old_task) = info(old_id);
+        let (new, new_task) = info(new_id);
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert(path.clone(), old);
+
+        // `stop` removes the old map entry, and the next `start` inserts the replacement before
+        // the old watchdog necessarily wakes from its aborted wrapper.
+        let stopped = sessions.remove(&path).unwrap();
+        stopped.stop.store(true, Ordering::Relaxed);
+        stopped.abort.abort();
+        sessions.insert(path.clone(), new);
+
+        assert!(!remove_session_if_current(&mut sessions, &path, old_id));
+        assert_eq!(sessions.get(&path).unwrap().session_id, new_id);
+        sessions.remove(&path).unwrap().abort.abort();
+        old_task.abort();
+        new_task.abort();
+    }
 
     fn defines(name: &str, range: (usize, usize)) -> indexa_parsers::types::Edge {
         indexa_parsers::types::Edge {

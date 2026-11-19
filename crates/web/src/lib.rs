@@ -18,7 +18,9 @@ mod jobs_exec;
 mod update_control;
 mod update_progress;
 
-pub use update_control::{wait_for_command as wait_for_update_command, UpdateCommand};
+pub use update_control::{
+    begin_update_prompt, wait_for_command as wait_for_update_command, UpdateCommand,
+};
 pub use update_progress::{report_update_progress, UpdateProgress};
 
 use anyhow::Result;
@@ -102,6 +104,8 @@ pub struct AppState {
 
 /// Info about a running watch task so it can be listed and aborted via the web API.
 pub(crate) struct WatchTaskInfo {
+    /// Unique session generation; stale watchdog cleanup must not remove a replacement session.
+    pub(crate) session_id: uuid::Uuid,
     /// Abort signal for the outer async wrapper. Load-bearing only to make the wrapper's
     /// `.await` return promptly (so the watchdog cleanup fires) — it CANNOT cancel the inner
     /// `spawn_blocking` watch loop, which is why `stop` below exists.
@@ -346,27 +350,24 @@ pub async fn serve_with_config_path(
         Some(t) => guard::GuardConfig::lan_origin(t.clone(), port, bound_origin),
         None => guard::GuardConfig::loopback_origin(bound_origin),
     };
-    let app = build_router(state, port).layer(axum::middleware::from_fn_with_state(
-        guard_cfg,
-        guard::request_guard,
-    ));
+    let app = build_router_with_guard(state, port, guard_cfg);
 
-    let addr = format!("{host}:{port}");
+    let addr = bind_address(host, port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("Indexa web UI listening on http://{addr}");
 
     if loopback {
         println!("Open http://localhost:{port} in your browser. Press Ctrl-C to stop.");
     } else {
-        // LAN mode: print all non-loopback IPv4 addresses so the user knows what to connect to.
+        // LAN mode: print all non-loopback IPv4/IPv6 addresses so the user knows what to connect to.
         println!("Open http://localhost:{port} in your browser. Press Ctrl-C to stop.");
         println!("⚠  LAN mode active — also accessible at:");
         if let Ok(ifaces) = if_addrs::get_if_addrs() {
             // crate: if-addrs
             for iface in ifaces {
                 let ip = iface.ip();
-                if !ip.is_loopback() && ip.is_ipv4() {
-                    println!("   http://{ip}:{port}");
+                if !ip.is_loopback() {
+                    println!("   http://{}", std::net::SocketAddr::new(ip, port));
                 }
             }
         }
@@ -374,7 +375,8 @@ pub async fn serve_with_config_path(
             // The private `/api/*` routes require this token over LAN. The web UI picks it up from
             // the `?token=` query on first load; append it when sharing the URL.
             println!("   Access token (required for LAN API access):");
-            println!("      open  http://<ip>:{port}/?token={t}");
+            println!("      open  http://<ipv4-address>:{port}/?token={t}");
+            println!("      open  http://[<ipv6-address>]:{port}/?token={t}");
             println!("      or set header  Authorization: Bearer {t}");
         }
         println!("   Ensure your network is trusted before sharing this URL.");
@@ -452,7 +454,16 @@ async fn add_security_headers(
 /// `port` is used only to lock the CORS allow-origin to `http://localhost:<port>`.
 /// Extracted from [`serve`] so integration tests can drive handlers through the real
 /// router (routing + extractors + layers) via `tower::ServiceExt::oneshot`.
+#[cfg(test)]
 pub(crate) fn build_router(state: AppState, port: u16) -> Router {
+    build_router_with_guard(
+        state,
+        port,
+        guard::GuardConfig::loopback_origin(format!("http://localhost:{port}")),
+    )
+}
+
+fn build_router_with_guard(state: AppState, port: u16, guard_cfg: guard::GuardConfig) -> Router {
     // Restrict CORS to localhost only — prevents drive-by sites from reading the
     // user's private index via cross-origin requests to the local server.
     let origin = format!("http://localhost:{port}")
@@ -608,6 +619,21 @@ pub(crate) fn build_router(state: AppState, port: u16) -> Router {
                 .allow_headers([header::CONTENT_TYPE]),
         )
         .layer(axum::middleware::from_fn(add_security_headers))
+        .layer(axum::middleware::from_fn_with_state(
+            guard_cfg,
+            guard::request_guard,
+        ))
+}
+
+fn bind_address(host: &str, port: u16) -> String {
+    let unbracketed = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    match unbracketed.parse::<std::net::IpAddr>() {
+        Ok(ip) => std::net::SocketAddr::new(ip, port).to_string(),
+        Err(_) => format!("{host}:{port}"),
+    }
 }
 
 #[cfg(test)]
@@ -1187,6 +1213,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
+                    .header("origin", "http://localhost:7620")
                     .uri("/api/review/answer")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -1245,6 +1272,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
+                    .header("origin", "http://localhost:7620")
                     .uri("/api/review/revert")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -1307,6 +1335,7 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .method("POST")
+                        .header("origin", "http://localhost:7620")
                         .uri("/api/review/dismiss-evidence")
                         .header("content-type", "application/json")
                         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -1366,6 +1395,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
+                    .header("origin", "http://localhost:7620")
                     .uri("/api/keys")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -2016,6 +2046,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
+                    .header("origin", "http://localhost:7620")
                     .uri(uri)
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -2567,6 +2598,198 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[tokio::test]
+    async fn job_and_watch_paths_are_confined_to_indexed_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("indexed");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .upsert_entries(&[entry(root.to_str().unwrap(), EntryKind::Dir)])
+            .unwrap();
+        let child = root.join("child");
+        std::fs::create_dir(&child).unwrap();
+        let app = build_router(state_with(store), 7620);
+
+        async fn post_status(app: Router, uri: &str) -> StatusCode {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .header("origin", "http://localhost:7620")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+
+        let (inside_status, _) = get_json(
+            app.clone(),
+            &format!("/api/jobs/estimate?path={}", child.display()),
+        )
+        .await;
+        assert_eq!(
+            inside_status,
+            StatusCode::OK,
+            "indexed-root descendants remain usable"
+        );
+
+        let outside_uri = format!("/api/jobs/scan?path={}", outside.display());
+        assert_eq!(
+            post_status(app.clone(), &outside_uri).await,
+            StatusCode::FORBIDDEN,
+            "an unindexed path must not start a job"
+        );
+        let traversal = root.join("..").join("outside");
+        let traversal_uri = format!("/api/jobs/deep?path={}", traversal.display());
+        assert_eq!(
+            post_status(app.clone(), &traversal_uri).await,
+            StatusCode::FORBIDDEN,
+            ".. must be checked after canonicalization"
+        );
+
+        #[cfg(unix)]
+        {
+            let escape = root.join("escape");
+            std::os::unix::fs::symlink(&outside, &escape).unwrap();
+            let watch_uri = format!("/api/watch/start?path={}", escape.display());
+            assert_eq!(
+                post_status(app, &watch_uri).await,
+                StatusCode::FORBIDDEN,
+                "a symlink that leaves the indexed root must not start a watcher"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn build_router_enforces_origin_guard_including_invalid_utf8() {
+        use axum::http::HeaderValue;
+
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let invalid = HeaderValue::from_bytes(&[0xff]).unwrap();
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/update/control")
+                    .header("host", "localhost:7620")
+                    .header("origin", invalid)
+                    .header("referer", "http://localhost:7620/")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        let denied_body = axum::body::to_bytes(denied.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&denied_body).contains("cross-origin state-changing"));
+
+        let same_origin = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/update/control")
+                    .header("host", "localhost:7620")
+                    .header("origin", "http://localhost:7620")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"action":"start"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(same_origin.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(same_origin.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("only available inside the desktop app"));
+    }
+
+    #[tokio::test]
+    async fn build_router_enforces_host_fetch_metadata_and_mutation_origin() {
+        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let get = |host: &str, site: Option<&str>| {
+            let mut request = Request::builder().uri("/api/stats").header("host", host);
+            if let Some(site) = site {
+                request = request.header("sec-fetch-site", site);
+            }
+            request.body(Body::empty()).unwrap()
+        };
+        for request in [
+            get("rebound.attacker.test", Some("same-origin")),
+            get("localhost:7620", Some("cross-site")),
+        ] {
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        assert_eq!(
+            app.clone()
+                .oneshot(get("localhost:7620", Some("same-origin")))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+
+        let no_origin = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/update/control")
+                    .header("host", "localhost:7620")
+                    .body(Body::from(r#"{"action":"start"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(no_origin.status(), StatusCode::FORBIDDEN);
+        let cross_origin = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/update/control")
+                    .header("host", "localhost:7620")
+                    .header("origin", "http://attacker.test")
+                    .body(Body::from(r#"{"action":"start"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cross_origin.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn ipv6_bind_addresses_are_bracketed_for_binding_and_urls() {
+        assert_eq!(bind_address("::", 7620), "[::]:7620");
+        assert_eq!(bind_address("[2001:db8::1]", 7620), "[2001:db8::1]:7620");
+        assert_eq!(bind_address("0.0.0.0", 7620), "0.0.0.0:7620");
+        assert!("http://[::]:7620".parse::<axum::http::Uri>().is_ok());
+        let url = format!(
+            "http://{}",
+            std::net::SocketAddr::new("2001:db8::1".parse().unwrap(), 7620)
+        );
+        assert_eq!(url, "http://[2001:db8::1]:7620");
+    }
+
+    #[tokio::test]
+    async fn ipv6_wildcard_address_is_accepted_by_tokio_listener() {
+        let listener = tokio::net::TcpListener::bind(bind_address("::", 0))
+            .await
+            .expect("the IPv6 wildcard address must bind");
+        let address = listener.local_addr().unwrap();
+        assert!(address.ip().is_ipv6());
+        assert!(address.ip().is_unspecified());
     }
 
     #[tokio::test]

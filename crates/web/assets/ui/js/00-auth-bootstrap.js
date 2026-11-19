@@ -4,8 +4,13 @@
 // EventSource (which cannot set headers). Dependency-free, runs before any API call.
 (function () {
   "use strict";
+  var pageUrl = new URL(location.href);
+  var fromUrl = pageUrl.searchParams.get("token");
+  if (pageUrl.searchParams.has("token")) {
+    pageUrl.searchParams.delete("token");
+    history.replaceState(history.state, "", pageUrl.pathname + pageUrl.search + pageUrl.hash);
+  }
   try {
-    var fromUrl = new URLSearchParams(location.search).get("token");
     if (fromUrl) localStorage.setItem("indexa_web_token", fromUrl);
   } catch (e) {}
   var tok = null;
@@ -14,16 +19,22 @@
   } catch (e) {}
   if (!tok) return; // localhost / no token → leave fetch + EventSource untouched
 
-  var isApi = function (u) {
-    return typeof u === "string" && u.indexOf("/api/") !== -1;
+  var sameOriginApiUrl = function (u) {
+    var raw = typeof u === "string" ? u : (u && (typeof u.href === "string" ? u.href : u.url));
+    if (typeof raw !== "string") return null;
+    try {
+      var parsed = new URL(raw, location.href);
+      return parsed.origin === location.origin && parsed.pathname.startsWith("/api/") ? parsed : null;
+    } catch (e) {
+      return null;
+    }
   };
 
   var _fetch = window.fetch;
   window.fetch = function (input, init) {
     init = init || {};
-    var url = typeof input === "string" ? input : (input && input.url) || "";
-    if (isApi(url)) {
-      var h = new Headers(init.headers || {});
+    if (sameOriginApiUrl(input)) {
+      var h = new Headers(init.headers || (input && input.headers) || {});
       if (!h.has("Authorization")) h.set("Authorization", "Bearer " + tok);
       init.headers = h;
     }
@@ -33,8 +44,10 @@
   if (window.EventSource) {
     var _ES = window.EventSource;
     var Wrapped = function (url, cfg) {
-      if (isApi(url) && url.indexOf("token=") === -1) {
-        url += (url.indexOf("?") === -1 ? "?" : "&") + "token=" + encodeURIComponent(tok);
+      var parsed = sameOriginApiUrl(url);
+      if (parsed && !parsed.searchParams.has("token")) {
+        parsed.searchParams.set("token", tok);
+        url = parsed.href;
       }
       return new _ES(url, cfg);
     };
