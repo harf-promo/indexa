@@ -2,7 +2,9 @@
 //! plus their finalization and watchdog helpers. Spawned by the `api_job_*`
 //! handlers; no axum routing lives here.
 
-use crate::handlers::path_policy::{confine_walk_entries, ValidatedIndexedPath};
+use crate::handlers::path_policy::{
+    confine_walk_entries, ValidatedIndexedPath, ValidatedWalkFilter,
+};
 use crate::jobs::{broadcast_only, push, JobEvent, JobHandle, JobStatus, Jobs};
 use crate::AppState;
 use indexa_core::{
@@ -10,8 +12,8 @@ use indexa_core::{
     walker::{walk, WalkConfig},
 };
 use indexa_query::{
-    cleanup_chunks_for_mode, enqueue_subtree, process_queue_item_with_passes, requeue_subtree,
-    QueueOutcome, MAX_DIR_DEFERS,
+    cleanup_chunks_for_mode, enqueue_subtree, process_queue_item_with_passes,
+    process_queue_item_with_read_path, requeue_subtree, QueueOutcome, MAX_DIR_DEFERS,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -142,14 +144,10 @@ pub(crate) async fn walk_for_job(
             }
             let mut safe_cfg = walk_cfg.clone();
             safe_cfg.sniff_binary = false;
-            let before_descend = validated_path.clone();
+            let filter = ValidatedWalkFilter::new(validated_path.clone(), safe_cfg.clone());
             let entries =
                 indexa_core::walker::walk_filtered(&pb, &safe_cfg, move |path, is_dir| {
-                    if is_dir {
-                        before_descend.directory_is_beneath_root(path)
-                    } else {
-                        before_descend.open_file(path).is_ok()
-                    }
+                    filter.allows(path, is_dir)
                 })?;
             Ok(confine_walk_entries(
                 entries,
@@ -442,7 +440,7 @@ pub(crate) async fn run_summarize_phase(
                     },
                 );
             };
-            process_queue_item_with_passes(
+            process_summarize_item(
                 &mut job_store,
                 describer.as_ref(),
                 embedder.as_ref(),
@@ -451,10 +449,11 @@ pub(crate) async fn run_summarize_phase(
                 passes_override,
                 Some(&mut on_frag),
                 force,
+                validated_path.as_ref(),
             )
             .await
         } else {
-            process_queue_item_with_passes(
+            process_summarize_item(
                 &mut job_store,
                 describer.as_ref(),
                 embedder.as_ref(),
@@ -463,6 +462,7 @@ pub(crate) async fn run_summarize_phase(
                 passes_override,
                 None,
                 force,
+                validated_path.as_ref(),
             )
             .await
         };
@@ -582,6 +582,49 @@ pub(crate) async fn run_summarize_phase(
         push(handle, JobEvent::Done { summary });
         handle.set_status(JobStatus::Done);
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_summarize_item(
+    store: &mut indexa_core::store::Store,
+    describer: &dyn indexa_llm::Describer,
+    embedder: &dyn indexa_embed::Embedder,
+    item: &indexa_core::store::QueueItem,
+    cfg: &indexa_core::config::DescriberConfig,
+    passes_override: Option<u32>,
+    on_fragment: Option<&mut (dyn FnMut(String) + Send)>,
+    force_rollup: bool,
+    validated_path: Option<&ValidatedIndexedPath>,
+) -> anyhow::Result<QueueOutcome> {
+    if item.kind == "file" {
+        if let Some(validated_path) = validated_path {
+            let (_snapshot_dir, snapshot, _, _) =
+                validated_path.snapshot_file(std::path::Path::new(&item.path), 0)?;
+            return process_queue_item_with_read_path(
+                store,
+                describer,
+                embedder,
+                item,
+                cfg,
+                passes_override,
+                on_fragment,
+                force_rollup,
+                &snapshot,
+            )
+            .await;
+        }
+    }
+    process_queue_item_with_passes(
+        store,
+        describer,
+        embedder,
+        item,
+        cfg,
+        passes_override,
+        on_fragment,
+        force_rollup,
+    )
+    .await
 }
 
 #[cfg(test)]

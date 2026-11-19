@@ -1,7 +1,9 @@
 //! Web scans use a dedicated connection so filesystem work never holds the API store mutex.
 
 use super::{finalize_failed, orphan_prune_message, scan_walk_config};
-use crate::handlers::path_policy::{confine_walk_entries, ValidatedIndexedPath};
+use crate::handlers::path_policy::{
+    confine_walk_entries, ValidatedIndexedPath, ValidatedWalkFilter,
+};
 use crate::jobs::{push, JobEvent, JobHandle};
 use crate::AppState;
 use indexa_core::{
@@ -42,13 +44,9 @@ pub(super) async fn run_scan_phase(
                 let validator = validated_path.clone();
                 move |root, cfg| match validator {
                     Some(validated) => {
-                        let before_descend = validated.clone();
+                        let filter = ValidatedWalkFilter::new(validated, cfg.clone());
                         indexa_core::walker::walk_filtered(root, cfg, move |path, is_dir| {
-                            if is_dir {
-                                before_descend.directory_is_beneath_root(path)
-                            } else {
-                                before_descend.open_file(path).is_ok()
-                            }
+                            filter.allows(path, is_dir)
                         })
                     }
                     None => walk(root, cfg),
@@ -248,6 +246,10 @@ mod tests {
         let handle = Arc::new(JobHandle::new("scan", root.to_string_lossy()));
         let walked = std::sync::Arc::new(AtomicBool::new(false));
         let walked_in_closure = walked.clone();
+        let target_for_swap = target.clone();
+        let outside_for_swap = outside.clone();
+        let root_for_swap = root.clone();
+        let validated_for_walk = validated.clone();
         let result = scan_with_walk(
             &mut store,
             &root,
@@ -255,13 +257,17 @@ mod tests {
             50,
             &handle,
             Some(&validated),
-            |path, cfg| {
+            move |path, cfg| {
                 walked_in_closure.store(true, Ordering::Relaxed);
-                let entries = walk(path, cfg)?;
+                let filter = ValidatedWalkFilter::new(validated_for_walk, cfg.clone());
+                let entries =
+                    indexa_core::walker::walk_filtered(path, cfg, move |path, is_dir| {
+                        filter.allows(path, is_dir)
+                    })?;
                 // Deterministic race hook: mutate the directory after the walk lists entries but
                 // before scan opens and validates those entries.
-                std::fs::rename(&target, root.join("moved")).unwrap();
-                symlink(&outside, &target).unwrap();
+                std::fs::rename(&target_for_swap, root_for_swap.join("moved")).unwrap();
+                symlink(&outside_for_swap, &target_for_swap).unwrap();
                 Ok(entries)
             },
         );

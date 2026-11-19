@@ -414,15 +414,25 @@ pub fn walk_streaming(
     cfg: &WalkConfig,
     on_batch: impl FnMut(Vec<Entry>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    walk_streaming_filtered(root, cfg, std::sync::Arc::new(|_, _| true), on_batch)
+    walk_streaming_internal(root, cfg, std::sync::Arc::new(|_, _| true), true, on_batch)
 }
 
 /// Like [`walk_streaming`], with a predicate run for each non-symlink entry before a directory
 /// is descended into or a file is yielded. A rejected directory is pruned recursively.
-pub fn walk_streaming_filtered(
+fn walk_streaming_filtered(
     root: &Path,
     cfg: &WalkConfig,
     entry_filter: std::sync::Arc<EntryFilter>,
+    on_batch: impl FnMut(Vec<Entry>) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    walk_streaming_internal(root, cfg, entry_filter, false, on_batch)
+}
+
+fn walk_streaming_internal(
+    root: &Path,
+    cfg: &WalkConfig,
+    entry_filter: std::sync::Arc<EntryFilter>,
+    load_ignore_files: bool,
     mut on_batch: impl FnMut(Vec<Entry>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     use ignore::{WalkBuilder, WalkState};
@@ -461,9 +471,12 @@ pub fn walk_streaming_filtered(
     //     user's config, anchored at root.
     // Root `.gitignore` + `[scan] ignore` patterns, anchored at root — shared with the watchers'
     // per-event `should_index_file` so a scan and a live watch select the same files.
-    let combined_matcher: Option<Arc<ignore::gitignore::Gitignore>> =
+    let combined_matcher: Option<Arc<ignore::gitignore::Gitignore>> = if load_ignore_files {
         build_ignore_matcher(root, cfg.respect_gitignore, &cfg.ignore, cfg.custom_ignore)
-            .map(Arc::new);
+            .map(Arc::new)
+    } else {
+        None
+    };
 
     let mut b = WalkBuilder::new(root);
     b.threads(threads)
@@ -471,12 +484,12 @@ pub fn walk_streaming_filtered(
         // Honor .gitignore files found during the walk (root AND nested) plus global
         // gitignore and .git/info/exclude. All gated on respect_gitignore.
         // For non-git directories, the root .gitignore is handled by combined_matcher.
-        .git_ignore(cfg.respect_gitignore)
-        .git_global(cfg.respect_gitignore)
-        .git_exclude(cfg.respect_gitignore)
-        .parents(cfg.respect_gitignore)
+        .git_ignore(load_ignore_files && cfg.respect_gitignore)
+        .git_global(load_ignore_files && cfg.respect_gitignore)
+        .git_exclude(load_ignore_files && cfg.respect_gitignore)
+        .parents(load_ignore_files && cfg.respect_gitignore)
         // Also honor .ignore files (gitignore-style, not git-specific).
-        .ignore(cfg.respect_gitignore)
+        .ignore(load_ignore_files && cfg.respect_gitignore)
         // WalkBuilder.hidden(true) skips dot-prefixed files/dirs natively.
         .hidden(cfg.skip_hidden)
         // Scan-time size cap: files above this are not yielded by the walker.
@@ -484,7 +497,7 @@ pub fn walk_streaming_filtered(
 
     // `.indexaignore` — highest-precedence ignore layer, nested per directory (see
     // CUSTOM_IGNORE_FILENAME doc comment). Gated on respect_gitignore, matching `.ignore`.
-    if cfg.respect_gitignore && cfg.custom_ignore {
+    if load_ignore_files && cfg.respect_gitignore && cfg.custom_ignore {
         b.add_custom_ignore_filename(CUSTOM_IGNORE_FILENAME);
     }
 

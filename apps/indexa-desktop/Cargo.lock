@@ -2975,6 +2975,7 @@ dependencies = [
  "directories",
  "futures-util",
  "if-addrs",
+ "ignore",
  "indexa-core",
  "indexa-embed",
  "indexa-llm",

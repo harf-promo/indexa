@@ -4,9 +4,10 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::{dto::err_json, AppState};
 
@@ -355,6 +356,158 @@ pub(crate) fn confine_walk_entries(
         .collect()
 }
 
+/// Entry filter for a validated job walk. The ignore crate normally opens nested ignore files
+/// inside its directory-read operation, before a visitor can inspect the directory handle. Safe
+/// walks disable that automatic loading and build one matcher per directory from checked handle
+/// snapshots here, before the walk queues that directory's children.
+pub(crate) struct ValidatedWalkFilter {
+    validated: ValidatedIndexedPath,
+    root: PathBuf,
+    cfg: indexa_core::walker::WalkConfig,
+    matchers: Mutex<HashMap<PathBuf, ignore::gitignore::Gitignore>>,
+}
+
+impl ValidatedWalkFilter {
+    pub(crate) fn new(
+        validated: ValidatedIndexedPath,
+        cfg: indexa_core::walker::WalkConfig,
+    ) -> Self {
+        Self {
+            root: PathBuf::from(validated.as_str()),
+            validated,
+            cfg,
+            matchers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub(crate) fn allows(&self, path: &Path, is_dir: bool) -> bool {
+        if is_dir {
+            if !self.validated.directory_is_beneath_root(path) {
+                tracing::warn!(path = %path.display(), "skipping walked directory outside indexed root");
+                return false;
+            }
+        } else if self.validated.open_file(path).is_err() {
+            tracing::warn!(path = %path.display(), "skipping walked file outside indexed root");
+            return false;
+        }
+
+        if !is_dir
+            && path.file_name().is_some_and(|name| {
+                [
+                    ".gitignore",
+                    ".ignore",
+                    indexa_core::walker::CUSTOM_IGNORE_FILENAME,
+                ]
+                .iter()
+                .any(|ignore_name| name == std::ffi::OsStr::new(ignore_name))
+            })
+        {
+            return false;
+        }
+
+        let mut directories = Vec::new();
+        let mut current = if is_dir { Some(path) } else { path.parent() };
+        while let Some(dir) = current {
+            if !dir.starts_with(&self.root) {
+                break;
+            }
+            directories.push(dir.to_path_buf());
+            if dir == self.root {
+                break;
+            }
+            current = dir.parent();
+        }
+        directories.reverse();
+
+        let mut ignored = false;
+        {
+            let matchers = match self.matchers.lock() {
+                Ok(matchers) => matchers,
+                Err(_) => return false,
+            };
+            for dir in &directories {
+                let Some(matcher) = matchers.get(dir) else {
+                    continue;
+                };
+                let Ok(relative) = path.strip_prefix(dir) else {
+                    continue;
+                };
+                let matched = matcher.matched_path_or_any_parents(relative, is_dir || dir != path);
+                if !matched.is_none() {
+                    ignored = matched.is_ignore();
+                }
+            }
+        }
+        if ignored {
+            return false;
+        }
+
+        if is_dir {
+            let Some(matcher) = self.matcher_for_directory(path) else {
+                tracing::warn!(path = %path.display(), "skipping directory because its ignore policy could not be checked safely");
+                return false;
+            };
+            if let Ok(mut matchers) = self.matchers.lock() {
+                matchers.insert(path.to_path_buf(), matcher);
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn matcher_for_directory(&self, dir: &Path) -> Option<ignore::gitignore::Gitignore> {
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(dir);
+        if dir == self.root {
+            for pattern in &self.cfg.ignore {
+                let _ = builder.add_line(None, pattern);
+            }
+        }
+        let mut names = Vec::new();
+        if self.cfg.respect_gitignore {
+            names.extend([".gitignore", ".ignore"]);
+            if dir == self.root {
+                names.push(".git/info/exclude");
+            }
+            if self.cfg.custom_ignore {
+                names.push(indexa_core::walker::CUSTOM_IGNORE_FILENAME);
+            }
+        }
+        for name in names {
+            let file_path = dir.join(name);
+            let metadata = match std::fs::symlink_metadata(&file_path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    tracing::warn!(path = %file_path.display(), %error, "could not inspect ignore file");
+                    return None;
+                }
+            };
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                tracing::warn!(path = %file_path.display(), "refusing non-regular or symlinked ignore file");
+                return None;
+            }
+            let Ok((snapshot_dir, snapshot, _, _)) =
+                self.validated.snapshot_file(&file_path, 1024 * 1024)
+            else {
+                tracing::warn!(path = %file_path.display(), "could not safely snapshot ignore file");
+                return None;
+            };
+            let Ok(contents) = std::fs::read_to_string(&snapshot) else {
+                tracing::warn!(path = %file_path.display(), "ignore file is not valid UTF-8");
+                return None;
+            };
+            for line in contents.lines() {
+                if let Err(error) = builder.add_line(Some(file_path.clone()), line) {
+                    tracing::warn!(path = %file_path.display(), %error, "ignoring invalid ignore rule");
+                }
+            }
+            drop(snapshot_dir);
+        }
+        builder.build().ok()
+    }
+}
+
 /// Resolve the path represented by an already-open handle on supported CI platforms.
 #[cfg(target_os = "linux")]
 fn opened_handle_path(file: &File) -> std::io::Result<PathBuf> {
@@ -466,6 +619,24 @@ mod tests {
         symlink(&outside, &target).unwrap();
 
         assert!(validated.revalidate().is_err());
+    }
+
+    #[test]
+    fn validated_walk_filter_loads_nested_ignore_rules_from_checked_snapshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("indexed");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join(".gitignore"), "secret.txt\n").unwrap();
+        let secret = nested.join("secret.txt");
+        std::fs::write(&secret, "ignored content").unwrap();
+
+        let validated = ValidatedIndexedPath::capture(root.clone()).unwrap();
+        let filter =
+            ValidatedWalkFilter::new(validated, indexa_core::walker::WalkConfig::default());
+        assert!(filter.allows(&root, true));
+        assert!(filter.allows(&nested, true));
+        assert!(!filter.allows(&secret, false));
     }
 }
 
