@@ -22,6 +22,7 @@ pub(crate) struct IndexedPathError {
 #[derive(Clone, Debug)]
 pub(crate) struct ValidatedIndexedPath {
     path: String,
+    real_path: PathBuf,
     identity: FileIdentity,
     _handle: Arc<File>,
 }
@@ -126,6 +127,7 @@ impl FileIdentity {
 
 impl ValidatedIndexedPath {
     pub(crate) fn capture(path: PathBuf) -> std::io::Result<Self> {
+        let path = std::fs::canonicalize(path)?;
         #[cfg(unix)]
         let handle = {
             use std::os::unix::fs::OpenOptionsExt;
@@ -158,8 +160,10 @@ impl ValidatedIndexedPath {
                 "path changed while opening validated target",
             ));
         }
+        let real_path = opened_handle_path(&handle)?;
         Ok(Self {
             path: path.to_string_lossy().into_owned(),
+            real_path,
             identity,
             _handle: Arc::new(handle),
         })
@@ -209,8 +213,7 @@ impl ValidatedIndexedPath {
             ));
         }
         let real = opened_handle_path(&file)?;
-        let root = Path::new(&self.path);
-        if !real.starts_with(root) {
+        if !real.starts_with(&self.real_path) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "opened file is outside indexed root",
@@ -288,7 +291,7 @@ impl ValidatedIndexedPath {
             if !file.metadata()?.is_dir() {
                 return Ok(false);
             }
-            Ok(opened_handle_path(&file)?.starts_with(Path::new(&self.path)))
+            Ok(opened_handle_path(&file)?.starts_with(&self.real_path))
         })();
         result.unwrap_or(false)
     }
