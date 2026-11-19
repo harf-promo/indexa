@@ -59,31 +59,50 @@ pub(crate) async fn api_file_preview(
     State(state): State<AppState>,
     Query(q): Query<FileQuery>,
 ) -> Response {
-    if q.path.trim().is_empty() {
+    let db_path = state.db_path.clone();
+    let include_sensitive = state.config.scan.include_sensitive;
+    match tokio::task::spawn_blocking(move || {
+        api_file_preview_sync(&db_path, &q.path, include_sensitive)
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("file preview worker failed: {error}"),
+        ),
+    }
+}
+
+/// Filesystem and SQLite access for the preview must stay off Tokio's async workers. This opens a
+/// short-lived DB connection instead of holding the shared store mutex while doing path I/O.
+fn api_file_preview_sync(db_path: &Path, raw_path: &str, include_sensitive: bool) -> Response {
+    if raw_path.trim().is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "missing 'path' query parameter");
     }
     // Canonicalize (resolves symlinks, rejects non-existent paths) before any comparison.
-    let requested = match std::fs::canonicalize(&q.path) {
+    let requested = match std::fs::canonicalize(raw_path) {
         Ok(p) => p,
         Err(_) => return err_json(StatusCode::NOT_FOUND, "path not found"),
     };
     // Path-confinement: must be inside an indexed root (mirrors MCP read_file) and be an indexed
-    // file. Lock the store only for the lookups, then drop it before the filesystem read.
-    // Roots are kept as (stored, canonical): entries are recorded under the root as scanned.
-    let (roots, indexed) = {
-        let store = state.store.lock().await;
-        let roots: Vec<(PathBuf, PathBuf)> = store
-            .root_paths()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|r| {
-                let stored = PathBuf::from(r);
-                std::fs::canonicalize(&stored).ok().map(|c| (stored, c))
-            })
-            .collect();
-        let indexed = is_indexed_file(&store, &q.path, &requested, &roots);
-        (roots, indexed)
+    // file. Roots are kept as (stored, canonical): entries are recorded under the root as scanned.
+    let store = match indexa_core::store::Store::open(db_path) {
+        Ok(store) => store,
+        Err(error) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"));
+        }
     };
+    let roots: Vec<(PathBuf, PathBuf)> = store
+        .root_paths()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| {
+            let stored = PathBuf::from(r);
+            std::fs::canonicalize(&stored).ok().map(|c| (stored, c))
+        })
+        .collect();
+    let indexed = is_indexed_file(&store, raw_path, &requested, &roots);
     let canonical_roots: Vec<PathBuf> = roots.into_iter().map(|(_, c)| c).collect();
     if !canonical_roots
         .iter()
@@ -97,9 +116,7 @@ pub(crate) async fn api_file_preview(
     if !indexed {
         return err_json(StatusCode::FORBIDDEN, "path is not an indexed file");
     }
-    if !state.config.scan.include_sensitive
-        && indexa_core::walker::is_sensitive_path(&requested, &canonical_roots)
-    {
+    if !include_sensitive && indexa_core::walker::is_sensitive_path(&requested, &canonical_roots) {
         return err_json(
             StatusCode::FORBIDDEN,
             "refusing to preview a secret/credential file (set [scan] include_sensitive to allow)",
@@ -137,7 +154,7 @@ pub(crate) async fn api_file_preview(
     let language = language_for_ext(&requested).map(|s| s.to_owned());
 
     Json(FilePreviewResponse {
-        path: q.path,
+        path: raw_path.to_owned(),
         language,
         content,
         truncated,

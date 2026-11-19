@@ -1204,7 +1204,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_stats_empty_store_is_zero() {
-        let app = build_router(state_with(Store::open_in_memory().unwrap()), 7620);
+        let app = build_router(state_with_file_db("stats-empty", |_| {}), 7620);
         let (status, json) = get_json(app, "/api/stats").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["entries"], 0);
@@ -1213,17 +1213,18 @@ mod tests {
 
     #[tokio::test]
     async fn api_stats_counts_seeded_rows() {
-        let mut store = Store::open_in_memory().unwrap();
-        store
-            .upsert_entries(&[
-                entry("/r", EntryKind::Dir),
-                entry("/r/a.rs", EntryKind::File),
-            ])
-            .unwrap();
-        store
-            .upsert_chunks(&[chunk("/r/a.rs", 0, "fn main() {}")])
-            .unwrap();
-        let app = build_router(state_with(store), 7620);
+        let state = state_with_file_db("stats-seeded", |store| {
+            store
+                .upsert_entries(&[
+                    entry("/r", EntryKind::Dir),
+                    entry("/r/a.rs", EntryKind::File),
+                ])
+                .unwrap();
+            store
+                .upsert_chunks(&[chunk("/r/a.rs", 0, "fn main() {}")])
+                .unwrap();
+        });
+        let app = build_router(state, 7620);
         let (status, json) = get_json(app, "/api/stats").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["entries"], 2);
@@ -1822,29 +1823,31 @@ mod tests {
         std::fs::write(&file, b"fn bar() {}").unwrap();
         let file_s = file.to_string_lossy().to_string();
 
-        let mut store = Store::open_in_memory().unwrap();
-        store
-            .upsert_chunks(&[ChunkRecord {
-                embedding: Some(vec![0.1, 0.2, 0.3]),
-                embed_model: Some("test".to_owned()),
-                language: Some("rust".to_owned()),
-                ..chunk(&file_s, 0, "fn bar() {}")
-            }])
-            .unwrap();
-        // Pin indexed_at far in the future — current relative to the file's real mtime.
-        store
-            .db_connection()
-            .execute(
-                "UPDATE chunks SET indexed_at = 4102444800 WHERE entry_path = ?1",
-                rusqlite::params![file_s],
-            )
-            .unwrap();
-        let pack_id = store.create_pack("clean", None).unwrap();
-        store
-            .add_pack_paths(&pack_id, std::slice::from_ref(&file_s))
-            .unwrap();
-
-        let app = build_router(state_with(store), 7620);
+        let app = build_router(
+            state_with_file_db("refresh-clean", |store| {
+                store
+                    .upsert_chunks(&[ChunkRecord {
+                        embedding: Some(vec![0.1, 0.2, 0.3]),
+                        embed_model: Some("test".to_owned()),
+                        language: Some("rust".to_owned()),
+                        ..chunk(&file_s, 0, "fn bar() {}")
+                    }])
+                    .unwrap();
+                // Pin indexed_at far in the future — current relative to the file's real mtime.
+                store
+                    .db_connection()
+                    .execute(
+                        "UPDATE chunks SET indexed_at = 4102444800 WHERE entry_path = ?1",
+                        rusqlite::params![file_s],
+                    )
+                    .unwrap();
+                let pack_id = store.create_pack("clean", None).unwrap();
+                store
+                    .add_pack_paths(&pack_id, std::slice::from_ref(&file_s))
+                    .unwrap();
+            }),
+            7620,
+        );
         let (status, json) =
             post_json(app, "/api/packs/clean/refresh", serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK);
@@ -1947,7 +1950,9 @@ mod tests {
         // by gating the embed call on a `Notify` and asserting a second, unrelated lock-only
         // request completes promptly while that embed call is still blocked in flight.
         // Pre-fix, this test hangs until the 5s timeout and fails; post-fix it completes fast.
-        let mut store = Store::open_in_memory().unwrap();
+        let dir = temp_fixture_dir("pack-search-gated");
+        let db_path = dir.join("index.db");
+        let mut store = Store::open(&db_path).unwrap();
         let pack_id = store.create_pack("gated", None).unwrap();
         store
             .add_pack_paths(&pack_id, &["/r/a.rs".to_owned()])
@@ -1959,7 +1964,7 @@ mod tests {
             entered: entered.clone(),
             release: release.clone(),
         });
-        let state = state_with_embedder(store, PathBuf::from(":memory:"), embedder);
+        let state = state_with_embedder(store, db_path, embedder);
         let app = build_router(state, 7620);
 
         // Fire the search request; it blocks inside embed() until `release` fires.
@@ -2177,18 +2182,18 @@ mod tests {
 
     #[tokio::test]
     async fn api_impact_reports_per_tool_breakdown_most_saving_first() {
-        let mut store = Store::open_in_memory().unwrap();
-        // counterfactual > served so there is savings to report; ask saves more than search.
-        store
-            .record_tool_usage("web", "ask", 100, 4000, None)
-            .unwrap();
-        store
-            .record_tool_usage("mcp", "search", 50, 2000, None)
-            .unwrap();
-        store
-            .record_tool_usage("web", "ask", 100, 4000, None)
-            .unwrap();
-        let app = build_router(state_with(store), 7620);
+        let state = state_with_file_db("impact-per-tool", |store| {
+            store
+                .record_tool_usage("web", "ask", 100, 4000, None)
+                .unwrap();
+            store
+                .record_tool_usage("mcp", "search", 50, 2000, None)
+                .unwrap();
+            store
+                .record_tool_usage("web", "ask", 100, 4000, None)
+                .unwrap();
+        });
+        let app = build_router(state, 7620);
         let (status, json) = get_json(app, "/api/impact").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["calls"], 3);
@@ -2208,21 +2213,21 @@ mod tests {
         // `served_basis` tags what `bytes_served` measured (surfaces disagree — see
         // store::usage); `/api/impact` must split the blended weekly aggregate by it,
         // same as it already does for `by_tool`.
-        let mut store = Store::open_in_memory().unwrap();
-        store
-            .record_tool_usage_with_basis("web", "ask", 100, 4000, None, "answer_citations")
-            .unwrap();
-        store
-            .record_tool_usage_with_basis("cli", "search", 50, 2000, None, "rendered_response")
-            .unwrap();
-        store
-            .record_tool_usage_with_basis("web", "ask", 100, 4000, None, "answer_citations")
-            .unwrap();
-        // Untagged (delegating) row reads back as "unspecified".
-        store
-            .record_tool_usage("cli", "search", 10, 100, None)
-            .unwrap();
-        let app = build_router(state_with(store), 7620);
+        let state = state_with_file_db("impact-per-basis", |store| {
+            store
+                .record_tool_usage_with_basis("web", "ask", 100, 4000, None, "answer_citations")
+                .unwrap();
+            store
+                .record_tool_usage_with_basis("cli", "search", 50, 2000, None, "rendered_response")
+                .unwrap();
+            store
+                .record_tool_usage_with_basis("web", "ask", 100, 4000, None, "answer_citations")
+                .unwrap();
+            store
+                .record_tool_usage("cli", "search", 10, 100, None)
+                .unwrap();
+        });
+        let app = build_router(state, 7620);
         let (status, json) = get_json(app, "/api/impact").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["calls"], 4);
@@ -2460,11 +2465,12 @@ mod tests {
 
     #[tokio::test]
     async fn api_stats_counts_summaries() {
-        let mut store = Store::open_in_memory().unwrap();
-        store
-            .upsert_summary(&summary("/r", "dir", None, 0))
-            .unwrap();
-        let app = build_router(state_with(store), 7620);
+        let state = state_with_file_db("stats-summaries", |store| {
+            store
+                .upsert_summary(&summary("/r", "dir", None, 0))
+                .unwrap();
+        });
+        let app = build_router(state, 7620);
         let (status, json) = get_json(app, "/api/stats").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["summaries"], 1);
@@ -2472,14 +2478,15 @@ mod tests {
 
     #[tokio::test]
     async fn api_health_reports_thin_context_and_summaries() {
-        let mut store = Store::open_in_memory().unwrap();
-        store
-            .upsert_entries(&[entry("/r", EntryKind::Dir)])
-            .unwrap();
-        store
-            .upsert_chunks(&[chunk("/r/a.rs", 0, "fn main() {}")])
-            .unwrap();
-        let app = build_router(state_with(store), 7620);
+        let state = state_with_file_db("health-thin-context", |store| {
+            store
+                .upsert_entries(&[entry("/r", EntryKind::Dir)])
+                .unwrap();
+            store
+                .upsert_chunks(&[chunk("/r/a.rs", 0, "fn main() {}")])
+                .unwrap();
+        });
+        let app = build_router(state, 7620);
         let (status, json) = get_json(app, "/api/health").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["summaries"], 0);
@@ -2647,16 +2654,16 @@ mod tests {
         let outfile = outside.join("b.rs");
         std::fs::write(&outfile, "secret\n").unwrap();
 
-        let mut store = Store::open_in_memory().unwrap();
-        // Mirror a real scan: the root dir is indexed alongside the file under it, so
-        // root_paths() yields `root` and the file is confined within it.
-        store
-            .upsert_entries(&[
-                entry(root.to_str().unwrap(), EntryKind::Dir),
-                entry(infile.to_str().unwrap(), EntryKind::File),
-            ])
-            .unwrap();
-        let state = state_with(store);
+        // File preview opens its own SQLite connection in spawn_blocking, so seed a real DB
+        // file just like the production handler does.
+        let state = state_with_file_db("file-preview-roots", |store| {
+            store
+                .upsert_entries(&[
+                    entry(root.to_str().unwrap(), EntryKind::Dir),
+                    entry(infile.to_str().unwrap(), EntryKind::File),
+                ])
+                .unwrap();
+        });
 
         let (status, json) = get_json(
             build_router(state.clone(), 7620),
@@ -2884,14 +2891,15 @@ mod tests {
 
     #[tokio::test]
     async fn api_inspect_reports_facts_or_404() {
-        let mut store = Store::open_in_memory().unwrap();
-        store
-            .upsert_entries(&[entry("/r/a.rs", EntryKind::File)])
-            .unwrap();
-        store
-            .upsert_chunks(&[chunk("/r/a.rs", 0, "fn main() {}")])
-            .unwrap();
-        let app = build_router(state_with(store), 7620);
+        let state = state_with_file_db("inspect-facts", |store| {
+            store
+                .upsert_entries(&[entry("/r/a.rs", EntryKind::File)])
+                .unwrap();
+            store
+                .upsert_chunks(&[chunk("/r/a.rs", 0, "fn main() {}")])
+                .unwrap();
+        });
+        let app = build_router(state, 7620);
 
         let (status, json) = get_json(app.clone(), "/api/inspect?path=/r/a.rs").await;
         assert_eq!(status, StatusCode::OK);
@@ -2973,15 +2981,23 @@ mod tests {
 
     /// A router over an index whose root `root` is a Dir entry and whose File entries are `files`.
     fn preview_router(root: &std::path::Path, files: &[&std::path::Path]) -> Router {
+        static NEXT_PREVIEW_DB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tag = format!(
+            "preview-router-{}",
+            NEXT_PREVIEW_DB.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
         let mut entries = vec![entry(root.to_str().unwrap(), EntryKind::Dir)];
         entries.extend(
             files
                 .iter()
                 .map(|f| entry(f.to_str().unwrap(), EntryKind::File)),
         );
-        let mut store = Store::open_in_memory().unwrap();
-        store.upsert_entries(&entries).unwrap();
-        build_router(state_with(store), 7620)
+        build_router(
+            state_with_file_db(&tag, |store| {
+                store.upsert_entries(&entries).unwrap();
+            }),
+            7620,
+        )
     }
 
     fn file_uri(p: &std::path::Path) -> String {

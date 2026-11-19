@@ -62,15 +62,34 @@ fn is_thin_context(total_dirs: u64, built_dirs: u64) -> bool {
 }
 
 pub(crate) async fn api_health(State(state): State<AppState>) -> Response {
-    let (entries, chunks, summaries, last, dir_coverage) = {
-        let store = state.store.lock().await;
-        (
+    let db_path = state.db_path.clone();
+    let data_dir = indexa_core::config::default_data_dir();
+    let snapshot = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let store = indexa_core::store::Store::open(&db_path)?;
+        Ok((
             store.entry_count().unwrap_or(0),
             store.chunk_count().unwrap_or(0),
             store.summary_count().unwrap_or(0),
             store.last_indexed_at().ok().flatten(),
             store.coverage_stats().ok(),
-        )
+            data_dir.as_deref().and_then(read_cli_skew_marker),
+        ))
+    })
+    .await;
+    let (entries, chunks, summaries, last, dir_coverage, cli_skew) = match snapshot {
+        Ok(Ok(snapshot)) => snapshot,
+        Ok(Err(error)) => {
+            return crate::dto::err_json(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{error:#}"),
+            );
+        }
+        Err(error) => {
+            return crate::dto::err_json(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("health worker failed: {error}"),
+            );
+        }
     };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -84,10 +103,6 @@ pub(crate) async fn api_health(State(state): State<AppState>) -> Response {
         .map(|(total_dirs, built, ..)| (total_dirs, built))
         .unwrap_or((0, 0));
     let thin_context = is_thin_context(total_dirs, built_dirs);
-    // Best-effort, desktop-only signal — `null` under plain `indexa serve`.
-    let cli_skew = indexa_core::config::default_data_dir()
-        .as_deref()
-        .and_then(read_cli_skew_marker);
     Json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "entries": entries,

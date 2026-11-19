@@ -76,6 +76,7 @@
   transition: background 80ms, border-color 80ms;
 }
 .jobs-card:hover { background: var(--surface-2); }
+.jobs-card:focus-visible, .warn-row:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .jobs-card.selected { background: color-mix(in srgb, var(--accent) 8%, transparent); border-left-color: var(--accent); }
 .jobs-card.running { border-left-color: var(--accent); }
 .jobs-card.failed { border-left-color: var(--red); }

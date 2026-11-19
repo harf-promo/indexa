@@ -18,20 +18,20 @@ pub(crate) async fn api_projects(
     State(state): State<AppState>,
     Query(params): Query<PathQuery>,
 ) -> Response {
-    let prefix = params.path.as_deref().unwrap_or("");
-    // Open a fresh, short-lived read connection instead of locking the shared store for
-    // the whole per-project coverage loop (3 subtree scans each, ~195ms/16 projects
-    // measured live) — mirrors tree.rs's api_tree so a slow projects list no longer
-    // serializes every other web request that needs the store.
-    let store = match Store::open(&state.db_path) {
-        Ok(s) => s,
-        Err(e) => {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"));
-        }
-    };
-    match projects_from(&store, prefix) {
-        Ok(rows) => Json(rows).into_response(),
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    let db_path = state.db_path.clone();
+    let prefix = params.path.unwrap_or_default();
+    match tokio::task::spawn_blocking(move || {
+        let store = Store::open(&db_path)?;
+        projects_from(&store, &prefix)
+    })
+    .await
+    {
+        Ok(Ok(rows)) => Json(rows).into_response(),
+        Ok(Err(e)) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("projects worker failed: {e}"),
+        ),
     }
 }
 

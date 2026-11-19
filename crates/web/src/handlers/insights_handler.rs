@@ -21,6 +21,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::dto::err_json;
 use crate::AppState;
 
+async fn read_store<T, F>(db_path: std::path::PathBuf, query: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(indexa_core::store::Store) -> anyhow::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let store = indexa_core::store::Store::open(&db_path).map_err(|e| format!("{e:#}"))?;
+        query(store).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| format!("database worker failed: {e}"))?
+}
+
 #[derive(Deserialize)]
 pub(crate) struct DuplicatesQuery {
     threshold: Option<f32>,
@@ -93,8 +106,11 @@ pub(crate) async fn api_insights_stale(
     Query(q): Query<StaleQuery>,
 ) -> Response {
     let days = q.days.unwrap_or(365).max(1);
-    let store = state.store.lock().await;
-    match store.find_stale_entries(days) {
+    let result = read_store(state.db_path.as_ref().clone(), move |store| {
+        store.find_stale_entries(days)
+    })
+    .await;
+    match result {
         Ok(entries) => {
             let items: Vec<serde_json::Value> = entries
                 .into_iter()
@@ -109,7 +125,7 @@ pub(crate) async fn api_insights_stale(
                 .collect();
             Json(serde_json::json!({ "days": days, "entries": items })).into_response()
         }
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
@@ -123,8 +139,11 @@ pub(crate) async fn api_insights_diff(
         .map(|d| d.as_secs() as i64 - days * 86_400)
         .unwrap_or(0);
 
-    let store = state.store.lock().await;
-    match store.weekly_diff(since) {
+    let result = read_store(state.db_path.as_ref().clone(), move |store| {
+        store.weekly_diff(since)
+    })
+    .await;
+    match result {
         Ok(diff) => Json(serde_json::json!({
             "days": days,
             "added": diff.added,
@@ -133,7 +152,7 @@ pub(crate) async fn api_insights_diff(
             "modified_count": diff.modified_count,
         }))
         .into_response(),
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
@@ -142,8 +161,11 @@ pub(crate) async fn api_insights_largest(
     Query(q): Query<LargestQuery>,
 ) -> Response {
     let limit = q.limit.unwrap_or(20).clamp(1, 500);
-    let store = state.store.lock().await;
-    match store.find_largest(limit) {
+    let result = read_store(state.db_path.as_ref().clone(), move |store| {
+        store.find_largest(limit)
+    })
+    .await;
+    match result {
         Ok(rows) => {
             let items: Vec<serde_json::Value> = rows
                 .into_iter()
@@ -156,13 +178,16 @@ pub(crate) async fn api_insights_largest(
                 .collect();
             Json(serde_json::json!({ "limit": limit, "entries": items })).into_response()
         }
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
 pub(crate) async fn api_insights_languages(State(state): State<AppState>) -> Response {
-    let store = state.store.lock().await;
-    match store.language_breakdown() {
+    let result = read_store(state.db_path.as_ref().clone(), |store| {
+        store.language_breakdown()
+    })
+    .await;
+    match result {
         Ok(rows) => {
             let total: u64 = rows.iter().map(|l| l.chunks).sum();
             let items: Vec<serde_json::Value> = rows
@@ -176,7 +201,7 @@ pub(crate) async fn api_insights_languages(State(state): State<AppState>) -> Res
                 .collect();
             Json(serde_json::json!({ "total": total, "languages": items })).into_response()
         }
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
