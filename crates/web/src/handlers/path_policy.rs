@@ -173,6 +173,18 @@ impl ValidatedIndexedPath {
         &self.path
     }
 
+    fn ensure_root_identity(&self) -> std::io::Result<()> {
+        let path_identity = FileIdentity::of(Path::new(&self.path))?;
+        let handle_identity = FileIdentity::of_file(&self._handle)?;
+        if path_identity != self.identity || handle_identity != self.identity {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "indexed root identity changed",
+            ));
+        }
+        Ok(())
+    }
+
     /// Open a file without following a final symlink, then verify the opened object's real path
     /// is component-wise beneath this indexed root. Callers must read from the returned handle;
     /// reopening `path` would reintroduce the check/use race.
@@ -212,6 +224,7 @@ impl ValidatedIndexedPath {
                 "not a regular file",
             ));
         }
+        self.ensure_root_identity()?;
         let real = opened_handle_path(&file)?;
         if !real.starts_with(&self.real_path) {
             return Err(std::io::Error::new(
@@ -291,6 +304,7 @@ impl ValidatedIndexedPath {
             if !file.metadata()?.is_dir() {
                 return Ok(false);
             }
+            self.ensure_root_identity()?;
             Ok(opened_handle_path(&file)?.starts_with(&self.real_path))
         })();
         result.unwrap_or(false)
@@ -622,6 +636,26 @@ mod tests {
         symlink(&outside, &target).unwrap();
 
         assert!(validated.revalidate().is_err());
+    }
+
+    #[test]
+    fn rejects_opened_child_after_indexed_root_is_replaced() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("indexed");
+        let moved = temp.path().join("indexed-original");
+        std::fs::create_dir_all(&root).unwrap();
+        let validated = ValidatedIndexedPath::capture(root.clone()).unwrap();
+
+        std::fs::rename(&root, &moved).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        let sentinel = root.join("secret.txt");
+        std::fs::write(&sentinel, "replacement root content").unwrap();
+
+        assert_eq!(
+            validated.open_file(&sentinel).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(!validated.directory_is_beneath_root(&root));
     }
 
     #[test]
