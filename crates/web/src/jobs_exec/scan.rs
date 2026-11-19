@@ -244,8 +244,8 @@ mod tests {
         let db = temp.path().join("index.db");
         let mut store = Store::open(&db).unwrap();
         let handle = Arc::new(JobHandle::new("scan", root.to_string_lossy()));
-        let walked = std::sync::Arc::new(AtomicBool::new(false));
-        let walked_in_closure = walked.clone();
+        let swapped = std::sync::Arc::new(AtomicBool::new(false));
+        let swapped_in_closure = swapped.clone();
         let target_for_swap = target.clone();
         let outside_for_swap = outside.clone();
         let root_for_swap = root.clone();
@@ -258,23 +258,26 @@ mod tests {
             &handle,
             Some(&validated),
             move |path, cfg| {
-                walked_in_closure.store(true, Ordering::Relaxed);
                 let filter = ValidatedWalkFilter::new(validated_for_walk, cfg.clone());
                 let entries =
                     indexa_core::walker::walk_filtered(path, cfg, move |path, is_dir| {
+                        // filter_entry runs after the parent lists this name and before the
+                        // walker queues it for read_dir. Replace it here to exercise that race.
+                        if path == target_for_swap
+                            && !swapped_in_closure.swap(true, Ordering::Relaxed)
+                        {
+                            std::fs::rename(&target_for_swap, root_for_swap.join("moved")).unwrap();
+                            symlink(&outside_for_swap, &target_for_swap).unwrap();
+                        }
                         filter.allows(path, is_dir)
                     })?;
-                // Deterministic race hook: mutate the directory after the walk lists entries but
-                // before scan opens and validates those entries.
-                std::fs::rename(&target_for_swap, root_for_swap.join("moved")).unwrap();
-                symlink(&outside_for_swap, &target_for_swap).unwrap();
                 Ok(entries)
             },
         );
         assert!(result.is_some());
         assert!(
-            walked.load(Ordering::Relaxed),
-            "walk should list before the test swaps the subdirectory"
+            swapped.load(Ordering::Relaxed),
+            "walk should list the directory before the test swaps it"
         );
         assert_eq!(handle.status(), crate::jobs::JobStatus::Running);
         assert_eq!(store.count_descendants(&root.to_string_lossy()).unwrap(), 0);

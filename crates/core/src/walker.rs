@@ -490,6 +490,18 @@ fn walk_streaming_internal(
         .parents(load_ignore_files && cfg.respect_gitignore)
         // Also honor .ignore files (gitignore-style, not git-specific).
         .ignore(load_ignore_files && cfg.respect_gitignore)
+        // This runs after a parent lists a child but before that child is queued for read_dir.
+        // Confined walks validate the opened identity here so swapped directories are pruned.
+        .filter_entry({
+            let entry_filter = entry_filter.clone();
+            move |entry| {
+                let kind = entry.file_type();
+                let is_symlink =
+                    entry.path_is_symlink() || kind.is_some_and(|kind| kind.is_symlink());
+                let is_dir = kind.is_some_and(|kind| kind.is_dir());
+                !is_symlink && entry_filter(entry.path(), is_dir)
+            }
+        })
         // WalkBuilder.hidden(true) skips dot-prefixed files/dirs natively.
         .hidden(cfg.skip_hidden)
         // Scan-time size cap: files above this are not yielded by the walker.
@@ -537,7 +549,6 @@ fn walk_streaming_internal(
             let tx = tx.clone();
             move || {
                 let combined_matcher = combined_matcher.clone();
-                let entry_filter = entry_filter.clone();
                 let mut sink = StreamSink {
                     local: Vec::new(),
                     tx: tx.clone(),
@@ -563,17 +574,6 @@ fn walk_streaming_internal(
                         // innocuously-named link would otherwise slip through.
                         if de.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
                             return WalkState::Continue; // don't record; keep walking siblings
-                        }
-
-                        // Security-sensitive callers can validate the opened identity of every
-                        // directory before this walker descends into it, and every file before
-                        // yielding it. The caller still validates file handles again at use.
-                        if !entry_filter(path, is_dir) {
-                            return if is_dir {
-                                WalkState::Skip
-                            } else {
-                                WalkState::Continue
-                            };
                         }
 
                         // Belt-and-suspenders hidden check: WalkBuilder.hidden(true) handles
