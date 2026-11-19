@@ -549,6 +549,7 @@ fn walk_streaming_internal(
             let tx = tx.clone();
             move || {
                 let combined_matcher = combined_matcher.clone();
+                let entry_filter = entry_filter.clone();
                 let mut sink = StreamSink {
                     local: Vec::new(),
                     tx: tx.clone(),
@@ -574,6 +575,13 @@ fn walk_streaming_internal(
                         // innocuously-named link would otherwise slip through.
                         if de.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
                             return WalkState::Continue; // don't record; keep walking siblings
+                        }
+
+                        // Recheck a directory after the walker has opened/listed it and before
+                        // it queues any children. This closes a swap between filter_entry and
+                        // run_one's path-based read_dir from producing descendant work items.
+                        if is_dir && !entry_filter(path, true) {
+                            return WalkState::Skip;
                         }
 
                         // Belt-and-suspenders hidden check: WalkBuilder.hidden(true) handles
