@@ -57,12 +57,32 @@ async fn run_trigger_child(
     child.stdin(Stdio::null()).kill_on_drop(true);
     #[cfg(windows)]
     let job = ChildJob::new().map_err(|e| mcp_err(format!("failed to create child job: {e}")))?;
-    let process = child
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        child
+            .as_std_mut()
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+    }
+    #[allow(unused_mut)]
+    let mut process = child
         .spawn()
         .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))?;
     #[cfg(windows)]
-    job.assign(&process)
-        .map_err(|e| mcp_err(format!("failed to assign `indexa index` to child job: {e}")))?;
+    {
+        if let Err(e) = job.assign(&process) {
+            let e = terminate_unassigned_child(&mut process, e);
+            return Err(mcp_err(format!(
+                "failed to assign `indexa index` to child job: {e}"
+            )));
+        }
+        if let Err(e) = ChildJob::resume_child(&process) {
+            let e = terminate_unassigned_child(&mut process, e);
+            return Err(mcp_err(format!(
+                "failed to resume `indexa index` child: {e}"
+            )));
+        }
+    }
     #[cfg(unix)]
     let mut group = process.id().map(|pid| ProcessGroupGuard {
         pid: pid as i32,
@@ -94,6 +114,15 @@ struct ProcessGroupGuard {
 
 #[cfg(windows)]
 struct ChildJob(std::os::windows::io::OwnedHandle);
+
+#[cfg(windows)]
+fn terminate_unassigned_child(
+    child: &mut tokio::process::Child,
+    error: std::io::Error,
+) -> std::io::Error {
+    let _ = child.start_kill();
+    error
+}
 
 #[cfg(windows)]
 impl ChildJob {
@@ -140,6 +169,63 @@ impl ChildJob {
             Err(std::io::Error::last_os_error())
         } else {
             Ok(())
+        }
+    }
+
+    fn resume_child(child: &tokio::process::Child) -> std::io::Result<()> {
+        use std::{
+            mem::size_of,
+            os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        };
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::{
+                Diagnostics::ToolHelp::{
+                    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+                    THREADENTRY32,
+                },
+                Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+            },
+        };
+        let pid = child.id().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "child process already exited")
+        })?;
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let _snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot.cast()) };
+        let mut entry = THREADENTRY32 {
+            dwSize: size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        let mut found = false;
+        let mut last_error = None;
+        let mut more = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+        while more {
+            if entry.th32OwnerProcessID == pid {
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if !thread.is_null() {
+                    let thread = unsafe { OwnedHandle::from_raw_handle(thread.cast()) };
+                    if unsafe { ResumeThread(thread.as_raw_handle().cast()) } != u32::MAX {
+                        found = true;
+                        break;
+                    }
+                    last_error = Some(std::io::Error::last_os_error());
+                }
+            }
+            entry.dwSize = size_of::<THREADENTRY32>() as u32;
+            more = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+        }
+        if found {
+            Ok(())
+        } else {
+            Err(last_error.unwrap_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "child primary thread not found",
+                )
+            }))
         }
     }
 }
@@ -1251,6 +1337,28 @@ mod tests {
         assert!(
             !is_running(grandchild),
             "grandchild process {grandchild} survived timeout"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn immediate_trigger_grandchild_is_killed_by_timeout_job() {
+        let dir =
+            std::env::temp_dir().join(format!("indexa-trigger-immediate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let grandchild_file = dir.join("grandchild.pid");
+        let script = format!("$p = Start-Process powershell.exe -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru; $p.Id | Set-Content -NoNewline '{}' ; Start-Sleep -Seconds 30", grandchild_file.display());
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command.args(["-NoProfile", "-Command", &script]);
+        let result =
+            super::run_trigger_child(&mut command, std::time::Duration::from_secs(5)).await;
+        assert!(result.is_err(), "trigger child unexpectedly completed");
+        let grandchild = wait_for_pid(&grandchild_file).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !is_running(grandchild),
+            "immediate grandchild {grandchild} survived timeout"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -34,6 +34,15 @@ struct ProcessGroupGuard {
 struct ChildJob(std::os::windows::io::OwnedHandle);
 
 #[cfg(windows)]
+fn terminate_unassigned_child(
+    child: &mut tokio::process::Child,
+    error: std::io::Error,
+) -> std::io::Error {
+    let _ = child.start_kill();
+    error
+}
+
+#[cfg(windows)]
 impl ChildJob {
     fn new() -> std::io::Result<Self> {
         use std::{mem::size_of, os::windows::io::FromRawHandle};
@@ -80,6 +89,63 @@ impl ChildJob {
             Ok(())
         }
     }
+
+    fn resume_child(child: &tokio::process::Child) -> std::io::Result<()> {
+        use std::{
+            mem::size_of,
+            os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        };
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::{
+                Diagnostics::ToolHelp::{
+                    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+                    THREADENTRY32,
+                },
+                Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+            },
+        };
+        let pid = child.id().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "child process already exited")
+        })?;
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let _snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot.cast()) };
+        let mut entry = THREADENTRY32 {
+            dwSize: size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        let mut found = false;
+        let mut last_error = None;
+        let mut more = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+        while more {
+            if entry.th32OwnerProcessID == pid {
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if !thread.is_null() {
+                    let thread = unsafe { OwnedHandle::from_raw_handle(thread.cast()) };
+                    if unsafe { ResumeThread(thread.as_raw_handle().cast()) } != u32::MAX {
+                        found = true;
+                        break;
+                    }
+                    last_error = Some(std::io::Error::last_os_error());
+                }
+            }
+            entry.dwSize = size_of::<THREADENTRY32>() as u32;
+            more = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+        }
+        if found {
+            Ok(())
+        } else {
+            Err(last_error.unwrap_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "child primary thread not found",
+                )
+            }))
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -106,9 +172,24 @@ async fn output_with_timeout(
     command.kill_on_drop(true);
     #[cfg(windows)]
     let job = ChildJob::new()?;
-    let child = command.spawn()?;
     #[cfg(windows)]
-    job.assign(&child)?;
+    {
+        use std::os::windows::process::CommandExt;
+        command
+            .as_std_mut()
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+    }
+    #[allow(unused_mut)]
+    let mut child = command.spawn()?;
+    #[cfg(windows)]
+    {
+        if let Err(error) = job.assign(&child) {
+            return Err(terminate_unassigned_child(&mut child, error));
+        }
+        if let Err(error) = ChildJob::resume_child(&child) {
+            return Err(terminate_unassigned_child(&mut child, error));
+        }
+    }
     #[cfg(unix)]
     let mut group = child.id().map(|pid| ProcessGroupGuard {
         pid: pid as i32,
@@ -520,6 +601,50 @@ mod tests {
 #[cfg(all(test, windows))]
 mod windows_job_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn assignment_failure_terminates_suspended_child() {
+        use std::os::windows::process::CommandExt;
+        let marker = std::env::temp_dir().join(format!("idx-never-ran-{}.txt", std::process::id()));
+        let mut command = Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-Command"])
+            .arg(format!("Set-Content '{}' ran", marker.display()));
+        command
+            .as_std_mut()
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+        let mut child = command.spawn().unwrap();
+        let error = terminate_unassigned_child(
+            &mut child,
+            std::io::Error::other("simulated AssignProcessToJobObject failure"),
+        );
+        assert!(error.to_string().contains("simulated"));
+        let _ = child.wait().await.unwrap();
+        assert!(
+            !marker.exists(),
+            "suspended child ran after assignment failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn immediate_grandchild_is_killed_by_timeout_job() {
+        let dir =
+            std::env::temp_dir().join(format!("indexa-claude-immediate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let grandchild_file = dir.join("grandchild.pid");
+        let script = format!("$p = Start-Process powershell.exe -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru; $p.Id | Set-Content -NoNewline '{}' ; Start-Sleep -Seconds 30", grandchild_file.display());
+        let mut command = Command::new("powershell.exe");
+        command.args(["-NoProfile", "-Command", &script]);
+        let result = output_with_timeout(&mut command, std::time::Duration::from_secs(5)).await;
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        let grandchild = wait_for_pid(&grandchild_file).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !is_running(grandchild),
+            "immediate grandchild {grandchild} survived timeout"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[tokio::test]
     async fn timed_out_command_kills_child_and_grandchild_job() {
