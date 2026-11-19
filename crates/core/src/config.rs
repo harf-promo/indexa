@@ -1192,7 +1192,7 @@ impl ConfigWriter for FilesystemConfigWriter {
             replace_config_windows(temp, dest).map_err(|error| {
                 error
                     .downcast_ref::<std::io::Error>()
-                    .cloned()
+                    .map(|error| std::io::Error::new(error.kind(), error.to_string()))
                     .unwrap_or_else(|| std::io::Error::other(error.to_string()))
             })
         }
