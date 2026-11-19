@@ -539,7 +539,7 @@ mod windows_job_tests {
         );
         let mut command = Command::new("powershell.exe");
         command.args(["-NoProfile", "-Command", &script]);
-        let error = output_with_timeout(&mut command, std::time::Duration::from_millis(400))
+        let error = output_with_timeout(&mut command, std::time::Duration::from_secs(5))
             .await
             .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);

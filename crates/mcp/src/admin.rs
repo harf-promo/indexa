@@ -1236,7 +1236,7 @@ mod tests {
         let mut command = tokio::process::Command::new("powershell.exe");
         command.args(["-NoProfile", "-Command", &script]);
         let result =
-            super::run_trigger_child(&mut command, std::time::Duration::from_millis(400)).await;
+            super::run_trigger_child(&mut command, std::time::Duration::from_secs(5)).await;
         assert!(result.is_err(), "trigger child unexpectedly completed");
         let parent = wait_for_pid(&parent_file).await;
         let grandchild = wait_for_pid(&grandchild_file).await;
