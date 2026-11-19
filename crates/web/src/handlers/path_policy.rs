@@ -408,6 +408,17 @@ impl ValidatedWalkFilter {
             return false;
         }
 
+        // Walkers may preserve an alias such as macOS /var while the captured root and opened
+        // handles use /private/var. Normalize after handle validation and use one canonical path
+        // for ancestry, matcher lookup, and relative-path matching.
+        let path = match std::fs::canonicalize(path) {
+            Ok(path) if path.starts_with(&self.root) => path,
+            _ => {
+                tracing::warn!(path = %path.display(), "skipping path outside canonical indexed root");
+                return false;
+            }
+        };
+
         if !is_dir
             && path.file_name().is_some_and(|name| {
                 [
@@ -423,7 +434,11 @@ impl ValidatedWalkFilter {
         }
 
         let mut directories = Vec::new();
-        let mut current = if is_dir { Some(path) } else { path.parent() };
+        let mut current = if is_dir {
+            Some(path.as_path())
+        } else {
+            path.parent()
+        };
         while let Some(dir) = current {
             if !dir.starts_with(&self.root) {
                 break;
@@ -449,7 +464,10 @@ impl ValidatedWalkFilter {
                 let Ok(relative) = path.strip_prefix(dir) else {
                     continue;
                 };
-                let matched = matcher.matched_path_or_any_parents(relative, is_dir || dir != path);
+                let matched = matcher.matched_path_or_any_parents(
+                    relative,
+                    is_dir || dir.as_path() != path.as_path(),
+                );
                 if !matched.is_none() {
                     ignored = matched.is_ignore();
                 }
@@ -460,12 +478,12 @@ impl ValidatedWalkFilter {
         }
 
         if is_dir {
-            let Some(matcher) = self.matcher_for_directory(path) else {
+            let Some(matcher) = self.matcher_for_directory(&path) else {
                 tracing::warn!(path = %path.display(), "skipping directory because its ignore policy could not be checked safely");
                 return false;
             };
             if let Ok(mut matchers) = self.matchers.lock() {
-                matchers.insert(path.to_path_buf(), matcher);
+                matchers.insert(path.clone(), matcher);
             } else {
                 return false;
             }
@@ -661,19 +679,21 @@ mod tests {
     #[test]
     fn validated_walk_filter_loads_nested_ignore_rules_from_checked_snapshots() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("indexed");
+        let root = temp.path().join("real");
+        let root_alias = temp.path().join("linked");
         let nested = root.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join(".gitignore"), "secret.txt\n").unwrap();
         let secret = nested.join("secret.txt");
         std::fs::write(&secret, "ignored content").unwrap();
+        symlink(&root, &root_alias).unwrap();
 
-        let validated = ValidatedIndexedPath::capture(root.clone()).unwrap();
+        let validated = ValidatedIndexedPath::capture(root_alias.clone()).unwrap();
         let filter =
             ValidatedWalkFilter::new(validated, indexa_core::walker::WalkConfig::default());
         assert!(filter.allows(&root, true));
-        assert!(filter.allows(&nested, true));
-        assert!(!filter.allows(&secret, false));
+        assert!(filter.allows(&root_alias.join("nested"), true));
+        assert!(!filter.allows(&root_alias.join("nested/secret.txt"), false));
     }
 }
 
