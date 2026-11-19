@@ -584,13 +584,14 @@ pub(crate) async fn api_packs_refresh(
                     &handle,
                     &state.walk_semaphore,
                     scan_walk_config(&state.config.scan),
+                    None,
                 )
                 .await
                 {
                     entries.append(&mut e);
                 }
             }
-            if run_deep_phase(&state, &name, &entries, &handle).await {
+            if run_deep_phase(&state, &name, &entries, &handle, None).await {
                 let reindexed = stale.len() - missing_count;
                 let detail =
                     format!("{reindexed} reindexed, {missing_count} vanished (left flagged)");
@@ -685,12 +686,13 @@ pub(crate) async fn api_packs_note(
                     &handle,
                     &state.walk_semaphore,
                     scan_walk_config(&state.config.scan),
+                    None,
                 )
                 .await
                 {
                     entries.append(&mut e);
                 }
-                if run_deep_phase(&state, &name, &entries, &handle).await {
+                if run_deep_phase(&state, &name, &entries, &handle, None).await {
                     finalize_done(&handle, "Note indexed");
                 }
             })

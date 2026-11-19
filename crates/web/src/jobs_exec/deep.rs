@@ -4,6 +4,7 @@
 
 use super::watchdog::run_watchdog_check;
 use super::{finalize_cancelled, finalize_done, finalize_failed, walk_for_job};
+use crate::handlers::path_policy::ValidatedIndexedPath;
 use crate::jobs::{broadcast_only, push, JobEvent, JobHandle};
 use crate::AppState;
 use indexa_core::{
@@ -337,19 +338,21 @@ pub(crate) async fn run_deep_phase_standalone(
     state: &AppState,
     path: &str,
     handle: &Arc<JobHandle>,
+    validated_path: Option<ValidatedIndexedPath>,
 ) {
     let Some(entries) = walk_for_job(
         path,
         handle,
         &state.walk_semaphore,
         super::scan_walk_config(&state.config.scan),
+        validated_path.clone(),
     )
     .await
     else {
         return;
     };
     let n_files = entries.iter().filter(|e| e.kind == EntryKind::File).count();
-    if run_deep_phase(state, path, &entries, handle).await {
+    if run_deep_phase(state, path, &entries, handle, validated_path).await {
         finalize_done(handle, &format!("Deep index complete: {n_files} files"));
     }
 }
@@ -362,6 +365,7 @@ pub(crate) async fn run_deep_phase(
     path: &str,
     entries: &[indexa_core::walker::Entry],
     handle: &Arc<JobHandle>,
+    validated_path: Option<ValidatedIndexedPath>,
 ) -> bool {
     // Secret files (`.env`, keys, `.pem`/keystores) are recorded by scan but not embedded unless
     // `[scan] include_sensitive` — redaction can't scrub a raw key, so their contents stay out of
@@ -497,6 +501,14 @@ pub(crate) async fn run_deep_phase(
         MissBatcher::new(state.config.embedding.dim, indexa_embed::EMBED_BATCH_SIZE);
 
     for entry in &files {
+        // Revalidate for each file after previous asynchronous work; the path is used by
+        // parsers and optional media subprocesses below.
+        if let Some(validated_path) = &validated_path {
+            if let Err(e) = validated_path.revalidate() {
+                finalize_failed(handle, "path-validation", &anyhow::anyhow!(e.message));
+                return false;
+            }
+        }
         // Honor cancellation requested via DELETE /api/jobs/:id. Flush first: files already
         // buffered here were fully parsed (and, for contextual retrieval, already paid for an
         // LLM blurb call) — finalizing them rather than discarding keeps that work instead of
@@ -1341,7 +1353,14 @@ mod tests {
                 );
                 Arc::make_mut(&mut state.config).describer.mode = mode.clone();
                 assert!(
-                    run_deep_phase(&state, dir.path().to_str().unwrap(), &[entry], &handle).await
+                    run_deep_phase(
+                        &state,
+                        dir.path().to_str().unwrap(),
+                        &[entry],
+                        &handle,
+                        None
+                    )
+                    .await
                 );
                 let store = state.store.lock().await;
                 assert!(store.entry_exists(&path).unwrap());
@@ -1391,7 +1410,7 @@ mod tests {
         // captured in true send order.
         let mut rx = handle.tx.subscribe();
 
-        let ok = run_deep_phase(&state, &path_str, &entries, &handle).await;
+        let ok = run_deep_phase(&state, &path_str, &entries, &handle, None).await;
         assert!(ok, "deep phase should succeed against fresh temp files");
 
         let mut timeline = Vec::new();
@@ -1452,7 +1471,7 @@ mod tests {
             }),
         );
 
-        run_deep_phase(&state, &path_str, &entries, &handle).await;
+        run_deep_phase(&state, &path_str, &entries, &handle, None).await;
 
         let history = handle.history.lock().unwrap().clone();
         let watchdog_checks = history

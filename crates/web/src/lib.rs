@@ -12,7 +12,7 @@
 
 mod dto;
 mod guard;
-mod handlers;
+pub(crate) mod handlers;
 mod jobs;
 mod jobs_exec;
 mod update_control;

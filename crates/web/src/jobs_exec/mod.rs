@@ -2,6 +2,7 @@
 //! plus their finalization and watchdog helpers. Spawned by the `api_job_*`
 //! handlers; no axum routing lives here.
 
+use crate::handlers::path_policy::ValidatedIndexedPath;
 use crate::jobs::{broadcast_only, push, JobEvent, JobHandle, JobStatus, Jobs};
 use crate::AppState;
 use indexa_core::{
@@ -127,12 +128,23 @@ pub(crate) async fn walk_for_job(
     handle: &Arc<JobHandle>,
     sem: &tokio::sync::Semaphore,
     walk_cfg: WalkConfig,
+    validated_path: Option<ValidatedIndexedPath>,
 ) -> Option<Vec<indexa_core::walker::Entry>> {
     let _permit = sem.acquire().await.ok()?;
     let pb = std::path::PathBuf::from(path);
-    let walked = tokio::task::spawn_blocking(move || walk(&pb, &walk_cfg))
-        .await
-        .unwrap_or_else(|e| Err(anyhow::anyhow!(e)));
+    let walked = tokio::task::spawn_blocking(move || {
+        if let Some(validated_path) = validated_path {
+            if let Err(e) = validated_path.revalidate() {
+                return Err(anyhow::anyhow!(
+                    "path changed after validation: {}",
+                    e.message
+                ));
+            }
+        }
+        walk(&pb, &walk_cfg)
+    })
+    .await
+    .unwrap_or_else(|e| Err(anyhow::anyhow!(e)));
     match walked {
         Ok(e) => Some(e),
         Err(e) => {
@@ -147,9 +159,12 @@ pub(crate) async fn run_index_job(
     path: String,
     handle: Arc<JobHandle>,
     model_override: Option<(String, String, u32)>,
+    validated_path: ValidatedIndexedPath,
 ) {
     // Phase 1: scan
-    let Some(entries) = scan::run_scan_phase(&state, &path, &handle).await else {
+    let Some(entries) =
+        scan::run_scan_phase(&state, &path, &handle, Some(validated_path.clone())).await
+    else {
         return;
     };
     // Cancellation requested during/after scan — stop before the expensive phases.
@@ -160,7 +175,15 @@ pub(crate) async fn run_index_job(
 
     // Phase 2: deep index (its own loop also honors cancellation and emits the
     // terminal event, in which case it returns false and we just stop here).
-    if !run_deep_phase(&state, &path, &entries, &handle).await {
+    if !run_deep_phase(
+        &state,
+        &path,
+        &entries,
+        &handle,
+        Some(validated_path.clone()),
+    )
+    .await
+    {
         return;
     }
     if handle.is_cancelled() {
@@ -172,7 +195,16 @@ pub(crate) async fn run_index_job(
     // scan→deep→summarize pipeline, not a Regenerate action — always incremental
     // (force: false), so re-running it after editing a few files doesn't re-pay full
     // LLM cost for the whole subtree. See `run_summarize_phase`'s `force` doc.
-    run_summarize_phase(&state, &path, None, &handle, model_override, false).await;
+    run_summarize_phase(
+        &state,
+        &path,
+        None,
+        &handle,
+        model_override,
+        false,
+        Some(validated_path),
+    )
+    .await;
 }
 
 /// Standalone scan: walks, scans, then finalises the job as done.
@@ -180,8 +212,9 @@ pub(crate) async fn run_scan_phase_standalone(
     state: &AppState,
     path: &str,
     handle: &Arc<JobHandle>,
+    validated_path: ValidatedIndexedPath,
 ) {
-    if let Some(entries) = scan::run_scan_phase(state, path, handle).await {
+    if let Some(entries) = scan::run_scan_phase(state, path, handle, Some(validated_path)).await {
         let n = entries.len() as u64;
         finalize_done(handle, &format!("{n} entries scanned"));
     }
@@ -211,6 +244,7 @@ pub(crate) async fn run_summarize_phase(
     // context", the welcome list, `run_index_job`'s summarize phase): those must stay
     // incremental — see [`enqueue_subtree`] vs [`requeue_subtree`] below.
     force: bool,
+    validated_path: Option<ValidatedIndexedPath>,
 ) {
     push(
         handle,
@@ -278,8 +312,20 @@ pub(crate) async fn run_summarize_phase(
     // `mark_for_resummary` (used internally by both) leaves `in_flight` rows untouched so
     // concurrent workers aren't double-claimed.
     let requeue_result = if force {
+        if let Some(validated_path) = &validated_path {
+            if let Err(e) = validated_path.revalidate() {
+                finalize_failed(handle, "path-validation", &anyhow::anyhow!(e.message));
+                return;
+            }
+        }
         requeue_subtree(&mut job_store, &root)
     } else {
+        if let Some(validated_path) = &validated_path {
+            if let Err(e) = validated_path.revalidate() {
+                finalize_failed(handle, "path-validation", &anyhow::anyhow!(e.message));
+                return;
+            }
+        }
         enqueue_subtree(&mut job_store, &root)
     };
     let newly_enqueued = match requeue_result {

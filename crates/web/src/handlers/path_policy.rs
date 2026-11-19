@@ -123,7 +123,7 @@ impl FileIdentity {
 }
 
 impl ValidatedIndexedPath {
-    fn capture(path: PathBuf) -> std::io::Result<Self> {
+    pub(crate) fn capture(path: PathBuf) -> std::io::Result<Self> {
         #[cfg(unix)]
         let handle = {
             use std::os::unix::fs::OpenOptionsExt;

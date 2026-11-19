@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::dto::{err_json, EstimateResponse, JobListEntry, JobPathQuery, JobStartResponse};
 use crate::handlers::path_policy::canonical_indexed_path;
-use crate::jobs::{JobEvent, JobHandle, JobStatus, Jobs};
+use crate::jobs::{push, JobEvent, JobHandle, JobStatus, Jobs};
 use crate::jobs_exec::{
     run_deep_phase_standalone, run_index_job, run_scan_phase_standalone, run_summarize_phase,
     schedule_cleanup,
@@ -43,6 +43,20 @@ fn cap_reached(jobs: &std::collections::HashMap<Uuid, Arc<JobHandle>>) -> bool {
         .filter(|h| h.status() == JobStatus::Running)
         .count()
         >= MAX_CONCURRENT_JOBS
+}
+
+fn fail_changed_path(handle: &Arc<JobHandle>, error: &str) {
+    push(
+        handle,
+        JobEvent::Failed {
+            error: error.to_owned(),
+            stage: Some("path-validation".to_owned()),
+            item_path: None,
+            chain: None,
+            code: None,
+        },
+    );
+    handle.set_status(JobStatus::Failed);
 }
 
 pub(crate) fn too_many_jobs() -> Response {
@@ -93,10 +107,10 @@ pub(crate) async fn api_job_scan(
     let state = s.clone();
     tokio::spawn(async move {
         if let Err(err) = path.revalidate() {
-            handle.set_status(JobStatus::Failed);
+            fail_changed_path(&handle, &err.message);
             tracing::warn!(path = %display_path, error = %err.message, "job refused changed path");
         } else {
-            run_scan_phase_standalone(&state, &display_path, &handle).await;
+            run_scan_phase_standalone(&state, &display_path, &handle, path).await;
         }
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
@@ -119,10 +133,10 @@ pub(crate) async fn api_job_deep(
     let state = s.clone();
     tokio::spawn(async move {
         if let Err(err) = path.revalidate() {
-            handle.set_status(JobStatus::Failed);
+            fail_changed_path(&handle, &err.message);
             tracing::warn!(path = %display_path, error = %err.message, "job refused changed path");
         } else {
-            run_deep_phase_standalone(&state, &display_path, &handle).await;
+            run_deep_phase_standalone(&state, &display_path, &handle, Some(path)).await;
         }
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
@@ -146,7 +160,7 @@ pub(crate) async fn api_job_summarize(
     let state = s.clone();
     tokio::spawn(async move {
         if let Err(err) = path.revalidate() {
-            handle.set_status(JobStatus::Failed);
+            fail_changed_path(&handle, &err.message);
             tracing::warn!(path = %display_path, error = %err.message, "job refused changed path");
         } else {
             run_summarize_phase(
@@ -156,6 +170,7 @@ pub(crate) async fn api_job_summarize(
                 &handle,
                 model_override,
                 q.force,
+                Some(path),
             )
             .await;
         }
@@ -182,10 +197,10 @@ pub(crate) async fn api_job_index(
     tokio::spawn(async move {
         let id = handle.id;
         if let Err(err) = path.revalidate() {
-            handle.set_status(JobStatus::Failed);
+            fail_changed_path(&handle, &err.message);
             tracing::warn!(path = %display_path, error = %err.message, "job refused changed path");
         } else {
-            run_index_job(state.clone(), display_path, handle, model_override).await;
+            run_index_job(state.clone(), display_path, handle, model_override, path).await;
         }
         schedule_cleanup(state.jobs.clone(), id);
     });
