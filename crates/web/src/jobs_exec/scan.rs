@@ -231,6 +231,8 @@ mod tests {
         use std::os::unix::fs::symlink;
         use std::sync::atomic::{AtomicBool, Ordering};
 
+        let _recorder_test_lock =
+            crate::handlers::path_policy::lock_opened_validated_path_recording();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("indexed");
         let target = root.join("replace-me");
@@ -239,6 +241,10 @@ mod tests {
         std::fs::create_dir(&outside).unwrap();
         std::fs::write(target.join("secret.txt"), "inside-before-swap").unwrap();
         std::fs::write(outside.join("secret.txt"), "outside-sentinel").unwrap();
+        let control = root.join("ok.txt");
+        std::fs::write(&control, "ordinary-control").unwrap();
+        let canonical_control = std::fs::canonicalize(&control).unwrap();
+        let canonical_outside_secret = std::fs::canonicalize(outside.join("secret.txt")).unwrap();
         let validated = ValidatedIndexedPath::capture(root.clone()).unwrap();
 
         crate::handlers::path_policy::begin_opened_validated_path_recording();
@@ -282,12 +288,16 @@ mod tests {
             "walk should list the directory before the test swaps it"
         );
         assert_eq!(handle.status(), crate::jobs::JobStatus::Running);
-        assert_eq!(store.count_descendants(&root.to_string_lossy()).unwrap(), 0);
+        assert_eq!(store.count_descendants(&root.to_string_lossy()).unwrap(), 1);
         let opened_paths = crate::handlers::path_policy::take_opened_validated_paths();
+        assert!(
+            opened_paths.iter().any(|path| path == &canonical_control),
+            "scan did not record opening the in-root control file {canonical_control:?}: {opened_paths:?}"
+        );
         assert!(
             !opened_paths
                 .iter()
-                .any(|path| path == &outside.join("secret.txt")),
+                .any(|path| path == &canonical_outside_secret),
             "outside sentinel was opened for reading: {opened_paths:?}"
         );
     }
