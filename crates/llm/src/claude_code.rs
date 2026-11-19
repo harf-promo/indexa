@@ -24,14 +24,59 @@ use std::sync::Arc;
 use tokio::process::Command;
 
 /// A Unix process group guard kills descendants if the awaiting future is cancelled or times out.
-/// Windows currently retains Tokio's direct-child `kill_on_drop`; it has no process-group
-/// analogue. A Job Object needs platform-specific unsafe handle setup and assignment may be
-/// refused when the parent process is already constrained by an incompatible job, so descendant
-/// cleanup is explicitly unsupported there rather than making CLI invocation fail to spawn.
 #[cfg(unix)]
 struct ProcessGroupGuard {
     pid: i32,
     armed: bool,
+}
+
+#[cfg(windows)]
+struct ChildJob(std::os::windows::io::OwnedHandle);
+
+#[cfg(windows)]
+impl ChildJob {
+    fn new() -> std::io::Result<Self> {
+        use std::{mem::size_of, os::windows::io::FromRawHandle};
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::JobObjects::{
+                CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
+        };
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let owned = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle.cast()) };
+        let mut limits = JOB_OBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOB_OBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self(owned))
+    }
+
+    fn assign(&self, child: &tokio::process::Child) -> std::io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        let ok = unsafe {
+            AssignProcessToJobObject(self.0.as_raw_handle().cast(), child.as_raw_handle().cast())
+        };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -56,7 +101,11 @@ async fn output_with_timeout(
         command.as_std_mut().process_group(0);
     }
     command.kill_on_drop(true);
+    #[cfg(windows)]
+    let job = ChildJob::new()?;
     let child = command.spawn()?;
+    #[cfg(windows)]
+    job.assign(&child)?;
     #[cfg(unix)]
     let mut group = child.id().map(|pid| ProcessGroupGuard {
         pid: pid as i32,
@@ -322,20 +371,13 @@ pub async fn claude_status(claude_bin: &str) -> ClaudeStatus {
     let probe_timeout = std::time::Duration::from_secs(5);
 
     // Presence: `claude --version` → e.g. "2.1.158 (Claude Code)".
-    let version = tokio::time::timeout(
-        probe_timeout,
-        Command::new(bin)
-            .arg("--version")
-            .env_remove("ANTHROPIC_API_KEY")
-            .stdin(Stdio::null())
-            // As in `run()`: if the timeout fires and this future is dropped, kill the
-            // child instead of leaking it detached — a probe run on every Settings load
-            // must not accumulate orphaned `claude` processes.
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await;
-    if let Ok(Ok(out)) = version {
+    let mut version_command = Command::new(bin);
+    version_command
+        .arg("--version")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdin(Stdio::null());
+    let version = output_with_timeout(&mut version_command, probe_timeout).await;
+    if let Ok(out) = version {
         if out.status.success() {
             status.cli_present = true;
             let v = String::from_utf8_lossy(&out.stdout);
@@ -351,21 +393,15 @@ pub async fn claude_status(claude_bin: &str) -> ClaudeStatus {
     // Login state: `claude auth status --json` →
     // {"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max",...}.
     // `--json` is the default but we pass it explicitly to be robust to changes.
-    let auth = tokio::time::timeout(
-        probe_timeout,
-        Command::new(bin)
-            .arg("auth")
-            .arg("status")
-            .arg("--json")
-            .env_remove("ANTHROPIC_API_KEY")
-            .stdin(Stdio::null())
-            // Same reasoning as the `--version` probe above: this one may touch the
-            // network (OAuth validation), making a timeout-then-leak more likely, not less.
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await;
-    if let Ok(Ok(out)) = auth {
+    let mut auth_command = Command::new(bin);
+    auth_command
+        .arg("auth")
+        .arg("status")
+        .arg("--json")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdin(Stdio::null());
+    let auth = output_with_timeout(&mut auth_command, probe_timeout).await;
+    if let Ok(out) = auth {
         let stdout = String::from_utf8_lossy(&out.stdout);
         if let Ok(parsed) = serde_json::from_str::<ClaudeAuthStatus>(&stdout) {
             status.logged_in = parsed.logged_in;
@@ -475,5 +511,78 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_job_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn timed_out_command_kills_child_and_grandchild_job() {
+        let dir = std::env::temp_dir().join(format!(
+            "indexa-claude-job-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent_file = dir.join("parent.pid");
+        let grandchild_file = dir.join("grandchild.pid");
+        let quote_path = |path: &std::path::Path| path.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "$PID | Set-Content -NoNewline '{}'; $p = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru; $p.Id | Set-Content -NoNewline '{}'; Start-Sleep -Seconds 30",
+            quote_path(&parent_file),
+            quote_path(&grandchild_file)
+        );
+        let mut command = Command::new("powershell.exe");
+        command.args(["-NoProfile", "-Command", &script]);
+        let error = output_with_timeout(&mut command, std::time::Duration::from_millis(400))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let parent = wait_for_pid(&parent_file).await;
+        let grandchild = wait_for_pid(&grandchild_file).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !is_running(parent),
+            "child process {parent} survived timeout"
+        );
+        assert!(
+            !is_running(grandchild),
+            "grandchild process {grandchild} survived timeout"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    async fn wait_for_pid(path: &std::path::Path) -> u32 {
+        for _ in 0..100 {
+            if let Ok(value) = std::fs::read_to_string(path) {
+                if let Ok(pid) = value.parse() {
+                    return pid;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("process did not record pid in {}", path.display());
+    }
+
+    fn is_running(pid: u32) -> bool {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, STILL_ACTIVE},
+            System::Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code = 0;
+        let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+        unsafe { CloseHandle(handle) };
+        ok != 0 && exit_code == STILL_ACTIVE
     }
 }

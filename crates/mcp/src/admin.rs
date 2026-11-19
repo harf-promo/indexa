@@ -55,9 +55,14 @@ async fn run_trigger_child(
         child.as_std_mut().process_group(0);
     }
     child.stdin(Stdio::null()).kill_on_drop(true);
+    #[cfg(windows)]
+    let job = ChildJob::new().map_err(|e| mcp_err(format!("failed to create child job: {e}")))?;
     let process = child
         .spawn()
         .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))?;
+    #[cfg(windows)]
+    job.assign(&process)
+        .map_err(|e| mcp_err(format!("failed to assign `indexa index` to child job: {e}")))?;
     #[cfg(unix)]
     let mut group = process.id().map(|pid| ProcessGroupGuard {
         pid: pid as i32,
@@ -80,15 +85,60 @@ async fn run_trigger_child(
         .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))
 }
 
-/// Unix timeout/cancellation cleanup for the entire spawned process group. Windows descendant
-/// cleanup remains unsupported: Tokio exposes direct-child `kill_on_drop`, while Job Object
-/// assignment requires platform-specific unsafe handle setup and can be rejected when the parent
-/// process is already constrained by an incompatible job. We retain direct-child termination and
-/// document this limitation instead of making `trigger_index` fail to spawn on those hosts.
+/// Unix timeout/cancellation cleanup for the entire spawned process group.
 #[cfg(unix)]
 struct ProcessGroupGuard {
     pid: i32,
     armed: bool,
+}
+
+#[cfg(windows)]
+struct ChildJob(std::os::windows::io::OwnedHandle);
+
+#[cfg(windows)]
+impl ChildJob {
+    fn new() -> std::io::Result<Self> {
+        use std::{mem::size_of, os::windows::io::FromRawHandle};
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::JobObjects::{
+                CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
+        };
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let owned = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle.cast()) };
+        let mut limits = JOB_OBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOB_OBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self(owned))
+    }
+
+    fn assign(&self, child: &tokio::process::Child) -> std::io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        let ok = unsafe {
+            AssignProcessToJobObject(self.0.as_raw_handle().cast(), child.as_raw_handle().cast())
+        };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1161,5 +1211,75 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn timed_out_trigger_child_kills_child_and_grandchild_job() {
+        let dir = std::env::temp_dir().join(format!(
+            "indexa-trigger-job-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent_file = dir.join("parent.pid");
+        let grandchild_file = dir.join("grandchild.pid");
+        let quote_path = |path: &std::path::Path| path.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "$PID | Set-Content -NoNewline '{}'; $p = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru; $p.Id | Set-Content -NoNewline '{}'; Start-Sleep -Seconds 30",
+            quote_path(&parent_file),
+            quote_path(&grandchild_file)
+        );
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command.args(["-NoProfile", "-Command", &script]);
+        let result =
+            super::run_trigger_child(&mut command, std::time::Duration::from_millis(400)).await;
+        assert!(result.is_err(), "trigger child unexpectedly completed");
+        let parent = wait_for_pid(&parent_file).await;
+        let grandchild = wait_for_pid(&grandchild_file).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !is_running(parent),
+            "child process {parent} survived timeout"
+        );
+        assert!(
+            !is_running(grandchild),
+            "grandchild process {grandchild} survived timeout"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    async fn wait_for_pid(path: &std::path::Path) -> u32 {
+        for _ in 0..100 {
+            if let Ok(value) = std::fs::read_to_string(path) {
+                if let Ok(pid) = value.parse() {
+                    return pid;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("process did not record pid in {}", path.display());
+    }
+
+    #[cfg(windows)]
+    fn is_running(pid: u32) -> bool {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, STILL_ACTIVE},
+            System::Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code = 0;
+        let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+        unsafe { CloseHandle(handle) };
+        ok != 0 && exit_code == STILL_ACTIVE
     }
 }
