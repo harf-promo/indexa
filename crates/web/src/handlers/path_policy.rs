@@ -9,6 +9,21 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+#[cfg(test)]
+thread_local! {
+    static OPENED_VALIDATED_PATHS: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn begin_opened_validated_path_recording() {
+    OPENED_VALIDATED_PATHS.with(|paths| *paths.borrow_mut() = Some(Vec::new()));
+}
+
+#[cfg(test)]
+pub(crate) fn take_opened_validated_paths() -> Vec<PathBuf> {
+    OPENED_VALIDATED_PATHS.with(|paths| paths.borrow_mut().take().unwrap_or_default())
+}
+
 use crate::{dto::err_json, AppState};
 
 pub(crate) struct IndexedPathError {
@@ -226,6 +241,12 @@ impl ValidatedIndexedPath {
         }
         self.ensure_root_identity()?;
         let real = opened_handle_path(&file)?;
+        #[cfg(test)]
+        OPENED_VALIDATED_PATHS.with(|paths| {
+            if let Some(paths) = paths.borrow_mut().as_mut() {
+                paths.push(real.clone());
+            }
+        });
         if !real.starts_with(&self.real_path) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,

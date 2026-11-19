@@ -241,6 +241,8 @@ mod tests {
         std::fs::write(outside.join("secret.txt"), "outside-sentinel").unwrap();
         let validated = ValidatedIndexedPath::capture(root.clone()).unwrap();
 
+        crate::handlers::path_policy::begin_opened_validated_path_recording();
+
         let db = temp.path().join("index.db");
         let mut store = Store::open(&db).unwrap();
         let handle = Arc::new(JobHandle::new("scan", root.to_string_lossy()));
@@ -281,6 +283,13 @@ mod tests {
         );
         assert_eq!(handle.status(), crate::jobs::JobStatus::Running);
         assert_eq!(store.count_descendants(&root.to_string_lossy()).unwrap(), 0);
+        let opened_paths = crate::handlers::path_policy::take_opened_validated_paths();
+        assert!(
+            !opened_paths
+                .iter()
+                .any(|path| path == &outside.join("secret.txt")),
+            "outside sentinel was opened for reading: {opened_paths:?}"
+        );
     }
 
     // The CLI's production protocol: one lease/generation before walking, retained through

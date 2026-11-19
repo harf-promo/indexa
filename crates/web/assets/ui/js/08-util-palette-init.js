@@ -80,9 +80,10 @@ function escapeAttr(s) { return escapeHtml(s); }
    code blocks, inline code, bold, italic, headings, unordered lists, and GFM
    pipe tables (a `| h | h |` header row followed by a `|---|---|` separator). */
 function renderMarkdown(src) {
-  if (!src) return '';
+  const safeSrc = String(src || '').replace(/\0/g, '');
+  if (!safeSrc) return '';
   // 1) Escape everything up front so no raw HTML from the model can execute.
-  let text = escapeHtml(src);
+  let text = escapeHtml(safeSrc);
 
   // 2) Pull fenced code blocks out into placeholders so inline rules don't touch them.
   const blocks = [];
