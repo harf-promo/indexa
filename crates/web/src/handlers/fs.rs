@@ -8,22 +8,31 @@ use axum::{
 use crate::dto::{err_json, FsEntry, PathQuery};
 
 pub(crate) async fn api_fs_ls(Query(params): Query<PathQuery>) -> Response {
-    let raw = match params.path.as_deref() {
-        Some(p) if !p.is_empty() => p.to_owned(),
-        _ => directories::BaseDirs::new()
-            .map(|b| b.home_dir().to_string_lossy().into_owned())
-            .unwrap_or_else(|| "/".to_owned()),
-    };
+    let home = directories::BaseDirs::new()
+        .map(|b| b.home_dir().to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("/"));
+    let raw = params
+        .path
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| home.to_string_lossy().into_owned());
+    match tokio::task::spawn_blocking(move || api_fs_ls_sync(&raw, &home)).await {
+        Ok(response) => response,
+        Err(error) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("filesystem listing worker failed: {error}"),
+        ),
+    }
+}
 
+fn api_fs_ls_sync(raw: &str, home: &std::path::Path) -> Response {
     // Security: reject path traversal and non-absolute paths.
-    let canon = match std::fs::canonicalize(&raw) {
+    let canon = match std::fs::canonicalize(raw) {
         Ok(p) => p,
         Err(_) => return err_json(StatusCode::NOT_FOUND, "path not found"),
     };
 
-    let home_canon = directories::BaseDirs::new()
-        .map(|b| b.home_dir().to_path_buf())
-        .and_then(|h| std::fs::canonicalize(h).ok())
+    let home_canon = std::fs::canonicalize(home)
+        .ok()
         .unwrap_or_else(|| std::path::PathBuf::from("/"));
 
     // Clamp to HOME to prevent exposing system dirs.
@@ -62,4 +71,31 @@ pub(crate) async fn api_fs_ls(Query(params): Query<PathQuery>) -> Response {
     entries.extend(dirs);
 
     Json(entries).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::api_fs_ls_sync;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn filesystem_listing_stays_confined_and_only_returns_visible_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(home.join("projects")).unwrap();
+        std::fs::create_dir_all(home.join(".hidden")).unwrap();
+        std::fs::write(home.join("notes.txt"), "not a directory").unwrap();
+
+        let response = api_fs_ls_sync(home.to_str().unwrap(), &home);
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], "projects");
+
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let response = api_fs_ls_sync(outside.to_str().unwrap(), &home);
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    }
 }

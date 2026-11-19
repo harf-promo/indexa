@@ -26,20 +26,34 @@ pub(crate) async fn api_inspect(
     if q.path.trim().is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "missing 'path' query parameter");
     }
-    let store = state.store.lock().await;
+    let db_path = state.db_path.clone();
+    match tokio::task::spawn_blocking(move || api_inspect_sync(&db_path, &q.path)).await {
+        Ok(response) => response,
+        Err(error) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("inspect worker failed: {error}"),
+        ),
+    }
+}
 
-    let entry = store.entry_by_path(&q.path).ok().flatten();
-    let summary = store.summary_by_path(&q.path).ok().flatten();
-    let chunks = store.chunks_for_path(&q.path, 0).unwrap_or_default();
+fn api_inspect_sync(db_path: &std::path::Path, path: &str) -> Response {
+    let store = match indexa_core::store::Store::open(db_path) {
+        Ok(store) => store,
+        Err(error) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+    };
+
+    let entry = store.entry_by_path(path).ok().flatten();
+    let summary = store.summary_by_path(path).ok().flatten();
+    let chunks = store.chunks_for_path(path, 0).unwrap_or_default();
 
     if entry.is_none() && summary.is_none() && chunks.is_empty() {
         return err_json(StatusCode::NOT_FOUND, "nothing indexed at this path");
     }
 
-    let classification = store.classification_for(&q.path).ok().flatten();
-    let weight = store.weight_for(&q.path).unwrap_or(1.0);
+    let classification = store.classification_for(path).ok().flatten();
+    let weight = store.weight_for(path).unwrap_or(1.0);
     let apps: Vec<DetectedAppDto> = store
-        .apps_for_dir(&q.path)
+        .apps_for_dir(path)
         .unwrap_or_default()
         .into_iter()
         .map(|a| DetectedAppDto {
@@ -49,7 +63,7 @@ pub(crate) async fn api_inspect(
             is_primary: a.is_primary,
         })
         .collect();
-    let edges = store.edges_from(&q.path).unwrap_or_default();
+    let edges = store.edges_from(path).unwrap_or_default();
     let count_kind = |k: &str| edges.iter().filter(|e| e.kind == k).count();
 
     let language = chunks.iter().find_map(|c| c.language.clone());
@@ -66,7 +80,7 @@ pub(crate) async fn api_inspect(
         .collect();
 
     Json(InspectResponse {
-        path: q.path.clone(),
+        path: path.to_owned(),
         kind: entry.as_ref().map(|e| e.kind.clone()),
         size: entry.as_ref().map(|e| e.size),
         modified_s: entry.as_ref().and_then(|e| e.modified_s),

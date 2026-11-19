@@ -12,23 +12,42 @@ use crate::dto::{
 use crate::AppState;
 use indexa_core::store::{CoverageEntry, USAGE_WEEK_SECS};
 
+async fn read_store<T, F>(db_path: std::path::PathBuf, query: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(indexa_core::store::Store) -> anyhow::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let store = indexa_core::store::Store::open(&db_path).map_err(|e| format!("{e:#}"))?;
+        query(store).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| format!("database worker failed: {e}"))?
+}
+
 pub(crate) async fn api_stats(State(state): State<AppState>) -> Response {
-    let store = state.store.lock().await;
-    // Telemetry read is best-effort: zeros (the UI hides the line) over a 500.
-    let usage = store.usage_summary(USAGE_WEEK_SECS).unwrap_or_default();
-    match (store.entry_count(), store.chunk_count()) {
-        (Ok(entries), Ok(chunks)) => Json(StatsResponse {
+    let result = read_store(state.db_path.as_ref().clone(), |store| {
+        let usage = store.usage_summary(USAGE_WEEK_SECS).unwrap_or_default();
+        Ok((
+            store.entry_count()?,
+            store.chunk_count()?,
+            store.summary_count().unwrap_or(0),
+            usage,
+        ))
+    })
+    .await;
+    match result {
+        Ok((entries, chunks, summaries, usage)) => Json(StatsResponse {
             entries,
             chunks,
-            // Best-effort: 0 over a read error just hides the "context not built" hint.
-            summaries: store.summary_count().unwrap_or(0),
+            summaries,
             usage_week: UsageWeekDto {
                 served: usage.bytes_served,
                 counterfactual: usage.bytes_counterfactual,
             },
         })
         .into_response(),
-        (Err(e), _) | (_, Err(e)) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
@@ -39,12 +58,18 @@ pub(crate) async fn api_stats(State(state): State<AppState>) -> Response {
 /// path. The numbers are estimates by definition; the UI carries the ≈4 bytes/token
 /// caveat from `savings_line`.
 pub(crate) async fn api_impact(State(state): State<AppState>) -> Response {
-    let store = state.store.lock().await;
-    // Best-effort reads: an empty/zero dashboard over a 500 — telemetry must never
-    // be the reason a settings panel fails to render.
-    let week = store.usage_summary(USAGE_WEEK_SECS).unwrap_or_default();
-    let by_tool = store.usage_by_tool(USAGE_WEEK_SECS).unwrap_or_default();
-    let by_basis = store.usage_by_basis(USAGE_WEEK_SECS).unwrap_or_default();
+    let result = read_store(state.db_path.as_ref().clone(), |store| {
+        Ok((
+            store.usage_summary(USAGE_WEEK_SECS).unwrap_or_default(),
+            store.usage_by_tool(USAGE_WEEK_SECS).unwrap_or_default(),
+            store.usage_by_basis(USAGE_WEEK_SECS).unwrap_or_default(),
+        ))
+    })
+    .await;
+    let (week, by_tool, by_basis) = match result {
+        Ok(values) => values,
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
     Json(ImpactResponse {
         calls: week.calls,
         served: week.bytes_served,
@@ -81,8 +106,14 @@ pub(crate) async fn api_session_impact(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Response {
-    let store = state.store.lock().await;
-    let s = store.session_usage_summary(&session_id).unwrap_or_default();
+    let summary = read_store(state.db_path.as_ref().clone(), move |store| {
+        Ok(store.session_usage_summary(&session_id).unwrap_or_default())
+    })
+    .await;
+    let s = match summary {
+        Ok(summary) => summary,
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
     Json(ImpactResponse {
         calls: s.calls,
         served: s.bytes_served,
@@ -96,8 +127,11 @@ pub(crate) async fn api_session_impact(
 
 /// Coverage breakdown for the Map → Table view.
 pub(crate) async fn api_map(State(state): State<AppState>) -> Response {
-    let store = state.store.lock().await;
-    match store.coverage_stats() {
+    let result = read_store(state.db_path.as_ref().clone(), |store| {
+        store.coverage_stats()
+    })
+    .await;
+    match result {
         Ok((total_dirs, built, partial, failed, none, total_chunks, total_files)) => {
             Json(CoverageStats {
                 total_dirs,
@@ -110,13 +144,13 @@ pub(crate) async fn api_map(State(state): State<AppState>) -> Response {
             })
             .into_response()
         }
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
 pub(crate) async fn api_roots(State(state): State<AppState>) -> Response {
-    let store = state.store.lock().await;
-    match store.root_paths() {
+    let result = read_store(state.db_path.as_ref().clone(), |store| store.root_paths()).await;
+    match result {
         Ok(paths) => Json(
             paths
                 .into_iter()
@@ -127,7 +161,7 @@ pub(crate) async fn api_roots(State(state): State<AppState>) -> Response {
                 .collect::<Vec<_>>(),
         )
         .into_response(),
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
@@ -140,8 +174,11 @@ pub(crate) async fn api_search(
         return Json(Vec::<TreeNodeResponse>::new()).into_response();
     }
     let limit = params.limit.unwrap_or(50).min(200);
-    let store = state.store.lock().await;
-    match store.search_paths(&q, limit) {
+    let result = read_store(state.db_path.as_ref().clone(), move |store| {
+        store.search_paths(&q, limit)
+    })
+    .await;
+    match result {
         Ok(nodes) => {
             // Deliberately NO usage telemetry here: this is the sidebar
             // path-typeahead (a human navigating, debounced per keystroke),
@@ -153,7 +190,7 @@ pub(crate) async fn api_search(
                 nodes.into_iter().map(TreeNodeResponse::from).collect();
             Json(out).into_response()
         }
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
@@ -166,7 +203,7 @@ pub(crate) async fn api_search(
 /// Activity drawer) for its whole duration. Same discipline as `handlers/graph.rs` and
 /// `handlers/insights_handler.rs`.
 pub(crate) async fn api_map_treemap(State(state): State<AppState>) -> Response {
-    let db_path = state.db_path.clone();
+    let db_path = state.db_path.as_ref().clone();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let store = indexa_core::store::Store::open(&db_path)?;
         store.all_coverage_entries()

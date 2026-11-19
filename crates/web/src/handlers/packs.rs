@@ -543,26 +543,37 @@ pub(crate) async fn api_packs_refresh(
         return resp;
     }
 
-    let stale = {
-        let store = s.store.lock().await;
-        let pack = match store.pack_by_name(&name) {
-            Ok(Some(p)) => p,
-            Ok(None) => {
-                return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\""))
-            }
-            Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    let db_path = s.db_path.clone();
+    let name_for_lookup = name.clone();
+    let stale_snapshot = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let store = indexa_core::store::Store::open(&db_path)?;
+        let Some(pack) = store.pack_by_name(&name_for_lookup)? else {
+            return Ok(None);
         };
-        store.stale_pack_paths(&pack.id).unwrap_or_default()
-        // Lock dropped here, before spawning — never held across an `.await`/`tokio::spawn`.
+        let stale = store.stale_pack_paths(&pack.id).unwrap_or_default();
+        let missing_count = stale
+            .iter()
+            .filter(|path| !std::path::Path::new(path).exists())
+            .count();
+        Ok(Some((stale, missing_count)))
+    })
+    .await;
+    let (stale, missing_count) = match stale_snapshot {
+        Ok(Ok(Some(snapshot))) => snapshot,
+        Ok(Ok(None)) => {
+            return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\""))
+        }
+        Ok(Err(error)) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+        Err(error) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("refresh scan worker failed: {error}"),
+            )
+        }
     };
     if stale.is_empty() {
         return Json(serde_json::json!({ "stale_files": 0 })).into_response();
     }
-    let missing_count = stale
-        .iter()
-        .filter(|p| !std::path::Path::new(p).exists())
-        .count();
-
     // Check the cap and register under one lock: a refresh racing another start for the last
     // slot passed the early check above too, and must not overshoot the cap.
     let Some((id, handle)) = try_register_job(&s.jobs, "pack_refresh", name.clone()).await else {
@@ -719,45 +730,39 @@ pub(crate) async fn api_packs_suggest(
     // Try semantic search via the embedder held in AppState.
     let embedding = state.embedder.embed(&query).await.ok();
 
-    let store = state.store.lock().await;
-    if let Some(emb) = embedding {
-        match store.summary_cosine_search(&emb, limit, 0.15) {
-            Ok(hits) if !hits.is_empty() => {
-                let paths: Vec<&str> = hits.iter().map(|(p, _)| p.as_str()).collect();
-                return Json(serde_json::json!({
-                    "method": "semantic",
-                    "paths": paths,
-                }))
-                .into_response();
+    let db_path = state.db_path.clone();
+    match tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        use indexa_core::config::HybridMode;
+        let store = indexa_core::store::Store::open(&db_path)?;
+        if let Some(emb) = embedding {
+            match store.summary_cosine_search(&emb, limit, 0.15)? {
+                hits if !hits.is_empty() => {
+                    let paths: Vec<String> = hits.into_iter().map(|(path, _)| path).collect();
+                    return Ok(serde_json::json!({ "method": "semantic", "paths": paths }));
+                }
+                _ => {} // fall through to keyword
             }
-            Ok(_) => {} // fall through to keyword
-            Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
         }
-    }
-
-    // Keyword fallback.
-    use indexa_core::config::HybridMode;
-    match store.hybrid_search(&query, None, &HybridMode::Sparse, None, limit * 3, 0.0) {
-        Ok(hits) => {
-            let mut seen = std::collections::HashSet::new();
-            let paths: Vec<&str> = hits
-                .iter()
-                .filter_map(|h| {
-                    if seen.insert(h.entry_path.as_str()) {
-                        Some(h.entry_path.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .take(limit)
-                .collect();
-            Json(serde_json::json!({
-                "method": "keyword",
-                "paths": paths,
-            }))
-            .into_response()
-        }
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        let hits = store.hybrid_search(&query, None, &HybridMode::Sparse, None, limit * 3, 0.0)?;
+        let mut seen = std::collections::HashSet::new();
+        let paths: Vec<String> = hits
+            .into_iter()
+            .filter_map(|hit| {
+                seen.insert(hit.entry_path.clone())
+                    .then_some(hit.entry_path)
+            })
+            .take(limit)
+            .collect();
+        Ok(serde_json::json!({ "method": "keyword", "paths": paths }))
+    })
+    .await
+    {
+        Ok(Ok(body)) => Json(body).into_response(),
+        Ok(Err(error)) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+        Err(error) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("suggest worker failed: {error}"),
+        ),
     }
 }
 
@@ -780,57 +785,69 @@ pub(crate) async fn api_packs_search(
     // `api_packs_refresh` already follow this same release-before-slow-op shape.)
     let embedding = state.embedder.embed(&query).await.ok();
 
-    let store = state.store.lock().await;
-    let pack = match store.pack_by_name(&name) {
-        Ok(Some(p)) => p,
-        Ok(None) => return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\"")),
-        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
-    };
-    let paths = match store.pack_paths(&pack.id) {
-        Ok(p) => p,
-        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
-    };
-    if paths.is_empty() {
-        return Json(serde_json::json!({ "hits": [] })).into_response();
-    }
-
-    let per_scope = (limit * 2).max(10);
-    let mut all_hits: Vec<indexa_core::store::SearchHit> = Vec::new();
-    for root in &paths {
-        if let Ok(mut hits) = store.hybrid_search(
-            &query,
-            embedding.as_deref(),
-            &HybridMode::Rrf,
-            Some(root.as_str()),
-            per_scope,
-            60.0,
-        ) {
-            all_hits.append(&mut hits);
-        }
-    }
-
-    all_hits.sort_by(|a, b| {
-        b.rrf_score
-            .partial_cmp(&a.rrf_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let mut seen = std::collections::HashSet::new();
-    let hits: Vec<SearchHitDto> = all_hits
-        .into_iter()
-        .filter(|h| seen.insert(format!("{}:{}", h.entry_path, h.seq)))
-        .take(limit)
-        .map(|h| {
-            let snippet: String = h.text.chars().take(200).collect();
-            SearchHitDto {
-                path: h.entry_path,
-                heading: h.heading,
-                snippet,
-                score: h.rrf_score,
+    let db_path = state.db_path.clone();
+    let search_name = name.clone();
+    let search_query = query.clone();
+    let result =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Option<Vec<SearchHitDto>>> {
+            let store = indexa_core::store::Store::open(&db_path)?;
+            let Some(pack) = store.pack_by_name(&search_name)? else {
+                return Ok(None);
+            };
+            let paths = store.pack_paths(&pack.id)?;
+            if paths.is_empty() {
+                return Ok(Some(Vec::new()));
             }
-        })
-        .collect();
 
-    Json(serde_json::json!({ "name": name, "query": query, "hits": hits })).into_response()
+            let per_scope = (limit * 2).max(10);
+            let mut all_hits: Vec<indexa_core::store::SearchHit> = Vec::new();
+            for root in &paths {
+                if let Ok(mut hits) = store.hybrid_search(
+                    &search_query,
+                    embedding.as_deref(),
+                    &HybridMode::Rrf,
+                    Some(root.as_str()),
+                    per_scope,
+                    60.0,
+                ) {
+                    all_hits.append(&mut hits);
+                }
+            }
+
+            all_hits.sort_by(|a, b| {
+                b.rrf_score
+                    .partial_cmp(&a.rrf_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let mut seen = std::collections::HashSet::new();
+            let hits: Vec<SearchHitDto> = all_hits
+                .into_iter()
+                .filter(|h| seen.insert(format!("{}:{}", h.entry_path, h.seq)))
+                .take(limit)
+                .map(|h| {
+                    let snippet: String = h.text.chars().take(200).collect();
+                    SearchHitDto {
+                        path: h.entry_path,
+                        heading: h.heading,
+                        snippet,
+                        score: h.rrf_score,
+                    }
+                })
+                .collect();
+            Ok(Some(hits))
+        })
+        .await;
+    match result {
+        Ok(Ok(Some(hits))) => {
+            Json(serde_json::json!({ "name": name, "query": query, "hits": hits })).into_response()
+        }
+        Ok(Ok(None)) => err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\"")),
+        Ok(Err(error)) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+        Err(error) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("pack search worker failed: {error}"),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -913,7 +930,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // An indexed member that has vanished from disk counts as stale (and its walk is empty).
         let gone = dir.path().join("gone.rs").to_string_lossy().into_owned();
-        let mut store = Store::open_in_memory().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
         store
             .upsert_chunks(&[ChunkRecord {
                 entry_path: gone.clone(),

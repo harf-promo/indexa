@@ -21,10 +21,19 @@ pub(crate) async fn api_delete_entry(
     if path.trim().is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "path must not be empty");
     }
-    let mut store = s.store.lock().await;
-    match store.delete_subtree(&path) {
-        Ok(removed) => Json(serde_json::json!({ "removed": removed })).into_response(),
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    let db_path = s.db_path.clone();
+    match tokio::task::spawn_blocking(move || {
+        let mut store = indexa_core::store::Store::open(&db_path)?;
+        store.delete_subtree(&path)
+    })
+    .await
+    {
+        Ok(Ok(removed)) => Json(serde_json::json!({ "removed": removed })).into_response(),
+        Ok(Err(error)) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+        Err(error) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("delete worker failed: {error}"),
+        ),
     }
 }
 
@@ -43,29 +52,31 @@ pub(crate) async fn api_logs_tail(
         .unwrap_or(50)
         .min(500);
 
+    let log_dir = state.log_dir.clone();
+    let tail = tokio::task::spawn_blocking(move || logs_tail(&log_dir, lines))
+        .await
+        .unwrap_or_default();
+
+    Json(serde_json::json!({ "lines": tail }))
+}
+
+fn logs_tail(log_dir: &std::path::Path, lines: usize) -> String {
     // tracing-appender rolling::daily creates files named "prefix.YYYY-MM-DD".
     // Pick the most recently modified log file under the log dir.
-    let log_dir = &*state.log_dir;
     let candidates: Vec<_> = std::fs::read_dir(log_dir)
         .into_iter()
         .flatten()
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().starts_with("indexa.log"))
         .collect();
-
-    // Pick the most recently modified log file.
     let best = candidates
         .iter()
         .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
-
-    // Read a bounded window from the END of the (possibly huge) day's log rather than the whole
-    // file just to return the last `lines`.
     let content = match best {
         Some(entry) => read_tail_window(&entry.path(), lines),
         None => String::new(),
     };
-
-    let tail: String = content
+    content
         .lines()
         .rev()
         .take(lines)
@@ -73,9 +84,7 @@ pub(crate) async fn api_logs_tail(
         .into_iter()
         .rev()
         .collect::<Vec<_>>()
-        .join("\n");
-
-    Json(serde_json::json!({ "lines": tail }))
+        .join("\n")
 }
 
 /// Read the last window of a file — enough for `lines` lines at a generous ~512 bytes/line,

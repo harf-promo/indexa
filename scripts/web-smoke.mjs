@@ -424,7 +424,127 @@ try {
       search.body.some((n) => String(n.path || '').includes('alpha.txt')),
     `status=${search.status} hits=${Array.isArray(search.body) ? search.body.length : 'n/a'}`);
 
-  // Check 5 — Map tab → Treemap renders ≥2 cells on first paint (B1 regression guard).
+  // Check 5 — mocked streamed Ask: the batched renderer must preserve the final sanitized
+  // Markdown HTML exactly and announce the completed answer once, after all fragments arrive.
+  const streamed = await cdp.eval(`(async () => {
+    const originalFetch = window.fetch.bind(window);
+    const fence = String.fromCharCode(96).repeat(3);
+    const answer = 'Hello **world** <img src=x onerror=alert(1)>.' +
+      '\\n\\n' + fence + 'rs\\nfn main() {}\\n' + fence;
+    window.fetch = (input, init) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url === '/api/stats') return Promise.resolve(new Response('{"chunks":1}'));
+      if (url === '/api/ask/stream') {
+        const encoder = new TextEncoder();
+        const body = new ReadableStream({ start(controller) {
+          const push = event => controller.enqueue(encoder.encode('data: ' + JSON.stringify(event) + '\\n\\n'));
+          push({ type: 'fragment', text: 'Hello **' });
+          setTimeout(() => {
+            push({ type: 'fragment', text: 'world** <img src=x onerror=alert(1)>.' + '\\n\\n' });
+            push({ type: 'fragment', text: fence + 'rs\\nfn main() {}\\n' + fence });
+            push({ type: 'done' });
+            controller.close();
+          }, 40);
+        }});
+        return Promise.resolve(new Response(body, { headers: { 'Content-Type': 'text/event-stream' } }));
+      }
+      return originalFetch(input, init);
+    };
+    const live = document.getElementById('ask-answer-announcement');
+    let announcements = 0;
+    const observer = new MutationObserver(() => announcements++);
+    observer.observe(live, { childList: true, characterData: true, subtree: true });
+    document.getElementById('q').value = 'smoke question';
+    await doAsk();
+    await Promise.resolve();
+    observer.disconnect();
+    window.fetch = originalFetch;
+    return {
+      html: document.querySelector('#chat .msg.assistant:last-child .bubble').innerHTML,
+      announced: live.textContent,
+      announcements,
+      liveMode: live.getAttribute('aria-live'),
+      expected: renderMarkdown(answer),
+      codeBlockPreserved: renderMarkdown(answer).includes('<pre class="chat-code">') &&
+        renderMarkdown(answer).includes('fn main() {}'),
+    };
+  })()`, { awaitPromise: true });
+  check('streamed Ask keeps final sanitized Markdown output and announces once at completion',
+    streamed.html === streamed.expected &&
+      streamed.announced === 'Hello **world** <img src=x onerror=alert(1)>.' + '\n\n' + '```rs\nfn main() {}\n```' &&
+      streamed.announcements === 1 && streamed.liveMode === 'polite' && streamed.codeBlockPreserved,
+    `htmlMatches=${streamed.html === streamed.expected} codeBlock=${streamed.codeBlockPreserved} announcements=${streamed.announcements}`);
+
+  // Check 6 — generated job cards and warning rows expose button semantics and keyboard actions.
+  await cdp.eval(`(() => {
+    const priorSelect = selectJob;
+    window.__smokeSelectedJob = '';
+    selectJob = id => { window.__smokeSelectedJob = id; };
+    const before = document.createElement('button');
+    before.textContent = 'keyboard smoke start';
+    const card = document.createElement('div');
+    card.className = 'jobs-card';
+    card.dataset.jobId = 'smoke-a11y';
+    document.getElementById('send').insertAdjacentElement('afterend', before);
+    before.insertAdjacentElement('afterend', card);
+    _renderCardContent(card, 'smoke-a11y', { kind: 'scan', path: '/smoke', status: 'done', summary: 'done', warnings: [], warningOverflow: 0, lastProgress: null, snapshot: null });
+    window.__smokePriorSelect = priorSelect;
+    window.__smokeCard = card;
+    window.__smokeFocusStart = before;
+    const previousJob = activeJobs['smoke-a11y'];
+    const previousSelection = selectedJobId;
+    activeJobs['smoke-a11y'] = { warnings: [{ stage: 'scan', message: 'sample warning', item_path: '/smoke/a.txt' }], warningOverflow: 0, stageCounts: { scan: 1 } };
+    selectedJobId = 'smoke-a11y';
+    applyWarnFilter();
+    const row = document.querySelector('#jd-warn-list .warn-row');
+    card.insertAdjacentElement('afterend', row);
+    window.__smokeRow = row;
+    window.__smokePreviousJob = previousJob;
+    window.__smokePreviousSelection = previousSelection;
+  })()`);
+  const dispatchKey = async (key, code, windowsVirtualKeyCode) => {
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode });
+  };
+  const tabUntil = async (expression) => {
+    for (let i = 0; i < 12; i++) {
+      await dispatchKey('Tab', 'Tab', 9);
+      if (await cdp.eval(expression)) return true;
+    }
+    return false;
+  };
+  const cardReachedByTab = await tabUntil('document.activeElement === window.__smokeCard');
+  const cardRing = await cdp.eval(`(() => {
+    const element = window.__smokeCard;
+    const style = getComputedStyle(element);
+    const outline = style.outlineStyle !== 'none' && style.outlineWidth !== '0px';
+    return element.matches(':focus-visible') && (outline || style.boxShadow !== 'none');
+  })()`);
+  await dispatchKey('Enter', 'Enter', 13);
+  const rowReachedByTab = await tabUntil('document.activeElement === window.__smokeRow');
+  const rowRing = await cdp.eval(`(() => {
+    const element = window.__smokeRow;
+    const style = getComputedStyle(element);
+    const outline = style.outlineStyle !== 'none' && style.outlineWidth !== '0px';
+    return element.matches(':focus-visible') && (outline || style.boxShadow !== 'none');
+  })()`);
+  await dispatchKey(' ', 'Space', 32);
+  const keyboard = await cdp.eval(`(() => {
+    const card = window.__smokeCard;
+    const row = window.__smokeRow;
+    const cardOk = card.getAttribute('role') === 'button' && card.tabIndex === 0 && window.__smokeSelectedJob === 'smoke-a11y';
+    const rowOk = row.getAttribute('role') === 'button' && row.tabIndex === 0 && row.getAttribute('aria-expanded') === 'true' && row.classList.contains('expanded');
+    selectJob = window.__smokePriorSelect;
+    selectedJobId = window.__smokePreviousSelection;
+    if (window.__smokePreviousJob) activeJobs['smoke-a11y'] = window.__smokePreviousJob; else delete activeJobs['smoke-a11y'];
+    card.remove(); row.remove(); window.__smokeFocusStart.remove();
+    return { cardOk, rowOk };
+  })()`);
+  check('job cards and warning rows are keyboard-operable and focusable',
+    cardReachedByTab && cardRing && rowReachedByTab && rowRing && keyboard.cardOk && keyboard.rowOk,
+    `tabCard=${cardReachedByTab} cardRing=${cardRing} tabWarning=${rowReachedByTab} warningRing=${rowRing} card=${keyboard.cardOk} warning=${keyboard.rowOk}`);
+
+  // Check 7 — Map tab → Treemap renders ≥2 cells on first paint (B1 regression guard).
   // The fixture root is a single-child hop (root → wrap/) that fans out into wrap/{a,b} —
   // before the server-side single-child descent this whole tree rendered as ONE
   // undifferentiated cell. Activated through the app's own switcher (switchTab → the

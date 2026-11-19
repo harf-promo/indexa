@@ -21,8 +21,22 @@ pub(crate) async fn api_summary(
         Err(resp) => return resp,
     };
 
-    let store = state.store.lock().await;
-    let rec = match store.summary_by_path(&path) {
+    let db_path = state.db_path.clone();
+    match tokio::task::spawn_blocking(move || api_summary_sync(&db_path, &path)).await {
+        Ok(response) => response,
+        Err(error) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("summary worker failed: {error}"),
+        ),
+    }
+}
+
+fn api_summary_sync(db_path: &std::path::Path, path: &str) -> Response {
+    let store = match indexa_core::store::Store::open(db_path) {
+        Ok(store) => store,
+        Err(error) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+    };
+    let rec = match store.summary_by_path(path) {
         Ok(Some(r)) => r,
         Ok(None) => {
             // 404 so HTTP clients can distinguish "not yet summarized" from a 500.
@@ -36,8 +50,8 @@ pub(crate) async fn api_summary(
         Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     };
 
-    let children = store.children_summaries(&path).unwrap_or_default();
-    let crumbs = store.ancestor_summaries(&path).unwrap_or_default();
+    let children = store.children_summaries(path).unwrap_or_default();
+    let crumbs = store.ancestor_summaries(path).unwrap_or_default();
 
     let child_responses: Vec<SummaryChildResponse> = children
         .into_iter()
