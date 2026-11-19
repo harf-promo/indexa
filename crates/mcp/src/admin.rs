@@ -128,6 +128,7 @@ impl ChildJob {
     }
 
     fn assign(&self, child: &tokio::process::Child) -> std::io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
         let process_handle = child.raw_handle().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::NotFound, "child process already exited")
