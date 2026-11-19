@@ -426,6 +426,7 @@ async function saveFeatures() {
     });
     var d = await r.json();
     if (d.error) { if (status) { status.style.color = 'var(--red)'; status.textContent = d.error; } return; }
+    await loadFeatures();
     if (status) {
       status.style.color = 'var(--green)';
       status.textContent = 'Saved' + (d.restart_required ? ' · restart indexa to apply' : '');
