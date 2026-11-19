@@ -2981,14 +2981,17 @@ dependencies = [
  "indexa-parsers",
  "indexa-query",
  "indexa-update",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
+ "socket2",
  "tokio",
  "tokio-stream",
  "tower-http 0.7.0",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
