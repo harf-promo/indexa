@@ -9,17 +9,17 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 thread_local! {
     static OPENED_VALIDATED_PATHS: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn begin_opened_validated_path_recording() {
     OPENED_VALIDATED_PATHS.with(|paths| *paths.borrow_mut() = Some(Vec::new()));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn take_opened_validated_paths() -> Vec<PathBuf> {
     OPENED_VALIDATED_PATHS.with(|paths| paths.borrow_mut().take().unwrap_or_default())
 }
@@ -241,7 +241,7 @@ impl ValidatedIndexedPath {
         }
         self.ensure_root_identity()?;
         let real = opened_handle_path(&file)?;
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         OPENED_VALIDATED_PATHS.with(|paths| {
             if let Some(paths) = paths.borrow_mut().as_mut() {
                 paths.push(real.clone());
