@@ -617,6 +617,7 @@ async function savePasses() {
     });
     const d = await r.json();
     if (d.error) { status.style.color = 'var(--red)'; status.textContent = d.error; return; }
+    await loadPasses();
     status.style.color = 'var(--green)';
     status.textContent = 'Saved';
     setTimeout(function() { status.textContent = ''; }, 3000);
@@ -651,6 +652,7 @@ async function saveResource() {
     });
     const d = await r.json();
     if (d.error) { status.style.color = 'var(--red)'; status.textContent = d.error; return; }
+    await loadResource();
     status.style.color = 'var(--green)';
     status.textContent = 'Saved';
     setTimeout(function() { status.textContent = ''; }, 3000);

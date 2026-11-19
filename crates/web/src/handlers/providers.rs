@@ -1,4 +1,5 @@
-use axum::{extract::State, Json};
+use axum::{extract::State, response::IntoResponse, Json};
+use indexa_core::config;
 
 use crate::dto::ProviderStatus;
 use crate::AppState;
@@ -9,8 +10,19 @@ use crate::AppState;
 /// Backed by [`indexa_llm::claude_status`], which runs only token-free local
 /// probes (`claude --version`, `claude auth status --json`) — no model is
 /// invoked, so this is safe to hit on every Settings load.
-pub(crate) async fn api_providers_status(State(state): State<AppState>) -> Json<ProviderStatus> {
-    let describer = &state.config.describer;
+pub(crate) async fn api_providers_status(
+    State(state): State<AppState>,
+) -> axum::response::Response {
+    let current = match config::load(&state.config_path) {
+        Ok(config) => config,
+        Err(e) => {
+            return crate::dto::err_json(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{e:#}"),
+            )
+        }
+    };
+    let describer = &current.describer;
     let claude = indexa_llm::claude_status(&describer.claude_bin).await;
     Json(ProviderStatus {
         describer_provider: describer.provider.clone(),
@@ -20,4 +32,5 @@ pub(crate) async fn api_providers_status(State(state): State<AppState>) -> Json<
         claude_auth_method: claude.auth_method,
         claude_subscription: claude.subscription_type,
     })
+    .into_response()
 }

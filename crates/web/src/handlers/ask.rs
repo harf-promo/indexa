@@ -7,6 +7,19 @@ use axum::{
     },
     Json,
 };
+
+async fn cancel_on_disconnect<T, F>(
+    tx: &tokio::sync::mpsc::UnboundedSender<T>,
+    future: F,
+) -> Option<F::Output>
+where
+    F: std::future::Future,
+{
+    tokio::select! {
+        _ = tx.closed() => None,
+        result = future => Some(result),
+    }
+}
 use indexa_core::config::{Config, RetrievalConfig};
 use indexa_core::store::{AnnIndex, Store};
 use indexa_query::{AnswerChunk, AnswerImpact, PriorTurn, QaConfig};
@@ -393,50 +406,61 @@ pub(crate) async fn api_ask_stream(
         // before the synthesized answer; one-shot mode goes straight to sources+fragments.
         // Retrieval-only has nothing to stream: emit the citations, then the slice as a single
         // fragment, so the client renders identically to a one-shot answer.
-        let result = if !synthesize {
-            match indexa_query::answer_retrieval_only_history(
-                &db_path,
-                embedder.as_ref(),
-                llm.as_ref(),
-                &question,
-                &qa_cfg,
-                ann.as_deref(),
-                &history,
-            )
-            .await
-            {
-                Ok(ans) => {
-                    on_chunk(AnswerChunk::Sources(ans.sources.clone()));
-                    on_chunk(AnswerChunk::Fragment(ans.answer.clone()));
-                    Ok(ans)
+        let Some(result) = cancel_on_disconnect(&tx, async {
+            if !synthesize {
+                match indexa_query::answer_retrieval_only_history(
+                    &db_path,
+                    embedder.as_ref(),
+                    llm.as_ref(),
+                    &question,
+                    &qa_cfg,
+                    ann.as_deref(),
+                    &history,
+                )
+                .await
+                {
+                    Ok(ans) => {
+                        on_chunk(AnswerChunk::Sources(ans.sources.clone()));
+                        on_chunk(AnswerChunk::Fragment(ans.answer.clone()));
+                        Ok(ans)
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
+            } else if agentic {
+                indexa_query::answer_agentic_stream_history(
+                    &db_path,
+                    embedder.as_ref(),
+                    llm.as_ref(),
+                    &question,
+                    &qa_cfg,
+                    ann.as_deref(),
+                    &history,
+                    &mut on_chunk,
+                )
+                .await
+            } else {
+                indexa_query::answer_stream_with_ann_history(
+                    &db_path,
+                    embedder.as_ref(),
+                    llm.as_ref(),
+                    &question,
+                    &qa_cfg,
+                    ann.as_deref(),
+                    &history,
+                    &mut on_chunk,
+                )
+                .await
             }
-        } else if agentic {
-            indexa_query::answer_agentic_stream_history(
-                &db_path,
-                embedder.as_ref(),
-                llm.as_ref(),
-                &question,
-                &qa_cfg,
-                ann.as_deref(),
-                &history,
-                &mut on_chunk,
-            )
-            .await
-        } else {
-            indexa_query::answer_stream_with_ann_history(
-                &db_path,
-                embedder.as_ref(),
-                llm.as_ref(),
-                &question,
-                &qa_cfg,
-                ann.as_deref(),
-                &history,
-                &mut on_chunk,
-            )
-            .await
+        })
+        .await
+        else {
+            return;
         };
+        // Disconnect may race the final model chunk. Never persist or record usage for an
+        // answer whose client has already stopped consuming the stream.
+        if tx.is_closed() {
+            return;
+        }
 
         let terminal = match result {
             Ok(mut answer) => {
@@ -583,9 +607,37 @@ fn into_ask_confidence(c: Option<&indexa_query::ConfidenceReport>) -> Option<Ask
 
 #[cfg(test)]
 mod tests {
-    use super::{agentic_from, qa_config_from};
+    use super::{agentic_from, cancel_on_disconnect, qa_config_from};
     use indexa_core::config::Config;
     use indexa_core::config::RetrievalConfig;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn disconnected_stream_drops_generation_future() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct DropMark(Arc<AtomicBool>);
+        impl Drop for DropMark {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task_dropped = dropped.clone();
+        let task = tokio::spawn(async move {
+            cancel_on_disconnect(&tx, async move {
+                let _mark = DropMark(task_dropped);
+                let _ = started_tx.send(());
+                std::future::pending::<()>().await;
+            })
+            .await
+        });
+        started_rx.await.unwrap();
+        drop(rx);
+        assert!(task.await.unwrap().is_none());
+        assert!(dropped.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn agentic_flag_overrides_server_default_both_ways() {

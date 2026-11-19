@@ -336,9 +336,15 @@ pub async fn serve_with_config_path(
                 .unwrap_or_else(guard::generate_token),
         )
     };
+    let authority_host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    let bound_origin = format!("http://{authority_host}:{port}");
     let guard_cfg = match &lan_token {
-        Some(t) => guard::GuardConfig::lan(t.clone()),
-        None => guard::GuardConfig::loopback(),
+        Some(t) => guard::GuardConfig::lan_origin(t.clone(), port, bound_origin),
+        None => guard::GuardConfig::loopback_origin(bound_origin),
     };
     let app = build_router(state, port).layer(axum::middleware::from_fn_with_state(
         guard_cfg,
@@ -1448,6 +1454,11 @@ mod tests {
         let saved = indexa_core::config::load(&scratch).unwrap();
         assert_eq!(saved.resource.profile.as_str(), "performance");
         assert_eq!(saved.resource.headroom_gb, 2.0);
+        let (status, current) =
+            get_json(build_router(state.clone(), 7620), "/api/config/resource").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(current["profile"], "performance");
+        assert_eq!(current["headroom_gb"], 2.0);
         // ...and the real OS config path is untouched: this test never called
         // config::save with any path other than the scratch one above.
         let _ = std::fs::remove_file(&*scratch);

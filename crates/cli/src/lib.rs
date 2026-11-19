@@ -240,6 +240,12 @@ pub enum Commands {
         auto_reindex: bool,
     },
 
+    /// Inspect or explicitly recover legacy summary queue claims.
+    Queue {
+        #[command(subcommand)]
+        action: QueueAction,
+    },
+
     /// Record and query durable memory — typed claims with a source, a confidence and an
     /// expiry, kept across sessions.
     #[command(after_help = "Examples:
@@ -1054,6 +1060,16 @@ Kinds, most to least trusted:
     Plugin {
         #[command(subcommand)]
         action: PluginAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum QueueAction {
+    /// List ownerless in-flight rows; pass --apply to recover them.
+    RecoverStuck {
+        /// Requeue listed rows (or mark over-cap rows failed). Omitted by default for a dry run.
+        #[arg(long)]
+        apply: bool,
     },
 }
 

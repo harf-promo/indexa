@@ -22,13 +22,32 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 
 use crate::dto::{err_json, JobStartResponse};
 use crate::handlers::jobs::{job_slot_available, too_many_jobs, try_register_job};
 use crate::jobs_exec::{
-    finalize_done, run_deep_phase, scan_walk_config, schedule_cleanup, walk_for_job,
+    finalize_done, finalize_failed, run_deep_phase, scan_walk_config, schedule_cleanup,
+    walk_for_job,
 };
 use crate::AppState;
+
+async fn finish_job_after_catch<F>(handle: Arc<crate::jobs::JobHandle>, future: F)
+where
+    F: Future<Output = ()>,
+{
+    use futures_util::FutureExt;
+    if let Err(payload) = AssertUnwindSafe(future).catch_unwind().await {
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+            .unwrap_or_else(|| "job panicked with a non-string payload".to_owned());
+        finalize_failed(&handle, "panic", &anyhow::anyhow!(message));
+    }
+}
 
 // ── DTOs ─────────────────────────────────────────────────────────────────────
 
@@ -550,42 +569,48 @@ pub(crate) async fn api_packs_refresh(
         return too_many_jobs();
     };
     let state = s.clone();
+    let jobs = state.jobs.clone();
+    let failed_handle = handle.clone();
     tokio::spawn(async move {
-        // Walk each stale path independently (ignore::WalkBuilder handles a bare file root
-        // correctly — same behavior `cmd_deep` relies on for the CLI's `pack refresh`) and
-        // concatenate the resulting per-file Vecs, reusing the existing, trusted per-file
-        // classification/entry-construction logic rather than a new builder.
-        let mut entries = Vec::with_capacity(stale.len());
-        for path in &stale {
-            if let Some(mut e) = walk_for_job(
-                path,
-                &handle,
-                &state.walk_semaphore,
-                scan_walk_config(&state.config.scan),
-            )
-            .await
-            {
-                entries.append(&mut e);
-            }
-        }
-        if run_deep_phase(&state, &name, &entries, &handle).await {
-            let reindexed = stale.len() - missing_count;
-            let detail = format!("{reindexed} reindexed, {missing_count} vanished (left flagged)");
-            {
-                let mut store = state.store.lock().await;
-                if let Ok(Some(pack)) = store.pack_by_name(&name) {
-                    let _ = store.record_pack_refreshed(&pack.id, &detail);
+        finish_job_after_catch(failed_handle, async move {
+            // Walk each stale path independently (ignore::WalkBuilder handles a bare file root
+            // correctly — same behavior `cmd_deep` relies on for the CLI's `pack refresh`) and
+            // concatenate the resulting per-file Vecs, reusing the existing, trusted per-file
+            // classification/entry-construction logic rather than a new builder.
+            let mut entries = Vec::with_capacity(stale.len());
+            for path in &stale {
+                if let Some(mut e) = walk_for_job(
+                    path,
+                    &handle,
+                    &state.walk_semaphore,
+                    scan_walk_config(&state.config.scan),
+                )
+                .await
+                {
+                    entries.append(&mut e);
                 }
             }
-            finalize_done(
-                &handle,
-                &format!(
-                    "Pack refresh complete: {} file(s), {missing_count} vanished",
-                    entries.len()
-                ),
-            );
-        }
-        schedule_cleanup(state.jobs.clone(), handle.id);
+            if run_deep_phase(&state, &name, &entries, &handle).await {
+                let reindexed = stale.len() - missing_count;
+                let detail =
+                    format!("{reindexed} reindexed, {missing_count} vanished (left flagged)");
+                {
+                    let mut store = state.store.lock().await;
+                    if let Ok(Some(pack)) = store.pack_by_name(&name) {
+                        let _ = store.record_pack_refreshed(&pack.id, &detail);
+                    }
+                }
+                finalize_done(
+                    &handle,
+                    &format!(
+                        "Pack refresh complete: {} file(s), {missing_count} vanished",
+                        entries.len()
+                    ),
+                );
+            }
+        })
+        .await;
+        schedule_cleanup(jobs, id);
     });
     Json(JobStartResponse { job_id: id }).into_response()
 }
@@ -646,26 +671,31 @@ pub(crate) async fn api_packs_note(
     if let Some((id, handle)) = try_register_job(&s.jobs, "pack_note", name.clone()).await {
         let state = s.clone();
         let path_for_job = note_path.clone();
+        let jobs = state.jobs.clone();
+        let failed_handle = handle.clone();
         tokio::spawn(async move {
-            // Same single-path walk-then-deep shape as `api_packs_refresh`'s loop body (here over
-            // just the one new note file): an empty `entries` still makes `run_deep_phase` report
-            // success, and `walk_for_job` already finalizes the job itself on a real walk failure
-            // (never call `finalize_done` after that — it would overwrite Failed with Done).
-            let mut entries = Vec::new();
-            if let Some(mut e) = walk_for_job(
-                &path_for_job,
-                &handle,
-                &state.walk_semaphore,
-                scan_walk_config(&state.config.scan),
-            )
-            .await
-            {
-                entries.append(&mut e);
-            }
-            if run_deep_phase(&state, &name, &entries, &handle).await {
-                finalize_done(&handle, "Note indexed");
-            }
-            schedule_cleanup(state.jobs.clone(), handle.id);
+            finish_job_after_catch(failed_handle, async move {
+                // Same single-path walk-then-deep shape as `api_packs_refresh`'s loop body (here over
+                // just the one new note file): an empty `entries` still makes `run_deep_phase` report
+                // success, and `walk_for_job` already finalizes the job itself on a real walk failure
+                // (never call `finalize_done` after that — it would overwrite Failed with Done).
+                let mut entries = Vec::new();
+                if let Some(mut e) = walk_for_job(
+                    &path_for_job,
+                    &handle,
+                    &state.walk_semaphore,
+                    scan_walk_config(&state.config.scan),
+                )
+                .await
+                {
+                    entries.append(&mut e);
+                }
+                if run_deep_phase(&state, &name, &entries, &handle).await {
+                    finalize_done(&handle, "Note indexed");
+                }
+            })
+            .await;
+            schedule_cleanup(jobs, id);
         });
         return Json(serde_json::json!({ "saved": true, "path": note_path, "job_id": id }))
             .into_response();
@@ -967,5 +997,16 @@ mod tests {
         }
         assert_eq!(jobs_started, 1);
         assert_eq!(running_jobs(&*s.jobs.read().await), held.len());
+    }
+
+    #[tokio::test]
+    async fn panic_marks_pack_job_failed_and_releases_running_slot() {
+        let handle = Arc::new(crate::jobs::JobHandle::new("pack_refresh", "test"));
+        finish_job_after_catch(handle.clone(), async { panic!("injected job panic") }).await;
+        assert_eq!(handle.status(), crate::jobs::JobStatus::Failed);
+        assert!(handle
+            .history_snapshot()
+            .iter()
+            .any(|event| matches!(event, crate::jobs::JobEvent::Failed { error, .. } if error.contains("injected job panic"))));
     }
 }

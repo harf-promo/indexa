@@ -23,6 +23,7 @@ mod notes;
 mod pack;
 mod plugin;
 mod prune;
+mod queue;
 mod related;
 mod report;
 mod review;
@@ -71,6 +72,7 @@ pub(crate) use pack::{
 };
 pub(crate) use plugin::{cmd_plugin_info, cmd_plugin_list};
 pub(crate) use prune::cmd_prune;
+pub(crate) use queue::cmd_queue_recover_stuck;
 pub(crate) use related::cmd_related;
 pub(crate) use report::cmd_report;
 pub(crate) use review::{

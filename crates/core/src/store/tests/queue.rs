@@ -439,21 +439,118 @@ fn requeue_stale_in_flight_resets_then_caps() {
         .enqueue_summary_items(&[("/a".to_owned(), "file".to_owned(), 1)])
         .unwrap();
 
-    // Claim → attempts=1, in_flight (simulates a crash mid-processing).
-    store.next_queue_item().unwrap().unwrap();
+    // Claim → attempts=1, in_flight. Mark the recorded owner as gone to simulate a crash.
+    let item = store.next_queue_item().unwrap().unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE summary_queue SET owner_pid=4000000000 WHERE path=?1",
+            [&item.path],
+        )
+        .unwrap();
     assert_eq!(store.queue_stats().unwrap().in_flight, 1);
 
     // Below the cap → requeued to pending.
     assert_eq!(store.requeue_stale_in_flight(3).unwrap(), (1, 0));
     assert_eq!(store.queue_stats().unwrap().pending, 1);
 
-    store.next_queue_item().unwrap().unwrap(); // attempts=2
+    let item = store.next_queue_item().unwrap().unwrap(); // attempts=2
+    store
+        .conn
+        .execute(
+            "UPDATE summary_queue SET owner_pid=4000000000 WHERE path=?1",
+            [&item.path],
+        )
+        .unwrap();
     assert_eq!(store.requeue_stale_in_flight(3).unwrap(), (1, 0));
-    store.next_queue_item().unwrap().unwrap(); // attempts=3 — reaches cap
+    let item = store.next_queue_item().unwrap().unwrap(); // attempts=3 — reaches cap
+    store
+        .conn
+        .execute(
+            "UPDATE summary_queue SET owner_pid=4000000000 WHERE path=?1",
+            [&item.path],
+        )
+        .unwrap();
 
     // At the cap → failed instead of requeued (it keeps crashing).
     assert_eq!(store.requeue_stale_in_flight(3).unwrap(), (0, 1));
     assert_eq!(store.queue_stats().unwrap().failed, 1);
+}
+
+#[test]
+fn startup_sweep_keeps_items_owned_by_a_live_process() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .enqueue_summary_items(&[("/live".to_owned(), "file".to_owned(), 1)])
+        .unwrap();
+    let item = store.next_queue_item().unwrap().unwrap();
+    assert_eq!(store.requeue_stale_in_flight(3).unwrap(), (0, 0));
+    assert_eq!(store.queue_stats().unwrap().in_flight, 1);
+    let owner: u32 = store
+        .conn
+        .query_row(
+            "SELECT owner_pid FROM summary_queue WHERE path=?1",
+            [&item.path],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(owner, std::process::id());
+}
+
+#[test]
+fn startup_sweep_recovers_reused_pid_with_different_start_time() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .enqueue_summary_items(&[("/reused".into(), "file".into(), 1)])
+        .unwrap();
+    let item = store.next_queue_item().unwrap().unwrap();
+    let pid = std::process::id();
+    let system = sysinfo::System::new_all();
+    let actual_start = system
+        .process(sysinfo::Pid::from_u32(pid))
+        .unwrap()
+        .start_time();
+    store
+        .conn
+        .execute(
+            "UPDATE summary_queue SET owner_pid=?2, owner_start_time=?3 WHERE path=?1",
+            rusqlite::params![item.path, pid, (actual_start.saturating_sub(1)) as i64],
+        )
+        .unwrap();
+
+    assert_eq!(store.requeue_stale_in_flight(3).unwrap(), (1, 0));
+    assert_eq!(
+        store.queue_state(&item.path).unwrap().as_deref(),
+        Some("pending")
+    );
+}
+
+#[test]
+fn ownerless_in_flight_is_listed_and_only_recovered_explicitly() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .enqueue_summary_items(&[("/legacy".into(), "file".into(), 1)])
+        .unwrap();
+    let item = store.next_queue_item().unwrap().unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE summary_queue SET owner_pid=NULL, owner_start_time=NULL WHERE path=?1",
+            [&item.path],
+        )
+        .unwrap();
+
+    assert_eq!(store.requeue_stale_in_flight(3).unwrap(), (0, 0));
+    assert_eq!(store.unowned_in_flight().unwrap(), vec![item.path.clone()]);
+    assert_eq!(
+        store.queue_state(&item.path).unwrap().as_deref(),
+        Some("in_flight")
+    );
+    assert_eq!(store.recover_unowned_in_flight(3).unwrap(), (1, 0));
+    assert_eq!(
+        store.queue_state(&item.path).unwrap().as_deref(),
+        Some("pending")
+    );
 }
 
 #[test]
@@ -998,7 +1095,11 @@ fn claim_query_uses_claim_index_without_sorting() {
     // DESC) serves the filter AND the order, so the plan must name it and must not sort.
     let mut store = Store::open_in_memory().unwrap();
     seed_mixed_queue(&mut store);
-    let plan = query_plan(&store, crate::store::queue::NEXT_QUEUE_ITEM_SQL, []);
+    let plan = query_plan(
+        &store,
+        crate::store::queue::NEXT_QUEUE_ITEM_SQL,
+        rusqlite::params![std::process::id() as i64, 0_i64],
+    );
     println!(
         "EXPLAIN QUERY PLAN next_queue_item:\n  {}",
         plan.join("\n  ")

@@ -5,6 +5,7 @@ use rmcp::{
     handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router, ErrorData,
 };
 use serde::Deserialize;
+use std::process::Stdio;
 
 use crate::{mcp_err, mcp_invalid, ok_text, IndexaMcp};
 
@@ -29,6 +30,225 @@ pub struct AddNoteParams {
     /// anything else as a symbol name.
     #[serde(default)]
     pub anchor: Option<String>,
+}
+
+const DEFAULT_TRIGGER_INDEX_TIMEOUT_SECS: u64 = 1800;
+
+fn trigger_index_timeout() -> std::time::Duration {
+    std::env::var("INDEXA_TRIGGER_INDEX_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(
+            DEFAULT_TRIGGER_INDEX_TIMEOUT_SECS,
+        ))
+}
+
+async fn run_trigger_child(
+    child: &mut tokio::process::Command,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, ErrorData> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        child.as_std_mut().process_group(0);
+    }
+    child.stdin(Stdio::null()).kill_on_drop(true);
+    #[cfg(windows)]
+    let job = ChildJob::new().map_err(|e| mcp_err(format!("failed to create child job: {e}")))?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        child
+            .as_std_mut()
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+    }
+    #[allow(unused_mut)]
+    let mut process = child
+        .spawn()
+        .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))?;
+    #[cfg(windows)]
+    {
+        if let Err(e) = assign_or_terminate_child(&mut process, |process| job.assign(process)) {
+            return Err(mcp_err(format!(
+                "failed to assign `indexa index` to child job: {e}"
+            )));
+        }
+        if let Err(e) = ChildJob::resume_child(&process) {
+            let e = terminate_unassigned_child(&mut process, e);
+            return Err(mcp_err(format!(
+                "failed to resume `indexa index` child: {e}"
+            )));
+        }
+    }
+    #[cfg(unix)]
+    let mut group = process.id().map(|pid| ProcessGroupGuard {
+        pid: pid as i32,
+        armed: true,
+    });
+    let result = tokio::time::timeout(timeout, process.wait_with_output()).await;
+    #[cfg(unix)]
+    if result.is_err() {
+        drop(group); // Drop kills the whole process group, including grandchildren.
+    } else if let Some(group) = &mut group {
+        group.armed = false;
+    }
+    result
+        .map_err(|_| {
+            mcp_err(format!(
+                "trigger_index child timed out after {}s",
+                timeout.as_secs()
+            ))
+        })?
+        .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))
+}
+
+/// Unix timeout/cancellation cleanup for the entire spawned process group.
+#[cfg(unix)]
+struct ProcessGroupGuard {
+    pid: i32,
+    armed: bool,
+}
+
+#[cfg(windows)]
+struct ChildJob(std::os::windows::io::OwnedHandle);
+
+#[cfg(windows)]
+fn terminate_unassigned_child(
+    child: &mut tokio::process::Child,
+    error: std::io::Error,
+) -> std::io::Error {
+    let _ = child.start_kill();
+    error
+}
+
+#[cfg(windows)]
+fn assign_or_terminate_child(
+    child: &mut tokio::process::Child,
+    assign: impl FnOnce(&tokio::process::Child) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match assign(child) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(terminate_unassigned_child(child, error)),
+    }
+}
+
+#[cfg(windows)]
+impl ChildJob {
+    fn new() -> std::io::Result<Self> {
+        use std::{mem::size_of, os::windows::io::FromRawHandle};
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::JobObjects::{
+                CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
+        };
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let owned = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle.cast()) };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self(owned))
+    }
+
+    fn assign(&self, child: &tokio::process::Child) -> std::io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        let process_handle = child.raw_handle().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "child process already exited")
+        })?;
+        let ok = unsafe {
+            AssignProcessToJobObject(self.0.as_raw_handle().cast(), process_handle.cast())
+        };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn resume_child(child: &tokio::process::Child) -> std::io::Result<()> {
+        use std::{
+            mem::size_of,
+            os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        };
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::{
+                Diagnostics::ToolHelp::{
+                    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+                    THREADENTRY32,
+                },
+                Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+            },
+        };
+        let pid = child.id().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "child process already exited")
+        })?;
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let _snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot.cast()) };
+        let mut entry = THREADENTRY32 {
+            dwSize: size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        let mut found = false;
+        let mut last_error = None;
+        let mut more = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+        while more {
+            if entry.th32OwnerProcessID == pid {
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if !thread.is_null() {
+                    let thread = unsafe { OwnedHandle::from_raw_handle(thread.cast()) };
+                    if unsafe { ResumeThread(thread.as_raw_handle().cast()) } != u32::MAX {
+                        found = true;
+                        break;
+                    }
+                    last_error = Some(std::io::Error::last_os_error());
+                }
+            }
+            entry.dwSize = size_of::<THREADENTRY32>() as u32;
+            more = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+        }
+        if found {
+            Ok(())
+        } else {
+            Err(last_error.unwrap_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "child primary thread not found",
+                )
+            }))
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            unsafe {
+                libc::kill(-self.pid, libc::SIGKILL);
+            }
+        }
+    }
 }
 
 /// Absolute path to the running `indexa` binary. The MCP server IS `indexa mcp`, so `current_exe`
@@ -491,10 +711,7 @@ impl IndexaMcp {
         child
             .env("INDEXA_TRIGGER_INDEX_DEV", expected_dev)
             .env("INDEXA_TRIGGER_INDEX_INO", expected_ino);
-        let output = child
-            .output()
-            .await
-            .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))?;
+        let output = run_trigger_child(&mut child, trigger_index_timeout()).await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -634,6 +851,32 @@ mod tests {
     use indexa_llm::Generator;
     use rmcp::model::CallToolResult;
     use std::sync::Arc;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn assignment_failure_terminates_suspended_trigger_child() {
+        use std::os::windows::process::CommandExt;
+        let marker =
+            std::env::temp_dir().join(format!("idx-mcp-never-ran-{}.txt", std::process::id()));
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-Command"])
+            .arg(format!("Set-Content '{}' ran", marker.display()));
+        command
+            .as_std_mut()
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+        let mut child = command.spawn().unwrap();
+        let error = super::assign_or_terminate_child(&mut child, |_| {
+            Err(std::io::Error::other("simulated assignment failure"))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("simulated"));
+        let _ = child.wait().await.unwrap();
+        assert!(
+            !marker.exists(),
+            "suspended trigger child ran after assignment failure"
+        );
+    }
 
     /// `trigger_index` / `add_note` must spawn the server's OWN binary, not a bare `"indexa"`
     /// PATH lookup. Assert the resolver returns a concrete, absolute, existing path.
@@ -1029,5 +1272,161 @@ mod tests {
                 .unwrap(),
         );
         assert!(ok.contains("No changes found"), "got: {ok}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn timed_out_trigger_child_is_killed() {
+        let dir = std::env::temp_dir().join(format!(
+            "indexa-trigger-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("pid");
+        let mut child = tokio::process::Command::new("sh");
+        child
+            .arg("-c")
+            .arg(format!("echo $$ > {}; exec sleep 30", pid_file.display()));
+        let error = super::run_trigger_child(&mut child, std::time::Duration::from_millis(100))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("timed out"));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn timed_out_trigger_child_kills_its_grandchild() {
+        let dir = std::env::temp_dir().join(format!(
+            "indexa-trigger-group-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent_file = dir.join("parent");
+        let child_file = dir.join("grandchild");
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(format!(
+            "echo $$ > {}; sleep 30 & echo $! > {}; wait",
+            parent_file.display(),
+            child_file.display()
+        ));
+        let result =
+            super::run_trigger_child(&mut command, std::time::Duration::from_millis(150)).await;
+        assert!(result.is_err());
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        for pid_file in [&parent_file, &child_file] {
+            let pid = std::fs::read_to_string(pid_file).unwrap().trim().to_owned();
+            assert!(
+                !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                "process {pid} survived group timeout"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn timed_out_trigger_child_kills_child_and_grandchild_job() {
+        let dir = std::env::temp_dir().join(format!(
+            "indexa-trigger-job-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent_file = dir.join("parent.pid");
+        let grandchild_file = dir.join("grandchild.pid");
+        let quote_path = |path: &std::path::Path| path.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "$PID | Set-Content -NoNewline '{}'; $p = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru; $p.Id | Set-Content -NoNewline '{}'; Start-Sleep -Seconds 30",
+            quote_path(&parent_file),
+            quote_path(&grandchild_file)
+        );
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command.args(["-NoProfile", "-Command", &script]);
+        let result =
+            super::run_trigger_child(&mut command, std::time::Duration::from_secs(5)).await;
+        assert!(result.is_err(), "trigger child unexpectedly completed");
+        let parent = wait_for_pid(&parent_file).await;
+        let grandchild = wait_for_pid(&grandchild_file).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !is_running(parent),
+            "child process {parent} survived timeout"
+        );
+        assert!(
+            !is_running(grandchild),
+            "grandchild process {grandchild} survived timeout"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn immediate_trigger_grandchild_is_killed_by_timeout_job() {
+        let dir =
+            std::env::temp_dir().join(format!("indexa-trigger-immediate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let grandchild_file = dir.join("grandchild.pid");
+        let script = format!("$p = Start-Process powershell.exe -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru; $p.Id | Set-Content -NoNewline '{}' ; Start-Sleep -Seconds 30", grandchild_file.display());
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command.args(["-NoProfile", "-Command", &script]);
+        let result =
+            super::run_trigger_child(&mut command, std::time::Duration::from_secs(5)).await;
+        assert!(result.is_err(), "trigger child unexpectedly completed");
+        let grandchild = wait_for_pid(&grandchild_file).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !is_running(grandchild),
+            "immediate grandchild {grandchild} survived timeout"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    async fn wait_for_pid(path: &std::path::Path) -> u32 {
+        for _ in 0..100 {
+            if let Ok(value) = std::fs::read_to_string(path) {
+                if let Ok(pid) = value.parse() {
+                    return pid;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("process did not record pid in {}", path.display());
+    }
+
+    #[cfg(windows)]
+    fn is_running(pid: u32) -> bool {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, STILL_ACTIVE},
+            System::Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code = 0;
+        let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+        unsafe { CloseHandle(handle) };
+        ok != 0 && exit_code == STILL_ACTIVE as u32
     }
 }

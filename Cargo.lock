@@ -2250,12 +2250,14 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "indexa-http-util",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
