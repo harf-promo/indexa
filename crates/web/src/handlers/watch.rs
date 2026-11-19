@@ -112,10 +112,11 @@ pub(crate) async fn api_watch_start(
         Ok(p) => p,
         Err(err) => return err.into_response(),
     };
-    let path = match canonical_indexed_path(&state, &requested).await {
+    let validated_path = match canonical_indexed_path(&state, &requested).await {
         Ok(path) => path,
         Err(err) => return err.into_response(),
     };
+    let path = validated_path.as_str().to_owned();
 
     let mut sessions = state.watch_sessions.lock().await;
     if sessions.contains_key(&path) {
@@ -177,9 +178,31 @@ pub(crate) async fn api_watch_start(
                 return;
             }
         };
+        // notify accepts a pathname rather than a directory handle. Check the watched
+        // directory identity after attachment so a swap between request validation and
+        // watcher startup cannot silently attach the watch to an outside directory.
+        if let Err(e) = validated_path.revalidate() {
+            tracing::warn!(
+                "watch: refusing changed root {} after watcher startup: {}",
+                watch_root.display(),
+                e.message
+            );
+            stop2.store(true, Ordering::Relaxed);
+            return;
+        }
         let rt = tokio::runtime::Handle::current();
+        let validated_for_events = validated_path.clone();
         tokio::task::spawn_blocking(move || {
             watcher::run_watch_loop_until(session, &stop2, |event| {
+                if let Err(e) = validated_for_events.revalidate() {
+                    tracing::warn!(
+                        "watch: stopping after root identity changed for {}: {}",
+                        watch_root2.display(),
+                        e.message
+                    );
+                    stop2.store(true, Ordering::Relaxed);
+                    return;
+                }
                 let path = &event.path;
                 // A directory upsert carries no content (the watcher follows it with one event per
                 // file), but a directory *remove* must still clear its subtree: the watcher emits one

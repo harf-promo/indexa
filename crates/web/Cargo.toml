@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 tokio = { workspace = true }
+socket2 = "0.6"
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -27,6 +28,12 @@ indexa-llm = { path = "../llm" }
 indexa-parsers = { path = "../parsers" }
 indexa-query = { path = "../query" }
 indexa-update = { path = "../update" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # `tower::ServiceExt::oneshot` drives the real router in integration tests.

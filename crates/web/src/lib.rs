@@ -212,7 +212,8 @@ pub(crate) const UI_JS: &str = concat!(
 /// Start the web UI server on `host:port`. Runs until Ctrl-C or the process exits.
 ///
 /// `host` defaults to `"127.0.0.1"` (localhost-only). Pass `"0.0.0.0"` for LAN access.
-/// **Warning:** binding to 0.0.0.0 exposes all indexed files on your local network.
+/// **Warning:** binding to `0.0.0.0` exposes the web UI on IPv4 interfaces; `::` binds
+/// IPv6 only (`IPV6_V6ONLY`) and does not also accept IPv4 connections.
 pub async fn serve(
     port: u16,
     host: &str,
@@ -353,7 +354,7 @@ pub async fn serve_with_config_path(
     let app = build_router_with_guard(state, port, guard_cfg);
 
     let addr = bind_address(host, port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let listener = bind_listener(host, port).await?;
     info!("Indexa web UI listening on http://{addr}");
 
     if loopback {
@@ -445,6 +446,10 @@ async fn add_security_headers(
     headers.insert(
         header::X_FRAME_OPTIONS,
         axum::http::HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("no-referrer"),
     );
     resp
 }
@@ -634,6 +639,29 @@ fn bind_address(host: &str, port: u16) -> String {
         Ok(ip) => std::net::SocketAddr::new(ip, port).to_string(),
         Err(_) => format!("{host}:{port}"),
     }
+}
+
+/// Bind the IPv6 wildcard as IPv6-only. Tokio's convenience bind leaves the platform's
+/// dual-stack default in effect, which can make `--host ::` accept IPv4 too.
+async fn bind_listener(host: &str, port: u16) -> std::io::Result<tokio::net::TcpListener> {
+    let unbracketed = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if unbracketed == "::" {
+        use socket2::{Domain, Protocol, Socket, Type};
+        let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+        socket.set_only_v6(true)?;
+        socket.set_reuse_address(true)?;
+        socket.bind(
+            &std::net::SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), port)
+                .into(),
+        )?;
+        socket.listen(1024)?;
+        socket.set_nonblocking(true)?;
+        return tokio::net::TcpListener::from_std(socket.into());
+    }
+    tokio::net::TcpListener::bind(bind_address(host, port)).await
 }
 
 #[cfg(test)]
@@ -1033,6 +1061,14 @@ mod tests {
         assert!(csp.contains("default-src 'self'"));
         assert!(csp.contains("object-src 'none'"));
         assert!(csp.contains("frame-ancestors 'none'"));
+        assert_eq!(
+            resp.headers()
+                .get(header::REFERRER_POLICY)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "no-referrer"
+        );
     }
 
     /// The static UI bundle (JS, and by construction CSS/HTML too — `cached_asset` is shared
@@ -1055,6 +1091,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::REFERRER_POLICY)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "no-referrer"
+        );
         let etag = resp
             .headers()
             .get(ETAG)
@@ -1087,6 +1131,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp2.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            resp2
+                .headers()
+                .get(header::REFERRER_POLICY)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "no-referrer"
+        );
         let body2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -2784,12 +2837,23 @@ mod tests {
 
     #[tokio::test]
     async fn ipv6_wildcard_address_is_accepted_by_tokio_listener() {
-        let listener = tokio::net::TcpListener::bind(bind_address("::", 0))
+        let listener = bind_listener("::", 0)
             .await
-            .expect("the IPv6 wildcard address must bind");
+            .expect("the IPv6-only wildcard address must bind");
         let address = listener.local_addr().unwrap();
         assert!(address.ip().is_ipv6());
         assert!(address.ip().is_unspecified());
+        assert!(
+            matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, address.port()))
+                )
+                .await,
+                Err(_) | Ok(Err(_))
+            ),
+            "an IPv6-only wildcard listener must refuse IPv4 connections"
+        );
     }
 
     #[tokio::test]

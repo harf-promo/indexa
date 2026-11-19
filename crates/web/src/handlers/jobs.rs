@@ -85,13 +85,19 @@ pub(crate) async fn api_job_scan(
         Ok(path) => path,
         Err(err) => return err.into_response(),
     };
-    let (id, handle) = match try_register_job(&s.jobs, "scan", path.clone()).await {
+    let display_path = path.as_str().to_owned();
+    let (id, handle) = match try_register_job(&s.jobs, "scan", display_path.clone()).await {
         Some(job) => job,
         None => return too_many_jobs(),
     };
     let state = s.clone();
     tokio::spawn(async move {
-        run_scan_phase_standalone(&state, &path, &handle).await;
+        if let Err(err) = path.revalidate() {
+            handle.set_status(JobStatus::Failed);
+            tracing::warn!(path = %display_path, error = %err.message, "job refused changed path");
+        } else {
+            run_scan_phase_standalone(&state, &display_path, &handle).await;
+        }
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
     Json(JobStartResponse { job_id: id }).into_response()
@@ -105,13 +111,19 @@ pub(crate) async fn api_job_deep(
         Ok(path) => path,
         Err(err) => return err.into_response(),
     };
-    let (id, handle) = match try_register_job(&s.jobs, "deep", path.clone()).await {
+    let display_path = path.as_str().to_owned();
+    let (id, handle) = match try_register_job(&s.jobs, "deep", display_path.clone()).await {
         Some(job) => job,
         None => return too_many_jobs(),
     };
     let state = s.clone();
     tokio::spawn(async move {
-        run_deep_phase_standalone(&state, &path, &handle).await;
+        if let Err(err) = path.revalidate() {
+            handle.set_status(JobStatus::Failed);
+            tracing::warn!(path = %display_path, error = %err.message, "job refused changed path");
+        } else {
+            run_deep_phase_standalone(&state, &display_path, &handle).await;
+        }
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
     Json(JobStartResponse { job_id: id }).into_response()
@@ -125,14 +137,28 @@ pub(crate) async fn api_job_summarize(
         Ok(path) => path,
         Err(err) => return err.into_response(),
     };
-    let (id, handle) = match try_register_job(&s.jobs, "summarize", path.clone()).await {
+    let display_path = path.as_str().to_owned();
+    let (id, handle) = match try_register_job(&s.jobs, "summarize", display_path.clone()).await {
         Some(job) => job,
         None => return too_many_jobs(),
     };
     let model_override = model_override_from(&q, s.config.describer.num_ctx);
     let state = s.clone();
     tokio::spawn(async move {
-        run_summarize_phase(&state, &path, q.passes, &handle, model_override, q.force).await;
+        if let Err(err) = path.revalidate() {
+            handle.set_status(JobStatus::Failed);
+            tracing::warn!(path = %display_path, error = %err.message, "job refused changed path");
+        } else {
+            run_summarize_phase(
+                &state,
+                &display_path,
+                q.passes,
+                &handle,
+                model_override,
+                q.force,
+            )
+            .await;
+        }
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
     Json(JobStartResponse { job_id: id }).into_response()
@@ -146,7 +172,8 @@ pub(crate) async fn api_job_index(
         Ok(path) => path,
         Err(err) => return err.into_response(),
     };
-    let (id, handle) = match try_register_job(&s.jobs, "index", path.clone()).await {
+    let display_path = path.as_str().to_owned();
+    let (id, handle) = match try_register_job(&s.jobs, "index", display_path.clone()).await {
         Some(job) => job,
         None => return too_many_jobs(),
     };
@@ -154,7 +181,12 @@ pub(crate) async fn api_job_index(
     let state = s.clone();
     tokio::spawn(async move {
         let id = handle.id;
-        run_index_job(state.clone(), path, handle, model_override).await;
+        if let Err(err) = path.revalidate() {
+            handle.set_status(JobStatus::Failed);
+            tracing::warn!(path = %display_path, error = %err.message, "job refused changed path");
+        } else {
+            run_index_job(state.clone(), display_path, handle, model_override).await;
+        }
         schedule_cleanup(state.jobs.clone(), id);
     });
     Json(JobStartResponse { job_id: id }).into_response()

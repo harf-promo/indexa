@@ -2387,10 +2387,12 @@ dependencies = [
  "indexa-parsers",
  "indexa-query",
  "indexa-update",
+ "libc",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
+ "socket2",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -2398,6 +2400,7 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
