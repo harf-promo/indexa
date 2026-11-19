@@ -109,6 +109,7 @@ impl FileIdentity {
             if ok == 0 {
                 return Err(std::io::Error::last_os_error());
             }
+            let _ = metadata;
             Ok(Self {
                 volume: info.dwVolumeSerialNumber,
                 index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
