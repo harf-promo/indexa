@@ -1124,30 +1124,115 @@ pub fn save(cfg: &Config, path: &Path) -> Result<()> {
     let text =
         toml::to_string_pretty(cfg).with_context(|| "serialising config to TOML".to_owned())?;
 
+    let _lock = config_file_lock(path)?;
+    atomic_write_config(path, text.as_bytes())
+}
+
+/// Serialize a read-modify-write config update across threads and processes.
+/// The lock is a sibling file, so replacing the config does not invalidate it.
+pub fn update(path: &Path, mutate: impl FnOnce(&mut Config) -> Result<()>) -> Result<Config> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating config dir: {}", parent.display()))?;
+    }
+    let _lock = config_file_lock(path)?;
+    let mut cfg = load(path)?;
+    mutate(&mut cfg)?;
+    let text = toml::to_string_pretty(&cfg).context("serialising config to TOML")?;
+    atomic_write_config(path, text.as_bytes())?;
+    Ok(cfg)
+}
+
+fn config_file_lock(path: &Path) -> Result<std::fs::File> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let lock_path = parent.join(format!(".{name}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("opening config lock: {}", lock_path.display()))?;
     #[cfg(unix)]
     {
-        // Create the (API-key-bearing) file with 0600 from the start so it is never briefly
-        // world/group-readable between write and chmod — the old write-then-set_permissions
-        // had a TOCTOU window. `mode()` only applies on creation, so also tighten an existing
-        // file's perms afterward.
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .with_context(|| format!("writing config: {}", path.display()))?;
-        f.write_all(text.as_bytes())
-            .with_context(|| format!("writing config: {}", path.display()))?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("setting permissions on {}", path.display()))?;
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, &text)
-            .with_context(|| format!("writing config: {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("locking config: {}", path.display()))?;
+    Ok(file)
+}
+
+fn atomic_write_config(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let temp_path = loop {
+        let id = NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let candidate = parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), id));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&candidate);
+                    return Err(e).with_context(|| {
+                        format!("writing config temp file: {}", candidate.display())
+                    });
+                }
+                break candidate;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("creating config temp file: {}", candidate.display()))
+            }
+        }
+    };
+
+    #[cfg(windows)]
+    replace_config_windows(&temp_path, path)?;
+    #[cfg(not(windows))]
+    std::fs::rename(&temp_path, path)
+        .with_context(|| format!("replacing config: {}", path.display()))?;
+
+    #[cfg(unix)]
+    std::fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .with_context(|| format!("syncing config directory: {}", parent.display()))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_config_windows(temp: &Path, dest: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    let existing: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
+    let new: Vec<u16> = dest.as_os_str().encode_wide().chain(Some(0)).collect();
+    // The source and destination share a directory, so replacement is same-volume and atomic.
+    let ok = unsafe {
+        MoveFileExW(
+            existing.as_ptr(),
+            new.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("replacing config: {}", dest.display()));
     }
     Ok(())
 }
@@ -1157,6 +1242,47 @@ pub fn save(cfg: &Config, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_config_updates_preserve_both_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        save(&Config::default(), &path).unwrap();
+        let path_a = path.clone();
+        let path_b = path.clone();
+        let a = std::thread::spawn(move || {
+            update(&path_a, |cfg| {
+                cfg.resource.headroom_gb = 3.0;
+                Ok(())
+            })
+            .unwrap();
+        });
+        let b = std::thread::spawn(move || {
+            update(&path_b, |cfg| {
+                cfg.describer.passes_first = 4;
+                Ok(())
+            })
+            .unwrap();
+        });
+        a.join().unwrap();
+        b.join().unwrap();
+        let saved = load(&path).unwrap();
+        assert_eq!(saved.resource.headroom_gb, 3.0);
+        assert_eq!(saved.describer.passes_first, 4);
+    }
+
+    #[test]
+    fn incomplete_staged_write_leaves_previous_config_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut original = Config::default();
+        original.describer.passes_first = 2;
+        save(&original, &path).unwrap();
+        let temp = dir.path().join(".config.toml.interrupted.tmp");
+        std::fs::write(&temp, "[describer]\npasses_first = ").unwrap();
+        assert_eq!(load(&path).unwrap().describer.passes_first, 2);
+        let _ = std::fs::remove_file(temp);
+    }
 
     #[test]
     fn parse_reindex_interval_units_and_off() {

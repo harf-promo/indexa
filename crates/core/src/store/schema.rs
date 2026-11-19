@@ -8,7 +8,7 @@ use anyhow::Result;
 ///
 /// **INVARIANT: bump this whenever the DDL or any migration in `init_schema` changes** — otherwise a
 /// DB stamped at the old value would skip the new migration and silently miss a column/table.
-pub(super) const SCHEMA_VERSION: i64 = 12;
+pub(super) const SCHEMA_VERSION: i64 = 13;
 
 /// Does the `chunks` table's DDL declare AUTOINCREMENT? `true` when the table is absent
 /// (a fresh DB — the CREATE below already includes it). Used to gate the one-time migration.
@@ -240,7 +240,8 @@ impl Store {
                 attempts    INTEGER NOT NULL DEFAULT 0,
                 enqueued_at INTEGER NOT NULL DEFAULT (unixepoch()),
                 updated_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-                error       TEXT
+                error       TEXT,
+                owner_pid   INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_summary_queue_state ON summary_queue(state);
             -- Backs the claim in `next_queue_item` (`WHERE state='pending' ORDER BY depth DESC
@@ -894,6 +895,15 @@ impl Store {
             "inclusion_mode",
             "ALTER TABLE pack_paths ADD COLUMN inclusion_mode TEXT NOT NULL DEFAULT 'reference';
              ALTER TABLE pack_paths ADD COLUMN pinned_snapshot TEXT;",
+        )?;
+
+        // The summarizer claim owner lets startup recover only rows whose process is gone.
+        // A NULL owner (a legacy claim) is intentionally retained because it cannot be proven stale.
+        add_column_if_missing(
+            &mut self.conn,
+            "summary_queue",
+            "owner_pid",
+            "ALTER TABLE summary_queue ADD COLUMN owner_pid INTEGER;",
         )?;
 
         // Referential integrity for chunks/summaries/edges → entries is maintained by

@@ -25,7 +25,7 @@ fn summary_path_allowed(
 /// is served by `idx_summary_queue_claim (state, depth DESC)` — no per-claim sort of every
 /// pending row. A named constant so the EXPLAIN QUERY PLAN test checks this exact statement.
 pub(super) const NEXT_QUEUE_ITEM_SQL: &str = "UPDATE summary_queue
-     SET state='in_flight', attempts=attempts+1, updated_at=unixepoch()
+     SET state='in_flight', attempts=attempts+1, updated_at=unixepoch(), owner_pid=?1
      WHERE path = (
          SELECT path FROM summary_queue
          WHERE state='pending'
@@ -96,7 +96,7 @@ impl Store {
     pub fn next_queue_item(&mut self) -> Result<Option<QueueItem>> {
         let item = self
             .conn
-            .query_row(NEXT_QUEUE_ITEM_SQL, [], |r| {
+            .query_row(NEXT_QUEUE_ITEM_SQL, [std::process::id()], |r| {
                 Ok(QueueItem {
                     path: r.get(0)?,
                     kind: r.get(1)?,
@@ -142,27 +142,53 @@ impl Store {
         Ok(unfinished)
     }
 
-    /// Reset items left `in_flight` by a previously crashed/killed run back to `pending`
-    /// so they get retried; items whose `attempts` already reached `max_attempts` are marked
-    /// `failed` instead (they keep crashing). Returns `(requeued, failed)`.
-    ///
-    /// Call this **once at process startup, before any worker begins claiming** — never while
-    /// workers are draining, or it would reset an item another worker is actively processing.
+    /// Reset items whose claiming process is no longer running. Claims without a recorded owner
+    /// are retained: startup cannot prove they are stale. Returns `(requeued, failed)`.
     pub fn requeue_stale_in_flight(&mut self, max_attempts: u32) -> Result<(usize, usize)> {
+        let system = sysinfo::System::new_all();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, owner_pid FROM summary_queue WHERE state='in_flight'")?;
+        let candidates = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<u32>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        let stale: Vec<(String, u32)> = candidates
+            .into_iter()
+            .filter_map(|(path, pid)| {
+                let pid = pid?;
+                system
+                    .process(sysinfo::Pid::from_u32(pid))
+                    .is_none()
+                    .then_some((path, pid))
+            })
+            .collect();
+        if stale.is_empty() {
+            return Ok((0, 0));
+        }
+
         let tx = self.conn.transaction()?;
-        let failed = tx.execute(
-            "UPDATE summary_queue
-             SET state='failed', error='exceeded max attempts after interruption',
-                 updated_at=unixepoch()
-             WHERE state='in_flight' AND attempts >= ?1",
-            params![max_attempts],
-        )?;
-        let requeued = tx.execute(
-            "UPDATE summary_queue
-             SET state='pending', updated_at=unixepoch()
-             WHERE state='in_flight'",
-            [],
-        )?;
+        let mut failed = 0;
+        let mut requeued = 0;
+        for (path, pid) in stale {
+            failed += tx.execute(
+                "UPDATE summary_queue
+                 SET state='failed', error='exceeded max attempts after interruption',
+                     updated_at=unixepoch(), owner_pid=NULL
+                 WHERE path=?1 AND state='in_flight' AND owner_pid=?3
+                   AND attempts >= ?2",
+                params![path, max_attempts, pid],
+            )?;
+            requeued += tx.execute(
+                "UPDATE summary_queue
+                 SET state='pending', updated_at=unixepoch(), owner_pid=NULL
+                 WHERE path=?1 AND state='in_flight' AND owner_pid=?3
+                   AND attempts < ?2",
+                params![path, max_attempts, pid],
+            )?;
+        }
         tx.commit()?;
         Ok((requeued, failed))
     }
@@ -175,7 +201,7 @@ impl Store {
     pub fn defer_queue_item(&mut self, path: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE summary_queue
-             SET state='pending', attempts=MAX(0, attempts - 1), updated_at=unixepoch()
+             SET state='pending', attempts=MAX(0, attempts - 1), updated_at=unixepoch(), owner_pid=NULL
              WHERE path=?1",
             params![path],
         )?;
@@ -185,7 +211,7 @@ impl Store {
     /// Mark a queue item's state (e.g. "done" or "failed").
     pub fn mark_queue_state(&mut self, path: &str, state: &str, error: Option<&str>) -> Result<()> {
         self.conn.execute(
-            "UPDATE summary_queue SET state=?1, error=?2, updated_at=unixepoch() WHERE path=?3",
+            "UPDATE summary_queue SET state=?1, error=?2, updated_at=unixepoch(), owner_pid=NULL WHERE path=?3",
             params![state, error, path],
         )?;
         Ok(())
@@ -219,7 +245,7 @@ impl Store {
             "INSERT INTO summary_queue (path, kind, depth, state, attempts, error)
              VALUES (?1, ?2, ?3, 'pending', 0, NULL)
              ON CONFLICT(path) DO UPDATE SET
-                 state='pending', attempts=0, error=NULL, updated_at=unixepoch()
+                 state='pending', attempts=0, error=NULL, updated_at=unixepoch(), owner_pid=NULL
                  WHERE summary_queue.state <> 'in_flight'",
             params![path, kind, depth],
         )?;

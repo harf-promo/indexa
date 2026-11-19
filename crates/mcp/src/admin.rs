@@ -5,6 +5,7 @@ use rmcp::{
     handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router, ErrorData,
 };
 use serde::Deserialize;
+use std::process::Stdio;
 
 use crate::{mcp_err, mcp_invalid, ok_text, IndexaMcp};
 
@@ -29,6 +30,35 @@ pub struct AddNoteParams {
     /// anything else as a symbol name.
     #[serde(default)]
     pub anchor: Option<String>,
+}
+
+const DEFAULT_TRIGGER_INDEX_TIMEOUT_SECS: u64 = 1800;
+
+fn trigger_index_timeout() -> std::time::Duration {
+    std::env::var("INDEXA_TRIGGER_INDEX_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(
+            DEFAULT_TRIGGER_INDEX_TIMEOUT_SECS,
+        ))
+}
+
+async fn run_trigger_child(
+    child: &mut tokio::process::Command,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, ErrorData> {
+    child.stdin(Stdio::null()).kill_on_drop(true);
+    tokio::time::timeout(timeout, child.output())
+        .await
+        .map_err(|_| {
+            mcp_err(format!(
+                "trigger_index child timed out after {}s",
+                timeout.as_secs()
+            ))
+        })?
+        .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))
 }
 
 /// Absolute path to the running `indexa` binary. The MCP server IS `indexa mcp`, so `current_exe`
@@ -491,10 +521,7 @@ impl IndexaMcp {
         child
             .env("INDEXA_TRIGGER_INDEX_DEV", expected_dev)
             .env("INDEXA_TRIGGER_INDEX_INO", expected_ino);
-        let output = child
-            .output()
-            .await
-            .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))?;
+        let output = run_trigger_child(&mut child, trigger_index_timeout()).await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -1029,5 +1056,35 @@ mod tests {
                 .unwrap(),
         );
         assert!(ok.contains("No changes found"), "got: {ok}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn timed_out_trigger_child_is_killed() {
+        let dir = std::env::temp_dir().join(format!(
+            "indexa-trigger-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("pid");
+        let mut child = tokio::process::Command::new("sh");
+        child
+            .arg("-c")
+            .arg(format!("echo $$ > {}; exec sleep 30", pid_file.display()));
+        let error = super::run_trigger_child(&mut child, std::time::Duration::from_millis(100))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("timed out"));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

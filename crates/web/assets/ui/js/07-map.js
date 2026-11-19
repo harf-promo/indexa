@@ -196,7 +196,7 @@ async function setModelRole(name, role) {
     const d = await r.json();
     if (d.error) { toast(d.error, 'error'); return; }
     toast('Set ' + role + ' model → ' + name + (d.restart_required ? ' · restart indexa to apply' : ''), 'info');
-    loadModels();
+    await loadModels();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
@@ -271,7 +271,8 @@ async function setProvider(provider, model) {
     const d = await r.json();
     if (d.error) { toast(d.error, 'error'); return; }
     toast('Provider → ' + provider + (d.restart_required ? ' · restart indexa to apply' : ''), 'info');
-    loadProviderStatus();
+    await loadProviderStatus();
+    await loadModels();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 function useClaude() { setProvider('claude-code', 'sonnet'); }
@@ -289,7 +290,7 @@ async function saveEndpoint() {
     const d = await r.json();
     if (d.error) { toast(d.error, 'error'); return; }
     toast('Ollama endpoint saved' + (d.restart_required ? ' · restart indexa to apply' : ''), 'info');
-    loadModels();
+    await loadModels();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 

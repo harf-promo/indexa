@@ -19,6 +19,7 @@
 use crate::{ChildSummary, Describer, Generator};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
@@ -32,6 +33,14 @@ const DEFAULT_MAX_CONCURRENCY: usize = 3;
 /// cap a hung CLI process would stall a summarize/answer job indefinitely. Generous
 /// enough for a large summary prompt, bounded so a stuck process always terminalizes.
 const CLAUDE_TIMEOUT_SECS: u64 = 300;
+
+fn configured_timeout_secs() -> u64 {
+    std::env::var("INDEXA_CLAUDE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(CLAUDE_TIMEOUT_SECS)
+}
 
 /// The subset of `claude -p --output-format json` we care about.
 #[derive(Deserialize)]
@@ -93,6 +102,7 @@ impl ClaudeCodeLlm {
             .await
             .expect("claude-code semaphore never closed");
 
+        let timeout_secs = configured_timeout_secs();
         let run_fut = Command::new(&self.claude_bin)
             .arg("-p")
             .arg(prompt)
@@ -103,24 +113,22 @@ impl ClaudeCodeLlm {
             // Belt-and-suspenders: never let an inherited API key silently switch
             // this off the subscription and onto metered billing.
             .env_remove("ANTHROPIC_API_KEY")
+            .stdin(Stdio::null())
             // Kill the child if we drop the future on timeout, so a hung `claude` can't
             // leak as a zombie holding the concurrency permit.
             .kill_on_drop(true)
             .output();
-        let output =
-            tokio::time::timeout(std::time::Duration::from_secs(CLAUDE_TIMEOUT_SECS), run_fut)
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "claude CLI timed out after {CLAUDE_TIMEOUT_SECS}s (model {model})"
-                    )
-                })?
-                .with_context(|| {
-                    format!(
-                        "failed to spawn `{}` — is the Claude Code CLI installed and on PATH?",
-                        self.claude_bin
-                    )
-                })?;
+        let output = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), run_fut)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("claude CLI timed out after {timeout_secs}s (model {model})")
+            })?
+            .with_context(|| {
+                format!(
+                    "failed to spawn `{}` — is the Claude Code CLI installed and on PATH?",
+                    self.claude_bin
+                )
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -271,6 +279,7 @@ pub async fn claude_status(claude_bin: &str) -> ClaudeStatus {
         Command::new(bin)
             .arg("--version")
             .env_remove("ANTHROPIC_API_KEY")
+            .stdin(Stdio::null())
             // As in `run()`: if the timeout fires and this future is dropped, kill the
             // child instead of leaking it detached — a probe run on every Settings load
             // must not accumulate orphaned `claude` processes.
@@ -301,6 +310,7 @@ pub async fn claude_status(claude_bin: &str) -> ClaudeStatus {
             .arg("status")
             .arg("--json")
             .env_remove("ANTHROPIC_API_KEY")
+            .stdin(Stdio::null())
             // Same reasoning as the `--version` probe above: this one may touch the
             // network (OAuth validation), making a timeout-then-leak more likely, not less.
             .kill_on_drop(true)
