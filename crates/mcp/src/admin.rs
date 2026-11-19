@@ -70,8 +70,7 @@ async fn run_trigger_child(
         .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))?;
     #[cfg(windows)]
     {
-        if let Err(e) = job.assign(&process) {
-            let e = terminate_unassigned_child(&mut process, e);
+        if let Err(e) = assign_or_terminate_child(&mut process, |process| job.assign(process)) {
             return Err(mcp_err(format!(
                 "failed to assign `indexa index` to child job: {e}"
             )));
@@ -122,6 +121,17 @@ fn terminate_unassigned_child(
 ) -> std::io::Error {
     let _ = child.start_kill();
     error
+}
+
+#[cfg(windows)]
+fn assign_or_terminate_child(
+    child: &mut tokio::process::Child,
+    assign: impl FnOnce(&tokio::process::Child) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match assign(child) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(terminate_unassigned_child(child, error)),
+    }
 }
 
 #[cfg(windows)]
@@ -841,6 +851,32 @@ mod tests {
     use indexa_llm::Generator;
     use rmcp::model::CallToolResult;
     use std::sync::Arc;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn assignment_failure_terminates_suspended_trigger_child() {
+        use std::os::windows::process::CommandExt;
+        let marker =
+            std::env::temp_dir().join(format!("idx-mcp-never-ran-{}.txt", std::process::id()));
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-Command"])
+            .arg(format!("Set-Content '{}' ran", marker.display()));
+        command
+            .as_std_mut()
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+        let mut child = command.spawn().unwrap();
+        let error = super::assign_or_terminate_child(&mut child, |_| {
+            Err(std::io::Error::other("simulated assignment failure"))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("simulated"));
+        let _ = child.wait().await.unwrap();
+        assert!(
+            !marker.exists(),
+            "suspended trigger child ran after assignment failure"
+        );
+    }
 
     /// `trigger_index` / `add_note` must spawn the server's OWN binary, not a bare `"indexa"`
     /// PATH lookup. Assert the resolver returns a concrete, absolute, existing path.

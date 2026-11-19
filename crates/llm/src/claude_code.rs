@@ -43,6 +43,17 @@ fn terminate_unassigned_child(
 }
 
 #[cfg(windows)]
+fn assign_or_terminate_child(
+    child: &mut tokio::process::Child,
+    assign: impl FnOnce(&tokio::process::Child) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match assign(child) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(terminate_unassigned_child(child, error)),
+    }
+}
+
+#[cfg(windows)]
 impl ChildJob {
     fn new() -> std::io::Result<Self> {
         use std::{mem::size_of, os::windows::io::FromRawHandle};
@@ -183,9 +194,7 @@ async fn output_with_timeout(
     let mut child = command.spawn()?;
     #[cfg(windows)]
     {
-        if let Err(error) = job.assign(&child) {
-            return Err(terminate_unassigned_child(&mut child, error));
-        }
+        assign_or_terminate_child(&mut child, |child| job.assign(child))?;
         if let Err(error) = ChildJob::resume_child(&child) {
             return Err(terminate_unassigned_child(&mut child, error));
         }
@@ -614,10 +623,12 @@ mod windows_job_tests {
             .as_std_mut()
             .creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
         let mut child = command.spawn().unwrap();
-        let error = terminate_unassigned_child(
-            &mut child,
-            std::io::Error::other("simulated AssignProcessToJobObject failure"),
-        );
+        let error = assign_or_terminate_child(&mut child, |_| {
+            Err(std::io::Error::other(
+                "simulated AssignProcessToJobObject failure",
+            ))
+        })
+        .unwrap_err();
         assert!(error.to_string().contains("simulated"));
         let _ = child.wait().await.unwrap();
         assert!(
