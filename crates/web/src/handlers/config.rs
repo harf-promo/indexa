@@ -78,7 +78,9 @@ pub(crate) async fn api_config_provider_set(
         set(&mut cfg.embedding.model, body.embed_model);
         Ok(())
     }) {
-        Ok(_) => Json(serde_json::json!({ "saved": true })).into_response(),
+        Ok(_) => {
+            Json(serde_json::json!({ "saved": true, "restart_required": true })).into_response()
+        }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
 }
@@ -323,6 +325,7 @@ pub(crate) async fn api_config_features_set(
             let caption_warning = caption_budget_warning(&cfg, &state.machine_spec);
             Json(serde_json::json!({
                 "saved": true,
+                "restart_required": true,
                 "caption_warning": caption_warning,
             }))
             .into_response()
