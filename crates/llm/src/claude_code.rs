@@ -41,7 +41,7 @@ impl ChildJob {
             Foundation::INVALID_HANDLE_VALUE,
             System::JobObjects::{
                 CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
-                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             },
         };
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
@@ -49,14 +49,14 @@ impl ChildJob {
             return Err(std::io::Error::last_os_error());
         }
         let owned = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle.cast()) };
-        let mut limits = JOB_OBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         let ok = unsafe {
             SetInformationJobObject(
                 handle,
                 JobObjectExtendedLimitInformation,
-                (&limits as *const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                size_of::<JOB_OBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             )
         };
         if ok == 0 {
@@ -66,10 +66,12 @@ impl ChildJob {
     }
 
     fn assign(&self, child: &tokio::process::Child) -> std::io::Result<()> {
-        use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        let process_handle = child.raw_handle().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "child process already exited")
+        })?;
         let ok = unsafe {
-            AssignProcessToJobObject(self.0.as_raw_handle().cast(), child.as_raw_handle().cast())
+            AssignProcessToJobObject(self.0.as_raw_handle().cast(), process_handle.cast())
         };
         if ok == 0 {
             Err(std::io::Error::last_os_error())
@@ -583,6 +585,6 @@ mod windows_job_tests {
         let mut exit_code = 0;
         let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
         unsafe { CloseHandle(handle) };
-        ok != 0 && exit_code == STILL_ACTIVE
+        ok != 0 && exit_code == STILL_ACTIVE as u32
     }
 }
