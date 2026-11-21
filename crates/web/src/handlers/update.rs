@@ -151,7 +151,9 @@ pub(crate) async fn api_update_control(Json(body): Json<UpdateControlRequest>) -
             )
         }
     };
-    send_command(cmd);
+    if !send_command(cmd) {
+        return err_json(StatusCode::CONFLICT, "there is no pending update prompt");
+    }
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 

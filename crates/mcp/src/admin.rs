@@ -5,12 +5,13 @@ use rmcp::{
     handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router, ErrorData,
 };
 use serde::Deserialize;
+use std::process::Stdio;
 
 use crate::{mcp_err, mcp_invalid, ok_text, IndexaMcp};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TriggerIndexParams {
-    /// Absolute path to scan, deep-index, and summarize.
+    /// Absolute path inside an already-indexed root to scan, deep-index, and summarize.
     pub path: String,
 }
 
@@ -31,6 +32,225 @@ pub struct AddNoteParams {
     pub anchor: Option<String>,
 }
 
+const DEFAULT_TRIGGER_INDEX_TIMEOUT_SECS: u64 = 1800;
+
+fn trigger_index_timeout() -> std::time::Duration {
+    std::env::var("INDEXA_TRIGGER_INDEX_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(
+            DEFAULT_TRIGGER_INDEX_TIMEOUT_SECS,
+        ))
+}
+
+async fn run_trigger_child(
+    child: &mut tokio::process::Command,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, ErrorData> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        child.as_std_mut().process_group(0);
+    }
+    child.stdin(Stdio::null()).kill_on_drop(true);
+    #[cfg(windows)]
+    let job = ChildJob::new().map_err(|e| mcp_err(format!("failed to create child job: {e}")))?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        child
+            .as_std_mut()
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+    }
+    #[allow(unused_mut)]
+    let mut process = child
+        .spawn()
+        .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))?;
+    #[cfg(windows)]
+    {
+        if let Err(e) = assign_or_terminate_child(&mut process, |process| job.assign(process)) {
+            return Err(mcp_err(format!(
+                "failed to assign `indexa index` to child job: {e}"
+            )));
+        }
+        if let Err(e) = ChildJob::resume_child(&process) {
+            let e = terminate_unassigned_child(&mut process, e);
+            return Err(mcp_err(format!(
+                "failed to resume `indexa index` child: {e}"
+            )));
+        }
+    }
+    #[cfg(unix)]
+    let mut group = process.id().map(|pid| ProcessGroupGuard {
+        pid: pid as i32,
+        armed: true,
+    });
+    let result = tokio::time::timeout(timeout, process.wait_with_output()).await;
+    #[cfg(unix)]
+    if result.is_err() {
+        drop(group); // Drop kills the whole process group, including grandchildren.
+    } else if let Some(group) = &mut group {
+        group.armed = false;
+    }
+    result
+        .map_err(|_| {
+            mcp_err(format!(
+                "trigger_index child timed out after {}s",
+                timeout.as_secs()
+            ))
+        })?
+        .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))
+}
+
+/// Unix timeout/cancellation cleanup for the entire spawned process group.
+#[cfg(unix)]
+struct ProcessGroupGuard {
+    pid: i32,
+    armed: bool,
+}
+
+#[cfg(windows)]
+struct ChildJob(std::os::windows::io::OwnedHandle);
+
+#[cfg(windows)]
+fn terminate_unassigned_child(
+    child: &mut tokio::process::Child,
+    error: std::io::Error,
+) -> std::io::Error {
+    let _ = child.start_kill();
+    error
+}
+
+#[cfg(windows)]
+fn assign_or_terminate_child(
+    child: &mut tokio::process::Child,
+    assign: impl FnOnce(&tokio::process::Child) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match assign(child) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(terminate_unassigned_child(child, error)),
+    }
+}
+
+#[cfg(windows)]
+impl ChildJob {
+    fn new() -> std::io::Result<Self> {
+        use std::{mem::size_of, os::windows::io::FromRawHandle};
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::JobObjects::{
+                CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
+        };
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let owned = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle.cast()) };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self(owned))
+    }
+
+    fn assign(&self, child: &tokio::process::Child) -> std::io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        let process_handle = child.raw_handle().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "child process already exited")
+        })?;
+        let ok = unsafe {
+            AssignProcessToJobObject(self.0.as_raw_handle().cast(), process_handle.cast())
+        };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn resume_child(child: &tokio::process::Child) -> std::io::Result<()> {
+        use std::{
+            mem::size_of,
+            os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        };
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::{
+                Diagnostics::ToolHelp::{
+                    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+                    THREADENTRY32,
+                },
+                Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+            },
+        };
+        let pid = child.id().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "child process already exited")
+        })?;
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let _snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot.cast()) };
+        let mut entry = THREADENTRY32 {
+            dwSize: size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        let mut found = false;
+        let mut last_error = None;
+        let mut more = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+        while more {
+            if entry.th32OwnerProcessID == pid {
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if !thread.is_null() {
+                    let thread = unsafe { OwnedHandle::from_raw_handle(thread.cast()) };
+                    if unsafe { ResumeThread(thread.as_raw_handle().cast()) } != u32::MAX {
+                        found = true;
+                        break;
+                    }
+                    last_error = Some(std::io::Error::last_os_error());
+                }
+            }
+            entry.dwSize = size_of::<THREADENTRY32>() as u32;
+            more = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+        }
+        if found {
+            Ok(())
+        } else {
+            Err(last_error.unwrap_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "child primary thread not found",
+                )
+            }))
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            unsafe {
+                libc::kill(-self.pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
 /// Absolute path to the running `indexa` binary. The MCP server IS `indexa mcp`, so `current_exe`
 /// is the correct executable to re-invoke for `index`. Spawning the bare name `"indexa"` instead
 /// runs whatever is first on `$PATH` — which for a GUI-launched MCP client (minimal environment)
@@ -47,7 +267,10 @@ fn indexa_exe() -> Result<std::path::PathBuf, ErrorData> {
 /// `indexa index` takes global flags (`--config=<file>`, which can register a parser
 /// preprocessor command to run) anywhere on its command line, so a caller-supplied path that
 /// starts with `-` would be parsed as a flag instead of a path.
-fn validate_index_path(path: &str) -> Result<(), String> {
+fn validate_index_path(
+    path: &str,
+    indexed_roots: &[std::path::PathBuf],
+) -> Result<std::path::PathBuf, String> {
     if path.is_empty() || path.starts_with('-') {
         return Err(format!(
             "invalid path {path:?}: must be a non-empty absolute path and must not start with '-'"
@@ -63,7 +286,210 @@ fn validate_index_path(path: &str) -> Result<(), String> {
     if !p.exists() {
         return Err(format!("path does not exist: {path}"));
     }
-    Ok(())
+    let canonical = p
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve path {path}: {e}"))?;
+    let inside = indexed_roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| canonical.starts_with(root));
+    if !inside {
+        return Err(format!(
+            "path is outside every indexed root: {}",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
+}
+
+#[cfg(unix)]
+fn open_validated_index_path(
+    canonical_path: &std::path::Path,
+    indexed_roots: &[std::path::PathBuf],
+) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let before = canonical_path
+        .metadata()
+        .map_err(|e| format!("cannot inspect path {}: {e}", canonical_path.display()))?;
+    if !before.is_dir() && !before.is_file() {
+        return Err("trigger_index requires a regular file or directory".into());
+    }
+    let flags = libc::O_NOFOLLOW
+        | libc::O_CLOEXEC
+        | if before.is_dir() {
+            libc::O_DIRECTORY
+        } else {
+            0
+        };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(canonical_path)
+        .map_err(|e| format!("cannot safely open path {}: {e}", canonical_path.display()))?;
+    let opened = file.metadata().map_err(|e| e.to_string())?;
+    if (opened.is_dir() != before.is_dir())
+        || (!opened.is_dir() && !opened.is_file())
+        || (opened.dev(), opened.ino()) != (before.dev(), before.ino())
+    {
+        return Err("path changed while it was being validated".into());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let fd_path = std::path::PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+        let opened_path = fd_path
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve opened directory: {e}"))?;
+        if !indexed_roots
+            .iter()
+            .filter_map(|root| root.canonicalize().ok())
+            .any(|root| opened_path.starts_with(root))
+        {
+            return Err("opened path is outside every indexed root".into());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        let fd_path = std::path::PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()));
+        let opened_path = fd_path
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve opened directory: {e}"))?;
+        if !indexed_roots
+            .iter()
+            .filter_map(|root| root.canonicalize().ok())
+            .any(|root| opened_path.starts_with(root))
+        {
+            return Err("opened path is outside every indexed root".into());
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = indexed_roots;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_validated_index_path(
+    canonical_path: &std::path::Path,
+    indexed_roots: &[std::path::PathBuf],
+) -> Result<std::fs::File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, GetFinalPathNameByHandleW, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        VOLUME_NAME_DOS,
+    };
+
+    fn normalized(path: &str) -> String {
+        let path = path.strip_prefix(r"\\?\UNC\").map_or_else(
+            || path.strip_prefix(r"\\?\").unwrap_or(path).to_owned(),
+            |unc| format!(r"\\{unc}"),
+        );
+        path.trim_end_matches(['\\', '/']).to_lowercase()
+    }
+
+    fn final_path(file: &std::fs::File) -> Result<std::path::PathBuf, String> {
+        let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        let mut buffer = vec![0u16; 512];
+        loop {
+            let len = unsafe {
+                GetFinalPathNameByHandleW(
+                    handle,
+                    buffer.as_mut_ptr(),
+                    buffer.len() as u32,
+                    FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+                )
+            } as usize;
+            if len == 0 {
+                return Err(format!(
+                    "cannot resolve opened path: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if len < buffer.len() {
+                buffer.truncate(len);
+                let path = String::from_utf16(&buffer)
+                    .map_err(|e| format!("opened path is not valid UTF-16: {e}"))?;
+                return Ok(std::path::PathBuf::from(path));
+            }
+            buffer.resize(len + 1, 0);
+        }
+    }
+
+    let before = canonical_path
+        .metadata()
+        .map_err(|e| format!("cannot inspect path {}: {e}", canonical_path.display()))?;
+    if !before.is_dir() && !before.is_file() {
+        return Err("trigger_index requires a regular file or directory".into());
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(canonical_path)
+        .map_err(|e| format!("cannot safely open path {}: {e}", canonical_path.display()))?;
+
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    let ok = unsafe {
+        GetFileInformationByHandle(
+            file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+            &mut info,
+        )
+    };
+    if ok == 0 {
+        return Err(format!(
+            "cannot inspect opened path: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err("trigger_index refuses symlinks and junctions".into());
+    }
+    let is_dir = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+    if is_dir != before.is_dir() || (!is_dir && !before.is_file()) {
+        return Err("path changed while it was being validated".into());
+    }
+
+    let opened_path = normalized(
+        final_path(&file)?
+            .to_str()
+            .ok_or_else(|| "opened path is not valid Unicode".to_owned())?,
+    );
+    let expected_path = normalized(
+        canonical_path
+            .to_str()
+            .ok_or_else(|| "validated path is not valid Unicode".to_owned())?,
+    );
+    if opened_path != expected_path {
+        return Err("opened path changed while it was being validated".into());
+    }
+    let within_indexed_root = indexed_roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| {
+            root.to_str().is_some_and(|root| {
+                opened_path.starts_with(&normalized(root))
+                    && (opened_path.len() == normalized(root).len()
+                        || opened_path.as_bytes().get(normalized(root).len()) == Some(&b'\\'))
+            })
+        });
+    if !within_indexed_root {
+        return Err("opened path is outside every indexed root".into());
+    }
+    // The handle deliberately denies FILE_SHARE_DELETE and remains alive in the caller
+    // until the child exits, so the validated directory cannot be renamed or removed.
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_validated_index_path(
+    _canonical_path: &std::path::Path,
+    _indexed_roots: &[std::path::PathBuf],
+) -> Result<std::fs::File, String> {
+    Err("safe trigger_index directory handles are unsupported on this non-Unix, non-Windows platform".into())
 }
 
 /// Argument vector for the `indexa index` child. The `--` ends option parsing, so whatever
@@ -240,7 +666,7 @@ impl IndexaMcp {
 
     /// Trigger a full scan → deep-index → summarize pipeline on a path.
     #[tool(
-        description = "Start an `indexa index <path>` run: scan files, compute embeddings, \
+        description = "Start an `indexa index <path>` run for a path inside an already-indexed root: scan files, compute embeddings, \
                        and generate summaries. Runs as a background subprocess and returns \
                        when indexing is complete. Use before asking questions about new or \
                        changed files.",
@@ -253,15 +679,39 @@ impl IndexaMcp {
         let path = params.0.path;
         // `path` comes from the MCP caller (often a model that has read untrusted text) and is
         // handed to a CLI whose parser accepts global flags like `--config=<file>` anywhere.
-        validate_index_path(&path).map_err(mcp_invalid)?;
+        let roots = self
+            .store()?
+            .root_paths()
+            .map_err(mcp_err)?
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>();
+        let canonical_path = validate_index_path(&path, &roots).map_err(mcp_invalid)?;
+        let _validated_handle =
+            open_validated_index_path(&canonical_path, &roots).map_err(mcp_invalid)?;
+        #[cfg(unix)]
+        let (expected_dev, expected_ino) = {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = _validated_handle.metadata().map_err(mcp_err)?;
+            (metadata.dev().to_string(), metadata.ino().to_string())
+        };
+        let roots_json = serde_json::to_string(&roots).map_err(mcp_err)?;
         // Spawn `indexa index <path>` as a subprocess, using THIS server's own binary (not a
         // bare PATH lookup) so we re-invoke the exact `indexa` serving this MCP session. Both
         // processes open the same DB via WAL + 5s busy_timeout, which handles contention safely.
-        let output = tokio::process::Command::new(indexa_exe()?)
-            .args(index_args(&path))
-            .output()
-            .await
-            .map_err(|e| mcp_err(format!("failed to spawn `indexa index`: {e}")))?;
+        let mut child = tokio::process::Command::new(indexa_exe()?);
+        child
+            .args(index_args(
+                canonical_path
+                    .to_str()
+                    .ok_or_else(|| mcp_invalid("path is not valid UTF-8"))?,
+            ))
+            .env("INDEXA_TRIGGER_INDEX_ROOTS", roots_json);
+        #[cfg(unix)]
+        child
+            .env("INDEXA_TRIGGER_INDEX_DEV", expected_dev)
+            .env("INDEXA_TRIGGER_INDEX_INO", expected_ino);
+        let output = run_trigger_child(&mut child, trigger_index_timeout()).await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -401,6 +851,32 @@ mod tests {
     use indexa_llm::Generator;
     use rmcp::model::CallToolResult;
     use std::sync::Arc;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn assignment_failure_terminates_suspended_trigger_child() {
+        use std::os::windows::process::CommandExt;
+        let marker =
+            std::env::temp_dir().join(format!("idx-mcp-never-ran-{}.txt", std::process::id()));
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-Command"])
+            .arg(format!("Set-Content '{}' ran", marker.display()));
+        command
+            .as_std_mut()
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+        let mut child = command.spawn().unwrap();
+        let error = super::assign_or_terminate_child(&mut child, |_| {
+            Err(std::io::Error::other("simulated assignment failure"))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("simulated"));
+        let _ = child.wait().await.unwrap();
+        assert!(
+            !marker.exists(),
+            "suspended trigger child ran after assignment failure"
+        );
+    }
 
     /// `trigger_index` / `add_note` must spawn the server's OWN binary, not a bare `"indexa"`
     /// PATH lookup. Assert the resolver returns a concrete, absolute, existing path.
@@ -551,13 +1027,97 @@ mod tests {
             index_args("--config=/tmp/x.toml"),
             ["index", "--", "--config=/tmp/x.toml"]
         );
-        assert!(validate_index_path("--config=/tmp/x.toml").is_err());
-        assert!(validate_index_path("-h").is_err());
-        assert!(validate_index_path("").is_err());
-        assert!(validate_index_path("relative/dir").is_err());
-        assert!(validate_index_path("/definitely/not/a/real/dir-xyz").is_err());
+        let roots = Vec::new();
+        assert!(validate_index_path("--config=/tmp/x.toml", &roots).is_err());
+        assert!(validate_index_path("-h", &roots).is_err());
+        assert!(validate_index_path("", &roots).is_err());
+        assert!(validate_index_path("relative/dir", &roots).is_err());
+        assert!(validate_index_path("/definitely/not/a/real/dir-xyz", &roots).is_err());
         let tmp = tempfile::tempdir().unwrap();
-        assert!(validate_index_path(tmp.path().to_str().unwrap()).is_ok());
+        assert!(validate_index_path(tmp.path().to_str().unwrap(), &roots).is_err());
+        assert!(
+            validate_index_path(tmp.path().to_str().unwrap(), &[tmp.path().to_owned()]).is_ok()
+        );
+        let outside = tempfile::tempdir().unwrap();
+        assert!(
+            validate_index_path(outside.path().to_str().unwrap(), &[tmp.path().to_owned()])
+                .is_err()
+        );
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("outside-link");
+            std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+            assert!(validate_index_path(link.to_str().unwrap(), &[tmp.path().to_owned()]).is_err());
+        }
+        let traversal = tmp
+            .path()
+            .join("..")
+            .join(outside.path().file_name().unwrap());
+        assert!(
+            validate_index_path(traversal.to_str().unwrap(), &[tmp.path().to_owned()]).is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trigger_index_rejects_directory_replaced_by_junction_after_validation() {
+        use super::{open_validated_index_path, validate_index_path};
+        use std::process::Command;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let indexed = tmp.path().join("indexed");
+        let target = indexed.join("target");
+        let moved = indexed.join("moved-target");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let roots = vec![indexed.clone()];
+        let canonical = validate_index_path(target.to_str().unwrap(), &roots).unwrap();
+
+        std::fs::rename(&target, &moved).unwrap();
+        let junction = Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&target)
+            .arg(&outside)
+            .output()
+            .expect("Windows runner provides cmd.exe");
+        assert!(
+            junction.status.success(),
+            "could not create junction for the reparse-point race test: {}",
+            String::from_utf8_lossy(&junction.stderr)
+        );
+
+        let result = open_validated_index_path(&canonical, &roots);
+        assert!(
+            result.is_err(),
+            "trigger_index accepted a junction swapped in after validation"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trigger_index_holds_a_validated_directory_for_indexing() {
+        use super::{open_validated_index_path, validate_index_path};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("indexed");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("marker.txt"), "indexed content").unwrap();
+        let roots = vec![root.clone()];
+        let canonical = validate_index_path(root.to_str().unwrap(), &roots).unwrap();
+        let handle = open_validated_index_path(&canonical, &roots)
+            .expect("a normal indexed directory remains supported on Windows");
+
+        assert!(handle.metadata().unwrap().is_dir());
+        let moved = tmp.path().join("moved-indexed");
+        assert!(
+            std::fs::rename(&root, &moved).is_err(),
+            "the held directory handle must deny rename/delete while indexing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("marker.txt")).unwrap(),
+            "indexed content"
+        );
     }
 
     #[tokio::test]
@@ -581,6 +1141,48 @@ mod tests {
         assert!(
             format!("{err:?}").contains("invalid path"),
             "expected a validation refusal, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn trigger_index_uses_roots_from_the_open_index() {
+        use crate::TriggerIndexParams;
+        use indexa_core::walker::{Entry, EntryKind};
+        use rmcp::handler::server::wrapper::Parameters;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("indexed");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let db = tmp.path().join("idx.db");
+        {
+            let mut store = Store::open(&db).unwrap();
+            store
+                .upsert_entries(&[Entry {
+                    path: root,
+                    kind: EntryKind::Dir,
+                    size: 0,
+                    modified: None,
+                    hint: None,
+                    is_binary: false,
+                }])
+                .unwrap();
+        }
+        let mcp = IndexaMcp::new(
+            db,
+            Arc::new(StubEmbedder),
+            Arc::new(StubGenerator),
+            Arc::new(Config::default()),
+        );
+        let err = mcp
+            .trigger_index(Parameters(TriggerIndexParams {
+                path: outside.to_string_lossy().into_owned(),
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("outside every indexed root"),
+            "unexpected trigger_index result: {err:?}"
         );
     }
 
@@ -670,5 +1272,161 @@ mod tests {
                 .unwrap(),
         );
         assert!(ok.contains("No changes found"), "got: {ok}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn timed_out_trigger_child_is_killed() {
+        let dir = std::env::temp_dir().join(format!(
+            "indexa-trigger-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("pid");
+        let mut child = tokio::process::Command::new("sh");
+        child
+            .arg("-c")
+            .arg(format!("echo $$ > {}; exec sleep 30", pid_file.display()));
+        let error = super::run_trigger_child(&mut child, std::time::Duration::from_millis(100))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("timed out"));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn timed_out_trigger_child_kills_its_grandchild() {
+        let dir = std::env::temp_dir().join(format!(
+            "indexa-trigger-group-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent_file = dir.join("parent");
+        let child_file = dir.join("grandchild");
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(format!(
+            "echo $$ > {}; sleep 30 & echo $! > {}; wait",
+            parent_file.display(),
+            child_file.display()
+        ));
+        let result =
+            super::run_trigger_child(&mut command, std::time::Duration::from_millis(150)).await;
+        assert!(result.is_err());
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        for pid_file in [&parent_file, &child_file] {
+            let pid = std::fs::read_to_string(pid_file).unwrap().trim().to_owned();
+            assert!(
+                !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                "process {pid} survived group timeout"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn timed_out_trigger_child_kills_child_and_grandchild_job() {
+        let dir = std::env::temp_dir().join(format!(
+            "indexa-trigger-job-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent_file = dir.join("parent.pid");
+        let grandchild_file = dir.join("grandchild.pid");
+        let quote_path = |path: &std::path::Path| path.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "$PID | Set-Content -NoNewline '{}'; $p = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru; $p.Id | Set-Content -NoNewline '{}'; Start-Sleep -Seconds 30",
+            quote_path(&parent_file),
+            quote_path(&grandchild_file)
+        );
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command.args(["-NoProfile", "-Command", &script]);
+        let result =
+            super::run_trigger_child(&mut command, std::time::Duration::from_secs(5)).await;
+        assert!(result.is_err(), "trigger child unexpectedly completed");
+        let parent = wait_for_pid(&parent_file).await;
+        let grandchild = wait_for_pid(&grandchild_file).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !is_running(parent),
+            "child process {parent} survived timeout"
+        );
+        assert!(
+            !is_running(grandchild),
+            "grandchild process {grandchild} survived timeout"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn immediate_trigger_grandchild_is_killed_by_timeout_job() {
+        let dir =
+            std::env::temp_dir().join(format!("indexa-trigger-immediate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let grandchild_file = dir.join("grandchild.pid");
+        let script = format!("$p = Start-Process powershell.exe -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru; $p.Id | Set-Content -NoNewline '{}' ; Start-Sleep -Seconds 30", grandchild_file.display());
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command.args(["-NoProfile", "-Command", &script]);
+        let result =
+            super::run_trigger_child(&mut command, std::time::Duration::from_secs(5)).await;
+        assert!(result.is_err(), "trigger child unexpectedly completed");
+        let grandchild = wait_for_pid(&grandchild_file).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !is_running(grandchild),
+            "immediate grandchild {grandchild} survived timeout"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    async fn wait_for_pid(path: &std::path::Path) -> u32 {
+        for _ in 0..100 {
+            if let Ok(value) = std::fs::read_to_string(path) {
+                if let Ok(pid) = value.parse() {
+                    return pid;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("process did not record pid in {}", path.display());
+    }
+
+    #[cfg(windows)]
+    fn is_running(pid: u32) -> bool {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, STILL_ACTIVE},
+            System::Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code = 0;
+        let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+        unsafe { CloseHandle(handle) };
+        ok != 0 && exit_code == STILL_ACTIVE as u32
     }
 }

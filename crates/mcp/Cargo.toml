@@ -24,6 +24,10 @@ indexa-parsers = { path = "../parsers" }
 indexa-update = { path = "../update" }
 rmcp = { version = "3.9.0", features = ["server", "transport-io", "macros"] }
 schemars = "1"
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
 
 [dev-dependencies]
 tempfile = "3"

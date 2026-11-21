@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 tokio = { workspace = true }
+socket2 = "0.6"
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -21,12 +22,20 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
 if-addrs = { workspace = true }
 uuid = { version = "1", features = ["v4", "serde"] }
+ignore = "0.4"
+tempfile = "3"
 indexa-core = { path = "../core" }
 indexa-embed = { path = "../embed" }
 indexa-llm = { path = "../llm" }
 indexa-parsers = { path = "../parsers" }
 indexa-query = { path = "../query" }
 indexa-update = { path = "../update" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # `tower::ServiceExt::oneshot` drives the real router in integration tests.
@@ -39,4 +48,3 @@ async-trait = { workspace = true }
 # desktop app's lockfile (dev-dependency features aren't part of a dependent's build).
 tokio = { workspace = true, features = ["test-util"] }
 rusqlite = { workspace = true }
-tempfile = "3"

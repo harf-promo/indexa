@@ -15,10 +15,8 @@
 //!     loopback literal (a rebind arrives with the attacker's domain in `Host`), reject
 //!     `/api/*` requests the browser marks `Sec-Fetch-Site: cross-site` (any method, so a
 //!     drive-by GET cannot make the server do work), and reject state-changing methods whose
-//!     `Origin`/`Referer` is present but cross-site. Absent
-//!     `Host`/`Origin` (non-browser local tools like curl) is allowed — every browser drive-by /
-//!     rebind vector carries both headers, so "validate if present" is complete for that threat
-//!     model while leaving local scripts and the existing test suite working.
+//!     `Origin`/`Referer` is present but cross-site. Missing Host is allowed for non-browser local
+//!     tools, while mutations require a usable same-origin Origin or Referer.
 //!   - **Non-loopback bind (LAN):** require a shared bearer token on the private `/api/*` routes
 //!     (the static shell carries no private data and loads freely). The token — generated and
 //!     printed at startup, or `INDEXA_WEB_TOKEN` — defeats both vectors since an attacker never
@@ -40,14 +38,29 @@ pub(crate) struct GuardConfig {
     loopback: bool,
     /// Shared bearer token required in LAN mode. `None` on loopback.
     token: Option<String>,
+    allowed_origins: Vec<String>,
 }
 
 impl GuardConfig {
     /// Loopback bind (default): Host/Origin validation, no token.
+    #[cfg(test)]
     pub(crate) fn loopback() -> Self {
         Self {
             loopback: true,
             token: None,
+            allowed_origins: vec!["http://localhost:7620".to_owned()],
+        }
+    }
+
+    pub(crate) fn loopback_origin(origin: String) -> Self {
+        let port = origin
+            .rsplit_once(':')
+            .map(|(_, port)| port.to_owned())
+            .unwrap_or_default();
+        Self {
+            loopback: true,
+            token: None,
+            allowed_origins: vec![origin, format!("http://localhost:{port}")],
         }
     }
 
@@ -56,7 +69,28 @@ impl GuardConfig {
         Self {
             loopback: false,
             token: Some(token),
+            allowed_origins: std::env::var("INDEXA_WEB_ORIGIN")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .into_iter()
+                .collect(),
         }
+    }
+
+    pub(crate) fn lan_origin(token: String, port: u16, bound_origin: String) -> Self {
+        let mut cfg = Self::lan(token);
+        cfg.allowed_origins.push(bound_origin);
+        cfg.allowed_origins.push(format!("http://localhost:{port}"));
+        if let Ok(ifaces) = if_addrs::get_if_addrs() {
+            cfg.allowed_origins.extend(
+                ifaces
+                    .into_iter()
+                    .map(|iface| iface.ip())
+                    .filter(|ip| !ip.is_loopback())
+                    .map(|ip| format!("http://{}", std::net::SocketAddr::new(ip, port))),
+            );
+        }
+        cfg
     }
 }
 
@@ -89,17 +123,25 @@ pub(crate) async fn request_guard(
                 "cross-site request to the API rejected (Sec-Fetch-Site: cross-site)",
             );
         }
-        if is_state_changing(req.method()) && !origin_ok(req.headers()) {
+        if is_state_changing(req.method()) && !origin_ok(req.headers(), &cfg.allowed_origins) {
             return deny(
                 StatusCode::FORBIDDEN,
                 "cross-origin state-changing request rejected (CSRF)",
             );
         }
-    } else if req.uri().path().starts_with("/api/") && !token_ok(&cfg, &req) {
-        return deny(
-            StatusCode::UNAUTHORIZED,
-            "missing or invalid token — pass ?token=<INDEXA_WEB_TOKEN> or Authorization: Bearer <token>",
-        );
+    } else {
+        if is_state_changing(req.method()) && !origin_ok(req.headers(), &cfg.allowed_origins) {
+            return deny(
+                StatusCode::FORBIDDEN,
+                "cross-origin state-changing request rejected (CSRF)",
+            );
+        }
+        if req.uri().path().starts_with("/api/") && !token_ok(&cfg, &req) {
+            return deny(
+                StatusCode::UNAUTHORIZED,
+                "missing or invalid token — pass ?token=<INDEXA_WEB_TOKEN> or Authorization: Bearer <token>",
+            );
+        }
     }
     next.run(req).await
 }
@@ -152,24 +194,46 @@ fn host_ok(headers: &HeaderMap) -> bool {
     }
 }
 
-/// Origin (or, failing that, Referer) must be same-origin loopback when present. Absent → allow
-/// (same-origin navigations and non-browser tools omit it; a cross-site fetch/form always sends it).
-fn origin_ok(headers: &HeaderMap) -> bool {
-    let val = headers
-        .get(header::ORIGIN)
-        .or_else(|| headers.get(header::REFERER))
-        .and_then(|v| v.to_str().ok());
-    match val {
-        Some(o) => origin_is_loopback(o),
-        None => true,
-    }
+/// Origin (or, failing that, Referer) must be same-origin when present. A present but malformed
+/// Origin is rejected instead of being treated as absent or falling back to Referer.
+fn origin_ok(headers: &HeaderMap, allowed_origins: &[String]) -> bool {
+    let value = match headers.get(header::ORIGIN) {
+        Some(origin) => match origin.to_str() {
+            Ok(origin) => origin,
+            Err(_) => return false,
+        },
+        None => match headers.get(header::REFERER).and_then(|v| v.to_str().ok()) {
+            Some(referer) => referer,
+            None => return false,
+        },
+    };
+    allowed_origins
+        .iter()
+        .any(|expected| exact_same_origin(value, expected))
 }
 
-fn origin_is_loopback(origin: &str) -> bool {
-    // Strip `scheme://`, keep the authority up to the first `/`. "null"/opaque origins fail here.
-    let after_scheme = origin.split_once("://").map_or(origin, |(_, rest)| rest);
-    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
-    authority_is_loopback(authority)
+fn exact_same_origin(candidate: &str, expected: &str) -> bool {
+    fn parts(value: &str) -> Option<(&str, &str)> {
+        let (scheme, rest) = value.split_once("://")?;
+        if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+            return None;
+        }
+        let authority = rest.split(['/', '?', '#']).next()?;
+        if authority.is_empty() || authority.contains('@') {
+            return None;
+        }
+        Some((scheme, authority))
+    }
+    match (parts(candidate), parts(expected)) {
+        (
+            Some((candidate_scheme, candidate_authority)),
+            Some((expected_scheme, expected_authority)),
+        ) => {
+            candidate_scheme.eq_ignore_ascii_case(expected_scheme)
+                && candidate_authority.eq_ignore_ascii_case(expected_authority)
+        }
+        _ => false,
+    }
 }
 
 /// LAN token check: `Authorization: Bearer <token>` OR a `?token=` query param equals the
@@ -328,6 +392,58 @@ mod tests {
             .await,
             StatusCode::OK
         );
+    }
+
+    #[test]
+    fn origin_requires_exact_port_and_supports_ipv6() {
+        let allowed = ["http://127.0.0.1:7620".to_owned()];
+        assert!(exact_same_origin("http://127.0.0.1:7620", &allowed[0]));
+        assert!(!exact_same_origin("http://127.0.0.1:7621", &allowed[0]));
+        assert!(exact_same_origin("http://[::1]:7620", "http://[::1]:7620"));
+        assert!(!exact_same_origin("http://[::1]:7621", "http://[::1]:7620"));
+    }
+
+    #[tokio::test]
+    async fn loopback_mutation_rejects_other_port_and_accepts_bound_port() {
+        let cfg = GuardConfig::loopback_origin("http://127.0.0.1:7620".into());
+        let request = |origin: &str| {
+            Request::post("/api/x")
+                .header("host", "127.0.0.1:7620")
+                .header("origin", origin)
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            status(cfg.clone(), request("http://127.0.0.1:7621")).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status(cfg, request("http://127.0.0.1:7620")).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn mutation_without_usable_origin_or_referer_is_rejected() {
+        let cfg = GuardConfig::loopback_origin("http://127.0.0.1:7620".into());
+        for request in [
+            Request::post("/api/x")
+                .header("host", "127.0.0.1:7620")
+                .body(Body::empty())
+                .unwrap(),
+            Request::post("/api/x")
+                .header("host", "127.0.0.1:7620")
+                .header("origin", "not an origin")
+                .body(Body::empty())
+                .unwrap(),
+            Request::post("/api/x")
+                .header("host", "127.0.0.1:7620")
+                .header("referer", "not a referer")
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            assert_eq!(status(cfg.clone(), request).await, StatusCode::FORBIDDEN);
+        }
     }
 
     fn api_get(site: Option<&str>) -> Request<Body> {

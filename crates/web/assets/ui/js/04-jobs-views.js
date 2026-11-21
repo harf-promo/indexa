@@ -243,6 +243,7 @@ function selectJob(jobId) {
   selectedJobId = jobId;
   document.querySelectorAll('.jobs-card').forEach(function(c) {
     c.classList.toggle('selected', c.dataset.jobId === jobId);
+    c.setAttribute('aria-pressed', c.dataset.jobId === jobId ? 'true' : 'false');
   });
   renderJobDetail(jobId);
 }
@@ -326,6 +327,9 @@ function _renderCardContent(card, jobId, j) {
   card.classList.toggle('failed', j.status === 'failed');
 
   const pathName = (j.path || '').split('/').filter(Boolean).pop() || j.path || jobId;
+  card.setAttribute('role', 'button');
+  card.tabIndex = 0;
+  card.setAttribute('aria-pressed', jobId === selectedJobId ? 'true' : 'false');
   const warnCount = j.warnings.length + j.warningOverflow;
   const warnBadge = warnCount > 0 ? '<span class="jc-warn-badge">⚠ ' + warnCount + '</span>' : '';
   let statusText = '';
@@ -354,6 +358,12 @@ function _renderCardContent(card, jobId, j) {
   }
 
   card.onclick = function() { selectJob(jobId); };
+  card.onkeydown = function(e) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      selectJob(jobId);
+    }
+  };
 }
 
 /* ── Jobs detail pane ── */
@@ -553,7 +563,7 @@ function applyWarnFilter() {
         '" title="budget ' + sign + budgetMb + ' MB (room for a new model above the keep-free band)">' +
         escapeHtml(p.level) + ' · budget ' + sign + budgetMb + ' MB</span>';
     }
-    return '<div class="warn-row' + (w.pressure ? ' warn-row-pressure' : '') + '" onclick="this.classList.toggle(\'expanded\')">' +
+    return '<div class="warn-row' + (w.pressure ? ' warn-row-pressure' : '') + '" role="button" tabindex="0" aria-expanded="false" onclick="this.classList.toggle(\'expanded\');this.setAttribute(\'aria-expanded\',this.classList.contains(\'expanded\'))" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();this.click()}">' +
       '<span class="warn-stage">' + escapeHtml(w.stage) + '</span>' +
       (basename ? '<span class="warn-path" title="' + escapeAttr(w.item_path) + '">' + escapeHtml(basename) + '</span>' : '') +
       '<span class="warn-msg">' + escapeHtml(w.message) + pressureChip + '</span>' +

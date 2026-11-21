@@ -4,10 +4,8 @@
 //! CONTENT, not a commit SHA, so it survives history rewrites a raw `git rev-parse HEAD`
 //! reference would not.
 //!
-//! No git2/gix dependency: shells out to the user's own `git` binary, mirroring
-//! [`crate::gitdiff`]'s `Command::new("git")` house style (duplicated in miniature here rather
-//! than shared — this module doesn't otherwise depend on `gitdiff`, same reasoning `gitdiff.rs`
-//! itself gives for not sharing with `indexa-parsers::proc::run_capped`).
+//! No git2/gix dependency: shells out to the user's own `git` binary through the shared
+//! [`crate::gitcmd::git_command`] hardening helper.
 //!
 //! Fails open throughout: a missing `git` binary, a non-repo directory, an untracked or
 //! vanished path, or a timed-out child all resolve to `None` — `record_decision` degrades to
@@ -43,7 +41,15 @@ pub fn compute_patch_id(anchor_dir: &Path, subject_path: &Path) -> Option<String
     diff_cmd
         .arg("-C")
         .arg(anchor)
-        .args(["diff", EMPTY_TREE, "HEAD", "--", subject])
+        .args([
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            EMPTY_TREE,
+            "HEAD",
+            "--",
+            subject,
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let mut diff_child = diff_cmd.spawn().ok()?;
@@ -176,6 +182,35 @@ mod tests {
             id1, id2,
             "different committed content must yield a different patch-id"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn patch_id_disables_repository_external_diff_and_textconv() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_repo(root);
+        let marker = root.join("invoked");
+        let script = root.join("converter.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf invoked >> '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(root, &["config", "diff.external", script.to_str().unwrap()]);
+        git(
+            root,
+            &["config", "diff.probe.textconv", script.to_str().unwrap()],
+        );
+        std::fs::write(root.join(".gitattributes"), "*.rs diff=probe\n").unwrap();
+        std::fs::write(root.join("f.rs"), "fn a() {}\n").unwrap();
+        git(root, &["add", ".gitattributes", "f.rs"]);
+        git(root, &["commit", "-q", "-m", "fixture"]);
+        let patch_id = compute_patch_id(root, Path::new("f.rs"));
+        assert!(!marker.exists(), "repository-configured diff helper ran");
+        assert!(patch_id.is_some());
     }
 
     #[test]

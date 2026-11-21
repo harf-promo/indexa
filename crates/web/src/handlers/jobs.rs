@@ -14,7 +14,8 @@ use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
 use crate::dto::{err_json, EstimateResponse, JobListEntry, JobPathQuery, JobStartResponse};
-use crate::jobs::{JobEvent, JobHandle, JobStatus, Jobs};
+use crate::handlers::path_policy::canonical_indexed_path;
+use crate::jobs::{push, JobEvent, JobHandle, JobStatus, Jobs};
 use crate::jobs_exec::{
     run_deep_phase_standalone, run_index_job, run_scan_phase_standalone, run_summarize_phase,
     schedule_cleanup,
@@ -42,6 +43,20 @@ fn cap_reached(jobs: &std::collections::HashMap<Uuid, Arc<JobHandle>>) -> bool {
         .filter(|h| h.status() == JobStatus::Running)
         .count()
         >= MAX_CONCURRENT_JOBS
+}
+
+fn fail_changed_path(handle: &Arc<JobHandle>, error: &str) {
+    push(
+        handle,
+        JobEvent::Failed {
+            error: error.to_owned(),
+            stage: Some("path-validation".to_owned()),
+            item_path: None,
+            chain: None,
+            code: None,
+        },
+    );
+    handle.set_status(JobStatus::Failed);
 }
 
 pub(crate) fn too_many_jobs() -> Response {
@@ -80,13 +95,23 @@ pub(crate) async fn api_job_scan(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
 ) -> Response {
-    let (id, handle) = match try_register_job(&s.jobs, "scan", q.path.clone()).await {
+    let path = match canonical_indexed_path(&s, &q.path).await {
+        Ok(path) => path,
+        Err(err) => return err.into_response(),
+    };
+    let display_path = path.as_str().to_owned();
+    let (id, handle) = match try_register_job(&s.jobs, "scan", display_path.clone()).await {
         Some(job) => job,
         None => return too_many_jobs(),
     };
     let state = s.clone();
     tokio::spawn(async move {
-        run_scan_phase_standalone(&state, &q.path, &handle).await;
+        if let Err(err) = path.revalidate() {
+            fail_changed_path(&handle, &err.message);
+            tracing::warn!(path = %display_path, error = %err.message, "job refused changed path");
+        } else {
+            run_scan_phase_standalone(&state, &display_path, &handle, path).await;
+        }
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
     Json(JobStartResponse { job_id: id }).into_response()
@@ -96,13 +121,23 @@ pub(crate) async fn api_job_deep(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
 ) -> Response {
-    let (id, handle) = match try_register_job(&s.jobs, "deep", q.path.clone()).await {
+    let path = match canonical_indexed_path(&s, &q.path).await {
+        Ok(path) => path,
+        Err(err) => return err.into_response(),
+    };
+    let display_path = path.as_str().to_owned();
+    let (id, handle) = match try_register_job(&s.jobs, "deep", display_path.clone()).await {
         Some(job) => job,
         None => return too_many_jobs(),
     };
     let state = s.clone();
     tokio::spawn(async move {
-        run_deep_phase_standalone(&state, &q.path, &handle).await;
+        if let Err(err) = path.revalidate() {
+            fail_changed_path(&handle, &err.message);
+            tracing::warn!(path = %display_path, error = %err.message, "job refused changed path");
+        } else {
+            run_deep_phase_standalone(&state, &display_path, &handle, Some(path)).await;
+        }
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
     Json(JobStartResponse { job_id: id }).into_response()
@@ -112,14 +147,33 @@ pub(crate) async fn api_job_summarize(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
 ) -> Response {
-    let (id, handle) = match try_register_job(&s.jobs, "summarize", q.path.clone()).await {
+    let path = match canonical_indexed_path(&s, &q.path).await {
+        Ok(path) => path,
+        Err(err) => return err.into_response(),
+    };
+    let display_path = path.as_str().to_owned();
+    let (id, handle) = match try_register_job(&s.jobs, "summarize", display_path.clone()).await {
         Some(job) => job,
         None => return too_many_jobs(),
     };
     let model_override = model_override_from(&q, s.config.describer.num_ctx);
     let state = s.clone();
     tokio::spawn(async move {
-        run_summarize_phase(&state, &q.path, q.passes, &handle, model_override, q.force).await;
+        if let Err(err) = path.revalidate() {
+            fail_changed_path(&handle, &err.message);
+            tracing::warn!(path = %display_path, error = %err.message, "job refused changed path");
+        } else {
+            run_summarize_phase(
+                &state,
+                &display_path,
+                q.passes,
+                &handle,
+                model_override,
+                q.force,
+                Some(path),
+            )
+            .await;
+        }
         schedule_cleanup(state.jobs.clone(), handle.id);
     });
     Json(JobStartResponse { job_id: id }).into_response()
@@ -129,7 +183,12 @@ pub(crate) async fn api_job_index(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
 ) -> Response {
-    let (id, handle) = match try_register_job(&s.jobs, "index", q.path.clone()).await {
+    let path = match canonical_indexed_path(&s, &q.path).await {
+        Ok(path) => path,
+        Err(err) => return err.into_response(),
+    };
+    let display_path = path.as_str().to_owned();
+    let (id, handle) = match try_register_job(&s.jobs, "index", display_path.clone()).await {
         Some(job) => job,
         None => return too_many_jobs(),
     };
@@ -137,7 +196,12 @@ pub(crate) async fn api_job_index(
     let state = s.clone();
     tokio::spawn(async move {
         let id = handle.id;
-        run_index_job(state.clone(), q.path, handle, model_override).await;
+        if let Err(err) = path.revalidate() {
+            fail_changed_path(&handle, &err.message);
+            tracing::warn!(path = %display_path, error = %err.message, "job refused changed path");
+        } else {
+            run_index_job(state.clone(), display_path, handle, model_override, path).await;
+        }
         schedule_cleanup(state.jobs.clone(), id);
     });
     Json(JobStartResponse { job_id: id }).into_response()
@@ -148,7 +212,10 @@ pub(crate) async fn api_job_index(
 pub(crate) async fn api_job_estimate(
     Query(q): Query<JobPathQuery>,
     State(s): State<AppState>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Err(err) = canonical_indexed_path(&s, &q.path).await {
+        return err.into_response();
+    }
     let cfg = &s.config.describer;
     let headroom = s.config.resource.effective_headroom_bytes();
     let sample = sample_memory_once();
@@ -199,6 +266,7 @@ pub(crate) async fn api_job_estimate(
         chunk_count,
         queue_pending,
     })
+    .into_response()
 }
 
 pub(crate) async fn api_jobs_list(State(s): State<AppState>) -> impl IntoResponse {

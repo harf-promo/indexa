@@ -57,6 +57,8 @@ pub struct WalkConfig {
     pub custom_ignore: bool,
 }
 
+type EntryFilter = dyn Fn(&Path, bool) -> bool + Send + Sync;
+
 /// Default scan-time per-file size cap (8 MiB). Skips blobs that are almost
 /// never useful context and dominate disk/index growth on a broad scan.
 pub const DEFAULT_MAX_FILESIZE: u64 = 8 * 1024 * 1024;
@@ -287,16 +289,93 @@ pub fn should_index_file(
 /// Fail-open NUL sniff: read a file's first 8 KB and check for a NUL byte (via
 /// [`crate::text::is_binary`]). Returns `false` on any open/read error — an unreadable file is
 /// never *classified* binary (so it isn't skipped on the strength of a read failure).
-fn file_is_binary(path: &Path) -> bool {
+fn file_is_binary(path: &Path) -> std::io::Result<bool> {
     use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
-    };
+    let mut f = open_regular_file(path)?;
     let mut buf = [0u8; 8192];
-    match f.read(&mut buf) {
-        Ok(n) => crate::text::is_binary(&buf[..n]),
-        Err(_) => false,
+    let n = f.read(&mut buf)?;
+    Ok(crate::text::is_binary(&buf[..n]))
+}
+
+fn must_skip_after_safe_open_error(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Unsupported
+    ) {
+        return true;
     }
+    #[cfg(target_os = "linux")]
+    let nofollow_rejection = error.raw_os_error() == Some(40); // ELOOP
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    let nofollow_rejection = error.raw_os_error() == Some(62); // ELOOP
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    let nofollow_rejection = false;
+    nofollow_rejection
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub fn open_regular_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Linux O_NOFOLLOW | O_NONBLOCK: do not follow a swapped symlink or wait on a FIFO.
+        options.custom_flags(0x20000 | 0x800);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x100 | 0x4);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Open the reparse point itself so a final-component symlink swapped after the
+        // metadata check is not followed. Windows has no filesystem FIFO equivalent.
+        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ));
+        }
+    }
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn open_regular_file(_path: &Path) -> std::io::Result<std::fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "safe nonblocking file open is unsupported on this target",
+    ))
 }
 
 /// Per-thread flush threshold for [`walk_streaming`]: a worker sends its accumulated entries as a
@@ -333,6 +412,27 @@ const STREAM_CHANNEL_BOUND: usize = 4;
 pub fn walk_streaming(
     root: &Path,
     cfg: &WalkConfig,
+    on_batch: impl FnMut(Vec<Entry>) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    walk_streaming_internal(root, cfg, std::sync::Arc::new(|_, _| true), true, on_batch)
+}
+
+/// Like [`walk_streaming`], with a predicate run for each non-symlink entry before a directory
+/// is descended into or a file is yielded. A rejected directory is pruned recursively.
+fn walk_streaming_filtered(
+    root: &Path,
+    cfg: &WalkConfig,
+    entry_filter: std::sync::Arc<EntryFilter>,
+    on_batch: impl FnMut(Vec<Entry>) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    walk_streaming_internal(root, cfg, entry_filter, false, on_batch)
+}
+
+fn walk_streaming_internal(
+    root: &Path,
+    cfg: &WalkConfig,
+    entry_filter: std::sync::Arc<EntryFilter>,
+    load_ignore_files: bool,
     mut on_batch: impl FnMut(Vec<Entry>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     use ignore::{WalkBuilder, WalkState};
@@ -352,6 +452,7 @@ pub fn walk_streaming(
     let skip_hidden = cfg.skip_hidden;
     let include_sensitive = cfg.include_sensitive;
     let sniff_binary = cfg.sniff_binary;
+    let entry_filter = entry_filter.clone();
 
     // Build a callback-side gitignore matcher.
     //
@@ -370,9 +471,12 @@ pub fn walk_streaming(
     //     user's config, anchored at root.
     // Root `.gitignore` + `[scan] ignore` patterns, anchored at root — shared with the watchers'
     // per-event `should_index_file` so a scan and a live watch select the same files.
-    let combined_matcher: Option<Arc<ignore::gitignore::Gitignore>> =
+    let combined_matcher: Option<Arc<ignore::gitignore::Gitignore>> = if load_ignore_files {
         build_ignore_matcher(root, cfg.respect_gitignore, &cfg.ignore, cfg.custom_ignore)
-            .map(Arc::new);
+            .map(Arc::new)
+    } else {
+        None
+    };
 
     let mut b = WalkBuilder::new(root);
     b.threads(threads)
@@ -380,12 +484,24 @@ pub fn walk_streaming(
         // Honor .gitignore files found during the walk (root AND nested) plus global
         // gitignore and .git/info/exclude. All gated on respect_gitignore.
         // For non-git directories, the root .gitignore is handled by combined_matcher.
-        .git_ignore(cfg.respect_gitignore)
-        .git_global(cfg.respect_gitignore)
-        .git_exclude(cfg.respect_gitignore)
-        .parents(cfg.respect_gitignore)
+        .git_ignore(load_ignore_files && cfg.respect_gitignore)
+        .git_global(load_ignore_files && cfg.respect_gitignore)
+        .git_exclude(load_ignore_files && cfg.respect_gitignore)
+        .parents(load_ignore_files && cfg.respect_gitignore)
         // Also honor .ignore files (gitignore-style, not git-specific).
-        .ignore(cfg.respect_gitignore)
+        .ignore(load_ignore_files && cfg.respect_gitignore)
+        // This runs after a parent lists a child but before that child is queued for read_dir.
+        // Confined walks validate the opened identity here so swapped directories are pruned.
+        .filter_entry({
+            let entry_filter = entry_filter.clone();
+            move |entry| {
+                let kind = entry.file_type();
+                let is_symlink =
+                    entry.path_is_symlink() || kind.is_some_and(|kind| kind.is_symlink());
+                let is_dir = kind.is_some_and(|kind| kind.is_dir());
+                !is_symlink && entry_filter(entry.path(), is_dir)
+            }
+        })
         // WalkBuilder.hidden(true) skips dot-prefixed files/dirs natively.
         .hidden(cfg.skip_hidden)
         // Scan-time size cap: files above this are not yielded by the walker.
@@ -393,7 +509,7 @@ pub fn walk_streaming(
 
     // `.indexaignore` — highest-precedence ignore layer, nested per directory (see
     // CUSTOM_IGNORE_FILENAME doc comment). Gated on respect_gitignore, matching `.ignore`.
-    if cfg.respect_gitignore && cfg.custom_ignore {
+    if load_ignore_files && cfg.respect_gitignore && cfg.custom_ignore {
         b.add_custom_ignore_filename(CUSTOM_IGNORE_FILENAME);
     }
 
@@ -433,6 +549,7 @@ pub fn walk_streaming(
             let tx = tx.clone();
             move || {
                 let combined_matcher = combined_matcher.clone();
+                let entry_filter = entry_filter.clone();
                 let mut sink = StreamSink {
                     local: Vec::new(),
                     tx: tx.clone(),
@@ -458,6 +575,13 @@ pub fn walk_streaming(
                         // innocuously-named link would otherwise slip through.
                         if de.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
                             return WalkState::Continue; // don't record; keep walking siblings
+                        }
+
+                        // Recheck a directory after the walker has opened/listed it and before
+                        // it queues any children. This closes a swap between filter_entry and
+                        // run_one's path-based read_dir from producing descendant work items.
+                        if is_dir && !entry_filter(path, true) {
+                            return WalkState::Skip;
                         }
 
                         // Belt-and-suspenders hidden check: WalkBuilder.hidden(true) handles
@@ -560,11 +684,21 @@ pub fn walk_streaming(
                             })
                         };
 
-                        // Whole-computer groundwork: when opted in, NUL-sniff files so the deep
-                        // phase can skip binaries without opening them. Fail-open (an unreadable
-                        // file is never flagged). Only files; the entry itself is still recorded
-                        // either way.
-                        let is_binary = sniff_binary && meta.is_file() && file_is_binary(path);
+                        // When opted in, NUL-sniff files so the deep phase can skip binaries.
+                        // Ordinary read/permission failures remain fail-open. A safe-open refusal
+                        // (non-regular file, symlink race, or unsupported platform) skips this
+                        // entry so the deep phase cannot later block opening the rejected path.
+                        let is_binary = if sniff_binary && meta.is_file() {
+                            match file_is_binary(path) {
+                                Ok(is_binary) => is_binary,
+                                Err(e) if must_skip_after_safe_open_error(&e) => {
+                                    return WalkState::Continue;
+                                }
+                                Err(_) => false,
+                            }
+                        } else {
+                            false
+                        };
 
                         sink.local.push(Entry {
                             path: path.to_path_buf(),
@@ -611,6 +745,20 @@ pub fn walk_streaming(
 pub fn walk(root: &Path, cfg: &WalkConfig) -> anyhow::Result<Vec<Entry>> {
     let mut all = Vec::new();
     walk_streaming(root, cfg, |batch| {
+        all.extend(batch);
+        Ok(())
+    })?;
+    Ok(all)
+}
+
+/// Collect a walk while applying an entry predicate before directory descent and file yield.
+pub fn walk_filtered(
+    root: &Path,
+    cfg: &WalkConfig,
+    entry_filter: impl Fn(&Path, bool) -> bool + Send + Sync + 'static,
+) -> anyhow::Result<Vec<Entry>> {
+    let mut all = Vec::new();
+    walk_streaming_filtered(root, cfg, std::sync::Arc::new(entry_filter), |batch| {
         all.extend(batch);
         Ok(())
     })?;
@@ -696,6 +844,54 @@ pub fn ensure_walked_root_not_emptied(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn binary_sniff_does_not_block_on_fifo_replaced_after_metadata_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("race.fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(file_is_binary(&fifo));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("FIFO open/read blocked instead of rejecting the opened non-regular fd");
+        assert!(matches!(result, Err(e) if e.kind() == std::io::ErrorKind::InvalidInput));
+        let binary = dir.path().join("binary.dat");
+        std::fs::write(&binary, [0u8, 1, 2]).unwrap();
+        let symlink = dir.path().join("swapped-link");
+        std::os::unix::fs::symlink(&binary, &symlink).unwrap();
+        assert!(
+            file_is_binary(&symlink).is_err(),
+            "binary sniff followed a final-component symlink"
+        );
+    }
+
+    #[test]
+    fn unsafe_safe_open_errors_skip_walk_entries_but_read_errors_remain_fail_open() {
+        assert!(must_skip_after_safe_open_error(&std::io::Error::from(
+            std::io::ErrorKind::InvalidInput
+        )));
+        assert!(must_skip_after_safe_open_error(&std::io::Error::from(
+            std::io::ErrorKind::Unsupported
+        )));
+        assert!(!must_skip_after_safe_open_error(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+        assert!(!must_skip_after_safe_open_error(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+        #[cfg(target_os = "linux")]
+        assert!(must_skip_after_safe_open_error(
+            &std::io::Error::from_raw_os_error(40)
+        ));
+    }
 
     #[test]
     fn walks_temp_dir() {

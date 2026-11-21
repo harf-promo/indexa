@@ -19,8 +19,200 @@
 use crate::{ChildSummary, Describer, Generator};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::Command;
+
+/// A Unix process group guard kills descendants if the awaiting future is cancelled or times out.
+#[cfg(unix)]
+struct ProcessGroupGuard {
+    pid: i32,
+    armed: bool,
+}
+
+#[cfg(windows)]
+struct ChildJob(std::os::windows::io::OwnedHandle);
+
+#[cfg(windows)]
+fn terminate_unassigned_child(
+    child: &mut tokio::process::Child,
+    error: std::io::Error,
+) -> std::io::Error {
+    let _ = child.start_kill();
+    error
+}
+
+#[cfg(windows)]
+fn assign_or_terminate_child(
+    child: &mut tokio::process::Child,
+    assign: impl FnOnce(&tokio::process::Child) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match assign(child) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(terminate_unassigned_child(child, error)),
+    }
+}
+
+#[cfg(windows)]
+impl ChildJob {
+    fn new() -> std::io::Result<Self> {
+        use std::{mem::size_of, os::windows::io::FromRawHandle};
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::JobObjects::{
+                CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
+        };
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let owned = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle.cast()) };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self(owned))
+    }
+
+    fn assign(&self, child: &tokio::process::Child) -> std::io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        let process_handle = child.raw_handle().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "child process already exited")
+        })?;
+        let ok = unsafe {
+            AssignProcessToJobObject(self.0.as_raw_handle().cast(), process_handle.cast())
+        };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn resume_child(child: &tokio::process::Child) -> std::io::Result<()> {
+        use std::{
+            mem::size_of,
+            os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        };
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::{
+                Diagnostics::ToolHelp::{
+                    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+                    THREADENTRY32,
+                },
+                Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+            },
+        };
+        let pid = child.id().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "child process already exited")
+        })?;
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let _snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot.cast()) };
+        let mut entry = THREADENTRY32 {
+            dwSize: size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        let mut found = false;
+        let mut last_error = None;
+        let mut more = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+        while more {
+            if entry.th32OwnerProcessID == pid {
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if !thread.is_null() {
+                    let thread = unsafe { OwnedHandle::from_raw_handle(thread.cast()) };
+                    if unsafe { ResumeThread(thread.as_raw_handle().cast()) } != u32::MAX {
+                        found = true;
+                        break;
+                    }
+                    last_error = Some(std::io::Error::last_os_error());
+                }
+            }
+            entry.dwSize = size_of::<THREADENTRY32>() as u32;
+            more = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+        }
+        if found {
+            Ok(())
+        } else {
+            Err(last_error.unwrap_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "child primary thread not found",
+                )
+            }))
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        // Negative pid addresses the process group created by process_group(0).
+        if self.armed {
+            unsafe {
+                libc::kill(-self.pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+async fn output_with_timeout(
+    command: &mut Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+    command.kill_on_drop(true);
+    #[cfg(windows)]
+    let job = ChildJob::new()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command
+            .as_std_mut()
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+    }
+    #[allow(unused_mut)]
+    let mut child = command.spawn()?;
+    #[cfg(windows)]
+    {
+        assign_or_terminate_child(&mut child, |child| job.assign(child))?;
+        if let Err(error) = ChildJob::resume_child(&child) {
+            return Err(terminate_unassigned_child(&mut child, error));
+        }
+    }
+    #[cfg(unix)]
+    let mut group = child.id().map(|pid| ProcessGroupGuard {
+        pid: pid as i32,
+        armed: true,
+    });
+    let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
+    #[cfg(unix)]
+    if result.is_ok() {
+        if let Some(group) = &mut group {
+            group.armed = false;
+        }
+    }
+    result.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "child timed out"))?
+}
 use tokio::sync::Semaphore;
 
 /// Default cap on concurrent `claude` subprocesses. Each call is heavy (a full
@@ -32,6 +224,14 @@ const DEFAULT_MAX_CONCURRENCY: usize = 3;
 /// cap a hung CLI process would stall a summarize/answer job indefinitely. Generous
 /// enough for a large summary prompt, bounded so a stuck process always terminalizes.
 const CLAUDE_TIMEOUT_SECS: u64 = 300;
+
+fn configured_timeout_secs() -> u64 {
+    std::env::var("INDEXA_CLAUDE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(CLAUDE_TIMEOUT_SECS)
+}
 
 /// The subset of `claude -p --output-format json` we care about.
 #[derive(Deserialize)]
@@ -93,33 +293,31 @@ impl ClaudeCodeLlm {
             .await
             .expect("claude-code semaphore never closed");
 
-        let run_fut = Command::new(&self.claude_bin)
+        let timeout_secs = configured_timeout_secs();
+        let mut command = Command::new(&self.claude_bin);
+        command
             .arg("-p")
             .arg(prompt)
             .arg("--output-format")
             .arg("json")
             .arg("--model")
             .arg(model)
-            // Belt-and-suspenders: never let an inherited API key silently switch
-            // this off the subscription and onto metered billing.
             .env_remove("ANTHROPIC_API_KEY")
-            // Kill the child if we drop the future on timeout, so a hung `claude` can't
-            // leak as a zombie holding the concurrency permit.
-            .kill_on_drop(true)
-            .output();
+            .stdin(Stdio::null());
         let output =
-            tokio::time::timeout(std::time::Duration::from_secs(CLAUDE_TIMEOUT_SECS), run_fut)
+            output_with_timeout(&mut command, std::time::Duration::from_secs(timeout_secs))
                 .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "claude CLI timed out after {CLAUDE_TIMEOUT_SECS}s (model {model})"
-                    )
-                })?
-                .with_context(|| {
-                    format!(
-                        "failed to spawn `{}` — is the Claude Code CLI installed and on PATH?",
-                        self.claude_bin
-                    )
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::TimedOut {
+                        anyhow::anyhow!(
+                            "claude CLI timed out after {timeout_secs}s (model {model})"
+                        )
+                    } else {
+                        anyhow::Error::new(error).context(format!(
+                            "failed to spawn `{}` — is the Claude Code CLI installed and on PATH?",
+                            self.claude_bin
+                        ))
+                    }
                 })?;
 
         if !output.status.success() {
@@ -266,19 +464,13 @@ pub async fn claude_status(claude_bin: &str) -> ClaudeStatus {
     let probe_timeout = std::time::Duration::from_secs(5);
 
     // Presence: `claude --version` → e.g. "2.1.158 (Claude Code)".
-    let version = tokio::time::timeout(
-        probe_timeout,
-        Command::new(bin)
-            .arg("--version")
-            .env_remove("ANTHROPIC_API_KEY")
-            // As in `run()`: if the timeout fires and this future is dropped, kill the
-            // child instead of leaking it detached — a probe run on every Settings load
-            // must not accumulate orphaned `claude` processes.
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await;
-    if let Ok(Ok(out)) = version {
+    let mut version_command = Command::new(bin);
+    version_command
+        .arg("--version")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdin(Stdio::null());
+    let version = output_with_timeout(&mut version_command, probe_timeout).await;
+    if let Ok(out) = version {
         if out.status.success() {
             status.cli_present = true;
             let v = String::from_utf8_lossy(&out.stdout);
@@ -294,20 +486,15 @@ pub async fn claude_status(claude_bin: &str) -> ClaudeStatus {
     // Login state: `claude auth status --json` →
     // {"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max",...}.
     // `--json` is the default but we pass it explicitly to be robust to changes.
-    let auth = tokio::time::timeout(
-        probe_timeout,
-        Command::new(bin)
-            .arg("auth")
-            .arg("status")
-            .arg("--json")
-            .env_remove("ANTHROPIC_API_KEY")
-            // Same reasoning as the `--version` probe above: this one may touch the
-            // network (OAuth validation), making a timeout-then-leak more likely, not less.
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await;
-    if let Ok(Ok(out)) = auth {
+    let mut auth_command = Command::new(bin);
+    auth_command
+        .arg("auth")
+        .arg("status")
+        .arg("--json")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdin(Stdio::null());
+    let auth = output_with_timeout(&mut auth_command, probe_timeout).await;
+    if let Ok(out) = auth {
         let stdout = String::from_utf8_lossy(&out.stdout);
         if let Ok(parsed) = serde_json::from_str::<ClaudeAuthStatus>(&stdout) {
             status.logged_in = parsed.logged_in;
@@ -376,5 +563,165 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn timed_out_command_kills_child_and_grandchild() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "indexa-claude-group-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("claude");
+        let parent_file = dir.join("parent");
+        let child_file = dir.join("grandchild");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho $$ > {}\nsleep 30 & echo $! > {}\nwait\n",
+                parent_file.display(),
+                child_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut command = Command::new(&script);
+        let error = output_with_timeout(&mut command, std::time::Duration::from_millis(150))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        for pid_file in [&parent_file, &child_file] {
+            let pid = std::fs::read_to_string(pid_file).unwrap().trim().to_owned();
+            assert!(
+                !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                "process {pid} survived group timeout"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_job_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn assignment_failure_terminates_suspended_child() {
+        use std::os::windows::process::CommandExt;
+        let marker = std::env::temp_dir().join(format!("idx-never-ran-{}.txt", std::process::id()));
+        let mut command = Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-Command"])
+            .arg(format!("Set-Content '{}' ran", marker.display()));
+        command
+            .as_std_mut()
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+        let mut child = command.spawn().unwrap();
+        let error = assign_or_terminate_child(&mut child, |_| {
+            Err(std::io::Error::other(
+                "simulated AssignProcessToJobObject failure",
+            ))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("simulated"));
+        let _ = child.wait().await.unwrap();
+        assert!(
+            !marker.exists(),
+            "suspended child ran after assignment failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn immediate_grandchild_is_killed_by_timeout_job() {
+        let dir =
+            std::env::temp_dir().join(format!("indexa-claude-immediate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let grandchild_file = dir.join("grandchild.pid");
+        let script = format!("$p = Start-Process powershell.exe -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru; $p.Id | Set-Content -NoNewline '{}' ; Start-Sleep -Seconds 30", grandchild_file.display());
+        let mut command = Command::new("powershell.exe");
+        command.args(["-NoProfile", "-Command", &script]);
+        let result = output_with_timeout(&mut command, std::time::Duration::from_secs(5)).await;
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        let grandchild = wait_for_pid(&grandchild_file).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !is_running(grandchild),
+            "immediate grandchild {grandchild} survived timeout"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn timed_out_command_kills_child_and_grandchild_job() {
+        let dir = std::env::temp_dir().join(format!(
+            "indexa-claude-job-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent_file = dir.join("parent.pid");
+        let grandchild_file = dir.join("grandchild.pid");
+        let quote_path = |path: &std::path::Path| path.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "$PID | Set-Content -NoNewline '{}'; $p = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru; $p.Id | Set-Content -NoNewline '{}'; Start-Sleep -Seconds 30",
+            quote_path(&parent_file),
+            quote_path(&grandchild_file)
+        );
+        let mut command = Command::new("powershell.exe");
+        command.args(["-NoProfile", "-Command", &script]);
+        let error = output_with_timeout(&mut command, std::time::Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let parent = wait_for_pid(&parent_file).await;
+        let grandchild = wait_for_pid(&grandchild_file).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !is_running(parent),
+            "child process {parent} survived timeout"
+        );
+        assert!(
+            !is_running(grandchild),
+            "grandchild process {grandchild} survived timeout"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    async fn wait_for_pid(path: &std::path::Path) -> u32 {
+        for _ in 0..100 {
+            if let Ok(value) = std::fs::read_to_string(path) {
+                if let Ok(pid) = value.parse() {
+                    return pid;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("process did not record pid in {}", path.display());
+    }
+
+    fn is_running(pid: u32) -> bool {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, STILL_ACTIVE},
+            System::Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code = 0;
+        let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+        unsafe { CloseHandle(handle) };
+        ok != 0 && exit_code == STILL_ACTIVE as u32
     }
 }

@@ -10,11 +10,16 @@
 //! Option injection through refs is a separate guard (`gitdiff::validate_ref`,
 //! `--end-of-options`); `--no-ext-diff`/`--no-textconv` stay at their call site.
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// The `-c key=value` pairs prepended to every git invocation (each preceded by `-c`).
 /// Passing `core.hooksPath=/dev/null` mirrors git's own convention for "no hooks".
-pub const HARDENING_CONFIG: [&str; 2] = ["core.fsmonitor=false", "core.hooksPath=/dev/null"];
+pub const HARDENING_CONFIG: [&str; 4] = [
+    "core.fsmonitor=false",
+    "core.hooksPath=/dev/null",
+    "safe.bareRepository=explicit",
+    "log.showSignature=false",
+];
 
 /// A [`Command`] for `git` with [`HARDENING_CONFIG`] already applied. Use instead of
 /// `Command::new("git")` for anything run against a user-indexed directory.
@@ -23,6 +28,9 @@ pub fn git_command() -> Command {
     for kv in HARDENING_CONFIG {
         cmd.arg("-c").arg(kv);
     }
+    cmd.env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null());
     cmd
 }
 
@@ -45,11 +53,30 @@ mod tests {
                 "core.fsmonitor=false",
                 "-c",
                 "core.hooksPath=/dev/null",
+                "-c",
+                "safe.bareRepository=explicit",
+                "-c",
+                "log.showSignature=false",
                 "-C",
                 "/x",
                 "status"
             ]
         );
         assert_eq!(cmd.get_program(), "git");
+        let envs: Vec<_> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert!(envs
+            .iter()
+            .any(|(k, v)| k == "GIT_OPTIONAL_LOCKS" && v.as_deref() == Some("0")));
+        assert!(envs
+            .iter()
+            .any(|(k, v)| k == "GIT_TERMINAL_PROMPT" && v.as_deref() == Some("0")));
     }
 }

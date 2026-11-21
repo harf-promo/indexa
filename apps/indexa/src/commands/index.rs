@@ -5,6 +5,249 @@ use indexa_core::store::Store;
 use super::helpers::{index_db_path, preflight_ollama};
 use super::{cmd_deep, cmd_scan, cmd_summarize};
 
+struct ValidatedTriggerTarget {
+    _handle: std::fs::File,
+    _snapshot: Option<tempfile::TempDir>,
+    access_path: std::path::PathBuf,
+    display_path: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+fn validate_trigger_index_child_target(
+    path: &std::path::Path,
+    roots: &[std::path::PathBuf],
+    expected_dev: u64,
+    expected_ino: u64,
+) -> Result<ValidatedTriggerTarget> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let canonical = path.canonicalize()?;
+    if !roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| canonical.starts_with(root))
+    {
+        anyhow::bail!("trigger_index path is outside every indexed root");
+    }
+    let before = path.metadata()?;
+    if !before.is_dir() && !before.is_file() {
+        anyhow::bail!("trigger_index requires a regular file or directory");
+    }
+    let flags = libc::O_NOFOLLOW
+        | libc::O_CLOEXEC
+        | if before.is_dir() {
+            libc::O_DIRECTORY
+        } else {
+            0
+        };
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)?;
+    let metadata = opened.metadata()?;
+    if (metadata.is_dir() != before.is_dir())
+        || (!metadata.is_dir() && !metadata.is_file())
+        || (metadata.dev(), metadata.ino()) != (expected_dev, expected_ino)
+    {
+        anyhow::bail!("trigger_index path changed after MCP validation");
+    }
+    let (access_path, snapshot) = if metadata.is_dir() {
+        // Parser preprocessors and optional media tools receive the descriptor-backed path in
+        // their argv, so keep this one validated directory descriptor across their execs too.
+        if unsafe { libc::fcntl(opened.as_raw_fd(), libc::F_SETFD, 0) } == -1 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        #[cfg(target_os = "linux")]
+        let access_path =
+            std::path::PathBuf::from(format!("/proc/self/fd/{}/.", opened.as_raw_fd()));
+        #[cfg(target_os = "macos")]
+        let access_path = std::path::PathBuf::from(format!("/dev/fd/{}/.", opened.as_raw_fd()));
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        anyhow::bail!(
+            "descriptor-backed trigger_index paths are unsupported on this Unix platform"
+        );
+        (access_path, None)
+    } else {
+        use std::io::Write;
+        let name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("trigger_index file has no basename"))?;
+        let snapshot = tempfile::Builder::new()
+            .prefix("indexa-trigger-")
+            .tempdir()?;
+        let snapshot_path = snapshot.path().join(name);
+        let mut snapshot_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&snapshot_path)?;
+        let mut source = opened.try_clone()?;
+        std::io::copy(&mut source, &mut snapshot_file)?;
+        snapshot_file.flush()?;
+        let access_path = snapshot_path;
+        (access_path, Some(snapshot))
+    };
+    Ok(ValidatedTriggerTarget {
+        _handle: opened,
+        _snapshot: snapshot,
+        access_path,
+        display_path: canonical,
+    })
+}
+
+#[cfg(windows)]
+fn validate_trigger_index_child_target(
+    path: &std::path::Path,
+    roots: &[std::path::PathBuf],
+) -> Result<ValidatedTriggerTarget> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, GetFinalPathNameByHandleW, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        VOLUME_NAME_DOS,
+    };
+
+    fn normalized(path: &str) -> String {
+        let path = path.strip_prefix(r"\\?\UNC\").map_or_else(
+            || path.strip_prefix(r"\\?\").unwrap_or(path).to_owned(),
+            |unc| format!(r"\\{unc}"),
+        );
+        path.trim_end_matches(['\\', '/']).to_lowercase()
+    }
+
+    fn final_path(file: &std::fs::File) -> Result<std::path::PathBuf> {
+        let mut buffer = vec![0u16; 512];
+        loop {
+            let len = unsafe {
+                GetFinalPathNameByHandleW(
+                    file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+                    buffer.as_mut_ptr(),
+                    buffer.len() as u32,
+                    FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+                )
+            } as usize;
+            if len == 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            if len < buffer.len() {
+                buffer.truncate(len);
+                return Ok(std::path::PathBuf::from(String::from_utf16(&buffer)?));
+            }
+            buffer.resize(len + 1, 0);
+        }
+    }
+
+    let canonical = path.canonicalize()?;
+    if !roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| canonical.starts_with(root))
+    {
+        anyhow::bail!("trigger_index path is outside every indexed root");
+    }
+    let before = path.metadata()?;
+    if !before.is_dir() && !before.is_file() {
+        anyhow::bail!("trigger_index requires a regular file or directory");
+    }
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    let ok = unsafe {
+        GetFileInformationByHandle(
+            opened.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+            &mut info,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        anyhow::bail!("trigger_index refuses symlinks and junctions");
+    }
+    let is_dir = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+    if is_dir != before.is_dir() || (!is_dir && !before.is_file()) {
+        anyhow::bail!("trigger_index path changed after MCP validation");
+    }
+    let opened_path = normalized(
+        final_path(&opened)?
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("opened trigger_index path is not valid Unicode"))?,
+    );
+    let expected_path = normalized(
+        canonical
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("validated trigger_index path is not valid Unicode"))?,
+    );
+    if opened_path != expected_path {
+        anyhow::bail!("trigger_index path changed after MCP validation");
+    }
+
+    // The MCP parent also holds a no-delete-share handle until this child exits. Keeping
+    // this handle open protects the child-side validation through scan/deep/summarize.
+    Ok(ValidatedTriggerTarget {
+        _handle: opened,
+        _snapshot: None,
+        access_path: canonical.clone(),
+        display_path: canonical,
+    })
+}
+
+fn validate_trigger_index_child_env(paths: &[String]) -> Result<Option<ValidatedTriggerTarget>> {
+    let roots = std::env::var_os("INDEXA_TRIGGER_INDEX_ROOTS");
+    let dev = std::env::var_os("INDEXA_TRIGGER_INDEX_DEV");
+    let ino = std::env::var_os("INDEXA_TRIGGER_INDEX_INO");
+    if roots.is_none() && dev.is_none() && ino.is_none() {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    {
+        let (Some(roots), Some(dev), Some(ino)) = (roots, dev, ino) else {
+            anyhow::bail!("incomplete internal trigger_index validation data");
+        };
+        let roots: Vec<std::path::PathBuf> = serde_json::from_str(&roots.to_string_lossy())?;
+        let dev = dev.to_string_lossy().parse::<u64>()?;
+        let ino = ino.to_string_lossy().parse::<u64>()?;
+        if paths.len() != 1 {
+            anyhow::bail!("invalid internal trigger_index invocation");
+        }
+        Ok(Some(validate_trigger_index_child_target(
+            std::path::Path::new(&paths[0]),
+            &roots,
+            dev,
+            ino,
+        )?))
+    }
+    #[cfg(windows)]
+    {
+        let Some(roots) = roots else {
+            anyhow::bail!("incomplete internal trigger_index validation data");
+        };
+        if dev.is_some() || ino.is_some() {
+            anyhow::bail!("unexpected Unix identity data for Windows trigger_index");
+        }
+        let roots: Vec<std::path::PathBuf> = serde_json::from_str(&roots.to_string_lossy())?;
+        if paths.len() != 1 {
+            anyhow::bail!("invalid internal trigger_index invocation");
+        }
+        Ok(Some(validate_trigger_index_child_target(
+            std::path::Path::new(&paths[0]),
+            &roots,
+        )?))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (paths, roots, dev, ino);
+        anyhow::bail!(
+            "safe trigger_index validation is unsupported on this non-Unix, non-Windows platform"
+        );
+    }
+}
+
 /// One-shot context build: scan → deep embed → summarize.
 ///
 /// Equivalent to running `indexa scan`, `indexa deep`, and `indexa summarize`
@@ -21,6 +264,22 @@ pub(crate) async fn cmd_index(
     yes: bool,
     cfg: &Config,
 ) -> Result<()> {
+    // Keep the no-follow handle alive and use its descriptor-backed path for filesystem access
+    // through all phases. The canonical path remains the stable identity written to the index.
+    let validated_target = validate_trigger_index_child_env(&paths)?;
+    let paths = if let Some(target) = &validated_target {
+        std::env::set_var(
+            "INDEXA_TRIGGER_INDEX_ACCESS_PREFIX",
+            target.access_path.to_string_lossy().as_ref(),
+        );
+        std::env::set_var(
+            "INDEXA_TRIGGER_INDEX_DISPLAY_PATH",
+            target.display_path.to_string_lossy().as_ref(),
+        );
+        vec![target.access_path.to_string_lossy().into_owned()]
+    } else {
+        paths
+    };
     // ── Preflight: confirm Ollama is up and required models are pulled ─────────
     preflight_ollama(cfg).await?;
 
@@ -64,6 +323,114 @@ pub(crate) async fn cmd_index(
         println!("  {questions} question(s) for you — indexa review list");
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn trigger_index_child_rejects_directory_swapped_to_outside_symlink() {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("indexed");
+    let target = root.join("target");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    let validated = target.metadata().unwrap();
+    let expected = (validated.dev(), validated.ino());
+
+    let moved = root.join("moved-target");
+    std::fs::rename(&target, &moved).unwrap();
+    std::os::unix::fs::symlink(&outside, &target).unwrap();
+
+    let result = validate_trigger_index_child_target(&target, &[root], expected.0, expected.1);
+    assert!(
+        result.is_err(),
+        "child accepted an outside symlink swapped after validation"
+    );
+}
+
+#[cfg(all(test, unix, target_os = "linux"))]
+#[test]
+fn trigger_index_reads_through_validated_directory_handle_after_path_swap() {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("indexed");
+    let target = root.join("target");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(target.join("marker.txt"), "inside").unwrap();
+    std::fs::write(outside.join("marker.txt"), "outside").unwrap();
+    let metadata = target.metadata().unwrap();
+    let validated = validate_trigger_index_child_target(
+        &target,
+        std::slice::from_ref(&root),
+        metadata.dev(),
+        metadata.ino(),
+    )
+    .unwrap();
+
+    let moved = root.join("moved-target");
+    std::fs::rename(&target, &moved).unwrap();
+    std::os::unix::fs::symlink(&outside, &target).unwrap();
+
+    let content = std::fs::read_to_string(validated.access_path.join("marker.txt")).unwrap();
+    assert_eq!(
+        content, "inside",
+        "child access followed the swapped pathname"
+    );
+    assert_eq!(
+        std::fs::read_to_string(target.join("marker.txt")).unwrap(),
+        "outside"
+    );
+}
+
+#[cfg(all(test, unix, target_os = "linux"))]
+#[test]
+fn trigger_index_file_snapshot_preserves_the_full_original_basename() {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("indexed");
+    std::fs::create_dir(&root).unwrap();
+    let target = root.join("bundle.tar.gz");
+    std::fs::write(&target, b"snapshot bytes").unwrap();
+    let metadata = target.metadata().unwrap();
+    let validated = validate_trigger_index_child_target(
+        &target,
+        std::slice::from_ref(&root),
+        metadata.dev(),
+        metadata.ino(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        validated.access_path.file_name().unwrap(),
+        target.file_name().unwrap()
+    );
+    assert_eq!(
+        std::fs::read(&validated.access_path).unwrap(),
+        b"snapshot bytes"
+    );
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn trigger_index_child_accepts_and_reads_a_normal_indexed_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("indexed");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("marker.txt"), "indexed content").unwrap();
+
+    let validated = validate_trigger_index_child_target(&root, std::slice::from_ref(&root))
+        .expect("normal indexed directory should be usable by trigger_index on Windows");
+    assert!(validated._handle.metadata().unwrap().is_dir());
+    assert_eq!(
+        std::fs::read_to_string(validated.access_path.join("marker.txt")).unwrap(),
+        "indexed content"
+    );
 }
 
 /// Run the post-index detector pass; returns how many questions it opened. Also runs the

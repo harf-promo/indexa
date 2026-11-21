@@ -18,9 +18,10 @@
 // tree shows the fixture root, search round-trips, zero console errors.
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 
 const INDEXA_BIN = process.env.INDEXA_BIN;
 const CHROME_BIN = process.env.CHROME_BIN;
@@ -42,6 +43,69 @@ function check(name, ok, detail) {
   results.push({ name, ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}: ${name}${detail ? ` — ${detail}` : ''}`);
 }
+
+// Exercise the LAN-token bootstrap independently from the loopback smoke server: the mock
+// captures the actual fetch/EventSource arguments and proves URL cleanup plus origin isolation.
+function checkLanAuthBootstrap() {
+  const fetchCalls = [];
+  const eventSourceUrls = [];
+  const values = new Map();
+  const location = {
+    href: 'http://indexa.test/?token=smoke-secret&keep=1#section',
+    get origin() { return new URL(this.href).origin; },
+  };
+  const context = {
+    URL,
+    Headers,
+    location,
+    history: {
+      state: null,
+      replaceState(_state, _title, url) { location.href = new URL(url, location.href).href; },
+    },
+    localStorage: {
+      setItem(key, value) { values.set(key, value); },
+      getItem(key) { return values.get(key) || null; },
+    },
+    window: {
+      fetch(input, init) { fetchCalls.push({ input, init }); return Promise.resolve(); },
+      EventSource: function MockEventSource(url) { eventSourceUrls.push(String(url)); },
+    },
+  };
+  runInNewContext(readFileSync(new URL('../crates/web/assets/ui/js/00-auth-bootstrap.js', import.meta.url), 'utf8'), context);
+  context.window.fetch('/api/stats');
+  context.window.fetch('https://evil.test/page?next=/api/stats');
+  context.window.fetch('http://indexa.test/not-api?next=/api/stats');
+  context.window.fetch(new URL('/api/stats?from=url-object', location.href));
+  context.window.fetch({
+    url: 'http://indexa.test/api/stats?from=request-object',
+    headers: new Headers({ 'X-Smoke': 'preserved' }),
+  });
+  new context.window.EventSource('/api/update/progress/stream');
+  new context.window.EventSource('https://evil.test/api/events');
+
+  const sameOriginHeaders = new Headers(fetchCalls[0].init.headers);
+  const hostileHeaders = new Headers(fetchCalls[1].init?.headers || {});
+  const queryOnlyHeaders = new Headers(fetchCalls[2].init?.headers || {});
+  const urlObjectHeaders = new Headers(fetchCalls[3].init?.headers || {});
+  const requestObjectHeaders = new Headers(fetchCalls[4].init?.headers || {});
+  const sameOriginStream = new URL(eventSourceUrls[0], location.href);
+  check('LAN token is removed from the address bar after bootstrap',
+    !new URL(location.href).searchParams.has('token') && new URL(location.href).searchParams.get('keep') === '1');
+  check('LAN token is stored for same-origin API calls',
+    values.get('indexa_web_token') === 'smoke-secret' && sameOriginHeaders.get('Authorization') === 'Bearer smoke-secret');
+  check('LAN token is not attached to cross-origin or query-only API lookalikes',
+    !hostileHeaders.has('Authorization') && !queryOnlyHeaders.has('Authorization'));
+  check('LAN token is attached when fetch receives a same-origin URL object',
+    urlObjectHeaders.get('Authorization') === 'Bearer smoke-secret');
+  check('LAN token preserves Request headers when fetch receives a Request object',
+    requestObjectHeaders.get('Authorization') === 'Bearer smoke-secret' &&
+      requestObjectHeaders.get('X-Smoke') === 'preserved');
+  check('LAN token is attached to same-origin EventSource and omitted cross-origin',
+    sameOriginStream.searchParams.get('token') === 'smoke-secret' &&
+    eventSourceUrls[1] === 'https://evil.test/api/events');
+}
+
+checkLanAuthBootstrap();
 
 // ── Throwaway HOME + fixture tree ─────────────────────────────────────────────
 // Isolated HOME keeps the real index/config untouched: indexa resolves its
@@ -298,8 +362,18 @@ try {
     });
   });
   loaded.catch(() => {});
-  await cdp.send('Page.navigate', { url: `${base}/` });
+  await cdp.send('Page.navigate', { url: `${base}/?token=smoke-secret&keep=1` });
   await loaded;
+
+  const bootstrappedAuth = await cdp.eval(`({
+    url: location.href,
+    token: localStorage.getItem('indexa_web_token'),
+  })`);
+  check('browser removes the LAN token from the URL and retains it for API calls',
+    !new URL(bootstrappedAuth.url).searchParams.has('token') &&
+      new URL(bootstrappedAuth.url).searchParams.get('keep') === '1' &&
+      bootstrappedAuth.token === 'smoke-secret',
+    `url=${bootstrappedAuth.url}`);
 
   // Check 1 — app shell loads: title + #stats exists.
   const title = await cdp.eval('document.title');
@@ -350,7 +424,136 @@ try {
       search.body.some((n) => String(n.path || '').includes('alpha.txt')),
     `status=${search.status} hits=${Array.isArray(search.body) ? search.body.length : 'n/a'}`);
 
-  // Check 5 — Map tab → Treemap renders ≥2 cells on first paint (B1 regression guard).
+  // Check 5 — mocked streamed Ask: the batched renderer must preserve the final sanitized
+  // Markdown HTML exactly and announce the completed answer once, after all fragments arrive.
+  const streamed = await cdp.eval(`(async () => {
+    const originalFetch = window.fetch.bind(window);
+    const fence = String.fromCharCode(96).repeat(3);
+    const answer = 'Hello **world** <img src=x onerror=alert(1)>.' +
+      '\\n\\n' + fence + 'rs\\nfn main() {}\\n' + fence;
+    window.fetch = (input, init) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url === '/api/stats') return Promise.resolve(new Response('{"chunks":1}'));
+      if (url === '/api/ask/stream') {
+        const encoder = new TextEncoder();
+        const body = new ReadableStream({ start(controller) {
+          const push = event => controller.enqueue(encoder.encode('data: ' + JSON.stringify(event) + '\\n\\n'));
+          push({ type: 'fragment', text: 'Hello **' });
+          setTimeout(() => {
+            push({ type: 'fragment', text: 'world** <img src=x onerror=alert(1)>.' + '\\n\\n' });
+            push({ type: 'fragment', text: fence + 'rs\\nfn main() {}\\n' + fence });
+            push({ type: 'done' });
+            controller.close();
+          }, 40);
+        }});
+        return Promise.resolve(new Response(body, { headers: { 'Content-Type': 'text/event-stream' } }));
+      }
+      return originalFetch(input, init);
+    };
+    const live = document.getElementById('ask-answer-announcement');
+    let announcements = 0;
+    const observer = new MutationObserver(() => announcements++);
+    observer.observe(live, { childList: true, characterData: true, subtree: true });
+    document.getElementById('q').value = 'smoke question';
+    await doAsk();
+    await Promise.resolve();
+    observer.disconnect();
+    window.fetch = originalFetch;
+    return {
+      html: document.querySelector('#chat .msg.assistant:last-child .bubble').innerHTML,
+      announced: live.textContent,
+      announcements,
+      liveMode: live.getAttribute('aria-live'),
+      expected: renderMarkdown(answer),
+      codeBlockPreserved: renderMarkdown(answer).includes('<pre class="chat-code">') &&
+        renderMarkdown(answer).includes('fn main() {}'),
+    };
+  })()`, { awaitPromise: true });
+  check('streamed Ask keeps final sanitized Markdown output and announces once at completion',
+    streamed.html === streamed.expected &&
+      streamed.announced === 'Hello **world** <img src=x onerror=alert(1)>.' + '\n\n' + '```rs\nfn main() {}\n```' &&
+      streamed.announcements === 1 && streamed.liveMode === 'polite' && streamed.codeBlockPreserved,
+    `htmlMatches=${streamed.html === streamed.expected} codeBlock=${streamed.codeBlockPreserved} announcements=${streamed.announcements}`);
+
+  const nulSentinel = await cdp.eval(`(() => {
+    const sentinel = String.fromCharCode(0) + 'CODEBLOCK0' + String.fromCharCode(0);
+    return renderMarkdown(sentinel);
+  })()`, { awaitPromise: true });
+  check('Markdown renders user-supplied NUL placeholder text without fabricating a code block',
+    nulSentinel === 'CODEBLOCK0<br>' && !nulSentinel.includes('undefined') &&
+      !nulSentinel.includes('<pre class="chat-code">'),
+    `html=${JSON.stringify(nulSentinel)}`);
+
+  // Check 6 — generated job cards and warning rows expose button semantics and keyboard actions.
+  await cdp.eval(`(() => {
+    const priorSelect = selectJob;
+    window.__smokeSelectedJob = '';
+    selectJob = id => { window.__smokeSelectedJob = id; };
+    const before = document.createElement('button');
+    before.textContent = 'keyboard smoke start';
+    const card = document.createElement('div');
+    card.className = 'jobs-card';
+    card.dataset.jobId = 'smoke-a11y';
+    document.getElementById('send').insertAdjacentElement('afterend', before);
+    before.insertAdjacentElement('afterend', card);
+    _renderCardContent(card, 'smoke-a11y', { kind: 'scan', path: '/smoke', status: 'done', summary: 'done', warnings: [], warningOverflow: 0, lastProgress: null, snapshot: null });
+    window.__smokePriorSelect = priorSelect;
+    window.__smokeCard = card;
+    window.__smokeFocusStart = before;
+    const previousJob = activeJobs['smoke-a11y'];
+    const previousSelection = selectedJobId;
+    activeJobs['smoke-a11y'] = { warnings: [{ stage: 'scan', message: 'sample warning', item_path: '/smoke/a.txt' }], warningOverflow: 0, stageCounts: { scan: 1 } };
+    selectedJobId = 'smoke-a11y';
+    applyWarnFilter();
+    const row = document.querySelector('#jd-warn-list .warn-row');
+    card.insertAdjacentElement('afterend', row);
+    window.__smokeRow = row;
+    window.__smokePreviousJob = previousJob;
+    window.__smokePreviousSelection = previousSelection;
+  })()`);
+  const dispatchKey = async (key, code, windowsVirtualKeyCode) => {
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode });
+  };
+  const tabUntil = async (expression) => {
+    for (let i = 0; i < 12; i++) {
+      await dispatchKey('Tab', 'Tab', 9);
+      if (await cdp.eval(expression)) return true;
+    }
+    return false;
+  };
+  const cardReachedByTab = await tabUntil('document.activeElement === window.__smokeCard');
+  const cardRing = await cdp.eval(`(() => {
+    const element = window.__smokeCard;
+    const style = getComputedStyle(element);
+    const outline = style.outlineStyle !== 'none' && style.outlineWidth !== '0px';
+    return element.matches(':focus-visible') && (outline || style.boxShadow !== 'none');
+  })()`);
+  await dispatchKey('Enter', 'Enter', 13);
+  const rowReachedByTab = await tabUntil('document.activeElement === window.__smokeRow');
+  const rowRing = await cdp.eval(`(() => {
+    const element = window.__smokeRow;
+    const style = getComputedStyle(element);
+    const outline = style.outlineStyle !== 'none' && style.outlineWidth !== '0px';
+    return element.matches(':focus-visible') && (outline || style.boxShadow !== 'none');
+  })()`);
+  await dispatchKey(' ', 'Space', 32);
+  const keyboard = await cdp.eval(`(() => {
+    const card = window.__smokeCard;
+    const row = window.__smokeRow;
+    const cardOk = card.getAttribute('role') === 'button' && card.tabIndex === 0 && window.__smokeSelectedJob === 'smoke-a11y';
+    const rowOk = row.getAttribute('role') === 'button' && row.tabIndex === 0 && row.getAttribute('aria-expanded') === 'true' && row.classList.contains('expanded');
+    selectJob = window.__smokePriorSelect;
+    selectedJobId = window.__smokePreviousSelection;
+    if (window.__smokePreviousJob) activeJobs['smoke-a11y'] = window.__smokePreviousJob; else delete activeJobs['smoke-a11y'];
+    card.remove(); row.remove(); window.__smokeFocusStart.remove();
+    return { cardOk, rowOk };
+  })()`);
+  check('job cards and warning rows are keyboard-operable and focusable',
+    cardReachedByTab && cardRing && rowReachedByTab && rowRing && keyboard.cardOk && keyboard.rowOk,
+    `tabCard=${cardReachedByTab} cardRing=${cardRing} tabWarning=${rowReachedByTab} warningRing=${rowRing} card=${keyboard.cardOk} warning=${keyboard.rowOk}`);
+
+  // Check 7 — Map tab → Treemap renders ≥2 cells on first paint (B1 regression guard).
   // The fixture root is a single-child hop (root → wrap/) that fans out into wrap/{a,b} —
   // before the server-side single-child descent this whole tree rendered as ONE
   // undifferentiated cell. Activated through the app's own switcher (switchTab → the
@@ -377,6 +580,12 @@ try {
   // Check 6 — zero console errors across the whole session.
   check('no console errors during session', consoleErrors.length === 0,
     consoleErrors.length ? consoleErrors.slice(0, 5).join(' | ') : undefined);
+
+  if (process.env.INDEXA_SCREENSHOT_PATH) {
+    const { data } = await cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+    writeFileSync(process.env.INDEXA_SCREENSHOT_PATH, Buffer.from(data, 'base64'));
+    check('browser preview screenshot captured', true, process.env.INDEXA_SCREENSHOT_PATH);
+  }
 
   cdp.ws.close();
 

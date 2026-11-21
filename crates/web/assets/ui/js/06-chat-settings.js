@@ -340,18 +340,32 @@ async function doAsk() {
     return renderSteps() + renderMarkdown(answerText.replace(/^\s+/, '')) +
       renderSources(sources) + renderConfidence() + renderImpact() + renderExplain() + renderScopeHint();
   };
+  let answerRenderFrame = 0;
   const repaint = function() {
     bubble.innerHTML = renderAnswer();
     chat.scrollTop = chat.scrollHeight;
   };
+  const scheduleRepaint = function() {
+    if (answerRenderFrame) return;
+    answerRenderFrame = requestAnimationFrame(function() {
+      answerRenderFrame = 0;
+      repaint();
+    });
+  };
+  const flushRepaint = function() {
+    if (!answerRenderFrame) return;
+    cancelAnimationFrame(answerRenderFrame);
+    answerRenderFrame = 0;
+    repaint();
+  };
   const handleEvent = function(ev) {
     if (ev.type === 'sources') { sources = ev.sources || []; }
-    else if (ev.type === 'fragment') { answerText += ev.text; repaint(); }
-    else if (ev.type === 'step') { steps.push(ev); repaint(); }
+    else if (ev.type === 'fragment') { answerText += ev.text; scheduleRepaint(); }
+    else if (ev.type === 'step') { steps.push(ev); scheduleRepaint(); }
     else if (ev.type === 'done') {
       if (ev.confidence) confidence = ev.confidence;
       if (ev.impact) impact = ev.impact;
-      if (ev.confidence || ev.impact) repaint();
+      if (ev.confidence || ev.impact) scheduleRepaint();
       // Refresh the conversation-level running savings badge from the per-session ledger.
       updateSessionImpact();
     }
@@ -396,9 +410,13 @@ async function doAsk() {
         handleEvent(parsed);
       }
     }
+    flushRepaint();
     // Guard: a stream that closed without ever producing a fragment (e.g. empty answer).
     if (!answerText) repaint();
+    const announcement = document.getElementById('ask-answer-announcement');
+    if (announcement) announcement.textContent = answerText;
   } catch(err) {
+    flushRepaint();
     if (err && err.name === 'AbortError') {
       // User pressed Stop — keep whatever streamed so far and note the stop; not an error.
       stopped = true;
@@ -617,6 +635,7 @@ async function savePasses() {
     });
     const d = await r.json();
     if (d.error) { status.style.color = 'var(--red)'; status.textContent = d.error; return; }
+    await loadPasses();
     status.style.color = 'var(--green)';
     status.textContent = 'Saved';
     setTimeout(function() { status.textContent = ''; }, 3000);
@@ -651,6 +670,7 @@ async function saveResource() {
     });
     const d = await r.json();
     if (d.error) { status.style.color = 'var(--red)'; status.textContent = d.error; return; }
+    await loadResource();
     status.style.color = 'var(--green)';
     status.textContent = 'Saved';
     setTimeout(function() { status.textContent = ''; }, 3000);

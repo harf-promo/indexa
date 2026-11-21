@@ -42,6 +42,8 @@ ignore = [
     # (2026-07, harfbuzz/ttf-parser#217), NOT a vulnerability, no safe upgrade while
     # pdf-extract/lopdf pin it. Used only in the offline PDF text-extraction path.
     { id = "RUSTSEC-2026-0192", reason = "transitive via pdf-extract/lopdf; unmaintained-not-vuln; offline PDF parsing only" },
+    # chrono 0.4.45 is pulled by calamine, rmcp, and schemars; no safe upgrade is available.
+    { id = "RUSTSEC-2026-0543", reason = "transitive via calamine/rmcp/schemars; unmaintained-not-vuln; no safe upgrade available" },
 ]
 
 [bans]

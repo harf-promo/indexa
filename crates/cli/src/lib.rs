@@ -240,6 +240,12 @@ pub enum Commands {
         auto_reindex: bool,
     },
 
+    /// Inspect or explicitly recover legacy summary queue claims.
+    Queue {
+        #[command(subcommand)]
+        action: QueueAction,
+    },
+
     /// Record and query durable memory — typed claims with a source, a confidence and an
     /// expiry, kept across sessions.
     #[command(after_help = "Examples:
@@ -758,7 +764,8 @@ Kinds, most to least trusted:
     #[command(after_help = "Examples:
   indexa serve
   indexa serve --port 8080
-  indexa serve --host 0.0.0.0          # LAN access (⚠ exposes all indexed files on network)")]
+  indexa serve --host 0.0.0.0          # LAN access (⚠ exposes all indexed files on network)
+  indexa serve --host ::               # IPv6 wildcard only; does not accept IPv4")]
     #[command(display_order = 14)]
     Serve {
         #[arg(short, long, default_value_t = 7620)]
@@ -766,6 +773,7 @@ Kinds, most to least trusted:
 
         /// Bind host address. Default 127.0.0.1 (localhost only).
         /// Use 0.0.0.0 to expose on all interfaces (LAN access).
+        /// The IPv6 wildcard :: is explicitly IPv6-only.
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
 
@@ -1054,6 +1062,16 @@ Kinds, most to least trusted:
     Plugin {
         #[command(subcommand)]
         action: PluginAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum QueueAction {
+    /// List ownerless in-flight rows; pass --apply to recover them.
+    RecoverStuck {
+        /// Requeue listed rows (or mark over-cap rows failed). Omitted by default for a dry run.
+        #[arg(long)]
+        apply: bool,
     },
 }
 

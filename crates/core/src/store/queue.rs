@@ -25,7 +25,7 @@ fn summary_path_allowed(
 /// is served by `idx_summary_queue_claim (state, depth DESC)` — no per-claim sort of every
 /// pending row. A named constant so the EXPLAIN QUERY PLAN test checks this exact statement.
 pub(super) const NEXT_QUEUE_ITEM_SQL: &str = "UPDATE summary_queue
-     SET state='in_flight', attempts=attempts+1, updated_at=unixepoch()
+     SET state='in_flight', attempts=attempts+1, updated_at=unixepoch(), owner_pid=?1, owner_start_time=?2
      WHERE path = (
          SELECT path FROM summary_queue
          WHERE state='pending'
@@ -94,15 +94,25 @@ impl Store {
     /// read the same pending row before either flipped it, claiming and summarizing it twice.
     /// With WAL + `busy_timeout`, concurrent claims now serialize and each sees the prior claim.
     pub fn next_queue_item(&mut self) -> Result<Option<QueueItem>> {
+        static START_TIME: std::sync::OnceLock<Option<i64>> = std::sync::OnceLock::new();
+        let start_time = *START_TIME.get_or_init(|| {
+            sysinfo::System::new_all()
+                .process(sysinfo::Pid::from_u32(std::process::id()))
+                .map(|process| process.start_time() as i64)
+        });
         let item = self
             .conn
-            .query_row(NEXT_QUEUE_ITEM_SQL, [], |r| {
-                Ok(QueueItem {
-                    path: r.get(0)?,
-                    kind: r.get(1)?,
-                    depth: r.get(2)?,
-                })
-            })
+            .query_row(
+                NEXT_QUEUE_ITEM_SQL,
+                params![std::process::id(), start_time],
+                |r| {
+                    Ok(QueueItem {
+                        path: r.get(0)?,
+                        kind: r.get(1)?,
+                        depth: r.get(2)?,
+                    })
+                },
+            )
             .optional()?;
         Ok(item)
     }
@@ -142,26 +152,87 @@ impl Store {
         Ok(unfinished)
     }
 
-    /// Reset items left `in_flight` by a previously crashed/killed run back to `pending`
-    /// so they get retried; items whose `attempts` already reached `max_attempts` are marked
-    /// `failed` instead (they keep crashing). Returns `(requeued, failed)`.
-    ///
-    /// Call this **once at process startup, before any worker begins claiming** — never while
-    /// workers are draining, or it would reset an item another worker is actively processing.
+    /// Reset items whose claiming process is gone or whose PID identifies a different process.
+    /// Legacy claims without an owner are retained for explicit recovery. Returns `(requeued, failed)`.
     pub fn requeue_stale_in_flight(&mut self, max_attempts: u32) -> Result<(usize, usize)> {
+        let system = sysinfo::System::new_all();
+        let mut stmt = self.conn.prepare(
+            "SELECT path, owner_pid, owner_start_time FROM summary_queue WHERE state='in_flight'",
+        )?;
+        let candidates = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<u32>>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        let stale: Vec<(String, u32, Option<i64>)> = candidates
+            .into_iter()
+            .filter_map(|(path, pid, recorded_start)| {
+                let pid = pid?;
+                let process = system.process(sysinfo::Pid::from_u32(pid));
+                let is_stale = process.is_none_or(|current| {
+                    recorded_start.is_some_and(|start| current.start_time() as i64 != start)
+                });
+                is_stale.then_some((path, pid, recorded_start))
+            })
+            .collect();
+        if stale.is_empty() {
+            return Ok((0, 0));
+        }
+
+        let tx = self.conn.transaction()?;
+        let mut failed = 0;
+        let mut requeued = 0;
+        for (path, pid, recorded_start) in stale {
+            failed += tx.execute(
+                "UPDATE summary_queue
+                 SET state='failed', error='exceeded max attempts after interruption',
+                     updated_at=unixepoch(), owner_pid=NULL, owner_start_time=NULL
+                 WHERE path=?1 AND state='in_flight' AND owner_pid=?3
+                   AND owner_start_time IS ?4
+                   AND attempts >= ?2",
+                params![path, max_attempts, pid, recorded_start],
+            )?;
+            requeued += tx.execute(
+                "UPDATE summary_queue
+                 SET state='pending', updated_at=unixepoch(), owner_pid=NULL, owner_start_time=NULL
+                 WHERE path=?1 AND state='in_flight' AND owner_pid=?3
+                   AND owner_start_time IS ?4
+                   AND attempts < ?2",
+                params![path, max_attempts, pid, recorded_start],
+            )?;
+        }
+        tx.commit()?;
+        Ok((requeued, failed))
+    }
+
+    /// List in-flight claims with no recorded owner. These cannot be auto-requeued safely.
+    pub fn unowned_in_flight(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path FROM summary_queue WHERE state='in_flight' AND owner_pid IS NULL ORDER BY path",
+        )?;
+        let paths = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(paths)
+    }
+
+    /// Deliberately recover legacy ownerless claims; callers must make this user initiated.
+    pub fn recover_unowned_in_flight(&mut self, max_attempts: u32) -> Result<(usize, usize)> {
         let tx = self.conn.transaction()?;
         let failed = tx.execute(
-            "UPDATE summary_queue
-             SET state='failed', error='exceeded max attempts after interruption',
-                 updated_at=unixepoch()
-             WHERE state='in_flight' AND attempts >= ?1",
+            "UPDATE summary_queue SET state='failed', error='exceeded max attempts after manual recovery', updated_at=unixepoch()
+             WHERE state='in_flight' AND owner_pid IS NULL AND attempts >= ?1",
             params![max_attempts],
         )?;
         let requeued = tx.execute(
-            "UPDATE summary_queue
-             SET state='pending', updated_at=unixepoch()
-             WHERE state='in_flight'",
-            [],
+            "UPDATE summary_queue SET state='pending', updated_at=unixepoch()
+             WHERE state='in_flight' AND owner_pid IS NULL AND attempts < ?1",
+            params![max_attempts],
         )?;
         tx.commit()?;
         Ok((requeued, failed))
@@ -175,7 +246,7 @@ impl Store {
     pub fn defer_queue_item(&mut self, path: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE summary_queue
-             SET state='pending', attempts=MAX(0, attempts - 1), updated_at=unixepoch()
+             SET state='pending', attempts=MAX(0, attempts - 1), updated_at=unixepoch(), owner_pid=NULL, owner_start_time=NULL
              WHERE path=?1",
             params![path],
         )?;
@@ -185,7 +256,7 @@ impl Store {
     /// Mark a queue item's state (e.g. "done" or "failed").
     pub fn mark_queue_state(&mut self, path: &str, state: &str, error: Option<&str>) -> Result<()> {
         self.conn.execute(
-            "UPDATE summary_queue SET state=?1, error=?2, updated_at=unixepoch() WHERE path=?3",
+            "UPDATE summary_queue SET state=?1, error=?2, updated_at=unixepoch(), owner_pid=NULL, owner_start_time=NULL WHERE path=?3",
             params![state, error, path],
         )?;
         Ok(())
@@ -219,7 +290,7 @@ impl Store {
             "INSERT INTO summary_queue (path, kind, depth, state, attempts, error)
              VALUES (?1, ?2, ?3, 'pending', 0, NULL)
              ON CONFLICT(path) DO UPDATE SET
-                 state='pending', attempts=0, error=NULL, updated_at=unixepoch()
+                 state='pending', attempts=0, error=NULL, updated_at=unixepoch(), owner_pid=NULL, owner_start_time=NULL
                  WHERE summary_queue.state <> 'in_flight'",
             params![path, kind, depth],
         )?;

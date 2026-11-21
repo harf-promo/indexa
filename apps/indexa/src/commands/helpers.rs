@@ -403,9 +403,37 @@ smallest model. Free some RAM or lower the resource profile; the memory watchdog
 /// input when it can't be resolved (e.g. doesn't exist yet). Applied to *every*
 /// branch so a bare-home root and an explicit path land in the same form.
 fn canonical_root(p: PathBuf) -> PathBuf {
+    let path = p.to_string_lossy();
+    if path.starts_with("/proc/self/fd/") || path.starts_with("/dev/fd/") {
+        return p;
+    }
     match p.canonicalize() {
         Ok(c) => strip_verbatim_prefix(c),
         Err(_) => p,
+    }
+}
+
+/// Translate an internal descriptor-backed access path into the stable pathname stored in the
+/// index. Filesystem reads continue to use the descriptor path; only persistent identities use
+/// the original canonical root.
+pub(crate) fn index_display_path(path: &std::path::Path) -> PathBuf {
+    let (Some(access), Some(display)) = (
+        std::env::var_os("INDEXA_TRIGGER_INDEX_ACCESS_PREFIX"),
+        std::env::var_os("INDEXA_TRIGGER_INDEX_DISPLAY_PATH"),
+    ) else {
+        return path.to_path_buf();
+    };
+    let display = PathBuf::from(display);
+    let access = access.to_string_lossy();
+    let raw = path.to_string_lossy();
+    let Some(relative) = raw.strip_prefix(access.trim_end_matches("/.")) else {
+        return path.to_path_buf();
+    };
+    let relative = relative.trim_start_matches('/').trim_start_matches("./");
+    if relative.is_empty() || relative == "." {
+        display
+    } else {
+        display.join(relative)
     }
 }
 

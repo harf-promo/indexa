@@ -330,6 +330,14 @@ pub(crate) async fn cmd_worker(concurrency: usize, auto_reindex: bool, cfg: &Con
         Ok(_) => {}
         Err(e) => eprintln!("Warning: could not sweep stale in-flight items: {e}"),
     }
+    match store.lock().await.unowned_in_flight() {
+        Ok(items) if !items.is_empty() => {
+            tracing::warn!(count = items.len(), "legacy summary queue claims have no owner; run `indexa queue recover-stuck` to inspect");
+            eprintln!("Warning: {} legacy in-flight queue item(s) have no recorded owner; run `indexa queue recover-stuck` to inspect.", items.len());
+        }
+        Err(e) => tracing::warn!("could not inspect ownerless queue claims: {e}"),
+        _ => {}
+    }
 
     let stats = store.lock().await.queue_stats()?;
     println!(

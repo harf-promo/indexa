@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
 use indexa_cli::{
-    Cli, Commands, InsightsAction, McpAction, NoteAction, PackAction, PluginAction, ReviewAction,
-    SavedAction, SnapshotAction, WeightAction,
+    Cli, Commands, InsightsAction, McpAction, NoteAction, PackAction, PluginAction, QueueAction,
+    ReviewAction, SavedAction, SnapshotAction, WeightAction,
 };
 use indexa_core::config;
 use tracing_subscriber::prelude::*;
@@ -144,6 +144,9 @@ async fn main() -> Result<()> {
             concurrency,
             auto_reindex,
         } => commands::cmd_worker(concurrency, auto_reindex, &cfg).await,
+        Commands::Queue { action } => match action {
+            QueueAction::RecoverStuck { apply } => commands::cmd_queue_recover_stuck(apply),
+        },
         Commands::Memory { action } => commands::cmd_memory(action).await,
         Commands::Pack { action } => match action {
             PackAction::Create {

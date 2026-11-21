@@ -17,6 +17,7 @@ mod keys;
 mod misc;
 mod models;
 mod packs;
+pub(crate) mod path_policy;
 mod projects;
 mod providers;
 mod queue;

@@ -197,6 +197,26 @@ fn sample_via_parse(path: &str) -> Option<String> {
     Some(crate::contextual::build_doc_context(&texts))
 }
 
+/// For the internal MCP `trigger_index` child, keep content reads on the validated descriptor
+/// path while summary rows continue to use the stable canonical path stored in the index.
+fn trigger_index_access_path(path: &Path) -> std::path::PathBuf {
+    let (Some(access), Some(display)) = (
+        std::env::var_os("INDEXA_TRIGGER_INDEX_ACCESS_PREFIX"),
+        std::env::var_os("INDEXA_TRIGGER_INDEX_DISPLAY_PATH"),
+    ) else {
+        return path.to_path_buf();
+    };
+    trigger_index_access_path_for(path, Path::new(&access), Path::new(&display))
+}
+
+fn trigger_index_access_path_for(path: &Path, access: &Path, display: &Path) -> std::path::PathBuf {
+    match path.strip_prefix(display) {
+        Ok(relative) if relative.as_os_str().is_empty() => access.to_path_buf(),
+        Ok(relative) => access.join(relative),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
 /// Summarise one file and persist the row. Returns true if successful.
 ///
 /// When `on_fragment` is `Some`, each generated token is forwarded to the
@@ -207,6 +227,35 @@ pub async fn summarize_file(
     describer: &dyn Describer,
     embedder: &dyn Embedder,
     path: &str,
+    model: &str,
+    passes: u32,
+    model_fallback: bool,
+    on_fragment: Option<&mut (dyn FnMut(String) + Send)>,
+) -> Result<SummaryWrite> {
+    let read_path = trigger_index_access_path(Path::new(path));
+    summarize_file_with_read_path(
+        store,
+        describer,
+        embedder,
+        path,
+        &read_path,
+        model,
+        passes,
+        model_fallback,
+        on_fragment,
+    )
+    .await
+}
+
+/// Like [`summarize_file`], but lets a caller provide a previously checked snapshot for file
+/// reads while the indexed path remains the identity used for DB rows and prompts.
+#[allow(clippy::too_many_arguments)]
+pub async fn summarize_file_with_read_path(
+    store: &mut Store,
+    describer: &dyn Describer,
+    embedder: &dyn Embedder,
+    path: &str,
+    read_path: &Path,
     model: &str,
     passes: u32,
     model_fallback: bool,
@@ -226,7 +275,8 @@ pub async fn summarize_file(
     // the summary describes, so an edit landing during the (seconds-to-minutes)
     // LLM run still reads as modified_s >= generated_at on the next refresh.
     let generated_at = now_secs();
-    let source_hash = file_source_hash(Path::new(path));
+    let read_path = read_path.to_path_buf();
+    let source_hash = file_source_hash(&read_path);
     // One fetch serves both the freshness gate and the drift comparison after
     // the regeneration. A read error degrades to "not summarized yet"
     // (re-summarize), never a skip.
@@ -256,7 +306,7 @@ pub async fn summarize_file(
     // + `scan` (no `deep` yet) they still hold the previous version's text, and summarizing them
     // while stamping the NEW content's hash would certify a stale summary as current.
     // An unreadable mtime can't prove the chunks stale, so it keeps the old behavior (use them).
-    let chunks_describe_current_file = match std::fs::metadata(path)
+    let chunks_describe_current_file = match std::fs::metadata(&read_path)
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
@@ -274,9 +324,9 @@ pub async fn summarize_file(
         // Stored chunks are redacted at index time; text parsed straight from disk is not, so
         // scrub it before it can reach a (possibly cloud) describer.
         _ => crate::redact::chunk_text_for_store(
-            &match sample_via_parse(path) {
+            &match sample_via_parse(&read_path.to_string_lossy()) {
                 Some(text) => text,
-                None => match std::fs::read(path) {
+                None => match std::fs::read(&read_path) {
                     Ok(bytes) => {
                         let n = bytes.len().min(4096);
                         String::from_utf8_lossy(&bytes[..n]).into_owned()
@@ -332,7 +382,7 @@ pub async fn summarize_file(
     let parent_path = Path::new(path)
         .parent()
         .map(|p| p.to_string_lossy().into_owned());
-    let meta = std::fs::metadata(path).ok();
+    let meta = std::fs::metadata(&read_path).ok();
     let byte_size = meta.as_ref().map(|m| m.len() as i64).unwrap_or(0);
     let mtime_secs = meta
         .and_then(|m| m.modified().ok())
@@ -584,6 +634,59 @@ pub async fn process_queue_item_with_passes(
     on_fragment: Option<&mut (dyn FnMut(String) + Send)>,
     force_rollup: bool,
 ) -> Result<QueueOutcome> {
+    process_queue_item_inner(
+        store,
+        describer,
+        embedder,
+        item,
+        cfg,
+        passes_override,
+        on_fragment,
+        force_rollup,
+        None,
+    )
+    .await
+}
+
+/// Web-job variant that reads file content through a caller-validated snapshot path.
+#[allow(clippy::too_many_arguments)]
+pub async fn process_queue_item_with_read_path(
+    store: &mut Store,
+    describer: &dyn Describer,
+    embedder: &dyn Embedder,
+    item: &QueueItem,
+    cfg: &DescriberConfig,
+    passes_override: Option<u32>,
+    on_fragment: Option<&mut (dyn FnMut(String) + Send)>,
+    force_rollup: bool,
+    read_path: &Path,
+) -> Result<QueueOutcome> {
+    process_queue_item_inner(
+        store,
+        describer,
+        embedder,
+        item,
+        cfg,
+        passes_override,
+        on_fragment,
+        force_rollup,
+        Some(read_path),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_queue_item_inner(
+    store: &mut Store,
+    describer: &dyn Describer,
+    embedder: &dyn Embedder,
+    item: &QueueItem,
+    cfg: &DescriberConfig,
+    passes_override: Option<u32>,
+    on_fragment: Option<&mut (dyn FnMut(String) + Send)>,
+    force_rollup: bool,
+    read_path_override: Option<&Path>,
+) -> Result<QueueOutcome> {
     // Self-clean an orphaned claim: a path that is no longer a live `entries` row (a build
     // artifact later skipped, or a deleted file) can never summarize meaningfully and would
     // otherwise sit `pending` forever or re-summarize junk. Delete the row and move on.
@@ -630,17 +733,35 @@ pub async fn process_queue_item_with_passes(
     };
 
     let result = if item.kind == "file" {
-        summarize_file(
-            store,
-            describer,
-            embedder,
-            &item.path,
-            &cfg.file_model,
-            passes,
-            cfg.model_fallback,
-            on_fragment,
-        )
-        .await
+        match read_path_override {
+            Some(read_path) => {
+                summarize_file_with_read_path(
+                    store,
+                    describer,
+                    embedder,
+                    &item.path,
+                    read_path,
+                    &cfg.file_model,
+                    passes,
+                    cfg.model_fallback,
+                    on_fragment,
+                )
+                .await
+            }
+            None => {
+                summarize_file(
+                    store,
+                    describer,
+                    embedder,
+                    &item.path,
+                    &cfg.file_model,
+                    passes,
+                    cfg.model_fallback,
+                    on_fragment,
+                )
+                .await
+            }
+        }
     } else {
         summarize_directory(
             store,
@@ -924,7 +1045,25 @@ pub async fn summarize_subtree_sync(
 
 #[cfg(test)]
 mod tests {
-    use super::strip_summary_preamble;
+    use super::{strip_summary_preamble, trigger_index_access_path_for};
+
+    #[test]
+    fn trigger_index_summary_reads_map_display_paths_to_the_held_access_root() {
+        let access = std::path::Path::new("/proc/self/fd/42/.");
+        let display = std::path::Path::new("/indexed/project");
+        assert_eq!(
+            trigger_index_access_path_for(
+                std::path::Path::new("/indexed/project/src/main.rs"),
+                access,
+                display,
+            ),
+            std::path::Path::new("/proc/self/fd/42/./src/main.rs")
+        );
+        assert_eq!(
+            trigger_index_access_path_for(std::path::Path::new("/elsewhere/file"), access, display,),
+            std::path::Path::new("/elsewhere/file")
+        );
+    }
 
     #[test]
     fn strips_here_is_refined_summary() {
@@ -1291,7 +1430,7 @@ mod drift_tests {
     //! Summary-drift detector wiring: fires only when a regeneration ran for
     //! IDENTICAL content AND the new embedding disagrees with the old.
 
-    use super::{summarize_file, SummaryWrite};
+    use super::{summarize_file, summarize_file_with_read_path, SummaryWrite};
     use indexa_core::store::{Store, SummaryRecord};
     use indexa_embed::Embedder;
     use indexa_llm::{ChildSummary, Describer};
@@ -1397,6 +1536,36 @@ mod drift_tests {
         let row = store.summary_by_path(&path).unwrap().unwrap();
         assert_eq!(row.summary, "Old summary text. Tail.");
         assert!(row.embedding.is_none());
+    }
+
+    #[tokio::test]
+    async fn validated_read_path_supplies_file_bytes_but_keeps_indexed_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let indexed_path = tmp.path().join("indexed.txt");
+        let snapshot_path = tmp.path().join("snapshot.txt");
+        std::fs::write(&indexed_path, "path contents must not be read").unwrap();
+        std::fs::write(&snapshot_path, "checked snapshot contents").unwrap();
+        let indexed = indexed_path.to_string_lossy().into_owned();
+        let mut store = Store::open_in_memory().unwrap();
+
+        summarize_file_with_read_path(
+            &mut store,
+            &StubDescriber,
+            &FixedEmbedder(vec![1.0, 0.0]),
+            &indexed,
+            &snapshot_path,
+            "m",
+            1,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let summary = store.summary_by_path(&indexed).unwrap().unwrap();
+        assert_eq!(summary.path, indexed);
+        assert_eq!(summary.source_hash, super::file_source_hash(&snapshot_path));
+        assert_ne!(summary.source_hash, super::file_source_hash(&indexed_path));
     }
 
     #[tokio::test]

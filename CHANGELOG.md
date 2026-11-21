@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Web: streamed answers render once per frame and are announced when complete.** Job cards and
+  warning rows are keyboard-operable with a visible focus ring; file-preview and log-tail disk
+  operations run on blocking workers, and Markdown code-block placeholders remain text-source
+  escapes instead of literal NUL bytes.
+- **Security: web jobs and watches stay inside indexed roots; LAN auth and update/watch races are hardened.**
+  Job paths and watch starts use canonical indexed-root paths, the LAN token is removed from the
+  address bar and attached only to exact same-origin API requests, malformed Origin headers fail
+  closed, IPv6 listener URLs are bracketed, and stale watch/update commands cannot affect a new
+  session or prompt.
 - **Security: git run inside an indexed directory no longer executes that repo's own config.**
   `changed_impact`, the worker's git-poll, co-change history and decision patch-ids ran plain
   `git`, so a `.git/config` with `core.fsmonitor = <command>` (an extracted archive or a shared

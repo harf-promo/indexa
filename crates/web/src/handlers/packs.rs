@@ -22,13 +22,32 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 
 use crate::dto::{err_json, JobStartResponse};
 use crate::handlers::jobs::{job_slot_available, too_many_jobs, try_register_job};
 use crate::jobs_exec::{
-    finalize_done, run_deep_phase, scan_walk_config, schedule_cleanup, walk_for_job,
+    finalize_done, finalize_failed, run_deep_phase, scan_walk_config, schedule_cleanup,
+    walk_for_job,
 };
 use crate::AppState;
+
+async fn finish_job_after_catch<F>(handle: Arc<crate::jobs::JobHandle>, future: F)
+where
+    F: Future<Output = ()>,
+{
+    use futures_util::FutureExt;
+    if let Err(payload) = AssertUnwindSafe(future).catch_unwind().await {
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+            .unwrap_or_else(|| "job panicked with a non-string payload".to_owned());
+        finalize_failed(&handle, "panic", &anyhow::anyhow!(message));
+    }
+}
 
 // ── DTOs ─────────────────────────────────────────────────────────────────────
 
@@ -524,68 +543,86 @@ pub(crate) async fn api_packs_refresh(
         return resp;
     }
 
-    let stale = {
-        let store = s.store.lock().await;
-        let pack = match store.pack_by_name(&name) {
-            Ok(Some(p)) => p,
-            Ok(None) => {
-                return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\""))
-            }
-            Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    let db_path = s.db_path.clone();
+    let name_for_lookup = name.clone();
+    let stale_snapshot = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let store = indexa_core::store::Store::open(&db_path)?;
+        let Some(pack) = store.pack_by_name(&name_for_lookup)? else {
+            return Ok(None);
         };
-        store.stale_pack_paths(&pack.id).unwrap_or_default()
-        // Lock dropped here, before spawning — never held across an `.await`/`tokio::spawn`.
+        let stale = store.stale_pack_paths(&pack.id).unwrap_or_default();
+        let missing_count = stale
+            .iter()
+            .filter(|path| !std::path::Path::new(path).exists())
+            .count();
+        Ok(Some((stale, missing_count)))
+    })
+    .await;
+    let (stale, missing_count) = match stale_snapshot {
+        Ok(Ok(Some(snapshot))) => snapshot,
+        Ok(Ok(None)) => {
+            return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\""))
+        }
+        Ok(Err(error)) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+        Err(error) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("refresh scan worker failed: {error}"),
+            )
+        }
     };
     if stale.is_empty() {
         return Json(serde_json::json!({ "stale_files": 0 })).into_response();
     }
-    let missing_count = stale
-        .iter()
-        .filter(|p| !std::path::Path::new(p).exists())
-        .count();
-
     // Check the cap and register under one lock: a refresh racing another start for the last
     // slot passed the early check above too, and must not overshoot the cap.
     let Some((id, handle)) = try_register_job(&s.jobs, "pack_refresh", name.clone()).await else {
         return too_many_jobs();
     };
     let state = s.clone();
+    let jobs = state.jobs.clone();
+    let failed_handle = handle.clone();
     tokio::spawn(async move {
-        // Walk each stale path independently (ignore::WalkBuilder handles a bare file root
-        // correctly — same behavior `cmd_deep` relies on for the CLI's `pack refresh`) and
-        // concatenate the resulting per-file Vecs, reusing the existing, trusted per-file
-        // classification/entry-construction logic rather than a new builder.
-        let mut entries = Vec::with_capacity(stale.len());
-        for path in &stale {
-            if let Some(mut e) = walk_for_job(
-                path,
-                &handle,
-                &state.walk_semaphore,
-                scan_walk_config(&state.config.scan),
-            )
-            .await
-            {
-                entries.append(&mut e);
-            }
-        }
-        if run_deep_phase(&state, &name, &entries, &handle).await {
-            let reindexed = stale.len() - missing_count;
-            let detail = format!("{reindexed} reindexed, {missing_count} vanished (left flagged)");
-            {
-                let mut store = state.store.lock().await;
-                if let Ok(Some(pack)) = store.pack_by_name(&name) {
-                    let _ = store.record_pack_refreshed(&pack.id, &detail);
+        finish_job_after_catch(failed_handle, async move {
+            // Walk each stale path independently (ignore::WalkBuilder handles a bare file root
+            // correctly — same behavior `cmd_deep` relies on for the CLI's `pack refresh`) and
+            // concatenate the resulting per-file Vecs, reusing the existing, trusted per-file
+            // classification/entry-construction logic rather than a new builder.
+            let mut entries = Vec::with_capacity(stale.len());
+            for path in &stale {
+                if let Some(mut e) = walk_for_job(
+                    path,
+                    &handle,
+                    &state.walk_semaphore,
+                    scan_walk_config(&state.config.scan),
+                    None,
+                )
+                .await
+                {
+                    entries.append(&mut e);
                 }
             }
-            finalize_done(
-                &handle,
-                &format!(
-                    "Pack refresh complete: {} file(s), {missing_count} vanished",
-                    entries.len()
-                ),
-            );
-        }
-        schedule_cleanup(state.jobs.clone(), handle.id);
+            if run_deep_phase(&state, &name, &entries, &handle, None).await {
+                let reindexed = stale.len() - missing_count;
+                let detail =
+                    format!("{reindexed} reindexed, {missing_count} vanished (left flagged)");
+                {
+                    let mut store = state.store.lock().await;
+                    if let Ok(Some(pack)) = store.pack_by_name(&name) {
+                        let _ = store.record_pack_refreshed(&pack.id, &detail);
+                    }
+                }
+                finalize_done(
+                    &handle,
+                    &format!(
+                        "Pack refresh complete: {} file(s), {missing_count} vanished",
+                        entries.len()
+                    ),
+                );
+            }
+        })
+        .await;
+        schedule_cleanup(jobs, id);
     });
     Json(JobStartResponse { job_id: id }).into_response()
 }
@@ -646,26 +683,32 @@ pub(crate) async fn api_packs_note(
     if let Some((id, handle)) = try_register_job(&s.jobs, "pack_note", name.clone()).await {
         let state = s.clone();
         let path_for_job = note_path.clone();
+        let jobs = state.jobs.clone();
+        let failed_handle = handle.clone();
         tokio::spawn(async move {
-            // Same single-path walk-then-deep shape as `api_packs_refresh`'s loop body (here over
-            // just the one new note file): an empty `entries` still makes `run_deep_phase` report
-            // success, and `walk_for_job` already finalizes the job itself on a real walk failure
-            // (never call `finalize_done` after that — it would overwrite Failed with Done).
-            let mut entries = Vec::new();
-            if let Some(mut e) = walk_for_job(
-                &path_for_job,
-                &handle,
-                &state.walk_semaphore,
-                scan_walk_config(&state.config.scan),
-            )
-            .await
-            {
-                entries.append(&mut e);
-            }
-            if run_deep_phase(&state, &name, &entries, &handle).await {
-                finalize_done(&handle, "Note indexed");
-            }
-            schedule_cleanup(state.jobs.clone(), handle.id);
+            finish_job_after_catch(failed_handle, async move {
+                // Same single-path walk-then-deep shape as `api_packs_refresh`'s loop body (here over
+                // just the one new note file): an empty `entries` still makes `run_deep_phase` report
+                // success, and `walk_for_job` already finalizes the job itself on a real walk failure
+                // (never call `finalize_done` after that — it would overwrite Failed with Done).
+                let mut entries = Vec::new();
+                if let Some(mut e) = walk_for_job(
+                    &path_for_job,
+                    &handle,
+                    &state.walk_semaphore,
+                    scan_walk_config(&state.config.scan),
+                    None,
+                )
+                .await
+                {
+                    entries.append(&mut e);
+                }
+                if run_deep_phase(&state, &name, &entries, &handle, None).await {
+                    finalize_done(&handle, "Note indexed");
+                }
+            })
+            .await;
+            schedule_cleanup(jobs, id);
         });
         return Json(serde_json::json!({ "saved": true, "path": note_path, "job_id": id }))
             .into_response();
@@ -687,45 +730,39 @@ pub(crate) async fn api_packs_suggest(
     // Try semantic search via the embedder held in AppState.
     let embedding = state.embedder.embed(&query).await.ok();
 
-    let store = state.store.lock().await;
-    if let Some(emb) = embedding {
-        match store.summary_cosine_search(&emb, limit, 0.15) {
-            Ok(hits) if !hits.is_empty() => {
-                let paths: Vec<&str> = hits.iter().map(|(p, _)| p.as_str()).collect();
-                return Json(serde_json::json!({
-                    "method": "semantic",
-                    "paths": paths,
-                }))
-                .into_response();
+    let db_path = state.db_path.clone();
+    match tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        use indexa_core::config::HybridMode;
+        let store = indexa_core::store::Store::open(&db_path)?;
+        if let Some(emb) = embedding {
+            match store.summary_cosine_search(&emb, limit, 0.15)? {
+                hits if !hits.is_empty() => {
+                    let paths: Vec<String> = hits.into_iter().map(|(path, _)| path).collect();
+                    return Ok(serde_json::json!({ "method": "semantic", "paths": paths }));
+                }
+                _ => {} // fall through to keyword
             }
-            Ok(_) => {} // fall through to keyword
-            Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
         }
-    }
-
-    // Keyword fallback.
-    use indexa_core::config::HybridMode;
-    match store.hybrid_search(&query, None, &HybridMode::Sparse, None, limit * 3, 0.0) {
-        Ok(hits) => {
-            let mut seen = std::collections::HashSet::new();
-            let paths: Vec<&str> = hits
-                .iter()
-                .filter_map(|h| {
-                    if seen.insert(h.entry_path.as_str()) {
-                        Some(h.entry_path.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .take(limit)
-                .collect();
-            Json(serde_json::json!({
-                "method": "keyword",
-                "paths": paths,
-            }))
-            .into_response()
-        }
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        let hits = store.hybrid_search(&query, None, &HybridMode::Sparse, None, limit * 3, 0.0)?;
+        let mut seen = std::collections::HashSet::new();
+        let paths: Vec<String> = hits
+            .into_iter()
+            .filter_map(|hit| {
+                seen.insert(hit.entry_path.clone())
+                    .then_some(hit.entry_path)
+            })
+            .take(limit)
+            .collect();
+        Ok(serde_json::json!({ "method": "keyword", "paths": paths }))
+    })
+    .await
+    {
+        Ok(Ok(body)) => Json(body).into_response(),
+        Ok(Err(error)) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+        Err(error) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("suggest worker failed: {error}"),
+        ),
     }
 }
 
@@ -748,57 +785,69 @@ pub(crate) async fn api_packs_search(
     // `api_packs_refresh` already follow this same release-before-slow-op shape.)
     let embedding = state.embedder.embed(&query).await.ok();
 
-    let store = state.store.lock().await;
-    let pack = match store.pack_by_name(&name) {
-        Ok(Some(p)) => p,
-        Ok(None) => return err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\"")),
-        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
-    };
-    let paths = match store.pack_paths(&pack.id) {
-        Ok(p) => p,
-        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
-    };
-    if paths.is_empty() {
-        return Json(serde_json::json!({ "hits": [] })).into_response();
-    }
-
-    let per_scope = (limit * 2).max(10);
-    let mut all_hits: Vec<indexa_core::store::SearchHit> = Vec::new();
-    for root in &paths {
-        if let Ok(mut hits) = store.hybrid_search(
-            &query,
-            embedding.as_deref(),
-            &HybridMode::Rrf,
-            Some(root.as_str()),
-            per_scope,
-            60.0,
-        ) {
-            all_hits.append(&mut hits);
-        }
-    }
-
-    all_hits.sort_by(|a, b| {
-        b.rrf_score
-            .partial_cmp(&a.rrf_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let mut seen = std::collections::HashSet::new();
-    let hits: Vec<SearchHitDto> = all_hits
-        .into_iter()
-        .filter(|h| seen.insert(format!("{}:{}", h.entry_path, h.seq)))
-        .take(limit)
-        .map(|h| {
-            let snippet: String = h.text.chars().take(200).collect();
-            SearchHitDto {
-                path: h.entry_path,
-                heading: h.heading,
-                snippet,
-                score: h.rrf_score,
+    let db_path = state.db_path.clone();
+    let search_name = name.clone();
+    let search_query = query.clone();
+    let result =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Option<Vec<SearchHitDto>>> {
+            let store = indexa_core::store::Store::open(&db_path)?;
+            let Some(pack) = store.pack_by_name(&search_name)? else {
+                return Ok(None);
+            };
+            let paths = store.pack_paths(&pack.id)?;
+            if paths.is_empty() {
+                return Ok(Some(Vec::new()));
             }
-        })
-        .collect();
 
-    Json(serde_json::json!({ "name": name, "query": query, "hits": hits })).into_response()
+            let per_scope = (limit * 2).max(10);
+            let mut all_hits: Vec<indexa_core::store::SearchHit> = Vec::new();
+            for root in &paths {
+                if let Ok(mut hits) = store.hybrid_search(
+                    &search_query,
+                    embedding.as_deref(),
+                    &HybridMode::Rrf,
+                    Some(root.as_str()),
+                    per_scope,
+                    60.0,
+                ) {
+                    all_hits.append(&mut hits);
+                }
+            }
+
+            all_hits.sort_by(|a, b| {
+                b.rrf_score
+                    .partial_cmp(&a.rrf_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let mut seen = std::collections::HashSet::new();
+            let hits: Vec<SearchHitDto> = all_hits
+                .into_iter()
+                .filter(|h| seen.insert(format!("{}:{}", h.entry_path, h.seq)))
+                .take(limit)
+                .map(|h| {
+                    let snippet: String = h.text.chars().take(200).collect();
+                    SearchHitDto {
+                        path: h.entry_path,
+                        heading: h.heading,
+                        snippet,
+                        score: h.rrf_score,
+                    }
+                })
+                .collect();
+            Ok(Some(hits))
+        })
+        .await;
+    match result {
+        Ok(Ok(Some(hits))) => {
+            Json(serde_json::json!({ "name": name, "query": query, "hits": hits })).into_response()
+        }
+        Ok(Ok(None)) => err_json(StatusCode::NOT_FOUND, format!("no pack named \"{name}\"")),
+        Ok(Err(error)) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
+        Err(error) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("pack search worker failed: {error}"),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -881,7 +930,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // An indexed member that has vanished from disk counts as stale (and its walk is empty).
         let gone = dir.path().join("gone.rs").to_string_lossy().into_owned();
-        let mut store = Store::open_in_memory().unwrap();
+        let mut store = Store::open(&dir.path().join("index.db")).unwrap();
         store
             .upsert_chunks(&[ChunkRecord {
                 entry_path: gone.clone(),
@@ -967,5 +1016,16 @@ mod tests {
         }
         assert_eq!(jobs_started, 1);
         assert_eq!(running_jobs(&*s.jobs.read().await), held.len());
+    }
+
+    #[tokio::test]
+    async fn panic_marks_pack_job_failed_and_releases_running_slot() {
+        let handle = Arc::new(crate::jobs::JobHandle::new("pack_refresh", "test"));
+        finish_job_after_catch(handle.clone(), async { panic!("injected job panic") }).await;
+        assert_eq!(handle.status(), crate::jobs::JobStatus::Failed);
+        assert!(handle
+            .history_snapshot()
+            .iter()
+            .any(|event| matches!(event, crate::jobs::JobEvent::Failed { error, .. } if error.contains("injected job panic"))));
     }
 }
