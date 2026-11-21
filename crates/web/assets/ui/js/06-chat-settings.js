@@ -244,6 +244,7 @@ async function doAsk() {
   let steps = []; // agentic per-hop queries (empty for one-shot ask)
   let confidence = null; // retrieval-shape confidence, from the terminal 'done' event
   let impact = null; // per-answer byte savings vs whole-file context, from the 'done' event
+  let repaintFrame = null;
   // The agentic retrieval hops, shown as subtle chips above the answer so the user sees
   // what the model searched for while it works.
   const renderSteps = function() {
@@ -344,14 +345,30 @@ async function doAsk() {
     bubble.innerHTML = renderAnswer();
     chat.scrollTop = chat.scrollHeight;
   };
+  const scheduleRepaint = function() {
+    if (repaintFrame !== null) return;
+    repaintFrame = requestAnimationFrame(function() {
+      repaintFrame = null;
+      repaint();
+    });
+  };
+  const flushRepaint = function() {
+    if (repaintFrame !== null) {
+      cancelAnimationFrame(repaintFrame);
+      repaintFrame = null;
+    }
+    repaint();
+  };
   const handleEvent = function(ev) {
     if (ev.type === 'sources') { sources = ev.sources || []; }
-    else if (ev.type === 'fragment') { answerText += ev.text; repaint(); }
+    else if (ev.type === 'fragment') { answerText += ev.text; scheduleRepaint(); }
     else if (ev.type === 'step') { steps.push(ev); repaint(); }
     else if (ev.type === 'done') {
       if (ev.confidence) confidence = ev.confidence;
       if (ev.impact) impact = ev.impact;
-      if (ev.confidence || ev.impact) repaint();
+      flushRepaint();
+      const announcer = document.getElementById('ask-answer-announcer');
+      if (announcer) announcer.textContent = answerText;
       // Refresh the conversation-level running savings badge from the per-session ledger.
       updateSessionImpact();
     }

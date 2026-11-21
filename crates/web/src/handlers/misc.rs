@@ -43,39 +43,44 @@ pub(crate) async fn api_logs_tail(
         .unwrap_or(50)
         .min(500);
 
-    // tracing-appender rolling::daily creates files named "prefix.YYYY-MM-DD".
-    // Pick the most recently modified log file under the log dir.
-    let log_dir = &*state.log_dir;
-    let candidates: Vec<_> = std::fs::read_dir(log_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with("indexa.log"))
-        .collect();
+    let log_dir = state.log_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        // tracing-appender rolling::daily creates files named "prefix.YYYY-MM-DD".
+        // Pick the most recently modified log file under the log dir.
+        let log_dir = log_dir.as_path();
+        let candidates: Vec<_> = std::fs::read_dir(log_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("indexa.log"))
+            .collect();
 
-    // Pick the most recently modified log file.
-    let best = candidates
-        .iter()
-        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+        // Pick the most recently modified log file.
+        let best = candidates
+            .iter()
+            .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
 
-    // Read a bounded window from the END of the (possibly huge) day's log rather than the whole
-    // file just to return the last `lines`.
-    let content = match best {
-        Some(entry) => read_tail_window(&entry.path(), lines),
-        None => String::new(),
-    };
+        // Read a bounded window from the END of the (possibly huge) day's log rather than the whole
+        // file just to return the last `lines`.
+        let content = match best {
+            Some(entry) => read_tail_window(&entry.path(), lines),
+            None => String::new(),
+        };
 
-    let tail: String = content
-        .lines()
-        .rev()
-        .take(lines)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
+        let tail: String = content
+            .lines()
+            .rev()
+            .take(lines)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
 
-    Json(serde_json::json!({ "lines": tail }))
+        Json(serde_json::json!({ "lines": tail }))
+    })
+    .await
+    .unwrap_or_else(|_| Json(serde_json::json!({ "lines": "" })))
 }
 
 /// Read the last window of a file — enough for `lines` lines at a generous ~512 bytes/line,

@@ -350,7 +350,110 @@ try {
       search.body.some((n) => String(n.path || '').includes('alpha.txt')),
     `status=${search.status} hits=${Array.isArray(search.body) ? search.body.length : 'n/a'}`);
 
-  // Check 5 — Map tab → Treemap renders ≥2 cells on first paint (B1 regression guard).
+  const filePreview = await cdp.eval(
+    `fetch('/api/file?path=' + encodeURIComponent(${JSON.stringify(join(fixture, 'alpha.txt'))})).then(async r => ({ status: r.status, body: await r.json() }))`,
+    { awaitPromise: true },
+  );
+  check('file preview still returns indexed fixture text off the async worker',
+    filePreview.status === 200 && filePreview.body.content.includes('quick brown fox'),
+    `status=${filePreview.status}`);
+
+  // Check 5 — stream a controlled answer through the real Ask UI. This exercises
+  // frame-batched rendering, the unchanged Markdown renderer/sanitizer, and the
+  // completion-only live announcement in the actual browser.
+  const chatStream = await cdp.eval(`(async () => {
+    const originalFetch = window.fetch;
+    const answer = '**Safe** <script>window.__smokeInjected=true</script>';
+    const events = [
+      { type: 'fragment', text: '**Safe** ' },
+      { type: 'fragment', text: '<script>window.__smokeInjected=true</script>' },
+      { type: 'done' },
+    ];
+    const announcer = document.getElementById('ask-answer-announcer');
+    let announcements = 0;
+    const completionObserver = new MutationObserver((records) => { announcements += records.length; });
+    completionObserver.observe(announcer, { childList: true, characterData: true, subtree: true });
+    window.fetch = async (url) => {
+      if (url === '/api/stats') return Response.json({ chunks: 1 });
+      if (url === '/api/session-impact/' + encodeURIComponent(askSessionId || '')) return Response.json({});
+      if (url === '/api/ask/stream') {
+        const body = new ReadableStream({ start(controller) {
+          for (const event of events) controller.enqueue(new TextEncoder().encode('data: ' + JSON.stringify(event) + '\\n\\n'));
+          controller.close();
+        }});
+        return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } });
+      }
+      return originalFetch(url);
+    };
+    try {
+      document.getElementById('q').value = 'smoke question';
+      await doAsk();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const bubble = document.querySelector('#chat .msg.assistant:last-of-type .bubble');
+      return {
+        html: bubble && bubble.innerHTML,
+        expected: renderMarkdown(answer),
+        announced: announcer.textContent,
+        announcements,
+        scriptPresent: !!(bubble && bubble.querySelector('script')),
+        injected: !!window.__smokeInjected,
+      };
+    } finally {
+      completionObserver.disconnect();
+      window.fetch = originalFetch;
+    }
+  })()`, { awaitPromise: true });
+  check('streamed chat renders identical sanitized Markdown and announces once on completion',
+    chatStream.html === chatStream.expected && chatStream.announced === '**Safe** <script>window.__smokeInjected=true</script>' &&
+      chatStream.announcements === 1 && !chatStream.scriptPresent && !chatStream.injected,
+    `announcements=${chatStream.announcements} script=${chatStream.scriptPresent} injected=${chatStream.injected}`);
+
+  // Keyboard smoke for dynamically generated jobs and warning rows.
+  const keyboardUi = await cdp.eval(`(() => {
+    const oldDetail = renderJobDetail;
+    const oldTab = currentTab;
+    const jobId = 'smoke-keyboard-job';
+    const oldJob = activeJobs[jobId];
+    renderJobDetail = function() {};
+    currentTab = 'jobs';
+    activeJobs[jobId] = { startedAt: Date.now(), status: 'done', kind: 'scan', path: '/smoke',
+      warnings: [{ stage: 'scan', message: 'keyboard warning', item_path: '/smoke/a.txt' }],
+      warningOverflow: 0, stageCounts: { scan: 1 }, lastProgress: null, summary: 'done' };
+    try {
+      renderJobsPage();
+      const card = document.querySelector('.jobs-card[data-job-id="' + jobId + '"]');
+      const panel = document.getElementById('panel-jobs');
+      const priorDisplay = panel.style.display;
+      panel.style.display = 'flex';
+      card.focus({ focusVisible: true });
+      const visibleOutline = getComputedStyle(card).outlineStyle !== 'none';
+      card.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true }));
+      selectedJobId = jobId;
+      applyWarnFilter();
+      const row = document.querySelector('.warn-row');
+      row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      panel.style.display = priorDisplay;
+      return { cardRole: card.getAttribute('role'), cardTabIndex: card.tabIndex,
+        cardSelected: selectedJobId === jobId, visibleOutline,
+        rowRole: row.getAttribute('role'), rowTabIndex: row.tabIndex,
+        rowExpanded: row.getAttribute('aria-expanded') === 'true' && row.classList.contains('expanded') };
+    } finally {
+      renderJobDetail = oldDetail;
+      currentTab = oldTab;
+      if (oldJob) activeJobs[jobId] = oldJob; else delete activeJobs[jobId];
+    }
+  })()`);
+  check('job cards and warning rows support keyboard focus and activation',
+    keyboardUi.cardRole === 'button' && keyboardUi.cardTabIndex === 0 && keyboardUi.cardSelected &&
+      keyboardUi.visibleOutline && keyboardUi.rowRole === 'button' && keyboardUi.rowTabIndex === 0 &&
+      keyboardUi.rowExpanded,
+    JSON.stringify(keyboardUi));
+
+  const bundleText = await cdp.eval(`fetch('/assets/app.js').then((r) => r.text())`, { awaitPromise: true });
+  check('JavaScript bundle remains text after escaping NUL placeholders',
+    !bundleText.includes(String.fromCharCode(0)) && bundleText.includes(String.fromCharCode(92) + '0CODEBLOCK'));
+
+  // Check 8 — Map tab → Treemap renders ≥2 cells on first paint (B1 regression guard).
   // The fixture root is a single-child hop (root → wrap/) that fans out into wrap/{a,b} —
   // before the server-side single-child descent this whole tree rendered as ONE
   // undifferentiated cell. Activated through the app's own switcher (switchTab → the

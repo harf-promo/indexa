@@ -87,3 +87,9 @@ code, kbd, pre, .mono { font-family: var(--font-mono); }
   user-select: none;
 }
 
+/* Accessible live announcements remain available to screen readers without shifting layout. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+

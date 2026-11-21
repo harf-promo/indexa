@@ -280,7 +280,15 @@ function renderJobsPage() {
       card = document.createElement('div');
       card.className = 'jobs-card';
       card.dataset.jobId = jobId;
+      card.setAttribute('role', 'button');
+      card.tabIndex = 0;
       card.addEventListener('click', function() { selectJob(jobId); });
+      card.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          selectJob(jobId);
+        }
+      });
       masterList.prepend(card);
     }
     _renderCardContent(card, jobId, j);
@@ -324,6 +332,7 @@ function _renderCardContent(card, jobId, j) {
   card.classList.toggle('running', j.status === 'running' || j.status === 'reconnecting');
   card.classList.toggle('done', j.status === 'done');
   card.classList.toggle('failed', j.status === 'failed');
+  card.setAttribute('aria-label', (j.kind || 'Job') + ': ' + (j.path || jobId) + ', ' + j.status);
 
   const pathName = (j.path || '').split('/').filter(Boolean).pop() || j.path || jobId;
   const warnCount = j.warnings.length + j.warningOverflow;
@@ -553,7 +562,7 @@ function applyWarnFilter() {
         '" title="budget ' + sign + budgetMb + ' MB (room for a new model above the keep-free band)">' +
         escapeHtml(p.level) + ' · budget ' + sign + budgetMb + ' MB</span>';
     }
-    return '<div class="warn-row' + (w.pressure ? ' warn-row-pressure' : '') + '" onclick="this.classList.toggle(\'expanded\')">' +
+    return '<div class="warn-row' + (w.pressure ? ' warn-row-pressure' : '') + '" role="button" tabindex="0" aria-expanded="false" onclick="this.classList.toggle(\'expanded\'); this.setAttribute(\'aria-expanded\', this.classList.contains(\'expanded\'))" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();this.click()}">' +
       '<span class="warn-stage">' + escapeHtml(w.stage) + '</span>' +
       (basename ? '<span class="warn-path" title="' + escapeAttr(w.item_path) + '">' + escapeHtml(basename) + '</span>' : '') +
       '<span class="warn-msg">' + escapeHtml(w.message) + pressureChip + '</span>' +

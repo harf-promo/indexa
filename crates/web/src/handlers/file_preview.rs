@@ -62,90 +62,125 @@ pub(crate) async fn api_file_preview(
     if q.path.trim().is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "missing 'path' query parameter");
     }
-    // Canonicalize (resolves symlinks, rejects non-existent paths) before any comparison.
-    let requested = match std::fs::canonicalize(&q.path) {
-        Ok(p) => p,
-        Err(_) => return err_json(StatusCode::NOT_FOUND, "path not found"),
-    };
-    // Path-confinement: must be inside an indexed root (mirrors MCP read_file) and be an indexed
-    // file. Lock the store only for the lookups, then drop it before the filesystem read.
-    // Roots are kept as (stored, canonical): entries are recorded under the root as scanned.
-    let (roots, indexed) = {
-        let store = state.store.lock().await;
-        let roots: Vec<(PathBuf, PathBuf)> = store
-            .root_paths()
-            .unwrap_or_default()
+    let raw_path = q.path;
+    // SQLite stays backed by the configured Store (including in-memory stores). Run its small
+    // lookups on the blocking pool and release the shared mutex before any filesystem access.
+    let store = state.store.clone().lock_owned().await;
+    let stored_roots =
+        match tokio::task::spawn_blocking(move || store.root_paths().unwrap_or_default()).await {
+            Ok(roots) => roots,
+            Err(e) => {
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("file preview root lookup failed: {e}"),
+                )
+            }
+        };
+    let raw_for_fs = raw_path.clone();
+    let include_sensitive = state.config.scan.include_sensitive;
+    let (requested, roots) = match tokio::task::spawn_blocking(move || {
+        let requested = std::fs::canonicalize(&raw_for_fs)
+            .map_err(|_| err_json(StatusCode::NOT_FOUND, "path not found"))?;
+        let roots: Vec<(PathBuf, PathBuf)> = stored_roots
             .into_iter()
-            .filter_map(|r| {
-                let stored = PathBuf::from(r);
-                std::fs::canonicalize(&stored).ok().map(|c| (stored, c))
+            .filter_map(|root| {
+                let stored = PathBuf::from(root);
+                std::fs::canonicalize(&stored).ok().map(|canonical| (stored, canonical))
             })
             .collect();
-        let indexed = is_indexed_file(&store, &q.path, &requested, &roots);
-        (roots, indexed)
+        let canonical_roots: Vec<PathBuf> = roots
+            .iter()
+            .map(|(_, canonical)| canonical.clone())
+            .collect();
+        if !canonical_roots.iter().any(|root| requested.starts_with(root)) {
+            return Err(err_json(StatusCode::FORBIDDEN, "path is not within an indexed root"));
+        }
+        if requested.is_dir() {
+            return Err(err_json(StatusCode::BAD_REQUEST, "path is a directory, not a file"));
+        }
+        if !include_sensitive && indexa_core::walker::is_sensitive_path(&requested, &canonical_roots) {
+            return Err(err_json(
+                StatusCode::FORBIDDEN,
+                "refusing to preview a secret/credential file (set [scan] include_sensitive to allow)",
+            ));
+        }
+        Ok::<_, Response>((requested, roots))
+    }).await {
+        Ok(Ok(paths)) => paths,
+        Ok(Err(response)) => return response,
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("file preview path check failed: {e}")),
     };
-    let canonical_roots: Vec<PathBuf> = roots.into_iter().map(|(_, c)| c).collect();
-    if !canonical_roots
-        .iter()
-        .any(|root| requested.starts_with(root))
+    let query_path = raw_path.clone();
+    let query_requested = requested.clone();
+    let query_roots = roots.clone();
+    let store = state.store.clone().lock_owned().await;
+    let indexed = match tokio::task::spawn_blocking(move || {
+        is_indexed_file(&store, &query_path, &query_requested, &query_roots)
+    })
+    .await
     {
-        return err_json(StatusCode::FORBIDDEN, "path is not within an indexed root");
-    }
-    if requested.is_dir() {
-        return err_json(StatusCode::BAD_REQUEST, "path is a directory, not a file");
-    }
-    if !indexed {
-        return err_json(StatusCode::FORBIDDEN, "path is not an indexed file");
-    }
-    if !state.config.scan.include_sensitive
-        && indexa_core::walker::is_sensitive_path(&requested, &canonical_roots)
-    {
-        return err_json(
-            StatusCode::FORBIDDEN,
-            "refusing to preview a secret/credential file (set [scan] include_sensitive to allow)",
-        );
-    }
-
-    let window = match indexa_core::text::read_file_window(&requested, 0, PREVIEW_CAP) {
-        Ok(w) => w,
+        Ok(indexed) => indexed,
         Err(e) => {
             return err_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not read file: {e}"),
+                format!("file preview index lookup failed: {e}"),
             )
         }
     };
-    let bytes_total = window.file_len;
-    // Binary heuristic (shared with the scan walker's filter): a NUL byte in the first 8 KB.
-    // Text files don't contain NUL; this avoids dumping garbage from images/binaries.
-    let binary = indexa_core::text::is_binary(&window.bytes);
-    let (content, redacted) = if binary {
-        (None, 0)
-    } else {
-        // The window ends on a char boundary; lossy only matters for genuinely invalid UTF-8.
-        let text = String::from_utf8_lossy(&window.bytes);
-        if text.contains("PRIVATE KEY-----") {
-            return err_json(
-                StatusCode::FORBIDDEN,
-                "refusing to preview a file containing a private key",
-            );
-        }
-        let (text, n) = indexa_query::redact::redact_secrets(&text);
-        (Some(text), n)
-    };
-    let truncated = window.end < bytes_total;
-    let language = language_for_ext(&requested).map(|s| s.to_owned());
+    if !indexed {
+        return err_json(StatusCode::FORBIDDEN, "path is not an indexed file");
+    }
 
-    Json(FilePreviewResponse {
-        path: q.path,
-        language,
-        content,
-        truncated,
-        bytes_total,
-        binary,
-        redacted,
+    tokio::task::spawn_blocking(move || {
+        // The shared mutex has been released; reading disk cannot block unrelated handlers.
+        let window = match indexa_core::text::read_file_window(&requested, 0, PREVIEW_CAP) {
+            Ok(w) => w,
+            Err(e) => {
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("could not read file: {e}"),
+                )
+            }
+        };
+        let bytes_total = window.file_len;
+        // Binary heuristic (shared with the scan walker's filter): a NUL byte in the first 8 KB.
+        // Text files don't contain NUL; this avoids dumping garbage from images/binaries.
+        let binary = indexa_core::text::is_binary(&window.bytes);
+        let (content, redacted) = if binary {
+            (None, 0)
+        } else {
+            // The window ends on a char boundary; lossy only matters for genuinely invalid UTF-8.
+            let text = String::from_utf8_lossy(&window.bytes);
+            if text.contains("PRIVATE KEY-----") {
+                return err_json(
+                    StatusCode::FORBIDDEN,
+                    "refusing to preview a file containing a private key",
+                );
+            }
+            let (text, n) = indexa_query::redact::redact_secrets(&text);
+            (Some(text), n)
+        };
+        let truncated = window.end < bytes_total;
+        let language = language_for_ext(&requested).map(|s| s.to_owned());
+
+        Json(FilePreviewResponse {
+            path: raw_path,
+            language,
+            content,
+            truncated,
+            bytes_total,
+            binary,
+            redacted,
+        })
+        .into_response()
     })
-    .into_response()
+    .await
+    .unwrap_or_else(|e| {
+        err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("file preview task failed: {e}"),
+        )
+    })
 }
 
 /// Whether `requested` (canonical) is a `File` row in the index. Looked up as the caller spelled
