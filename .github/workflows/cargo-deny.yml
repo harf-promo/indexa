@@ -16,7 +16,18 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - name: cargo deny (root workspace)
+        uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
           arguments: --all-features
+      # apps/indexa-desktop is workspace-excluded with its own Cargo.lock, so the
+      # root run never sees it. Same job (the job name is a required check) and
+      # the same root deny.toml policy, found by walking up from the manifest.
+      - name: cargo deny (apps/indexa-desktop)
+        if: ${{ !cancelled() }}
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+          manifest-path: apps/indexa-desktop/Cargo.toml
