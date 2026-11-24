@@ -24,7 +24,7 @@ CI uses GitHub-hosted runners (`ci.workflows` in fleet facts). The six workflows
 | Workflow | Trigger and checks |
 | --- | --- |
 | [ci.yml](../../.github/workflows/ci.yml) | Push to `main` and PR targeting `main`: fmt/clippy/test on 3 OSes, headless web smoke, hermetic sparse retrieval eval over `fixtures/self-golden.json`, and a separate locked desktop build on macOS. |
-| [cargo-deny.yml](../../.github/workflows/cargo-deny.yml) | Push to `main` and PR targeting `main`: license/dependency policy. |
+| [cargo-deny.yml](../../.github/workflows/cargo-deny.yml) | Push to `main` and PR targeting `main`: license/dependency policy, run on both the root workspace and the workspace-excluded `apps/indexa-desktop` lock (same root `deny.toml`). |
 | [dco.yml](../../.github/workflows/dco.yml) | PR targeting `main`: sign-off check; follow the root [Git & PR flow](../../AGENTS.md#git--pr-flow). |
 | [dense-eval.yml](../../.github/workflows/dense-eval.yml) | Manual `workflow_dispatch` only: dense/RRF retrieval eval over `fixtures/self-golden.json` using Ollama and real embeddings. |
 | [docs.yml](../../.github/workflows/docs.yml) | PR changing `**/*.md`: offline Markdown file/fragment links. |
