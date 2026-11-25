@@ -1,4 +1,4 @@
-<!-- fleet-template: v1 | reconciled-against: fleet-kit/templates/AGENT-CONTEXT-TEMPLATE.md @ 08dbc79 2026-09-19 -->
+<!-- fleet-template: v1 | public -->
 # Indexa — agent contract
 
 Feature history lives in `CHANGELOG.md` — do not narrate versions here. This file holds only the pitch, the invariants, and the procedures.
@@ -127,7 +127,7 @@ Web preview belongs on this VPS (headless Chrome + Xvfb + chrome-devtools MCP). 
 - Set `--workspace-status in-review` when a PR opens on this repo's work.
 - A dispatched worker sends `worker_done` exactly once, with an explicit
   `--outcome`, when finishing supervised orchestration work here — see
-  fleet-command's `ORCHESTRATION.md` for the full coordinator recipe.
+  the fleet orchestration guide for the full coordinator recipe.
 
 ## Where to find more
 
@@ -139,14 +139,11 @@ Web preview belongs on this VPS (headless Chrome + Xvfb + chrome-devtools MCP). 
 | Using CLI commands or finding per-platform index DB paths | [USAGE.md](USAGE.md) |
 | Using MCP over stdio / live retrieval | [Walkthrough](docs/how-to/live-retrieval-over-mcp.md) |
 | Recording or checking version history | [CHANGELOG.md](CHANGELOG.md) |
-| Reconciling fleet context | `fleet-kit/templates/AGENT-CONTEXT-TEMPLATE.md` |
+| Reconciling fleet context | the fleet-wide AGENTS.md template (stamp on line 1) |
 
-Before editing, discover instructions with `rg --files --hidden -g '!.git' -g AGENTS.md -g CLAUDE.md`. This tree has no deeper `AGENTS.md`/`CLAUDE.md` (fleet-command's `nested.json` records the inventory). Root `CLAUDE.md` stays exactly `@AGENTS.md` plus a trailing newline (11 bytes); never duplicate guidance there. Read any newly discovered nested instructions for the paths they cover.
+Before editing, discover instructions with `rg --files --hidden -g '!.git' -g AGENTS.md -g CLAUDE.md`. This tree has no deeper `AGENTS.md`/`CLAUDE.md` (the fleet's nested-instructions inventory records this). Root `CLAUDE.md` stays exactly `@AGENTS.md` plus a trailing newline (11 bytes); never duplicate guidance there. Read any newly discovered nested instructions for the paths they cover.
 
 ## Fleet context
 
-This file follows the fleet-wide template
-(`fleet-kit/templates/AGENT-CONTEXT-TEMPLATE.md`, stamped above). Config drift
-between this file and the template is caught automatically by `fleet-doctor.sh`, which
-runs as part of fleet-command's daily sweep — see that repo's `PORTFOLIO.md` and
-`SWEEP.md` for what gets reported and what (if anything) gets auto-dispatched.
+This file follows the fleet-wide AGENTS.md template (stamped on line 1). Drift between
+this file and the template is caught automatically by the fleet's daily doctor sweep.

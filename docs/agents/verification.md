@@ -30,7 +30,7 @@ CI uses GitHub-hosted runners (`ci.workflows` in fleet facts). The six workflows
 | [docs.yml](../../.github/workflows/docs.yml) | PR changing `**/*.md`: offline Markdown file/fragment links. |
 | [release.yml](../../.github/workflows/release.yml) | Push of `v*.*.*` tags only; never a merge to `main`. Read the [Release procedure](release-and-hosts.md#release-procedure) before release work. |
 
-**Host note (this VPS, wikiclaw-1):** headless Chrome + Xvfb and the `chrome-devtools` MCP server are available on this host (confirmed 2026-08-31) — do the `indexa serve` → `http://localhost:7620` visual confirmation above directly from here via a real browser-preview/screenshot, rather than deferring it to the Mac. The only things genuinely unavailable on this VPS are Xcode, iOS/Android simulators, and native mobile builds — none of which apply to indexa (the desktop app is Tauri, with no iOS/Android target).
+**Host note (the Linux VPS):** headless Chrome + Xvfb and the `chrome-devtools` MCP server are available on this host (confirmed 2026-08-31) — do the `indexa serve` → `http://localhost:7620` visual confirmation above directly from here via a real browser-preview/screenshot, rather than deferring it to the Mac. The only things genuinely unavailable on this VPS are Xcode, iOS/Android simulators, and native mobile builds — none of which apply to indexa (the desktop app is Tauri, with no iOS/Android target).
 
 ## Markdown links
 
