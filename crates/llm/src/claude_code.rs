@@ -514,6 +514,15 @@ pub async fn claude_status(claude_bin: &str) -> ClaudeStatus {
 mod tests {
     use super::*;
 
+    /// Serializes the tests that write a fake executable and then exec it. Linux refuses to
+    /// exec a file that any process holds open for writing (`ETXTBSY`, surfaced as
+    /// `ErrorKind::ExecutableFileBusy`). If one test is inside `std::fs::write` on its script
+    /// while another test's thread spawns a child, that child inherits the write fd until its
+    /// own exec closes it (`O_CLOEXEC`), so the first test's spawn fails. `claude_status`
+    /// swallows that spawn error, which turned the race into a missing pid file on CI. Holding
+    /// this lock from script write through the spawned process's end keeps those windows apart.
+    static FAKE_EXECUTABLE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Regression test for a missing `.kill_on_drop(true)` on the `claude_status` probes: when
     /// the 5s probe timeout fires and `tokio::time::timeout` drops the still-running child
     /// future, the underlying process must actually die, not keep running detached. This runs
@@ -526,6 +535,7 @@ mod tests {
     #[tokio::test]
     async fn timed_out_version_probe_actually_kills_the_child_process() {
         use std::os::unix::fs::PermissionsExt;
+        let _exec_guard = FAKE_EXECUTABLE_LOCK.lock().await;
 
         // A fake "claude" binary that outlives the probe's 5s timeout by a wide margin, and
         // records its own pid so the test can check afterward whether it's still alive.
@@ -568,6 +578,7 @@ mod tests {
     #[tokio::test]
     async fn timed_out_command_kills_child_and_grandchild() {
         use std::os::unix::fs::PermissionsExt;
+        let _exec_guard = FAKE_EXECUTABLE_LOCK.lock().await;
         let dir = std::env::temp_dir().join(format!(
             "indexa-claude-group-timeout-{}-{}",
             std::process::id(),
