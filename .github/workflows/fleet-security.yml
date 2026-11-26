@@ -1,7 +1,7 @@
-# GENERATED for harf-promo/indexa by fleet-kit shared/bin/fleet-security-workflow.py: do not edit here.
-# Source: wikithoughts/fleet-kit templates/github/fleet-security/ (template + repos.json "indexa").
+# GENERATED for harf-promo/indexa by fleet-security-workflow.py: do not edit here.
+# Source: the shared fleet-security template and its "indexa" config entry.
 # Change it there, then: fleet-security-workflow.py write indexa --repo-dir <checkout>
-# fleet-security: template sha256:57379d447990 config sha256:53056a45b530
+# fleet-security: template sha256:ca2c257fe365 config sha256:7790143f6244
 name: Fleet security
 
 # Secret scan (gitleaks) and workflow lint (actionlint + shellcheck), one
@@ -174,7 +174,7 @@ jobs:
           # A repo's own .github/actionlint.yaml wins; otherwise declare the
           # self-hosted runner labels this repo's workflows use.
           if [ ! -f .github/actionlint.yaml ] && [ ! -f .github/actionlint.yml ]; then
-            printf 'self-hosted-runner:\n  labels: %s\n' '["wikiclaw-1"]' > "$FLEET_LINT_BIN/actionlint.yaml"
+            printf 'self-hosted-runner:\n  labels: %s\n' '[]' > "$FLEET_LINT_BIN/actionlint.yaml"
             args+=(-config-file "$FLEET_LINT_BIN/actionlint.yaml")
           fi
           args+=(-ignore 'SC2034')  # dense-eval.yml retry loop counter `i` is intentionally unused.
